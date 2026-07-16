@@ -122,6 +122,10 @@ function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
   );
 }
 
+function sessionLaunchFailed(session: SessionView): boolean {
+  return session.status === "errored" || session.state === "error";
+}
+
 async function shouldClaimWorkItemSpawn(
   dataDir: string,
   service: SessionService,
@@ -261,33 +265,86 @@ async function runSpawnTrigger(
       }
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
-        const session = await service.spawn({
-          project: projectId,
-          prompt: renderedPrompt,
-          ...(block.steps !== undefined ? { steps: block.steps } : {}),
-          ...(block.agent !== undefined ? { agent: block.agent } : {}),
-          ...(block.model !== undefined ? { model: block.model } : {}),
-          ...(block.branch !== undefined ? { branch: block.branch } : {}),
-          ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
-          ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
-          ...(restrictWrites === true ? { restrictWrites: true } : {}),
-          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
-          ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-          ...(deskGroup === true && anchorSessionId !== undefined
-            ? { reuseWorkspaceSessionId: anchorSessionId }
-            : {}),
-        });
+        const session = await service.spawnInBackground(
+          {
+            project: projectId,
+            prompt: renderedPrompt,
+            ...(block.steps !== undefined ? { steps: block.steps } : {}),
+            ...(block.agent !== undefined ? { agent: block.agent } : {}),
+            ...(block.model !== undefined ? { model: block.model } : {}),
+            ...(block.branch !== undefined ? { branch: block.branch } : {}),
+            ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
+            ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
+            ...(restrictWrites === true ? { restrictWrites: true } : {}),
+            ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+            ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+            ...(deskGroup === true && anchorSessionId !== undefined
+              ? { reuseWorkspaceSessionId: anchorSessionId }
+              : {}),
+          },
+          {
+            onSettled: (settled) => {
+              if (sessionLaunchFailed(settled)) {
+                const message = settled.error ?? "background spawn failed";
+                if (workItemData) {
+                  recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+                    ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+                    state: "failed",
+                    error: message,
+                  });
+                }
+                logTriggerEvent(dataDir, "trigger.spawn.failed", {
+                  level: "error",
+                  sessionId: settled.id,
+                  projectId,
+                  sourceId,
+                  triggerId,
+                  message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
+                  details: {
+                    eventName,
+                    agent: block.agent ?? null,
+                    background: true,
+                    ...(deskGroup === true && blockIndex === 0 ? { deskGroup: true } : {}),
+                  },
+                });
+                logger.warn(
+                  block.agent
+                    ? `[trigger:${projectId}/${triggerId}] failed to spawn ${block.agent}: ${message}`
+                    : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
+                );
+                return;
+              }
+              if (workItemData) {
+                recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+                  ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+                  state: "running",
+                  sessionId: settled.id,
+                });
+              }
+              logTriggerEvent(dataDir, "trigger.spawn.completed", {
+                level: "info",
+                sessionId: settled.id,
+                projectId,
+                sourceId,
+                triggerId,
+                message:
+                  deskGroup === true && blockIndex === 0
+                    ? `Spawn trigger ${projectId}/${triggerId} created desk anchor ${settled.id}`
+                    : `Spawn trigger ${projectId}/${triggerId} created ${settled.id}`,
+                details: {
+                  eventName,
+                  agent: block.agent ?? null,
+                  background: true,
+                  ...(deskGroup === true && blockIndex === 0 ? { deskGroup: true } : {}),
+                },
+              });
+            },
+          },
+        );
         if (deskGroup === true && anchorSessionId === undefined) {
           anchorSessionId = session.id;
         }
-        if (workItemData) {
-          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-            state: "running",
-            sessionId: session.id,
-          });
-        }
-        logTriggerEvent(dataDir, "trigger.spawn.completed", {
+        logTriggerEvent(dataDir, "trigger.spawn.queued", {
           level: "info",
           sessionId: session.id,
           projectId,
@@ -295,11 +352,12 @@ async function runSpawnTrigger(
           triggerId,
           message:
             deskGroup === true && blockIndex === 0
-              ? `Spawn trigger ${projectId}/${triggerId} created desk anchor ${session.id}`
-              : `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+              ? `Spawn trigger ${projectId}/${triggerId} queued desk anchor ${session.id}`
+              : `Spawn trigger ${projectId}/${triggerId} queued ${session.id}`,
           details: {
             eventName,
             agent: block.agent ?? null,
+            background: true,
             ...(deskGroup === true && blockIndex === 0 ? { deskGroup: true } : {}),
           },
         });

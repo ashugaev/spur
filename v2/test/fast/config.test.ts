@@ -3156,6 +3156,17 @@ projects:
     );
   });
 
+  it("can check only one directory for project config discovery", async () => {
+    const dir = await createTempDir("spur-fast-config-boundary-");
+    tempDirs.push(dir);
+    const childDir = join(dir, "child");
+    await mkdir(childDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPath(childDir)).toBe(join(dir, "spur.yaml"));
+    expect(findProjectConfigPathInDirectory(childDir)).toBeUndefined();
+  });
+
   it("checks project config overwrite guards only at the repo root", async () => {
     const dir = await createTempDir("spur-fast-config-boundary-");
     tempDirs.push(dir);

@@ -607,6 +607,23 @@ function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
   return records;
 }
 
+function backgroundSpawnOptionsMatcher() {
+  return expect.objectContaining({
+    onSettled: expect.any(Function),
+  });
+}
+
+function resolveBackgroundSpawn(id: string) {
+  return async (_request: unknown, options?: { onSettled?: (session: unknown) => void }) => {
+    options?.onSettled?.({
+      id,
+      status: "running",
+      state: "waiting",
+    });
+    return { id };
+  };
+}
+
 async function loadTriggersModule() {
   vi.resetModules();
   return import("../../src/triggers.js");
@@ -1270,14 +1287,14 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("passes spawn overrides through to the session service", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-7" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-7"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: spawnConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -1287,14 +1304,17 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
-          project: "api",
-          prompt: "ship the task",
-          steps: ["review", "continue"],
-          overrides: {
-            worktree: false,
+        expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+          {
+            project: "api",
+            prompt: "ship the task",
+            steps: ["review", "continue"],
+            overrides: {
+              worktree: false,
+            },
           },
-        });
+          backgroundSpawnOptionsMatcher(),
+        );
       });
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.matched",
@@ -1308,14 +1328,14 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("threads block model into the spawn call", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-7" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-7"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: spawnModelConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -1325,12 +1345,15 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
-          project: "api",
-          prompt: "ship the task",
-          agent: "codex",
-          model: "gpt-5.5",
-        });
+        expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+          {
+            project: "api",
+            prompt: "ship the task",
+            agent: "codex",
+            model: "gpt-5.5",
+          },
+          backgroundSpawnOptionsMatcher(),
+        );
       });
     } finally {
       await controller.stop();
@@ -1338,17 +1361,17 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("spawns each trigger block in order with its own prompt, steps, and agent", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-7" })
-      .mockResolvedValueOnce({ id: "api-8" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-7"))
+      .mockImplementationOnce(resolveBackgroundSpawn("api-8"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: spawnFanoutConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -1358,26 +1381,34 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        prompt: "ship ship the task",
-        steps: ["review", "continue"],
-        agent: "claude",
-        overrides: {
-          worktree: false,
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          prompt: "ship ship the task",
+          steps: ["review", "continue"],
+          agent: "claude",
+          overrides: {
+            worktree: false,
+          },
         },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        prompt: "risks for ship the task",
-        steps: ["verify"],
-        agent: "codex",
-        overrides: {
-          worktree: false,
+        backgroundSpawnOptionsMatcher(),
+      );
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          prompt: "risks for ship the task",
+          steps: ["verify"],
+          agent: "codex",
+          overrides: {
+            worktree: false,
+          },
         },
-      });
+        backgroundSpawnOptionsMatcher(),
+      );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.completed",
       );
@@ -1387,17 +1418,17 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("uses the first desk-group block as workspace anchor for later blocks", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-7" })
-      .mockResolvedValueOnce({ id: "api-8" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-7"))
+      .mockImplementationOnce(resolveBackgroundSpawn("api-8"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: spawnDeskGroupConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -1407,34 +1438,42 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        prompt: "ship ship the task",
-        steps: ["review", "continue"],
-        agent: "claude",
-        overrides: {
-          worktree: false,
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          prompt: "ship ship the task",
+          steps: ["review", "continue"],
+          agent: "claude",
+          overrides: {
+            worktree: false,
+          },
         },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        prompt: "risks for ship the task",
-        steps: ["verify"],
-        agent: "codex",
-        overrides: {
-          worktree: false,
+        backgroundSpawnOptionsMatcher(),
+      );
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          prompt: "risks for ship the task",
+          steps: ["verify"],
+          agent: "codex",
+          overrides: {
+            worktree: false,
+          },
+          reuseWorkspaceSessionId: "api-7",
         },
-        reuseWorkspaceSessionId: "api-7",
-      });
+        backgroundSpawnOptionsMatcher(),
+      );
     } finally {
       await controller.stop();
     }
   });
 
   it("blocks desk-group children when anchor spawn fails", async () => {
-    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("anchor failed"));
+    const spawnInBackgroundMock = vi.fn().mockRejectedValueOnce(new Error("anchor failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1442,7 +1481,7 @@ describe("startConfiguredTriggers", () => {
       config: spawnDeskGroupConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: warnMock,
@@ -1456,16 +1495,16 @@ describe("startConfiguredTriggers", () => {
           "[trigger:api/kickoff] failed to spawn claude: anchor failed",
         );
       });
-      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
     } finally {
       await controller.stop();
     }
   });
 
   it("logs desk-group child failures and continues remaining children", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-7" })
+      .mockImplementationOnce(resolveBackgroundSpawn("api-7"))
       .mockRejectedValueOnce(new Error("child failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -1474,7 +1513,7 @@ describe("startConfiguredTriggers", () => {
       config: spawnDeskGroupConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: warnMock,
@@ -1484,8 +1523,14 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
+      expect(spawnInBackgroundMock.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          agent: "codex",
+          reuseWorkspaceSessionId: "api-7",
+        }),
+      );
       expect(warnMock).toHaveBeenCalledWith(
         "[trigger:api/kickoff] failed to spawn codex: child failed",
       );
@@ -1495,10 +1540,10 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("logs fan-out spawn failures and continues remaining targets", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
       .mockRejectedValueOnce(new Error("claude failed"))
-      .mockResolvedValueOnce({ id: "api-8" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-8"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1506,7 +1551,7 @@ describe("startConfiguredTriggers", () => {
       config: spawnFanoutConfig() as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: warnMock,
@@ -1516,9 +1561,9 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock.mock.calls[1]?.[0]).toEqual(
+      expect(spawnInBackgroundMock.mock.calls[1]?.[0]).toEqual(
         expect.objectContaining({
           agent: "codex",
           prompt: "risks for ship the task",
@@ -1542,10 +1587,10 @@ describe("startConfiguredTriggers", () => {
         expect.objectContaining({
           event: "trigger.spawn.completed",
           sessionId: "api-8",
-          details: {
+          details: expect.objectContaining({
             eventName: "cron:tick",
             agent: "codex",
-          },
+          }),
         }),
       );
     } finally {
@@ -1560,7 +1605,7 @@ describe("startConfiguredTriggers", () => {
       throw new Error("missing first spawn block");
     }
     firstBlock.prompt = "ship {{missing}}";
-    const spawnMock = vi.fn().mockResolvedValueOnce({ id: "api-8" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-8"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1568,7 +1613,7 @@ describe("startConfiguredTriggers", () => {
       config: config as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: warnMock,
@@ -1578,17 +1623,20 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "risks for ship the task",
-        steps: ["verify"],
-        agent: "codex",
-        overrides: {
-          worktree: false,
+      expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "risks for ship the task",
+          steps: ["verify"],
+          agent: "codex",
+          overrides: {
+            worktree: false,
+          },
         },
-      });
+        backgroundSpawnOptionsMatcher(),
+      );
       expect(warnMock).toHaveBeenCalledWith(
         "[trigger:api/kickoff] failed to spawn claude: Cannot render prompt placeholder {{missing}}: event data.missing is unavailable",
       );
@@ -2020,7 +2068,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("passes restrictWrites through to the session service", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-8"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2046,7 +2094,7 @@ describe("startConfiguredTriggers", () => {
       } as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -2056,11 +2104,14 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
-          project: "api",
-          prompt: "review only",
-          restrictWrites: true,
-        });
+        expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+          {
+            project: "api",
+            prompt: "review only",
+            restrictWrites: true,
+          },
+          backgroundSpawnOptionsMatcher(),
+        );
       });
     } finally {
       await controller.stop();
@@ -2068,7 +2119,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("passes allowedTriggers through to the session service", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-8"));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2094,7 +2145,7 @@ describe("startConfiguredTriggers", () => {
       } as never,
       bus,
       sessionService: {
-        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
       } as never,
       logger: {
         warn: vi.fn(),
@@ -2104,11 +2155,14 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
-          project: "api",
-          prompt: "review only",
-          allowedTriggers: [],
-        });
+        expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+          {
+            project: "api",
+            prompt: "review only",
+            allowedTriggers: [],
+          },
+          backgroundSpawnOptionsMatcher(),
+        );
       });
     } finally {
       await controller.stop();
@@ -2157,27 +2211,30 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-9"));
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         DATA_DIR,
         "api",
@@ -2198,81 +2255,146 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("marks a work-item spawn failed when the background launch settles errored", async () => {
+    const spawnInBackgroundMock = vi.fn(
+      async (_request: unknown, options?: { onSettled?: (session: unknown) => void }) => {
+        options?.onSettled?.({
+          id: "api-9",
+          status: "errored",
+          state: "error",
+          error: "Timed out waiting for agent prompt",
+        });
+        return { id: "api-9" };
+      },
+    );
+    const records = useWorkItemLifecycleStore();
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
+      logger: { warn: warnMock },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(records.get("acme/api#42")).toEqual(
+          expect.objectContaining({
+            state: "failed",
+            error: "Timed out waiting for agent prompt",
+          }),
+        );
+      });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({
+          event: "trigger.spawn.failed",
+          sessionId: "api-9",
+          message: expect.stringContaining("Timed out waiting for agent prompt"),
+        }),
+      );
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/pick-up] failed to spawn: Timed out waiting for agent prompt",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("spawns each work-item trigger block with the pr slot link", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-9" })
-      .mockResolvedValueOnce({ id: "api-10" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-9"))
+      .mockImplementationOnce(resolveBackgroundSpawn("api-10"));
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemFanoutSpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "codex",
-        prompt: "Codex review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          agent: "claude",
+          prompt: "Claude review https://github.com/acme/api/pull/42.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          agent: "codex",
+          prompt: "Codex review https://github.com/acme/api/pull/42.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
     } finally {
       await controller.stop();
     }
   });
 
   it("applies restrictWrites and allowedTriggers to every work-item block", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-9" })
-      .mockResolvedValueOnce({ id: "api-10" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-9"))
+      .mockImplementationOnce(resolveBackgroundSpawn("api-10"));
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemReadOnlyFanoutSpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        model: "sonnet",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "cursor",
-        model: "composer-2.5",
-        prompt: "Cursor review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          agent: "claude",
+          model: "sonnet",
+          prompt: "Claude review https://github.com/acme/api/pull/42.",
+          restrictWrites: true,
+          allowedTriggers: [],
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          agent: "cursor",
+          model: "composer-2.5",
+          prompt: "Cursor review https://github.com/acme/api/pull/42.",
+          restrictWrites: true,
+          allowedTriggers: [],
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",
         "api",
@@ -2289,27 +2411,30 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-9"));
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: sentrySpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
     try {
       bus.emit(sentryEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
-        slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
-      });
+      expect(spawnInBackgroundMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
+          slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
+        },
+        backgroundSpawnOptionsMatcher(),
+      );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",
         "api",
@@ -2327,14 +2452,14 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("suppresses duplicate work-item events once a pending claim exists", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-9"));
     const records = useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2342,7 +2467,7 @@ describe("startConfiguredTriggers", () => {
       bus.emit(workItemEvent());
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
       });
       expect(records.get("acme/api#42")).toEqual(
         expect.objectContaining({
@@ -2356,17 +2481,17 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("leaves a failed work-item claim and retries on the next event", async () => {
-    const spawnMock = vi
+    const spawnInBackgroundMock = vi
       .fn()
       .mockRejectedValueOnce(new Error("spawn failed"))
-      .mockResolvedValueOnce({ id: "api-10" });
+      .mockImplementationOnce(resolveBackgroundSpawn("api-10"));
     const records = useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2383,7 +2508,7 @@ describe("startConfiguredTriggers", () => {
 
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
       });
       expect(records.get("acme/api#42")).toEqual(
         expect.objectContaining({
@@ -2397,7 +2522,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("suppresses active and completed work-item owners", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-10"));
     const getMock = vi.fn().mockResolvedValue({
       id: "api-9",
       status: "running",
@@ -2410,7 +2535,10 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
+      sessionService: {
+        get: getMock,
+        spawnInBackground: spawnInBackgroundMock,
+      } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2419,7 +2547,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(getMock).toHaveBeenCalledWith("api-9");
       });
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnInBackgroundMock).not.toHaveBeenCalled();
 
       readWorkItemLifecyclesMock.mockReturnValue(
         new Map([
@@ -2435,14 +2563,14 @@ describe("startConfiguredTriggers", () => {
       );
       bus.emit(workItemEvent());
       await vi.advanceTimersByTimeAsync(1);
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnInBackgroundMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
   });
 
   it("replaces a stopped work-item owner once and suppresses later duplicates", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const spawnInBackgroundMock = vi.fn(resolveBackgroundSpawn("api-10"));
     const getMock = vi.fn().mockImplementation((sessionId: string) =>
       Promise.resolve(
         sessionId === "api-9"
@@ -2466,7 +2594,10 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
+      sessionService: {
+        get: getMock,
+        spawnInBackground: spawnInBackgroundMock,
+      } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2474,13 +2605,14 @@ describe("startConfiguredTriggers", () => {
       bus.emit(workItemEvent());
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith(
+      expect(spawnInBackgroundMock).toHaveBeenCalledWith(
         expect.objectContaining({
           project: "api",
           prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
+        backgroundSpawnOptionsMatcher(),
       );
     } finally {
       await controller.stop();
@@ -2585,13 +2717,13 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("fails a spawn trigger when prompt placeholders are missing", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const spawnInBackgroundMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig({ prompt: "Take {{missing}}." }) as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2602,7 +2734,7 @@ describe("startConfiguredTriggers", () => {
           "trigger.spawn.failed",
         );
       });
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnInBackgroundMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
@@ -2701,13 +2833,13 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("logs spawn.failed when prompt template references a missing placeholder", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const spawnInBackgroundMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig({ prompt: "Take {{nonexistent}}." }) as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2720,14 +2852,14 @@ describe("startConfiguredTriggers", () => {
         expect(failedEntry).toBeDefined();
         expect(failedEntry?.[1].message).toContain("nonexistent");
       });
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnInBackgroundMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
   });
 
   it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
-    const spawnMock = vi.fn();
+    const spawnInBackgroundMock = vi.fn();
     const cronAutoCompleteConfig = {
       dataDir: "/tmp/spur-data",
       projects: {
@@ -2757,7 +2889,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: cronAutoCompleteConfig as never,
       bus,
-      sessionService: { spawn: spawnMock } as never,
+      sessionService: { spawnInBackground: spawnInBackgroundMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2770,7 +2902,7 @@ describe("startConfiguredTriggers", () => {
         expect(failedEntry).toBeDefined();
         expect(failedEntry?.[1].message).toContain("incompatible work-item payload");
       });
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnInBackgroundMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

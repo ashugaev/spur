@@ -2288,7 +2288,7 @@
     "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.",
     "tier": "v2-runtime",
-    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "testFiles": ["v2/test/runtime/github-work-items.runtime.test.ts"],
     "ciJob": "runtime-integration"
   },
   {
@@ -2304,7 +2304,7 @@
     "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.coexists_with_signal_branch` — when `query` is also set, the per-branch signal branch still fires `github:ci_failed` for an attached session alongside `github:work_item.new` from the query branch.",
     "tier": "v2-runtime",
-    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "testFiles": ["v2/test/runtime/github-work-items.runtime.test.ts"],
     "ciJob": "runtime-integration"
   },
   {
