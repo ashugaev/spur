@@ -295,11 +295,13 @@ function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogIte
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
     const result = new Map<string, AvailableBacklogItem>();
-    for (const item of parsed["items"]) {
-      if (isAvailableBacklogItem(item)) {
-        result.set(item.externalId, item);
+    parsed["items"].forEach((raw: unknown, index: number) => {
+      const candidate =
+        isRecord(raw) && typeof raw["position"] !== "number" ? { ...raw, position: index } : raw;
+      if (isAvailableBacklogItem(candidate)) {
+        result.set(candidate.externalId, candidate);
       }
-    }
+    });
     return result;
   } catch {
     return new Map();

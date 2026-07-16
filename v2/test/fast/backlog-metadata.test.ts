@@ -73,7 +73,7 @@ describe("backlog metadata", () => {
     );
   });
 
-  it("skips a persisted item missing position while still reading valid items", async () => {
+  it("backfills position from array index for a legacy item missing position, instead of dropping it", async () => {
     const dataDir = await tempDataDir();
     const path = join(dataDir, "source-state", "available-backlog", "api", "features.json");
     mkdirSync(join(dataDir, "source-state", "available-backlog", "api"), { recursive: true });
@@ -83,7 +83,28 @@ describe("backlog metadata", () => {
         items: [
           item({ externalId: "10001", position: 0 }),
           { ...item({ externalId: "20002" }), position: undefined },
+          { ...item({ externalId: "30003" }), position: undefined },
         ],
+      }),
+      "utf-8",
+    );
+
+    // Legacy files were persisted sorted by externalId, so array order is the legacy order;
+    // items missing position are backfilled from their array index and kept, not dropped.
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
+      ["10001", "20002", "30003"],
+    );
+  });
+
+  it("still drops a persisted item missing a required non-position field", async () => {
+    const dataDir = await tempDataDir();
+    const path = join(dataDir, "source-state", "available-backlog", "api", "features.json");
+    mkdirSync(join(dataDir, "source-state", "available-backlog", "api"), { recursive: true });
+    const { title: _title, ...missingTitle } = item({ externalId: "20002" });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        items: [item({ externalId: "10001", position: 0 }), missingTitle],
       }),
       "utf-8",
     );
