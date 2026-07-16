@@ -1487,6 +1487,9 @@ function parseConfigFile(
 
   const tags = parseTags(root["tags"]);
 
+  const projectsRootRaw =
+    mode === "instance" ? asOptionalString(root["projectsRoot"], "projectsRoot") : undefined;
+
   const serverPort =
     mode === "instance"
       ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
@@ -1515,6 +1518,9 @@ function parseConfigFile(
             asOptionalString(root["worktreeDir"], "worktreeDir") ?? resolvedDefaults.worktreeDir,
           )
         : resolvedDefaults.worktreeDir,
+    ...(projectsRootRaw !== undefined
+      ? { projectsRoot: resolveFrom(configDir, projectsRootRaw) }
+      : {}),
     defaultAgent:
       mode === "instance"
         ? (asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? resolvedDefaults.defaultAgent)

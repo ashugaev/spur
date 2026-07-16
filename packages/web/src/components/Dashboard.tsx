@@ -659,12 +659,12 @@ function NewProjectModal({
           />
         </label>
         <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Project path</span>
+          <span className="text-[var(--color-text-secondary)]">Project path (optional)</span>
           <input
             aria-label="Project path"
             className={INPUT_CLASS}
             onChange={(event) => onPathChange(event.target.value)}
-            placeholder="/absolute/path/to/repo"
+            placeholder="/absolute/path/to/repo (optional, defaults under Spur data dir)"
             value={path}
           />
         </label>
@@ -1557,17 +1557,13 @@ export function Dashboard() {
       setNewProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
       return;
     }
-    if (!path) {
-      setNewProjectError("Path is required");
-      return;
-    }
     setNewProjectSubmitting(true);
     setNewProjectError(null);
     if (createMissing) setNewProjectMissingPath(null);
     try {
-      const body: CreateProjectRequest = createMissing
-        ? { displayName, prefix, path, createMissing: true }
-        : { displayName, prefix, path };
+      const body: CreateProjectRequest = { displayName, prefix };
+      if (path) body.path = path;
+      if (createMissing) body.createMissing = true;
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },

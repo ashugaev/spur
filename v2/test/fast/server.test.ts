@@ -1827,6 +1827,145 @@ describe("startServer", () => {
     }
   });
 
+  it("POST /projects derives folder under dataDir/projects when path omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { path: string };
+      };
+      expect(payload.id).toBe("demo-app");
+      const expectedPath = join(dataDir, "projects", "demo-app");
+      expect(payload.entry.path).toBe(expectedPath);
+      expect(fs.existsSync(expectedPath)).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects derives folder under configured projectsRoot when path omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projectsRoot: ./custom-root",
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { path: string };
+      };
+      expect(payload.id).toBe("demo-app");
+      const expectedPath = join(root, "custom-root", "demo-app");
+      expect(payload.entry.path).toBe(expectedPath);
+      expect(fs.existsSync(expectedPath)).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects returns 400 when path is provided but blank", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub", path: "" }),
+      });
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as { error: string };
+      expect(payload.error).toBe("path must be a non-empty string when provided");
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects rejects missing fields with 400", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

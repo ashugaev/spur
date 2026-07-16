@@ -703,12 +703,17 @@ export async function startServer(
 
       if (method === "POST" && path === "/projects") {
         const body = await readJsonBody<CreateProjectRequest>(request);
-        for (const field of ["displayName", "prefix", "path"] as const) {
+        for (const field of ["displayName", "prefix"] as const) {
           const value = body[field];
           if (typeof value !== "string" || !value.trim()) {
             sendError(response, 400, `${field} must be a non-empty string`);
             return;
           }
+        }
+        const rawPath = body.path;
+        if (rawPath !== undefined && (typeof rawPath !== "string" || !rawPath.trim())) {
+          sendError(response, 400, "path must be a non-empty string when provided");
+          return;
         }
         try {
           const result = service.createUnconfiguredProject(body);

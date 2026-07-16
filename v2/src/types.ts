@@ -507,6 +507,7 @@ export interface AppConfig {
   };
   dataDir: string;
   worktreeDir: string;
+  projectsRoot?: string;
   defaultAgent: AgentName;
   tmux: {
     socketName: string;
@@ -918,7 +919,7 @@ export interface ProjectListEntry {
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 

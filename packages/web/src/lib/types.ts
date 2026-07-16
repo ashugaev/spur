@@ -295,7 +295,7 @@ export interface ProjectInfo {
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 
