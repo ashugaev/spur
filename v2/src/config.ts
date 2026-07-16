@@ -1504,7 +1504,9 @@ function parseConfigFile(
       : resolvedDefaults.dataDir;
 
   const projectsRoot =
-    projectsRootRaw !== undefined ? resolveFrom(configDir, projectsRootRaw) : join(dataDir, "projects");
+    projectsRootRaw !== undefined
+      ? resolveFrom(configDir, projectsRootRaw)
+      : join(dataDir, "projects");
 
   return {
     configPath,
