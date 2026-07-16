@@ -63,14 +63,31 @@ describe("backlog metadata", () => {
   it("reads items back in fetch/position order, not externalId or fetchedAt order", async () => {
     const dataDir = await tempDataDir();
     replaceAvailableBacklogItems(dataDir, "api", "features", [
-      item({ externalId: "30003", key: "WEB-3", fetchedAt: "2026-06-16T12:02:00.000Z", position: 2 }),
-      item({ externalId: "10001", key: "WEB-1", fetchedAt: "2026-06-16T12:00:00.000Z", position: 0 }),
-      item({ externalId: "20002", key: "WEB-2", fetchedAt: "2026-06-16T12:01:00.000Z", position: 1 }),
+      item({
+        externalId: "30003",
+        key: "WEB-3",
+        fetchedAt: "2026-06-16T12:02:00.000Z",
+        position: 2,
+      }),
+      item({
+        externalId: "10001",
+        key: "WEB-1",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      }),
+      item({
+        externalId: "20002",
+        key: "WEB-2",
+        fetchedAt: "2026-06-16T12:01:00.000Z",
+        position: 1,
+      }),
     ]);
 
-    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
-      ["10001", "20002", "30003"],
-    );
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+      "20002",
+      "30003",
+    ]);
   });
 
   it("backfills position from array index for a legacy item missing position, instead of dropping it", async () => {
@@ -91,9 +108,11 @@ describe("backlog metadata", () => {
 
     // Legacy files were persisted sorted by externalId, so array order is the legacy order;
     // items missing position are backfilled from their array index and kept, not dropped.
-    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
-      ["10001", "20002", "30003"],
-    );
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+      "20002",
+      "30003",
+    ]);
   });
 
   it("still drops a persisted item missing a required non-position field", async () => {
@@ -109,8 +128,8 @@ describe("backlog metadata", () => {
       "utf-8",
     );
 
-    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
-      ["10001"],
-    );
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+    ]);
   });
 });

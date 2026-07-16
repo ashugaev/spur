@@ -1264,8 +1264,9 @@ describe("SessionService", () => {
         position: 1,
       },
     ];
-    readAvailableBacklogItemsMock.mockImplementation((_dataDir: string, _projectId: string, backlogId: string) =>
-      backlogId === "features" ? featuresItems : bugsItems,
+    readAvailableBacklogItemsMock.mockImplementation(
+      (_dataDir: string, _projectId: string, backlogId: string) =>
+        backlogId === "features" ? featuresItems : bugsItems,
     );
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
