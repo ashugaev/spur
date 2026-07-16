@@ -131,7 +131,7 @@ projects:
     expect(config.projectsRoot).toBe(join(configPath, "..", "custom-root"));
   });
 
-  it("leaves projectsRoot undefined when not set", async () => {
+  it("derives projectsRoot under dataDir/projects when not set", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -140,7 +140,7 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projectsRoot).toBeUndefined();
+    expect(config.projectsRoot).toBe(join(config.dataDir, "projects"));
   });
 
   it("parses tag definitions and assigns a stable color when none is given", async () => {

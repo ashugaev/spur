@@ -2158,8 +2158,10 @@ export class SessionService {
         throw new Error(`path is not a directory: ${absolutePath}`);
       }
     } else {
-      const projectsRoot = this.config.projectsRoot ?? join(this.config.dataDir, "projects");
-      absolutePath = join(projectsRoot, candidateId);
+      absolutePath = join(this.config.projectsRoot, candidateId);
+      if (existsSync(absolutePath)) {
+        throw new Error(`derived project folder already exists: ${absolutePath}`);
+      }
       mkdirSync(absolutePath, { recursive: true });
     }
 

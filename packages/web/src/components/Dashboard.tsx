@@ -664,7 +664,7 @@ function NewProjectModal({
             aria-label="Project path"
             className={INPUT_CLASS}
             onChange={(event) => onPathChange(event.target.value)}
-            placeholder="/absolute/path/to/repo (optional, defaults under Spur data dir)"
+            placeholder="/absolute/path/to/repo (optional)"
             value={path}
           />
         </label>

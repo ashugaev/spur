@@ -42,6 +42,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     server: { host: "127.0.0.1", port: 4310 },
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
+    projectsRoot: "/tmp/spur-data/projects",
     defaultAgent: "claude",
     tmux: { socketName: "spur-test" },
     ui: { port: 5555 },

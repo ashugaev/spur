@@ -507,7 +507,7 @@ export interface AppConfig {
   };
   dataDir: string;
   worktreeDir: string;
-  projectsRoot?: string;
+  projectsRoot: string;
   defaultAgent: AgentName;
   tmux: {
     socketName: string;
