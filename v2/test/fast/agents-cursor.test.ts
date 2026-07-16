@@ -94,10 +94,6 @@ describe("buildCursorPlan", () => {
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 
-  it("keeps --force when restrictWrites is enabled", () => {
-    const plan = buildCursorPlan("review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
-  });
 });
 
 describe("buildCursorResumePlan", () => {
@@ -119,8 +115,8 @@ describe("buildCursorResumePlan", () => {
     expect(plan.launchCommand).not.toContain("--model");
   });
 
-  it("keeps --force when restrictWrites is enabled", () => {
-    const plan = buildCursorResumePlan("chat-123", "agent", { restrictWrites: true });
+  it("always includes --force --sandbox disabled", () => {
+    const plan = buildCursorResumePlan("chat-123", "agent");
     expect(plan.launchCommand).toContain("--force --sandbox disabled");
   });
 });

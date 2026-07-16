@@ -68,6 +68,15 @@ export async function findCursorSessionId(
   return best?.chatId ?? null;
 }
 
+/**
+ * Denies Cursor's model Write/Edit tools via `permissions.deny`. This does
+ * NOT confine shell-exec writes (`sed -i`, `tee`, `>`, `gh`, ...): cursor
+ * launches with `--force`, which auto-approves the Shell permission category
+ * and runs shell commands unsandboxed regardless of this deny-list. A true
+ * no-writes posture (workspace_readonly) exists in Cursor but is only
+ * settable via a server-side Cursor team/repo policy, not via CLI flags or
+ * local `cli-config.json`.
+ */
 export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string): Promise<void> {
   await mkdir(cursorConfigDir, { recursive: true });
   await writeFile(
@@ -87,7 +96,7 @@ export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string):
 
 export function buildCursorPlan(
   prompt: string,
-  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
+  options?: { planMode?: boolean; model?: string },
 ): AgentLaunchPlan {
   const model = options?.model ?? DEFAULT_CURSOR_MODEL;
   const modelArg = ` --model ${shellEscape(model)}`;
@@ -102,7 +111,7 @@ export function buildCursorPlan(
 export function buildCursorResumePlan(
   chatId: string,
   binary = cursorCommand(),
-  options?: { planMode?: boolean; restrictWrites?: boolean },
+  options?: { planMode?: boolean },
 ): AgentResumePlan {
   const planArg = options?.planMode ? " --plan" : "";
   return {
@@ -114,7 +123,7 @@ export function buildCursorResumePlan(
 export async function buildCursorRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { planMode?: boolean; restrictWrites?: boolean; cursorConfigDir?: string },
+  options?: { planMode?: boolean; cursorConfigDir?: string },
 ): Promise<AgentLaunchPlan | null> {
   const chatId = await findCursorSessionId(
     worktreePath,
