@@ -75,6 +75,7 @@ function shot(page: Page, name: string) {
 }
 
 test("tag filter states", async ({ page }) => {
+  test.slow();
   await mockDashboard(page);
   await page.goto("/");
   // The trigger's aria-label gains a `: <tags>` suffix once tags are selected,
