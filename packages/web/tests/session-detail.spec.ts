@@ -1610,7 +1610,7 @@ test.describe("S3: Message section", () => {
     await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
 
     releaseSend();
-    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
   });
 
   test("composer buttons show inline hotkey hints", async ({ page }) => {
