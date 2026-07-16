@@ -240,6 +240,7 @@ describe("Dashboard", () => {
       title: "Fix checkout",
       url: "https://jira.example.com/browse/WEB-17",
       fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
     };
     const spawnedSession = {
       ...sessionsPayload().sessions[0],
@@ -316,6 +317,7 @@ describe("Dashboard", () => {
         title: "Fix checkout",
         url: "https://jira.example.com/browse/WEB-17",
         fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
       },
       {
         provider: "jira",
@@ -326,6 +328,7 @@ describe("Dashboard", () => {
         title: "Fix cart",
         url: "https://jira.example.com/browse/WEB-18",
         fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 1,
       },
     ];
     let resolveTake: ((response: Response) => void) | null = null;

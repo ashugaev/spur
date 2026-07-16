@@ -285,7 +285,8 @@ function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
     typeof value["key"] === "string" &&
     typeof value["title"] === "string" &&
     typeof value["url"] === "string" &&
-    typeof value["fetchedAt"] === "string"
+    typeof value["fetchedAt"] === "string" &&
+    typeof value["position"] === "number"
   );
 }
 
@@ -872,7 +873,7 @@ export function readAvailableBacklogItems(
   const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   return [...readAvailableBacklogFile(path).values()]
     .filter((item) => !claimed.has(item.externalId))
-    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+    .sort((left, right) => left.position - right.position);
 }
 
 export function replaceAvailableBacklogItems(
@@ -883,9 +884,7 @@ export function replaceAvailableBacklogItems(
 ): void {
   const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
-    items: items
-      .filter((item) => !claimed.has(item.externalId))
-      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+    items: items.filter((item) => !claimed.has(item.externalId)),
   });
 }
 

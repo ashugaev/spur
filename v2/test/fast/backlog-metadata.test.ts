@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,7 @@ function item(overrides: Partial<AvailableBacklogItem> = {}): AvailableBacklogIt
     title: "Fix checkout",
     url: "https://jira.example.com/browse/WEB-17",
     fetchedAt: "2026-06-16T12:00:00.000Z",
+    position: 0,
     ...overrides,
   };
 }
@@ -56,5 +58,38 @@ describe("backlog metadata", () => {
     ]);
 
     expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([]);
+  });
+
+  it("reads items back in fetch/position order, not externalId or fetchedAt order", async () => {
+    const dataDir = await tempDataDir();
+    replaceAvailableBacklogItems(dataDir, "api", "features", [
+      item({ externalId: "30003", key: "WEB-3", fetchedAt: "2026-06-16T12:02:00.000Z", position: 2 }),
+      item({ externalId: "10001", key: "WEB-1", fetchedAt: "2026-06-16T12:00:00.000Z", position: 0 }),
+      item({ externalId: "20002", key: "WEB-2", fetchedAt: "2026-06-16T12:01:00.000Z", position: 1 }),
+    ]);
+
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
+      ["10001", "20002", "30003"],
+    );
+  });
+
+  it("skips a persisted item missing position while still reading valid items", async () => {
+    const dataDir = await tempDataDir();
+    const path = join(dataDir, "source-state", "available-backlog", "api", "features.json");
+    mkdirSync(join(dataDir, "source-state", "available-backlog", "api"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        items: [
+          item({ externalId: "10001", position: 0 }),
+          { ...item({ externalId: "20002" }), position: undefined },
+        ],
+      }),
+      "utf-8",
+    );
+
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual(
+      ["10001"],
+    );
   });
 });
