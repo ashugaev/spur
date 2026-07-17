@@ -460,6 +460,19 @@ export async function isProcessRunningInTmux(
   }
 }
 
+// Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic
+// scans, but a tmux create/kill is a real mutation the next read must see
+// immediately — otherwise a just-created session/sidecar reads as absent, or
+// a just-killed/paused one reads as still alive, for up to the ~2s TTL.
+// Create/kill are rare (not per-tick), so busting these three single-key
+// caches here doesn't touch the per-tick fork savings the fleet batching
+// exists for.
+function invalidateFleetProbeCaches(): void {
+  fleetSessionCache.clear();
+  fleetPaneCache.clear();
+  psSnapshotCache.clear();
+}
+
 export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
@@ -482,6 +495,7 @@ export async function createTmuxSession(input: {
     input.cwd,
     ...envArgs,
   ]);
+  invalidateFleetProbeCaches();
   await sleep(300);
 
   try {
@@ -493,6 +507,8 @@ export async function createTmuxSession(input: {
       await tmux("kill-session", "-t", sessionTarget);
     } catch {
       // Best effort only.
+    } finally {
+      invalidateFleetProbeCaches();
     }
     throw error;
   }
@@ -520,6 +536,7 @@ export async function createTmuxCommandSession(input: {
     ...buildEnvArgs(input.env),
     shellCommand,
   ]);
+  invalidateFleetProbeCaches();
   await sleep(100);
   try {
     await tmux("set-option", "-t", sessionTarget, "remain-on-exit", "on");
@@ -675,6 +692,8 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
     await tmux("kill-session", "-t", target);
   } catch {
     // Best effort only.
+  } finally {
+    invalidateFleetProbeCaches();
   }
 }
 

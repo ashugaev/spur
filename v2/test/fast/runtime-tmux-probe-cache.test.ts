@@ -246,6 +246,63 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(isProcessRunningInTmux(sessionName, ["agent-on-split-pane"])).resolves.toBe(true);
   });
 
+  it("invalidates the fleet caches after a real tmux create so a just-created session isn't read as stale-absent", async () => {
+    let sessionExists = false;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-sessions")) {
+        return { stdout: sessionExists ? "fresh-api-1 1700000000" : "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("new-session")) {
+        sessionExists = true;
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux") {
+        // send-keys/cancel/paste etc. inside sendMessageToTmux — no-ops.
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { tmuxSessionExists, createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    // Cold read: the session doesn't exist yet — cached for the TTL.
+    await expect(tmuxSessionExists("fresh-api-1")).resolves.toBe(false);
+
+    await createTmuxSession({
+      sessionName: "fresh-api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+    });
+
+    // Without invalidation this would still serve the stale cached `false`
+    // for up to ~2s after a real create — a just-created session/sidecar
+    // reading as absent/"stopped" is exactly the regression real tmux-backed
+    // runtime tests hit.
+    await expect(tmuxSessionExists("fresh-api-1")).resolves.toBe(true);
+  });
+
+  it("invalidates the fleet caches after a real tmux kill so a just-killed session isn't read as stale-alive", async () => {
+    let sessionExists = true;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-sessions")) {
+        return { stdout: sessionExists ? "dying-api-1 1700000000" : "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("kill-session")) {
+        sessionExists = false;
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { tmuxSessionExists, killTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(tmuxSessionExists("dying-api-1")).resolves.toBe(true);
+    await killTmuxSession("dying-api-1");
+    // Without invalidation this would still serve the stale cached `true`
+    // for up to ~2s after a real kill/pause.
+    await expect(tmuxSessionExists("dying-api-1")).resolves.toBe(false);
+  });
+
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-sessions")) {
