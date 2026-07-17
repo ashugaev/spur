@@ -8819,7 +8819,7 @@ export class SessionService {
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
-    const history = await this.updateStateHistory(
+    await this.updateStateHistory(
       session,
       state,
       classified.source,
