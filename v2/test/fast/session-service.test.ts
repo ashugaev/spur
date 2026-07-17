@@ -4143,6 +4143,71 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
   });
 
+  it("dashboard-cache tick never forks capture-pane (last un-batched fork removed)", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("working", "responding");
+    mockClaudeJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain the constructor's immediate dashboard tick and baseline attention
+    // tick — the baseline attention tick's full enrich legitimately scans the
+    // pane once, so it must not pollute the measured dashboard-only tick below.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    captureTmuxPaneMock.mockClear();
+
+    // Advance exactly one 2s dashboard-tick interval (well under the 5s
+    // attention cadence) and assert it alone forks zero pane captures.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const listed = await service.list({ view: "dashboard" });
+    expect(listed[0]).toMatchObject({ id: "api-1", state: "working" });
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("still detects and auto-confirms the usage-limit menu via on-demand enrich even though the dashboard tick skips the pane scan", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The 2s dashboard tick resolves state from structured sources only —
+    // needs_input from claude status, no rate-limit menu scan.
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "needs_input" });
+
+    // The on-demand full enrich of the viewed session still scans the pane,
+    // detects the menu, and auto-confirms it.
+    const result = await service.get("api-1");
+    expect(result.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+    service.dispose();
+  });
+
   it("returns null for this test file's own raw contents (self-match regression guard)", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();

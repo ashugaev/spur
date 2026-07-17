@@ -303,13 +303,25 @@ function exactPaneTarget(sessionName: string): string {
   return `=${sessionName}:`;
 }
 
-export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    return await tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
-  } catch {
-    return "";
-  }
+// TTL-cached, in-flight-promise-memoized like the other fleet/per-session
+// probes: capture-pane can't be batched fleet-wide (there's no `-a` form that
+// returns per-session pane *text*), so it's the last per-session fork left in
+// the classify/enrich path. Within a TTL window, the 2s dashboard tick, the
+// 5s attention monitor, the viewed page's own enrich poll, and desk-sibling
+// lookups all share one capture per (session, lines) pair instead of forking
+// one each. Keyed by lines too since callers request different tail lengths
+// (classify's default 200, attention's 15-line notice tail, sidecar's 40).
+const capturePaneCache = new Map<string, ProbeCacheEntry<string>>();
+
+export function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
+  return memoizedProbe(capturePaneCache, `${sessionName}:${lines}`, async () => {
+    const target = exactPaneTarget(sessionName);
+    try {
+      return await tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
+    } catch {
+      return "";
+    }
+  });
 }
 
 // Pid of the session's pane process (the shell hosting the agent). Used to

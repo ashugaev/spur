@@ -141,6 +141,42 @@ describe("runtime-tmux shared probe cache", () => {
     expect(warmProcessAlive).toBe(coldProcessAlive);
   });
 
+  it("caches capture-pane per (session, lines) so a repeat scan within the TTL forks nothing extra", async () => {
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        return { stdout: "pane text", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    // capture-pane can't be batched fleet-wide (no `-a` form returns text per
+    // session), so one concurrent capture per session — mirroring a dashboard
+    // tick, the attention monitor, or desk-sibling lookups all scanning at
+    // once — still costs one fork per session.
+    await Promise.all(sessionNames.map((name) => captureTmuxPane(name)));
+    expect(captureCalls).toBe(SESSION_COUNT);
+
+    // A second read of the same sessions within the TTL — e.g. the dashboard
+    // tick, the attention monitor, and the viewed page's own poll landing in
+    // the same ~2s window — must all share the cached capture.
+    await Promise.all(sessionNames.map((name) => captureTmuxPane(name)));
+    expect(captureCalls).toBe(SESSION_COUNT);
+
+    // A different tail-length request (e.g. the attention notice's 15-line
+    // tail vs classify's default 200) is cached independently, not conflated
+    // with the default-length cache entry.
+    const firstSession = sessionNames[0];
+    if (firstSession === undefined) {
+      throw new Error("expected at least one session name");
+    }
+    await captureTmuxPane(firstSession, 15);
+    expect(captureCalls).toBe(SESSION_COUNT + 1);
+  });
+
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-sessions")) {

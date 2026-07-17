@@ -8579,7 +8579,11 @@ export class SessionService {
     return updated;
   }
 
-  private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
+  private async classifySessionRecord(
+    session: SessionRecord,
+    options?: { scanPane?: boolean },
+  ): Promise<SessionStateResult> {
+    const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
       this.isInRestoreWarmup(session.id)
@@ -8745,7 +8749,12 @@ export class SessionService {
       // didn't confirm a limit. For Claude, the interactive-menu check always runs
       // regardless, since the menu can show up even after jsonl already confirmed
       // the limit — that's the common case the Enter-confirm needs to catch.
-      if (strategy === "claude_jsonl") {
+      // The 2s dashboard-cache tick opts out (scanPane:false): capture-pane is the
+      // last per-session fork left in this path, and jsonl/hook sources already
+      // cover rate-limit detection for the dashboard. The 5s attention monitor and
+      // on-demand enrich of the viewed session keep scanning (through the cached
+      // captureTmuxPane, so it's still O(1) forks per session per TTL window).
+      if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const menuHit = detectClaudeUsageLimitMenu(paneText);
         if (!rateLimit?.limited) {
@@ -8757,7 +8766,7 @@ export class SessionService {
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
         }
-      } else if (!rateLimit?.limited) {
+      } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
@@ -8786,7 +8795,11 @@ export class SessionService {
   }
 
   private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
-    const classified = await this.classifySessionRecord(session);
+    // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
+    // last un-batched fork): jsonl/hook-sourced rate limits still show up
+    // immediately, and the 5s attention monitor (full enrich) plus on-demand
+    // viewed-session enrich still run the tmux-banner/usage-menu scan.
+    const classified = await this.classifySessionRecord(session, { scanPane: false });
     session = classified.session;
     const {
       queuedMessages: _queuedMessages,
