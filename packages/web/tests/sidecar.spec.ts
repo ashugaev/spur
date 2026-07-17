@@ -1,14 +1,22 @@
 import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, makeSessionWithSidecar } from "./fixtures.js";
+import { makeWorkingSession, makeSessionWithSidecar, mockTagCatalog } from "./fixtures.js";
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
-  return page.route(`**/api/sessions/${session.id}`, (route) => {
-    void route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(session),
-    });
-  });
+  return Promise.all([
+    mockTagCatalog(page),
+    page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    }),
+  ]);
+}
+
+async function gotoSessionDetail(page: Page, sessionId: string) {
+  await page.goto(`/sessions/${sessionId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Sidecars").first()).toBeVisible();
 }
 
 // SC1: Sidecar terminal buttons
@@ -215,9 +223,6 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       tmuxSession: "spur-sc-click-1",
     });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
     await page.goto(`/sessions/${session.id}`);
 
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
@@ -299,7 +304,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       },
     });
     await mockSessionDetail(page, session);
-    await page.goto(`/sessions/${session.id}`);
+    await gotoSessionDetail(page, session.id);
 
     const actionNames = await page
       .locator("section")

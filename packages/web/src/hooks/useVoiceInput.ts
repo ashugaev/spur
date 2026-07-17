@@ -1,12 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { startRealtimeTranscription, type RealtimeSession } from "@/lib/realtime-voice-client";
+
+interface RealtimeTokenResponse {
+  value: string;
+  model: string;
+  language: string;
+}
 
 interface VoiceStatus {
   available: boolean;
   modelPath?: string;
   language: string;
   reason?: string;
+  realtime?: boolean;
 }
 
 type VoiceInputContextKey =
@@ -185,6 +193,14 @@ function formatTranscriptionFailure(message: string): string {
   return `Failed to transcribe audio after ${TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`;
 }
 
+function resolveTakeMode(
+  pendingSend: ((text: string) => void | Promise<void>) | null,
+  hasOnTranscribed: boolean,
+): RetainedVoiceTakeMode {
+  if (pendingSend) return "send";
+  return hasOnTranscribed ? "insert" : "modal";
+}
+
 async function transcribeRecording(audio: Blob): Promise<string> {
   let lastError = TRANSCRIBE_ERROR;
 
@@ -331,6 +347,12 @@ export function useVoiceInput(options: {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const realtimeSessionRef = useRef<RealtimeSession | null>(null);
+  // Modal realtime accumulation: finalized segments are joined here. Partials
+  // render live as `accumulated + in-progress segment`; each completed segment
+  // is appended to this ref and the draft is replaced (never appended) so a
+  // segment is not counted twice (streamed partial + appended final).
+  const realtimeFinalizedRef = useRef("");
   const retainedTakeRef = useRef<RetainedVoiceTake | null>(null);
   const retainedAudioRef = useRef<HTMLAudioElement | null>(null);
   const retainedAudioUrlRef = useRef<string | null>(null);
@@ -454,6 +476,13 @@ export function useVoiceInput(options: {
       mediaRecorderRef.current = null;
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
+      const session = realtimeSessionRef.current;
+      realtimeSessionRef.current = null;
+      if (session) {
+        void Promise.resolve(session.stop()).catch(() => {
+          // Ignore teardown failures during unmount.
+        });
+      }
       pendingSendCallbackRef.current = null;
       stopRetainedPlayback();
     };
@@ -464,6 +493,19 @@ export function useVoiceInput(options: {
     stopRetainedPlayback();
     setHasRetainedTake(false);
     retainedTakeRef.current = null;
+
+    // A contextKey switch mid-recording must not leak the active realtime
+    // session (RTCPeerConnection + mic tracks). Tear it down like unmount/cancel.
+    const activeSession = realtimeSessionRef.current;
+    realtimeSessionRef.current = null;
+    if (activeSession) {
+      pendingSendCallbackRef.current = null;
+      realtimeFinalizedRef.current = "";
+      setRecording(false);
+      void Promise.resolve(activeSession.stop()).catch(() => {
+        // Ignore teardown failures; the session is being discarded.
+      });
+    }
 
     if (hasIndexedDbSupport()) {
       void (async () => {
@@ -488,15 +530,116 @@ export function useVoiceInput(options: {
     };
   }, [options.contextKey, stopRetainedPlayback]);
 
+  const stopRealtimeSession = useCallback(() => {
+    const session = realtimeSessionRef.current;
+    realtimeSessionRef.current = null;
+    if (session) {
+      void Promise.resolve(session.stop()).catch(() => {
+        // Ignore teardown failures; the session is being discarded.
+      });
+    }
+  }, []);
+
   const stopStream = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
     mediaChunksRef.current = [];
+    stopRealtimeSession();
     setRecording(false);
-  }, []);
+  }, [stopRealtimeSession]);
+
+  const startRealtimeRecording = useCallback(() => {
+    setVoiceError(null);
+    setVoiceBusy("starting");
+    realtimeFinalizedRef.current = "";
+    void (async () => {
+      try {
+        if (typeof window === "undefined" || typeof RTCPeerConnection === "undefined") {
+          throw new Error("Voice recording is not supported in this browser");
+        }
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(MICROPHONE_HTTPS_ERROR);
+        }
+
+        const response = await fetch("/api/runtime/voice/realtime-token", { method: "POST" });
+        if (!response.ok) {
+          throw new Error(await readVoiceError(response, TRANSCRIBE_ERROR));
+        }
+        const token = (await response.json()) as RealtimeTokenResponse;
+
+        const session = await startRealtimeTranscription({
+          token: token.value,
+          model: token.model,
+          language: token.language,
+          onPartial: (text) => {
+            // Only the modal flow renders the live draft. In insert/send mode the
+            // final transcript is applied directly via onFinal, so partials must not
+            // pop the modal open or leave stale draft text behind.
+            const mode = resolveTakeMode(
+              pendingSendCallbackRef.current,
+              Boolean(onTranscribedRef.current),
+            );
+            if (mode !== "modal") return;
+            if (!voiceModalOpenRef.current) {
+              setVoiceModalOpen(true);
+            }
+            const finalized = realtimeFinalizedRef.current;
+            setVoiceDraft(finalized ? `${finalized} ${text}` : text);
+          },
+          onFinal: (text) => {
+            const pendingSend = pendingSendCallbackRef.current;
+            const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
+            // Modal mode streams partials into the draft already, so replace
+            // (not append) the draft with the accumulated finalized segments to
+            // avoid double-counting the just-streamed partial.
+            if (mode === "modal") {
+              const finalized = realtimeFinalizedRef.current;
+              const trimmed = text.trim();
+              const next = finalized && trimmed ? `${finalized} ${trimmed}` : finalized || trimmed;
+              realtimeFinalizedRef.current = next;
+              if (!voiceModalOpenRef.current) {
+                setVoiceModalOpen(true);
+              }
+              setVoiceDraft(next);
+              return;
+            }
+            pendingSendCallbackRef.current = null;
+            void applyTranscription(text, mode, pendingSend ?? undefined);
+          },
+          onError: (err) => {
+            pendingSendCallbackRef.current = null;
+            stopRealtimeSession();
+            setRecording(false);
+            setVoiceBusy(null);
+            setVoiceError(err.message);
+          },
+        });
+        realtimeSessionRef.current = session;
+        setRecording(true);
+      } catch (err) {
+        pendingSendCallbackRef.current = null;
+        stopRealtimeSession();
+        setRecording(false);
+        setVoiceError(readRecordingStartError(err));
+      } finally {
+        setVoiceBusy((current) => (current === "starting" ? null : current));
+      }
+    })();
+  }, [applyTranscription, stopRealtimeSession]);
 
   const toggleRecording = useCallback(() => {
+    if (voiceStatus?.realtime) {
+      if (recording) {
+        stopRealtimeSession();
+        setRecording(false);
+        return;
+      }
+      if (!voiceStatus.available) return;
+      startRealtimeRecording();
+      return;
+    }
+
     if (recording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -538,11 +681,7 @@ export function useVoiceInput(options: {
           const chunks = [...mediaChunksRef.current];
           const wasDismissed = dismissedRef.current;
           const pendingSend = pendingSendCallbackRef.current;
-          const mode: RetainedVoiceTakeMode = pendingSend
-            ? "send"
-            : onTranscribedRef.current
-              ? "insert"
-              : "modal";
+          const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
           dismissedRef.current = false;
           stopStream();
           if (wasDismissed) {
@@ -572,7 +711,15 @@ export function useVoiceInput(options: {
         setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
-  }, [hasRetainedTake, recording, stopStream, transcribeAndApply, voiceStatus]);
+  }, [
+    hasRetainedTake,
+    recording,
+    startRealtimeRecording,
+    stopRealtimeSession,
+    stopStream,
+    transcribeAndApply,
+    voiceStatus,
+  ]);
 
   const playRetainedTake = useCallback(() => {
     const retainedTake = retainedTakeRef.current;
@@ -646,12 +793,25 @@ export function useVoiceInput(options: {
     setVoiceDraft("");
   }, [cancelRecording]);
 
-  const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== "recording") return;
-    pendingSendCallbackRef.current = onSend;
-    recorder.stop();
-  }, []);
+  const stopAndSend = useCallback(
+    (onSend: (text: string) => void | Promise<void>) => {
+      if (realtimeSessionRef.current) {
+        const text = voiceDraft.trim();
+        pendingSendCallbackRef.current = null;
+        stopRealtimeSession();
+        setRecording(false);
+        if (text) {
+          void applyTranscription(text, "send", onSend);
+        }
+        return;
+      }
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state !== "recording") return;
+      pendingSendCallbackRef.current = onSend;
+      recorder.stop();
+    },
+    [applyTranscription, stopRealtimeSession, voiceDraft],
+  );
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),

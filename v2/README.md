@@ -446,7 +446,7 @@ projects:
         event: github:ci_failed
         send:
           interrupt: true # delivered immediately and retried every 10m (up to 3) while CI still fails
-          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+          prompt: "Run $manager and $github. Check failing CI on the active PR. Fix it if fixable — regardless of cause, own change or another agent's — then rerun checks and push. If not fixable, say why."
       pr-watch-merge-conflict:
         source: pr-watch
         event: github:merge_conflict
@@ -589,7 +589,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that first tells the agent to check relevant skills and all agent instruction files for branch-naming rules, then return only a branch name that follows them, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 

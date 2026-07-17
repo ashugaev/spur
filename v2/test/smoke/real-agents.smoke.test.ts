@@ -112,6 +112,9 @@ function parseCursorAuthStatus(text: string): AuthStatus | null {
     normalized.includes("authentication required") ||
     normalized.includes("not logged in") ||
     normalized.includes("logged in: false") ||
+    normalized.includes("no api key") ||
+    normalized.includes("missing api key") ||
+    normalized.includes("api key required") ||
     normalized.includes("unable to fetch user details") ||
     normalized.includes("agent login")
   ) {
@@ -443,6 +446,9 @@ describe("cursor auth status parsing", () => {
       "Logged in (unable to fetch user details)",
       { available: false, skipReason: "cursor not authenticated" },
     ],
+    ["no api key found", { available: false, skipReason: "cursor not authenticated" }],
+    ["missing api key", { available: false, skipReason: "cursor not authenticated" }],
+    ["api key required", { available: false, skipReason: "cursor not authenticated" }],
     ["authenticated", { available: true }],
     ["logged in", { available: true }],
     ["agent status pending", null],

@@ -160,6 +160,40 @@ backlog:
       agent: claude
 ```
 
+### Claude auth rotation
+
+Rotate Claude login accounts across the rate limit. Each account is an isolated
+`CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` +
+`<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
+
+Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
+accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
+Spur auto-detects the account once `.credentials.json` lands. Select sets the
+active account; remove drops it.
+
+Per-session switch auth (claude sessions only): kills and relaunches the session
+under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
+switches even while the session is working.
+
+Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
+rotation policy (the config carries no agent name so it extends to other agents;
+the account store is currently claude-only). When on,
+a claude session that hits `rate_limited` rotates to the next authenticated,
+non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
+limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
+limited -> falls through to the reactivation nudge.
+
+Instance-only, same footgun as `rateLimitReactivation`/`tags`: this block is
+parsed only in instance config. A per-project `spur.yaml authRotation:` is
+silently ignored.
+
+```yaml
+authRotation:
+  autoRotateOnRateLimit: true
+  cooldownMinutes: 60
+  maxRotationsPerEpisode: 2
+```
+
 ## Main flow
 
 ```text
@@ -232,13 +266,12 @@ Port map:
 |---------|-------------|------|
 | Daemon API | `127.0.0.1` | 4310 |
 | Next.js (web) | `127.0.0.1` | 3012 |
-| Terminal WS | `127.0.0.1` | 14801 |
 | Nginx proxy | `127.0.0.1` + private Tailscale IP | 5555 |
 
 - Systemd units: `spur-daemon.service`, `spur-web.service`
 - Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
-- `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
+- Terminal WS shares the web server on path `/ws` (no separate port). Any reverse proxy that forwards `/` covers it; no `DIRECT_TERMINAL_*` env to keep in sync.
 - Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation
