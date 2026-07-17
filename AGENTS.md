@@ -72,5 +72,6 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
 - Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
+- Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance except on the user's explicit direct instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.agents/skills/spur/SKILL.md` Agent Isolation for detail.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
