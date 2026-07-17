@@ -129,7 +129,6 @@ triggers:
         the project's test/lint/typecheck commands, and only commit once
         they pass. Update IMPLEMENTATION_PLAN.md with what you did and
         what's next. Do not start a second task this run.
-      autoComplete: true
 ```
 
 Prerequisites this puts on the _target_ repo (not on Spur itself):
@@ -149,10 +148,17 @@ this on:
 - No cost circuit-breaker — this is exactly the "overbaking" risk Huntley warns
   about. Start with a coarse schedule (hourly, not every-minute) and watch the
   first few runs' diffs before tightening it.
-- `spawn.autoComplete` (already used by `gh-pr-review-spawn`) only completes a
-  session after 5+ minutes in `waiting` state — good enough as a "this
-  iteration is done" signal, but doesn't itself stop the _loop_ (the cron
-  source keeps ticking and spawning new sessions regardless).
+- `spawn.autoComplete` does not apply here: `config.ts` only permits it for
+  `github:work_item.new`, `sentry:issue.new`, or `github-ci:run.completed`
+  events, not `cron:tick` — setting it on a cron-triggered spawn trigger fails
+  config load. It also isn't a "which sessions are already live" concept, it's
+  one-work-item-per-PR dedup (README's `pr-review-queue-spawn` example is the
+  only place it's actually used; the live `gh-pr-review-spawn` trigger in this
+  repo uses `spawnDeskGroup` instead, which explicitly rejects `autoComplete`).
+  A cron-spawned Ralph iteration needs no equivalent: each tick's session just
+  runs to `waiting` and sits idle in its own worktree; the next tick spawns
+  another one regardless, so nothing needs to be marked "complete" to unblock
+  the loop.
 
 ### Recipe B: single-session self-loop — Claude only, lighter weight
 
