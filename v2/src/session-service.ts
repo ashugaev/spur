@@ -4777,12 +4777,16 @@ export class SessionService {
         });
         continue;
       }
-      // Desk siblings reuse the dashboard-cache tick's classification
-      // (<=DASHBOARD_CACHE_INTERVAL_MS old) instead of re-running a full
-      // classify per sibling per viewer — that N× re-classify was a major
-      // fork-storm contributor. A sibling missing from the cache (e.g. just
-      // created, before the first tick ran) falls back to a single cheap,
-      // now-cached tmux existence check rather than a full classify.
+      // Desk siblings reuse the dashboard-cache tick's last-completed
+      // classification instead of re-running a full classify per sibling per
+      // viewer — that N× re-classify was a major fork-storm contributor.
+      // That cached value is usually <=DASHBOARD_CACHE_INTERVAL_MS old, but
+      // not guaranteed under tick overlap (a slow tick can leave a slightly
+      // older value in place until the next one completes). A sibling
+      // missing from the cache (freshly created, or evicted) is rare, so it
+      // gets a live classify instead of a stale/derived guess: scanPane:false
+      // still skips the capture-pane fork, but jsonl/hook sources already
+      // surface needs_input/rate_limited/error, so this stays cheap.
       const cached = this.dashboardCache.get(member.id);
       if (cached) {
         members.push({
@@ -4794,13 +4798,13 @@ export class SessionService {
         });
         continue;
       }
-      const runtimeAlive = await tmuxSessionExists(member.tmuxSession);
+      const classified = await this.classifySessionRecord(member, { scanPane: false });
       members.push({
-        id: member.id,
-        agent: member.agent,
-        status: member.status,
-        state: this.stateCache.get(member.id)?.state ?? statusFallbackState(member),
-        runtimeAlive,
+        id: classified.session.id,
+        agent: classified.session.agent,
+        status: classified.session.status,
+        state: this.stabilizeState(classified.session.id, classified.state),
+        runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
     return members;
@@ -6879,10 +6883,15 @@ export class SessionService {
         undefined,
         { agent: session.agent },
       );
+      // fresh:true: this session's tmux pane was just created by
+      // createTmuxSession above and may postdate the last fleet-pane
+      // snapshot, which would otherwise wrongly see it as absent and abort a
+      // genuinely successful recovery.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
@@ -6928,10 +6937,13 @@ export class SessionService {
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
+      // fresh:true — same rationale as the resume-plan check above: this
+      // pane was just (re)created and may postdate the last fleet snapshot.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, freshLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -7140,10 +7152,13 @@ export class SessionService {
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });
+      // fresh:true — this pane was just created by createTmuxSession above
+      // and may postdate the last fleet-pane snapshot.
       if (
         !(await isProcessRunningInTmux(
           current.tmuxSession,
           agentProcessMatchers(current.agent, restoreLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
@@ -8052,9 +8067,15 @@ export class SessionService {
       }
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
+    // fresh:true forces an independent re-sample here — otherwise this retry
+    // would just re-read the same ~2s-TTL cached result as the first check
+    // above, making a single transient glitch look like two agreeing reads
+    // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
-    if (await tmuxSessionExists(session.tmuxSession)) {
-      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)));
+    if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+        fresh: true,
+      }));
     }
     return true;
   }

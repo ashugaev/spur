@@ -211,6 +211,41 @@ describe("runtime-tmux shared probe cache", () => {
     }
   });
 
+  it("picks the active window's active pane from multiple list-panes -a rows for one session", async () => {
+    const sessionName = "multi-pane-session";
+    // Three panes for the same session: an inactive window's pane (dead),
+    // the active window's non-active split pane (alive, different pid/tty),
+    // and the active window's active pane (alive) — the one a no-window/
+    // no-pane target (`=name:`) actually resolves to.
+    const rows = [
+      `${sessionName} 0 1 1 111 /dev/pts/50`,
+      `${sessionName} 1 0 0 222 /dev/pts/51`,
+      `${sessionName} 1 1 0 333 /dev/pts/52`,
+    ];
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: rows.join("\n"), stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "222 pts/51 agent-on-split-pane --flag", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { tmuxPaneDead, getTmuxPanePid, isProcessRunningInTmux } =
+      await import("../../src/runtime-tmux.js");
+
+    // Active pane (row 3) is alive with pid 333 — not the inactive window's
+    // dead pane (row 1) nor the active window's non-active split pane (row 2).
+    await expect(tmuxPaneDead(sessionName)).resolves.toBe(false);
+    await expect(getTmuxPanePid(sessionName)).resolves.toBe(333);
+
+    // isProcessRunningInTmux must see every pane's tty across the session,
+    // including the non-active split pane (row 2's pts/51), not just the
+    // active pane's.
+    await expect(isProcessRunningInTmux(sessionName, ["agent-on-split-pane"])).resolves.toBe(true);
+  });
+
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-sessions")) {
