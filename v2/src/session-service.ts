@@ -2332,11 +2332,12 @@ export class SessionService {
   }
 
   private sessionAgentConfig(
-    session: Pick<SessionRecord, "agent" | "id">,
+    session: Pick<SessionRecord, "agent" | "id" | "restrictWrites">,
   ): ReturnType<typeof agentSessionConfig> {
     return agentSessionConfig(session.agent, {
       dataDir: this.config.dataDir,
       sessionId: session.id,
+      restrictWrites: resolveRestrictWrites(session),
     });
   }
 
@@ -4455,6 +4456,7 @@ export class SessionService {
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
         id: sessionId,
+        restrictWrites,
       });
       const planOptions = withAgentModeOptions(
         withProjectAgentOptions(project, {

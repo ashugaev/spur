@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { shellEscape } from "./shell-escape.js";
@@ -10,6 +10,120 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
 export const DEFAULT_CURSOR_MODEL = "auto";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
+
+/** Env gate a materialized guard script checks before denying anything. */
+export const CURSOR_RESTRICT_WRITES_ENV = "SPUR_CURSOR_RESTRICT_WRITES";
+const CURSOR_GIT_GUARD_FILENAME = "restrict-writes-hook.js";
+
+/**
+ * A Cursor `beforeShellExecution` hook, materialized per-session and
+ * referenced by absolute path. Denies `git commit`/`git push` (including
+ * through `git -c`/`-C`, a leading `env`/`VAR=val` prefix, an absolute git
+ * path, one level of `sh|bash|zsh -c "..."`, and collapsed whitespace).
+ * Inert (`{"permission":"allow"}`) unless `SPUR_CURSOR_RESTRICT_WRITES=1` is
+ * set in its process env — required because pooled/reused worktrees can
+ * carry a leftover hooks.json entry into a later, non-restricted session.
+ * Dependency-free node so it runs on any cursor host with no extra install.
+ */
+export const CURSOR_GIT_GUARD_SCRIPT = `#!/usr/bin/env node
+"use strict";
+
+const ENV_VAR = ${JSON.stringify(CURSOR_RESTRICT_WRITES_ENV)};
+const DENY_MESSAGE = "git commit/push blocked in this read-only Spur session";
+const SEGMENT_SPLIT_RE = /(?:&&|\\|\\||;|\\||\\n)/;
+const SHELL_C_RE = /^(?:\\S*\\/)?(sh|bash|zsh)\\s+-c\\s+(['"])([\\s\\S]*)\\2\\s*$/;
+const SHORT_VALUE_FLAGS = new Set(["-c", "-C"]);
+const LONG_VALUE_FLAGS = new Set(["--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function allow() {
+  process.stdout.write(JSON.stringify({ permission: "allow" }));
+}
+
+function deny() {
+  process.stdout.write(JSON.stringify({ permission: "deny", user_message: DENY_MESSAGE }));
+}
+
+function basename(token) {
+  const parts = token.split("/");
+  return parts[parts.length - 1];
+}
+
+function tokenize(segment) {
+  return segment.trim().split(/\\s+/).filter(Boolean);
+}
+
+function unwrapShellC(command) {
+  const trimmed = command.trim();
+  const match = trimmed.match(SHELL_C_RE);
+  return match ? match[3] : trimmed;
+}
+
+function segmentDeniesGitWrite(segment) {
+  const tokens = tokenize(segment);
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (ASSIGNMENT_RE.test(token) || basename(token) === "env") {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  if (index >= tokens.length || basename(tokens[index]) !== "git") {
+    return false;
+  }
+  index += 1;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (SHORT_VALUE_FLAGS.has(token) || LONG_VALUE_FLAGS.has(token)) {
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const subcommand = tokens[index];
+  return subcommand === "commit" || subcommand === "push";
+}
+
+function commandDeniesGitWrite(command) {
+  return unwrapShellC(command)
+    .split(SEGMENT_SPLIT_RE)
+    .some(segmentDeniesGitWrite);
+}
+
+if (process.env[ENV_VAR] !== "1") {
+  allow();
+  process.exit(0);
+}
+
+let raw = "";
+process.stdin.on("data", (chunk) => {
+  raw += chunk;
+});
+process.stdin.on("end", () => {
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    deny();
+    process.exit(0);
+    return;
+  }
+
+  const command = String((payload && payload.command) || "");
+  if (commandDeniesGitWrite(command)) {
+    deny();
+  } else {
+    allow();
+  }
+  process.exit(0);
+});
+`;
 
 interface CursorSessionFile {
   chatId: string;
@@ -69,15 +183,19 @@ export async function findCursorSessionId(
 }
 
 /**
- * Denies Cursor's model Write/Edit tools via `permissions.deny`. This does
- * NOT confine shell-exec writes (`sed -i`, `tee`, `>`, `gh`, ...): cursor
- * launches with `--force`, which auto-approves the Shell permission category
- * and runs shell commands unsandboxed regardless of this deny-list. A true
- * no-writes posture (workspace_readonly) exists in Cursor but is only
- * settable via a server-side Cursor team/repo policy, not via CLI flags or
- * local `cli-config.json`.
+ * Denies Cursor's model Write/Edit tools via `permissions.deny`, and blocks
+ * `git commit`/`git push` at the shell layer via a `beforeShellExecution`
+ * hook (see `CURSOR_GIT_GUARD_SCRIPT`). Neither confines raw shell-exec
+ * writes (`sed -i`, `tee`, `>`, ...): cursor launches with `--force`, which
+ * auto-approves the Shell permission category and runs shell commands
+ * unsandboxed regardless of these guards. A true no-writes posture
+ * (workspace_readonly) exists in Cursor but is only settable via a
+ * server-side Cursor team/repo policy, not via CLI flags or local config.
  */
-export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string): Promise<void> {
+export async function ensureCursorRestrictWritesConfig(
+  worktreePath: string,
+  cursorConfigDir: string,
+): Promise<void> {
   await mkdir(cursorConfigDir, { recursive: true });
   await writeFile(
     join(cursorConfigDir, "cli-config.json"),
@@ -92,6 +210,61 @@ export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string):
     ) + "\n",
     "utf8",
   );
+
+  const scriptPath = join(cursorConfigDir, CURSOR_GIT_GUARD_FILENAME);
+  await writeFile(scriptPath, CURSOR_GIT_GUARD_SCRIPT, "utf8");
+  await chmod(scriptPath, 0o755);
+
+  await mergeCursorGitGuardHook(worktreePath, scriptPath);
+}
+
+interface CursorHooksConfig {
+  version?: number;
+  hooks?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+interface CursorHookEntry {
+  command?: unknown;
+  [key: string]: unknown;
+}
+
+/**
+ * Merges a `beforeShellExecution` guard entry into `<worktreePath>/.cursor/hooks.json`
+ * without clobbering existing hooks (e.g. the repo's `stop` array) or other
+ * keys. Idempotent: re-invocation replaces (not duplicates) the entry for
+ * the same `scriptPath`. Throws on an unparseable existing file rather than
+ * silently overwriting a human-authored one.
+ */
+async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string): Promise<void> {
+  const hooksDir = join(worktreePath, ".cursor");
+  const hooksPath = join(hooksDir, "hooks.json");
+  await mkdir(hooksDir, { recursive: true });
+
+  let hooksConfig: CursorHooksConfig = { version: 1, hooks: {} };
+  if (existsSync(hooksPath)) {
+    const raw = await readFile(hooksPath, "utf8");
+    try {
+      hooksConfig = JSON.parse(raw) as CursorHooksConfig;
+    } catch (error) {
+      throw new Error(`Unparseable existing Cursor hooks.json at ${hooksPath}`, { cause: error });
+    }
+  }
+
+  const hooks = { ...(hooksConfig.hooks ?? {}) };
+  const existingEntries = Array.isArray(hooks["beforeShellExecution"])
+    ? (hooks["beforeShellExecution"] as CursorHookEntry[])
+    : [];
+  const preserved = existingEntries.filter((entry) => entry.command !== scriptPath);
+  hooks["beforeShellExecution"] = [
+    ...preserved,
+    { command: scriptPath, timeout: 5, failClosed: true },
+  ];
+
+  const merged: CursorHooksConfig = { ...hooksConfig, hooks };
+  const tmpPath = join(hooksDir, `.hooks.json.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(tmpPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  await rename(tmpPath, hooksPath);
 }
 
 export function buildCursorPlan(
