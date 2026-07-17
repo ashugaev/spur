@@ -19,19 +19,31 @@ const CURSOR_GIT_GUARD_FILENAME = "restrict-writes-hook.js";
  * A Cursor `beforeShellExecution` hook, materialized per-session and
  * referenced by absolute path. Denies `git commit`/`git push` (including
  * through `git -c`/`-C`, a leading `env`/`VAR=val` prefix, an absolute git
- * path, one level of `sh|bash|zsh -c "..."`, and collapsed whitespace).
- * Inert (`{"permission":"allow"}`) unless `SPUR_CURSOR_RESTRICT_WRITES=1` is
- * set in its process env — required because pooled/reused worktrees can
- * carry a leftover hooks.json entry into a later, non-restricted session.
- * Dependency-free node so it runs on any cursor host with no extra install.
+ * path, one level of `sh|bash|zsh -c "..."` (even behind an `env`/`VAR=val`
+ * prefix on the interpreter itself), a single `&` job-control separator, one
+ * level of `(...)` subshell grouping, and `$(...)`/backtick command
+ * substitution). Inert (`{"permission":"allow"}`) unless
+ * `SPUR_CURSOR_RESTRICT_WRITES=1` is set in its process env — required
+ * because pooled/reused worktrees can carry a leftover hooks.json entry into
+ * a later, non-restricted session. Dependency-free node so it runs on any
+ * cursor host with no extra install.
+ *
+ * NOT covered (raises the bar, not a sandbox): git aliases that resolve to
+ * commit/push, a renamed git binary or a shell function/alias named `git`,
+ * direct `.git` plumbing writes (`hash-object`/`write-tree`/`update-ref`) that
+ * fabricate or advance refs without going through `commit`/`push`, more than
+ * one level of nested `sh -c`, and other obfuscated encodings (e.g. quoted or
+ * escaped subcommand names).
  */
 export const CURSOR_GIT_GUARD_SCRIPT = `#!/usr/bin/env node
 "use strict";
 
 const ENV_VAR = ${JSON.stringify(CURSOR_RESTRICT_WRITES_ENV)};
 const DENY_MESSAGE = "git commit/push blocked in this read-only Spur session";
-const SEGMENT_SPLIT_RE = /(?:&&|\\|\\||;|\\||\\n)/;
+const SEGMENT_SPLIT_RE = /(?:&&|\\|\\||;|&|\\||\\n)/;
 const SHELL_C_RE = /^(?:\\S*\\/)?(sh|bash|zsh)\\s+-c\\s+(['"])([\\s\\S]*)\\2\\s*$/;
+const ENV_PREFIX_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+/;
+const ENV_PREFIX_ENV_RE = /^(?:\\S*\\/)?env\\s+/;
 const SHORT_VALUE_FLAGS = new Set(["-c", "-C"]);
 const LONG_VALUE_FLAGS = new Set(["--git-dir", "--work-tree", "--namespace", "--exec-path"]);
 const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -53,14 +65,94 @@ function tokenize(segment) {
   return segment.trim().split(/\\s+/).filter(Boolean);
 }
 
+function stripLeadingEnvPrefix(text) {
+  let rest = text;
+  for (;;) {
+    const assignMatch = rest.match(ENV_PREFIX_ASSIGNMENT_RE);
+    if (assignMatch) {
+      rest = rest.slice(assignMatch[0].length);
+      continue;
+    }
+    const envMatch = rest.match(ENV_PREFIX_ENV_RE);
+    if (envMatch) {
+      rest = rest.slice(envMatch[0].length);
+      continue;
+    }
+    break;
+  }
+  return rest;
+}
+
 function unwrapShellC(command) {
   const trimmed = command.trim();
-  const match = trimmed.match(SHELL_C_RE);
+  const withoutPrefix = stripLeadingEnvPrefix(trimmed);
+  const match = withoutPrefix.match(SHELL_C_RE);
   return match ? match[3] : trimmed;
 }
 
-function segmentDeniesGitWrite(segment) {
-  const tokens = tokenize(segment);
+function isBalancedOuterParens(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return i === text.length - 1;
+      }
+    }
+  }
+  return false;
+}
+
+function stripGroupingParens(text) {
+  let stripped = text;
+  while (
+    stripped.startsWith("(") &&
+    stripped.endsWith(")") &&
+    isBalancedOuterParens(stripped)
+  ) {
+    stripped = stripped.slice(1, -1).trim();
+  }
+  return stripped;
+}
+
+function extractSubstitutionInners(command) {
+  const inners = [];
+  for (let i = 0; i < command.length; i += 1) {
+    if (command[i] === "$" && command[i + 1] === "(") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < command.length && depth > 0) {
+        if (command[j] === "(") {
+          depth += 1;
+        } else if (command[j] === ")") {
+          depth -= 1;
+        }
+        j += 1;
+      }
+      inners.push(command.slice(i + 2, j - 1));
+      i = j - 1;
+    } else if (command[i] === "\`") {
+      const close = command.indexOf("\`", i + 1);
+      if (close === -1) {
+        break;
+      }
+      inners.push(command.slice(i + 1, close));
+      i = close;
+    }
+  }
+  return inners;
+}
+
+function segmentDeniesGitWrite(rawSegment) {
+  const trimmedSegment = rawSegment.trim();
+  const stripped = stripGroupingParens(trimmedSegment);
+  if (stripped !== trimmedSegment) {
+    return commandDeniesGitWrite(stripped);
+  }
+  const tokens = tokenize(stripped);
   let index = 0;
   while (index < tokens.length) {
     const token = tokens[index];
@@ -91,6 +183,9 @@ function segmentDeniesGitWrite(segment) {
 }
 
 function commandDeniesGitWrite(command) {
+  if (extractSubstitutionInners(command).some((inner) => commandDeniesGitWrite(inner))) {
+    return true;
+  }
   return unwrapShellC(command)
     .split(SEGMENT_SPLIT_RE)
     .some(segmentDeniesGitWrite);

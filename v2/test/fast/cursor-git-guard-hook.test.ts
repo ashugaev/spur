@@ -65,6 +65,12 @@ describe("CURSOR_GIT_GUARD_SCRIPT", () => {
     "git commit --no-verify -m x",
     "git add . && git commit -m z",
     "true || git push",
+    "true & git push",
+    "( git push )",
+    "$(git push)",
+    "`git commit -m x`",
+    "env sh -c 'git push'",
+    "x=1 sh -c 'git commit'",
   ];
 
   const allowCommands = [
@@ -79,6 +85,7 @@ describe("CURSOR_GIT_GUARD_SCRIPT", () => {
     "rg pattern",
     "gh pr view",
     "echo git commit",
+    "echo $(git log)",
   ];
 
   it.each(denyCommands)("denies %s when the gate is on", async (command) => {
