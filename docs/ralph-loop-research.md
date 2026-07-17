@@ -39,12 +39,13 @@ picks up where the plan file says to.
 
 Why fresh context per iteration, instead of one long session: Huntley's own
 lesson from the official Claude Code plugin (below) is that letting the loop
-run forever *inside one growing context* diverges — it produces "overbaked"
+run forever _inside one growing context_ diverges — it produces "overbaked"
 emergent behavior (his example: a GTD app that spontaneously grew post-quantum
 crypto support). Partitioning into discrete, bounded context windows is a
 deliberate guardrail, not an accident of the original bash implementation.
 
 Guardrails that matter in practice:
+
 - One task per iteration, commit only when tests pass — bounds blast radius per cycle.
 - `git reset --hard` / re-run is the recommended recovery — code is cheap, don't hand-patch.
 - Cap iterations (`-n 50`, `--max-iterations`) — unbounded loops burn cost and drift.
@@ -52,6 +53,7 @@ Guardrails that matter in practice:
 - Ralph needs a well-understood end-state and testable acceptance criteria; it's a poor fit for open-ended exploration.
 
 Sources:
+
 - [Ralph Wiggum as a "software engineer"](https://ghuntley.com/ralph/)
 - [how-to-ralph-wiggum (recipe repo)](https://github.com/ghuntley/how-to-ralph-wiggum)
 - [A Brief History of Ralph — HumanLayer](https://www.humanlayer.dev/blog/brief-history-of-ralph)
@@ -59,13 +61,26 @@ Sources:
 
 ## Per-tool native support (state as of mid-2026)
 
-| Tool | Native mechanism | Notes |
-|---|---|---|
-| Claude Code | Official `ralph-loop` plugin (`/plugin install ralph-loop@claude-plugins-official`) + built-in `/loop` command | Plugin re-feeds the prompt via a Stop hook inside one session (`--completion-promise`, `--max-iterations`), which is not the fresh-context original — it's the same session growing. `/loop` is time-interval polling, not completion-driven. This session's own `/loop` skill and `ScheduleWakeup` tool are the `/loop` primitive. |
-| Codex CLI | `/goal` command (shipped 0.128.0) is Ralph as a first-class primitive; classic form still works: `while :; do cat PROMPT.md | codex exec --sandbox workspace-write --ask-for-approval never ; done` (or `--dangerously-bypass-approvals-and-sandbox` when the sandbox boundary is external, e.g. a worktree/container) | `codex exec` (headless) is read-only unless a write-scope or bypass flag is passed — this is the detail people miss first. |
-| Cursor | `cursor-agent` headless CLI loops cleanly with the same `while :; do ... ; done` shape | No Cursor-specific plugin equivalent to Claude's; it's the classic bash-loop pattern, unmodified. |
+- Claude Code: official `ralph-loop` plugin
+  (`/plugin install ralph-loop@claude-plugins-official`) plus the built-in
+  `/loop` command. The plugin re-feeds the prompt via a Stop hook inside one
+  session (`--completion-promise`, `--max-iterations`) — not the fresh-context
+  original, the same session keeps growing. `/loop` is time-interval polling,
+  not completion-driven. This session's own `/loop` skill and `ScheduleWakeup`
+  tool are the `/loop` primitive.
+- Codex CLI: the `/goal` command (shipped 0.128.0) is Ralph as a first-class
+  primitive. The classic form still works too:
+  `while :; do cat PROMPT.md | codex exec --sandbox workspace-write --ask-for-approval never; done`
+  (or `--dangerously-bypass-approvals-and-sandbox` when the sandbox boundary is
+  external, e.g. a worktree/container). Note `codex exec` (headless) is
+  read-only unless a write-scope or bypass flag is passed — the detail people
+  miss first.
+- Cursor: the `cursor-agent` headless CLI loops cleanly with the same
+  `while :; do ...; done` shape. No Cursor-specific plugin equivalent to
+  Claude's — it's the classic bash-loop pattern, unmodified.
 
 Sources:
+
 - [Ralph Wiggum Loop for Claude Code — awesomeclaude.ai](https://awesomeclaude.ai/ralph-wiggum)
 - [How to Run a Ralph Loop With the Codex CLI — ralphloop.sh](https://ralphloop.sh/blog/ralph-loop-with-codex-cli/)
 - [How to Run the Codex CLI in an Autonomous Loop — ralphloop.sh](https://ralphloop.sh/blog/run-codex-cli-in-a-loop/)
@@ -84,7 +99,7 @@ full-autonomy launch flags baked in
 That's already the "sandbox is the boundary, agent shouldn't police itself"
 setup Ralph guides recommend for Codex specifically — Spur gets this for free,
 for all three agents, uniformly. So implementing Ralph in Spur is about
-wiring the *loop*, not the per-invocation flags.
+wiring the _loop_, not the per-invocation flags.
 
 ### Recipe A: cron + spawn — the native Spur fit
 
@@ -100,14 +115,14 @@ relies on.
 sources:
   ralph-tick:
     type: cron
-    schedule: "*/30 * * * *"   # every 30 min; cap cadence to control cost
+    schedule: "*/30 * * * *" # every 30 min; cap cadence to control cost
     runOnStart: false
 triggers:
   ralph-tick-spawn:
     source: ralph-tick
     event: cron:tick
     spawn:
-      agent: codex   # or claude / cursor
+      agent: codex # or claude / cursor
       prompt: >
         Read AGENTS.md and IMPLEMENTATION_PLAN.md. Pick the single
         highest-priority unfinished task. Implement it completely, run
@@ -117,7 +132,8 @@ triggers:
       autoComplete: true
 ```
 
-Prerequisites this puts on the *target* repo (not on Spur itself):
+Prerequisites this puts on the _target_ repo (not on Spur itself):
+
 - `AGENTS.md` — build/test/lint commands + conventions, kept short.
 - `IMPLEMENTATION_PLAN.md` — the disk-persisted task list/state. Someone
   (human or a first "plan mode" spawn) has to seed it before the loop starts.
@@ -125,6 +141,7 @@ Prerequisites this puts on the *target* repo (not on Spur itself):
 
 What Spur doesn't give you out of the box, and what to decide before turning
 this on:
+
 - No hard iteration cap analogous to `--max-iterations` — a cron source ticks
   indefinitely. Cap it either by schedule bounds (business-hours only, N runs/day)
   or by having the plan file itself declare "done" and the prompt check for that
@@ -134,14 +151,14 @@ this on:
   first few runs' diffs before tightening it.
 - `spawn.autoComplete` (already used by `gh-pr-review-spawn`) only completes a
   session after 5+ minutes in `waiting` state — good enough as a "this
-  iteration is done" signal, but doesn't itself stop the *loop* (the cron
+  iteration is done" signal, but doesn't itself stop the _loop_ (the cron
   source keeps ticking and spawning new sessions regardless).
 
 ### Recipe B: single-session self-loop — Claude only, lighter weight
 
 This very session is a live example: the `/loop` skill + `ScheduleWakeup` tool
 let one Claude session re-invoke itself on an interval or self-paced,
-*without* a fresh worktree or discarded context each time. That's the
+_without_ a fresh worktree or discarded context each time. That's the
 "stop-hook, same-session" variant, not the classic fresh-context Ralph — it's
 a better fit for polling/monitoring tasks ("check the deploy every 5 min")
 than for open-ended implementation work, since context keeps growing and
@@ -150,7 +167,7 @@ isn't reset.
 Spur has no equivalent primitive for Codex or Cursor sessions today (no
 `/loop`-style skill, no self-scheduling wake tool) — for those two agents,
 Recipe A (cron + spawn) is the only path, which conveniently is also the
-*more faithful* Ralph implementation per Huntley's own guidance to prefer
+_more faithful_ Ralph implementation per Huntley's own guidance to prefer
 fresh context over one growing session.
 
 ## Recommendation
@@ -165,6 +182,7 @@ If the goal is a bounded/polling task on an existing session: use the
 built-in `/loop` skill (Claude sessions only) — no config changes needed.
 
 Open questions for whoever picks this up next:
+
 - Which project/repo is the actual Ralph target — this decides whether
   `AGENTS.md`/`IMPLEMENTATION_PLAN.md` need to be authored first.
 - Preferred agent (codex/cursor/claude) and whether one loop should rotate
