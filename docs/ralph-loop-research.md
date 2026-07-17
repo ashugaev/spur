@@ -9,7 +9,7 @@ objective completion condition is met. Spur already has every primitive this
 pattern needs — worktree isolation, full-autonomy launch flags for all three
 agents, and a `cron` source + `spawn` trigger mechanism that is agent-agnostic.
 Running a Ralph loop for Codex, Cursor, or Claude in this repo is a `spur.yaml`
-config addition, not new code (see [Recipe A](#recipe-a-cron--spawn-the-native-spur-fit)).
+config addition, not new code (see [Recipe A](#recipe-a-cron--spawn--the-native-spur-fit)).
 
 ## What is the Ralph loop
 
