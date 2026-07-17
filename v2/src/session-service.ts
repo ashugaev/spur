@@ -4777,13 +4777,30 @@ export class SessionService {
         });
         continue;
       }
-      const classified = await this.classifySessionRecord(member);
+      // Desk siblings reuse the dashboard-cache tick's classification
+      // (<=DASHBOARD_CACHE_INTERVAL_MS old) instead of re-running a full
+      // classify per sibling per viewer — that N× re-classify was a major
+      // fork-storm contributor. A sibling missing from the cache (e.g. just
+      // created, before the first tick ran) falls back to a single cheap,
+      // now-cached tmux existence check rather than a full classify.
+      const cached = this.dashboardCache.get(member.id);
+      if (cached) {
+        members.push({
+          id: member.id,
+          agent: member.agent,
+          status: member.status,
+          state: cached.state,
+          runtimeAlive: cached.runtimeAlive,
+        });
+        continue;
+      }
+      const runtimeAlive = await tmuxSessionExists(member.tmuxSession);
       members.push({
-        id: classified.session.id,
-        agent: classified.session.agent,
-        status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
-        runtimeAlive: classified.runtime.runtimeAlive,
+        id: member.id,
+        agent: member.agent,
+        status: member.status,
+        state: this.stateCache.get(member.id)?.state ?? statusFallbackState(member),
+        runtimeAlive,
       });
     }
     return members;
