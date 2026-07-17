@@ -177,6 +177,40 @@ describe("runtime-tmux shared probe cache", () => {
     expect(captureCalls).toBe(SESSION_COUNT + 1);
   });
 
+  it("prunes expired capture-pane cache entries instead of accumulating them forever", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      execFileAsyncMock.mockImplementation(async (file, args) => {
+        if (file === "tmux" && args[0] === "capture-pane") {
+          return { stdout: "pane text", stderr: "" };
+        }
+        throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+      });
+
+      const { captureTmuxPane, _capturePaneCacheSizeForTests } =
+        await import("../../src/runtime-tmux.js");
+
+      // A fleet-wide capture burst leaves one resident entry per session.
+      await Promise.all(sessionNames.map((name) => captureTmuxPane(name)));
+      expect(_capturePaneCacheSizeForTests()).toBe(SESSION_COUNT);
+
+      // Advance well past the ~2s TTL, then probe a single session. On a
+      // long-running daemon, every session ever captured would otherwise
+      // stay resident forever; the sweep inside memoizedProbe must prune all
+      // expired entries so the cache shrinks to just the one fresh entry.
+      vi.setSystemTime(10_000);
+      const firstSession = sessionNames[0];
+      if (firstSession === undefined) {
+        throw new Error("expected at least one session name");
+      }
+      await captureTmuxPane(firstSession);
+      expect(_capturePaneCacheSizeForTests()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-sessions")) {

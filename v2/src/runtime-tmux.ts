@@ -53,14 +53,25 @@ interface ProbeCacheEntry<T> {
 // would still let every one of ~183 concurrent callers race past an empty
 // cache and each fork their own subprocess before the first one resolves.
 // Caching the promise itself (set before the first `await`) closes that gap.
+//
+// Per-key caches (e.g. capturePaneCache, keyed by session×lines) would
+// otherwise grow unbounded on a long-running daemon — every distinct key
+// ever probed stays resident forever. Sweep expired entries on every access
+// so each cache self-bounds to only the keys actually live within the TTL.
+// The single-key fleet caches (one entry each) pay a trivial sweep cost.
 function memoizedProbe<T>(
   cache: Map<string, ProbeCacheEntry<T>>,
   key: string,
   fetch: () => Promise<T>,
 ): Promise<T> {
   const now = Date.now();
+  for (const [staleKey, entry] of cache) {
+    if (entry.expiresAt <= now) {
+      cache.delete(staleKey);
+    }
+  }
   const cached = cache.get(key);
-  if (cached && cached.expiresAt > now) {
+  if (cached) {
     return cached.promise;
   }
   const promise = fetch();
@@ -322,6 +333,15 @@ export function captureTmuxPane(sessionName: string, lines = 200): Promise<strin
       return "";
     }
   });
+}
+
+// Test-only introspection: capturePaneCache is keyed per (session, lines), so
+// it's the one probe cache that can accumulate a distinct entry per session
+// ever captured on a long-running daemon. Exposes its size so a test can
+// assert memoizedProbe's expired-entry sweep keeps it bounded rather than
+// growing forever.
+export function _capturePaneCacheSizeForTests(): number {
+  return capturePaneCache.size;
 }
 
 // Pid of the session's pane process (the shell hosting the agent). Used to
