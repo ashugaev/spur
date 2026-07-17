@@ -442,7 +442,7 @@ projects:
         event: github:ci_failed
         send:
           interrupt: true # delivered immediately and retried every 10m (up to 3) while CI still fails
-          prompt: "Run $manager and $github. Check failing CI on active PR. Fix if fixable regardless of cause — own change or another agent's — then rerun checks and push."
+          prompt: "Run $manager and $github. Check failing CI on the active PR. Fix it if fixable — regardless of cause, own change or another agent's — then rerun checks and push. If not fixable, say why."
       pr-watch-merge-conflict:
         source: pr-watch
         event: github:merge_conflict
