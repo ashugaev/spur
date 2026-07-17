@@ -818,10 +818,7 @@ describe("SessionService", () => {
     agentSessionConfigMock
       .mockReset()
       .mockImplementation(
-        (
-          agent: string,
-          args?: { dataDir: string; sessionId: string; restrictWrites?: boolean },
-        ) =>
+        (agent: string, args?: { dataDir: string; sessionId: string; restrictWrites?: boolean }) =>
           agent === "cursor"
             ? {
                 env: {
@@ -832,7 +829,7 @@ describe("SessionService", () => {
                   cursorConfigDir: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
                 },
               }
-          : {},
+            : {},
       );
     agentStateStrategyMock
       .mockReset()
@@ -2040,9 +2037,7 @@ describe("SessionService", () => {
       "cursor",
       expect.objectContaining({ restrictWrites: false }),
     );
-    const cursorCall = createTmuxSessionMock.mock.calls.find(
-      (call) => call[0]?.agent === "cursor",
-    );
+    const cursorCall = createTmuxSessionMock.mock.calls.find((call) => call[0]?.agent === "cursor");
     expect(cursorCall?.[0]?.env).not.toHaveProperty("SPUR_CURSOR_RESTRICT_WRITES");
   });
 

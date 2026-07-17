@@ -99,7 +99,6 @@ describe("buildCursorPlan", () => {
     const plan = buildCursorPlan("ship it", { model: "composer-2.5-fast" });
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
-
 });
 
 describe("buildCursorResumePlan", () => {
@@ -268,9 +267,7 @@ describe("ensureCursorRestrictWritesConfig", () => {
     mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
     mockReadFile.mockResolvedValue("{not valid json");
 
-    await expect(
-      ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir),
-    ).rejects.toThrow();
+    await expect(ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir)).rejects.toThrow();
     expect(mockRename).not.toHaveBeenCalled();
   });
 });
