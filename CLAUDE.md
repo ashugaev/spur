@@ -74,3 +74,4 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
+- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: v2/README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.

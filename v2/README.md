@@ -353,6 +353,7 @@ server:
 
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
+projectsRoot: ~/.spur/projects # optional; base dir for projects created without an explicit path
 defaultAgent: claude
 tmux:
   socketName: spur-4310
@@ -519,6 +520,7 @@ Field reference:
 - `server.port`: optional, default `4310`.
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
+- `projectsRoot`: optional, default `<dataDir>/projects`. Base folder for projects created without an explicit path. Creating a project (dashboard/API) without a `path` derives `<projectsRoot>/<project-id>` and creates that folder; passing a `path` keeps the existing behavior unchanged.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
 - `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai|openai_compatible`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
