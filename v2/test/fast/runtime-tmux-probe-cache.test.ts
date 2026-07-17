@@ -39,28 +39,25 @@ function callsFor(matcher: (file: string, args: string[]) => boolean): number {
   return execFileAsyncMock.mock.calls.filter(([file, args]) => matcher(file, args)).length;
 }
 
+// A fleet-wide `list-panes -a` row per session: window_active pane_active
+// pane_dead pane_pid pane_tty — all alive, all panes usable.
+function fleetPaneLine(name: string, index: number): string {
+  return `${name} 1 1 0 ${1000 + index} /dev/pts/${index}`;
+}
+
 function installFleetTmuxMock(): void {
   execFileAsyncMock.mockImplementation(async (file, args) => {
     if (file === "tmux" && args.includes("list-sessions")) {
-      return { stdout: sessionNames.join("\n"), stderr: "" };
+      // "#{session_name} #{session_activity}" — one line per session.
+      const lines = sessionNames.map((name) => `${name} 1700000000`);
+      return { stdout: lines.join("\n"), stderr: "" };
     }
-    if (file === "tmux" && args.includes("list-panes")) {
-      const target = args[args.indexOf("-t") + 1] ?? "";
-      const sessionName = target.replace(/^=/, "").replace(/:$/, "");
-      return { stdout: `/dev/pts/${sessionNames.indexOf(sessionName)}`, stderr: "" };
-    }
-    if (file === "tmux" && args.includes("display-message") && args.includes("#{pane_dead}")) {
-      return { stdout: "0", stderr: "" };
-    }
-    if (
-      file === "tmux" &&
-      args.includes("display-message") &&
-      args.includes("#{session_activity}")
-    ) {
-      return { stdout: "1700000000", stderr: "" };
+    if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+      const lines = sessionNames.map((name, index) => fleetPaneLine(name, index));
+      return { stdout: lines.join("\n"), stderr: "" };
     }
     if (file === "ps") {
-      const psLines = sessionNames.map((_, i) => `1${i} pts/${i} node agent`);
+      const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} node agent`);
       return { stdout: psLines.join("\n"), stderr: "" };
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -73,7 +70,7 @@ describe("runtime-tmux shared probe cache", () => {
     vi.resetModules();
   });
 
-  it("bounds a fleet-wide dashboard tick to O(1) list-sessions/ps forks, not O(N)", async () => {
+  it("bounds a fleet-wide dashboard tick to a small constant fork count, not O(N)", async () => {
     installFleetTmuxMock();
 
     await Promise.all(sessionNames.map((name) => simulateReadRuntimeSnapshot(name)));
@@ -81,24 +78,27 @@ describe("runtime-tmux shared probe cache", () => {
     const listSessionsCalls = callsFor(
       (file, args) => file === "tmux" && args.includes("list-sessions"),
     );
+    const listPanesCalls = callsFor(
+      (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
+    );
     const psCalls = callsFor((file) => file === "ps");
     const totalCalls = execFileAsyncMock.mock.calls.length;
 
-    // Fleet existence and the process table each cost exactly one fork
-    // regardless of fleet size — the fork-storm fix's core invariant.
+    // Fleet existence+activity, fleet pane state, and the process table each
+    // cost exactly one fork regardless of fleet size — the fork-storm fix's
+    // core invariant. A cold tick over 50 sessions must stay a small
+    // constant (list-sessions + list-panes -a + ps), NOT the old 3N+2 (still
+    // one list-panes/pane-dead/activity fork per session) or the original 5N.
     expect(listSessionsCalls).toBe(1);
+    expect(listPanesCalls).toBe(1);
     expect(psCalls).toBe(1);
-    // Per-session capture (list-panes tty lookup + pane-dead + activity)
-    // still costs up to 3 forks per session on a cold tick, but the two
-    // bulk-shared probes (has-session, ps) that used to run once per
-    // session are now O(1): total forks must stay well under the old 5N.
-    expect(totalCalls).toBeLessThan(5 * SESSION_COUNT);
-    expect(totalCalls).toBeLessThanOrEqual(3 * SESSION_COUNT + 2);
+    expect(totalCalls).toBeLessThanOrEqual(5);
+    expect(totalCalls).toBeLessThan(3 * SESSION_COUNT + 2);
 
     execFileAsyncMock.mockClear();
 
     // A second tick within the TTL window must reuse every cached probe:
-    // zero additional forks of any kind, including the per-session ones.
+    // zero additional forks of any kind.
     await Promise.all(sessionNames.map((name) => simulateReadRuntimeSnapshot(name)));
     expect(execFileAsyncMock.mock.calls).toHaveLength(0);
   });
@@ -120,15 +120,9 @@ describe("runtime-tmux shared probe cache", () => {
       if (file === "tmux" && args.includes("list-sessions")) {
         return { stdout: "", stderr: "" };
       }
-      if (file === "tmux" && args.includes("display-message") && args.includes("#{pane_dead}")) {
-        return { stdout: "1", stderr: "" };
-      }
-      if (
-        file === "tmux" &&
-        args.includes("display-message") &&
-        args.includes("#{session_activity}")
-      ) {
-        return { stdout: "1", stderr: "" };
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        // Now dead, on a different pid/tty, to prove a warm read ignores it.
+        return { stdout: `${sessionName} 1 1 1 9999 /dev/pts/9`, stderr: "" };
       }
       if (file === "ps") {
         return { stdout: "", stderr: "" };
@@ -150,6 +144,10 @@ describe("runtime-tmux shared probe cache", () => {
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-sessions")) {
+        const error = new Error("no server running on /tmp/tmux-0/default");
+        throw Object.assign(error, { code: 1 });
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
         const error = new Error("no server running on /tmp/tmux-0/default");
         throw Object.assign(error, { code: 1 });
       }
