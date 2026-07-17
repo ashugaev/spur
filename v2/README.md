@@ -353,7 +353,7 @@ server:
 
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
-projectsRoot: ~/.spur/projects # optional; base dir for projects created without an explicit path
+projectsRoot: ~/projects
 defaultAgent: claude
 tmux:
   socketName: spur-4310
