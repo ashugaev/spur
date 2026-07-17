@@ -3786,20 +3786,7 @@ describe("SessionService", () => {
   });
 
   it("marks needs_input sessions opened, and a later hook event re-brightens even without a state transition", async () => {
-    let stored: SessionRecord = {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
+    let stored: SessionRecord = runningSession({ id: "api-1" });
     readSessionMock.mockImplementation(() => stored);
     writeSessionMock.mockImplementation((_dataDir, next) => {
       stored = next;
@@ -3836,20 +3823,7 @@ describe("SessionService", () => {
   it("renders needs_input sessions unseen after a restart when no lastOpenedAt has been recorded", async () => {
     // Simulates the daemon-restart case: in-memory stateHistory is empty and
     // no lastOpenedAt has ever been persisted for this session.
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
     mockClaudeJsonlState("needs_input");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -3866,20 +3840,7 @@ describe("SessionService", () => {
       ["stopped", undefined],
       ["errored", undefined],
     ] as const) {
-      readSessionMock.mockReturnValue({
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "hello",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status,
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:01:00.000Z",
-      });
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1", status }));
       if (jsonlState) {
         mockClaudeJsonlState(jsonlState);
       }
