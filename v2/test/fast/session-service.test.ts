@@ -7157,6 +7157,54 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("reuses the dashboard-cache classification for desk siblings instead of re-classifying them per viewer", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      sessionRecord({ id: "api-2", deskId: "api-1", worktreePath: "/repo/api-2" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain the constructor's immediate dashboard + attention ticks so both
+    // desk members are already classified in the dashboard cache before the
+    // measured call, mirroring the real 2s-interval cache the background
+    // loops maintain in production.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // Every probe used by a full classify (pane pid + tmux existence) reset
+    // here — a desk-sibling re-classify would show up as a fresh call keyed
+    // by api-2's tmux session name.
+    getTmuxPanePidMock.mockClear();
+    tmuxSessionExistsMock.mockClear();
+    captureTmuxPaneMock.mockClear();
+
+    const result = await service.get("api-1");
+
+    expect(result.deskGroupMembers).toEqual([
+      { id: "api-1", agent: "claude", status: "running", state: "working", runtimeAlive: true },
+      { id: "api-2", agent: "claude", status: "running", state: "working", runtimeAlive: true },
+    ]);
+    // The primary viewed session (api-1) still classifies live; the sibling
+    // (api-2) must be served from the dashboard cache, not re-forked.
+    expect(getTmuxPanePidMock.mock.calls.some((call) => (call as unknown[])[0] === "api-2")).toBe(
+      false,
+    );
+    expect(captureTmuxPaneMock.mock.calls.some((call) => (call as unknown[])[0] === "api-2")).toBe(
+      false,
+    );
+  });
+
   it("completes active same-desk sessions and skips killed or already completed members", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", sessionRecord({ id: "api-1" }));

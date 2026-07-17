@@ -184,25 +184,45 @@ export async function getTmuxPanePid(sessionName: string): Promise<number | null
   }
 }
 
-const sessionActivityCache = new Map<string, { value: Date | null; expiresAt: number }>();
+interface ProbeCacheEntry<T> {
+  promise: Promise<T>;
+  expiresAt: number;
+}
 
-export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
-  const cached = sessionActivityCache.get(sessionName);
+// Dedups concurrent callers within the same TTL window onto one in-flight
+// fetch. A dashboard-cache tick fires every session's probe via
+// `Promise.all` near-simultaneously, so caching only the *resolved* value
+// would still let every one of ~183 concurrent callers race past an empty
+// cache and each fork their own subprocess before the first one resolves.
+// Caching the promise itself (set before the first `await`) closes that gap.
+function memoizedProbe<T>(
+  cache: Map<string, ProbeCacheEntry<T>>,
+  key: string,
+  fetch: () => Promise<T>,
+): Promise<T> {
   const now = Date.now();
+  const cached = cache.get(key);
   if (cached && cached.expiresAt > now) {
-    return cached.value;
+    return cached.promise;
   }
-  const target = exactPaneTarget(sessionName);
-  let value: Date | null;
-  try {
-    const output = await tmux("display-message", "-t", target, "-p", "#{session_activity}");
-    const seconds = Number.parseInt(output, 10);
-    value = Number.isNaN(seconds) ? null : new Date(seconds * 1000);
-  } catch {
-    value = null;
-  }
-  sessionActivityCache.set(sessionName, { value, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS });
-  return value;
+  const promise = fetch();
+  cache.set(key, { promise, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS });
+  return promise;
+}
+
+const sessionActivityCache = new Map<string, ProbeCacheEntry<Date | null>>();
+
+export function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
+  return memoizedProbe(sessionActivityCache, sessionName, async () => {
+    const target = exactPaneTarget(sessionName);
+    try {
+      const output = await tmux("display-message", "-t", target, "-p", "#{session_activity}");
+      const seconds = Number.parseInt(output, 10);
+      return Number.isNaN(seconds) ? null : new Date(seconds * 1000);
+    } catch {
+      return null;
+    }
+  });
 }
 
 interface PsRow {
@@ -210,59 +230,50 @@ interface PsRow {
   args: string;
 }
 
-const paneTtyCache = new Map<string, { value: string[]; expiresAt: number }>();
-let psSnapshotCache: { rows: PsRow[]; expiresAt: number } | null = null;
+const paneTtyCache = new Map<string, ProbeCacheEntry<string[]>>();
 
-async function getPaneTtys(sessionName: string): Promise<string[]> {
-  const cached = paneTtyCache.get(sessionName);
-  const now = Date.now();
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
-  }
-  const target = exactSessionTarget(sessionName);
-  let ttys: string[];
-  try {
-    const ttyOut = await tmux("list-panes", "-t", target, "-F", "#{pane_tty}");
-    ttys = ttyOut
-      .trim()
-      .split("\n")
-      .map((tty) => tty.trim())
-      .filter(Boolean);
-  } catch {
-    ttys = [];
-  }
-  paneTtyCache.set(sessionName, { value: ttys, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS });
-  return ttys;
+function getPaneTtys(sessionName: string): Promise<string[]> {
+  return memoizedProbe(paneTtyCache, sessionName, async () => {
+    const target = exactSessionTarget(sessionName);
+    try {
+      const ttyOut = await tmux("list-panes", "-t", target, "-F", "#{pane_tty}");
+      return ttyOut
+        .trim()
+        .split("\n")
+        .map((tty) => tty.trim())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  });
 }
 
 // Shared, TTL-cached `ps` snapshot: the full process table is identical for
 // every session in a tick, so this is one fork per TTL window instead of one
 // per session.
-async function getPsSnapshot(): Promise<PsRow[]> {
-  const now = Date.now();
-  if (psSnapshotCache && psSnapshotCache.expiresAt > now) {
-    return psSnapshotCache.rows;
-  }
-  let rows: PsRow[];
-  try {
-    const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
-      timeout: 5_000,
-    });
-    rows = psOut
-      .split("\n")
-      .map((line) => {
-        const cols = line.trimStart().split(/\s+/);
-        if (cols.length < 3) {
-          return null;
-        }
-        return { tty: cols[1] ?? "", args: cols.slice(2).join(" ") };
-      })
-      .filter((row): row is PsRow => row !== null);
-  } catch {
-    rows = [];
-  }
-  psSnapshotCache = { rows, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS };
-  return rows;
+const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
+const PS_SNAPSHOT_CACHE_KEY = "ps";
+
+function getPsSnapshot(): Promise<PsRow[]> {
+  return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
+    try {
+      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
+        timeout: 5_000,
+      });
+      return psOut
+        .split("\n")
+        .map((line) => {
+          const cols = line.trimStart().split(/\s+/);
+          if (cols.length < 3) {
+            return null;
+          }
+          return { tty: cols[1] ?? "", args: cols.slice(2).join(" ") };
+        })
+        .filter((row): row is PsRow => row !== null);
+    } catch {
+      return [];
+    }
+  });
 }
 
 export async function isProcessRunningInTmux(
@@ -512,34 +523,30 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
   }
 }
 
-let tmuxSessionNamesCache: { names: Set<string>; expiresAt: number } | null = null;
+const tmuxSessionNamesCache = new Map<string, ProbeCacheEntry<Set<string>>>();
+const TMUX_SESSION_NAMES_CACHE_KEY = "fleet";
 
 // Fleet-wide session existence in ONE fork instead of one `has-session` per
 // session. `tmuxSessionExists` reroutes through this cached set so the
 // dashboard-cache tick, the attention monitor, and on-demand HTTP enrich all
 // share the same ~2s snapshot.
-export async function listTmuxSessionNames(): Promise<Set<string>> {
-  const now = Date.now();
-  if (tmuxSessionNamesCache && tmuxSessionNamesCache.expiresAt > now) {
-    return tmuxSessionNamesCache.names;
-  }
-  let names: Set<string>;
-  try {
-    const out = await tmux("list-sessions", "-F", "#{session_name}");
-    names = new Set(
-      out
-        .trim()
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-    );
-  } catch {
-    // No tmux server running (or another list-sessions failure) — an empty
-    // fleet, never a thrown error.
-    names = new Set();
-  }
-  tmuxSessionNamesCache = { names, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS };
-  return names;
+export function listTmuxSessionNames(): Promise<Set<string>> {
+  return memoizedProbe(tmuxSessionNamesCache, TMUX_SESSION_NAMES_CACHE_KEY, async () => {
+    try {
+      const out = await tmux("list-sessions", "-F", "#{session_name}");
+      return new Set(
+        out
+          .trim()
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
+      );
+    } catch {
+      // No tmux server running (or another list-sessions failure) — an empty
+      // fleet, never a thrown error.
+      return new Set();
+    }
+  });
 }
 
 export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
@@ -547,24 +554,18 @@ export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
   return names.has(sessionName);
 }
 
-const paneDeadCache = new Map<string, { value: boolean; expiresAt: number }>();
+const paneDeadCache = new Map<string, ProbeCacheEntry<boolean>>();
 
-export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
-  const cached = paneDeadCache.get(sessionName);
-  const now = Date.now();
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
-  }
-  const target = exactPaneTarget(sessionName);
-  let value: boolean;
-  try {
-    const output = await tmux("display-message", "-t", target, "-p", "#{pane_dead}");
-    value = output.trim() === "1";
-  } catch {
-    value = true;
-  }
-  paneDeadCache.set(sessionName, { value, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS });
-  return value;
+export function tmuxPaneDead(sessionName: string): Promise<boolean> {
+  return memoizedProbe(paneDeadCache, sessionName, async () => {
+    const target = exactPaneTarget(sessionName);
+    try {
+      const output = await tmux("display-message", "-t", target, "-p", "#{pane_dead}");
+      return output.trim() === "1";
+    } catch {
+      return true;
+    }
+  });
 }
 
 export function sidecarTmuxSession(sessionId: string, sidecarName: string): string {
