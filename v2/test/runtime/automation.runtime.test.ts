@@ -27,6 +27,13 @@ const activeContexts: Array<{
   sessionPrefix: string;
 }> = [];
 
+// Tracks the SessionService constructed by the currently running test so its
+// leaked setInterval timers (attention/scheduled-wake/dashboard-cache) get
+// disposed before the next test mutates global process.env via
+// withRuntimeEnv; otherwise a leaked timer from an earlier test can fire
+// during a later test's env window and corrupt it.
+let currentService: SessionService | undefined;
+
 function currentActiveContext(): (typeof activeContexts)[number] {
   const current = activeContexts.at(-1);
   if (!current) {
@@ -117,6 +124,8 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
 
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
   afterEach(async () => {
+    currentService?.dispose();
+    currentService = undefined;
     while (activeContexts.length > 0) {
       const current = popActiveContext();
       if (current.daemonPid) {
@@ -316,6 +325,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -454,6 +464,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,
@@ -610,6 +621,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -738,6 +750,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -909,6 +922,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,
@@ -1051,6 +1065,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,

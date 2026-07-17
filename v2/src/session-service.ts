@@ -45,6 +45,8 @@ import {
   normalizeBranchName,
 } from "./branch-name.js";
 import {
+  DEFAULT_CLAUDE_EFFORT,
+  DEFAULT_CLAUDE_MODEL,
   findLatestSessionFile as findLatestClaudeSessionFile,
   claudeCommand,
 } from "./agents/claude.js";
@@ -216,6 +218,7 @@ import {
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
+  CLAUDE_EFFORTS,
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
   type AgentName,
@@ -659,6 +662,14 @@ function normalizeSpawnRequest(
     return normalized;
   }
   return { ...normalized, steps };
+}
+
+function parseEffort(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("effort must be a non-empty string when provided");
+  }
+  return value.trim();
 }
 
 function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
@@ -1162,6 +1173,7 @@ async function waitForRestorePlan(
     codexArgs?: string[];
     planMode?: boolean;
     restrictWrites?: boolean;
+    agentSessionId?: string;
   },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
@@ -1181,7 +1193,7 @@ function resolveSpawnWorktree(
 }
 
 // A model only ever applies to the agent it belongs to. An explicit request
-// model wins; otherwise the project defaultModels entry for the resolved agent
+// model wins; otherwise the project agentDefaults entry for the resolved agent
 // applies. The map is keyed by agent, so it never bleeds onto another agent.
 export function resolveSpawnModel(args: {
   requestModel: string | undefined;
@@ -1190,8 +1202,42 @@ export function resolveSpawnModel(args: {
 }): string | undefined {
   return (
     args.requestModel ??
-    args.project.defaultModels?.[args.resolvedAgent] ??
-    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+    args.project.agentDefaults?.[args.resolvedAgent]?.model ??
+    (args.resolvedAgent === "cursor"
+      ? DEFAULT_CURSOR_MODEL
+      : args.resolvedAgent === "claude"
+        ? DEFAULT_CLAUDE_MODEL
+        : undefined)
+  );
+}
+
+// Mirrors resolveSpawnModel's precedence chain for reasoning effort. Claude
+// gets a code-level fallback because --effort is a confirmed, zero-risk
+// native flag; Cursor has no code-level fallback since the bracket-suffix
+// trick is unverified CLI behavior and stays project-config opt-in only.
+export function resolveSpawnEffort(args: {
+  requestEffort: string | undefined;
+  resolvedAgent: AgentName;
+  project: ProjectConfig;
+}): string | undefined {
+  if (args.requestEffort !== undefined) {
+    if (args.resolvedAgent === "codex") {
+      throw new Error('effort is not supported for agent "codex"');
+    }
+    if (
+      args.resolvedAgent === "claude" &&
+      !CLAUDE_EFFORTS.includes(args.requestEffort as (typeof CLAUDE_EFFORTS)[number])
+    ) {
+      throw new Error(`effort must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+    }
+    return args.requestEffort;
+  }
+  if (args.resolvedAgent === "codex") {
+    return undefined;
+  }
+  return (
+    args.project.agentDefaults?.[args.resolvedAgent]?.effort ??
+    (args.resolvedAgent === "claude" ? DEFAULT_CLAUDE_EFFORT : undefined)
   );
 }
 
@@ -1297,6 +1343,14 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function resolveCarriedSpawnEffort(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicitEffort?: string,
+): string | undefined {
+  return explicitEffort ?? (targetAgent === session.agent ? session.effort : undefined);
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1304,11 +1358,13 @@ export function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    effort?: string;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
+  const effort = resolveCarriedSpawnEffort(session, agent, options?.effort);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1316,6 +1372,7 @@ export function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -1351,6 +1408,7 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    effort?: string;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
@@ -1361,6 +1419,7 @@ function resolveHandoffSpawnRequest(
     prompt: options.prompt,
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.effort !== undefined ? { effort: options.effort } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -4156,6 +4215,7 @@ export class SessionService {
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let resolvedModel: string | undefined;
+    let resolvedEffort: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
@@ -4170,6 +4230,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
+      const requestEffort = parseEffort(request.effort);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -4190,6 +4251,11 @@ export class SessionService {
           project,
         }),
       );
+      resolvedEffort = resolveSpawnEffort({
+        requestEffort,
+        resolvedAgent: agent,
+        project,
+      });
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
@@ -4332,6 +4398,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -4474,6 +4541,7 @@ export class SessionService {
           ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         }),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
@@ -4839,6 +4907,7 @@ export class SessionService {
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
+    let resolvedEffort: string | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -4849,6 +4918,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
+      const requestEffort = parseEffort(request.effort);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -4870,6 +4940,11 @@ export class SessionService {
           project,
         }),
       );
+      resolvedEffort = resolveSpawnEffort({
+        requestEffort,
+        resolvedAgent: agent,
+        project,
+      });
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -4903,6 +4978,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -5254,6 +5330,9 @@ export class SessionService {
           restrictWrites,
         }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
+        ...(prepared.placeholder.effort !== undefined
+          ? { effort: prepared.placeholder.effort }
+          : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
@@ -6809,6 +6888,7 @@ export class SessionService {
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
       ...planOptions,
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      ...(session.effort !== undefined ? { effort: session.effort } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     // A pinned claude keeps its native id on a fresh relaunch via --session-id so
@@ -6895,6 +6975,7 @@ export class SessionService {
         ? buildAgentLaunchPlan(session.agent, session.prompt, {
             ...planOptions,
             ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+            ...(session.effort !== undefined ? { effort: session.effort } : {}),
             agentSessionId: pinnedClaudeId,
           })
         : baseLaunchPlan;
@@ -7030,9 +7111,8 @@ export class SessionService {
         ...this.resolveClaudeAuthPlanOptions(current),
       };
       const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
-      const launchPlanOptions = {
+      const restoreProbeOptions = {
         ...planOptions,
-        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         // Restore a pinned claude session by resuming its own transcript id;
         // if that transcript is gone the restore plan is null and the fresh
         // launch below reuses the same id via --session-id.
@@ -7044,10 +7124,15 @@ export class SessionService {
         current.agent,
         current.worktreePath,
         restorePrompt,
-        launchPlanOptions,
+        restoreProbeOptions,
       );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
+        launchPlan ??
+        buildAgentLaunchPlan(current.agent, restorePrompt, {
+          ...restoreProbeOptions,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(current.effort !== undefined ? { effort: current.effort } : {}),
+        });
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
@@ -7472,6 +7557,7 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.effort !== undefined ? { effort: request.effort } : {}),
       }),
       request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
@@ -7520,6 +7606,7 @@ export class SessionService {
       }
     }
     const model = resolveCarriedSpawnModel(session, agent, request.model);
+    const effort = resolveCarriedSpawnEffort(session, agent, request.effort);
 
     let sourceForSpawn = session;
     if (session.status === "running" || session.status === "spawning") {
@@ -7569,6 +7656,7 @@ export class SessionService {
         prompt,
         agent,
         ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
         originalTaskPrompt: originalTask,
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),

@@ -1,4 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
@@ -370,6 +371,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  effort?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -478,6 +480,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface AgentDefaultConfig {
+  model?: string;
+  effort?: string;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -491,7 +498,7 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
-  defaultModels?: Partial<Record<AgentName, string>>;
+  agentDefaults?: Partial<Record<AgentName, AgentDefaultConfig>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
@@ -627,6 +634,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  effort?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -762,6 +770,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  effort?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -888,11 +897,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  effort?: string;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
+  effort?: string;
   notes?: string;
 }
 

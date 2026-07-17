@@ -370,9 +370,11 @@ projects:
     sessionPrefix: api
     worktree: true
     defaultAgent: codex # optional; agent chosen when a spawn omits --agent
-    defaultModels: # optional; per-agent default model, applied when that agent is chosen without an explicit model
-      codex: gpt-5.5
-      cursor: composer-2.5
+    agentDefaults: # optional; per-agent model and effort defaults
+      claude: sonnet
+      cursor:
+        model: auto
+        effort: high
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -539,6 +541,7 @@ Field reference:
 - `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
+- `projects.<id>.agentDefaults`: optional canonical per-agent map. Entries accept a model string or `{ model?, effort? }`; Codex rejects `effort`. Legacy `defaultModels` and `defaultEfforts` fill missing fields; equal duplicates pass, conflicting values fail.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.

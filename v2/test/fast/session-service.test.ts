@@ -11,16 +11,18 @@ import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
-import type {
-  AgentName,
-  AppConfig,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  ServiceInstanceRecord,
-  SessionMemoryRecord,
-  SessionRecord,
-  SessionStateTransition,
-  SessionView,
+import {
+  CLAUDE_EFFORTS,
+  type AgentName,
+  type AppConfig,
+  type ProjectConfig,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type ServiceInstanceRecord,
+  type SessionMemoryRecord,
+  type SessionRecord,
+  type SessionStateTransition,
+  type SessionView,
 } from "../../src/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -246,6 +248,8 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
 
 vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestClaudeSessionFileMock,
+  DEFAULT_CLAUDE_MODEL: "sonnet",
+  DEFAULT_CLAUDE_EFFORT: "high",
 }));
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
@@ -1037,6 +1041,8 @@ describe("SessionService", () => {
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
+      model: "sonnet",
+      effort: "high",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -1081,6 +1087,96 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  it("normalizes valid explicit effort for foreground and background spawns", async () => {
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const spawned = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      effort: " medium ",
+    });
+    expect(spawned.effort).toBe("medium");
+
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      effort: " low ",
+    });
+    expect(placeholder.effort).toBe("low");
+  });
+
+  it.each([
+    ["spawn", ""],
+    ["spawn", "   "],
+    ["spawn", 1],
+    ["spawnInBackground", ""],
+    ["spawnInBackground", 1],
+  ] as const)("rejects invalid explicit effort at the %s boundary", async (method, effort) => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service[method]({
+        project: "api",
+        prompt: "hello",
+        effort: effort as unknown as string,
+      }),
+    ).rejects.toThrow("effort must be a non-empty string when provided");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["spawn", "spawnInBackground"] as const)(
+    "rejects a claude effort outside the known value set at the %s boundary",
+    async (method) => {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service[method]({
+          project: "api",
+          prompt: "hello",
+          effort: "turbo",
+        }),
+      ).rejects.toThrow(`effort must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    },
+  );
+
+  describe("resolveSpawnEffort", () => {
+    const project: ProjectConfig = baseConfig().projects["api"] as ProjectConfig;
+
+    it.each(CLAUDE_EFFORTS)("returns %s unchanged for claude", async (effort) => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(resolveSpawnEffort({ requestEffort: effort, resolvedAgent: "claude", project })).toBe(
+        effort,
+      );
+    });
+
+    it("throws for an unknown claude effort value", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(() =>
+        resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "claude", project }),
+      ).toThrow(`effort must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+    });
+
+    it("passes an arbitrary effort value through unchanged for cursor", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "cursor", project })).toBe(
+        "turbo",
+      );
+    });
+
+    it("rejects any effort for codex", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(() =>
+        resolveSpawnEffort({ requestEffort: "high", resolvedAgent: "codex", project }),
+      ).toThrow('effort is not supported for agent "codex"');
+    });
   });
 
   it("binds the launch to the requested claude account and persists the account id", async () => {
@@ -1932,6 +2028,8 @@ describe("SessionService", () => {
       expect.stringContaining("slot-instructions\nhello"),
       {
         planMode: true,
+        model: "sonnet",
+        effort: "high",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
       },
     );
@@ -1978,6 +2076,8 @@ describe("SessionService", () => {
       expect.stringContaining("[Spur step 1/1: review]"),
       {
         restrictWrites: true,
+        model: "sonnet",
+        effort: "high",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
       },
     );
@@ -2325,6 +2425,8 @@ describe("SessionService", () => {
     expect(result.prompt).toBe("");
     expect(result.pipeline).toBeUndefined();
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
+      model: "sonnet",
+      effort: "high",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
     });
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
@@ -13501,7 +13603,7 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "claude",
         "slot-instructions\nfix the bug",
-        { agentSessionId: PINNED_CLAUDE_SESSION_ID },
+        { model: "sonnet", effort: "high", agentSessionId: PINNED_CLAUDE_SESSION_ID },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.respawn.started",
@@ -13910,7 +14012,7 @@ describe("SessionService", () => {
           "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
           "edited prompt",
         ].join("\n"),
-        { agentSessionId: PINNED_CLAUDE_SESSION_ID },
+        { model: "sonnet", effort: "high", agentSessionId: PINNED_CLAUDE_SESSION_ID },
       );
       expect(
         readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8"),
@@ -13958,6 +14060,61 @@ describe("SessionService", () => {
       const result = await service.respawn("api-1", { agent: "codex" });
 
       expect(result.agent).toBe("codex");
+    });
+
+    it("carries a non-default effort on same-agent respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        model: "sonnet",
+        effort: "medium",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.effort).toBe("medium");
+    });
+
+    it("does not carry effort when the agent override differs from the source session's agent", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        model: "sonnet",
+        effort: "medium",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1", { agent: "codex" });
+
+      expect(result.agent).toBe("codex");
+      expect(result.effort).toBeUndefined();
     });
 
     it("falls back to the original agent when agent is omitted", async () => {
@@ -14296,6 +14453,54 @@ describe("SessionService", () => {
 
       expect(spawned.agent).toBe("codex");
       expect(spawned.model).toBeUndefined();
+      service.dispose();
+    });
+
+    it("carries a non-default effort on same-agent handoff", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agent: "claude",
+          model: "sonnet",
+          effort: "medium",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "claude" });
+
+      expect(spawned.agent).toBe("claude");
+      expect(spawned.effort).toBe("medium");
+      service.dispose();
+    });
+
+    it("does not carry effort when the handoff target agent differs from the source session's agent", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agent: "claude",
+          model: "sonnet",
+          effort: "medium",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "codex" });
+
+      expect(spawned.agent).toBe("codex");
+      expect(spawned.effort).toBeUndefined();
       service.dispose();
     });
 

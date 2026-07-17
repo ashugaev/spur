@@ -4,9 +4,11 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     defaultAgent: claude
-    defaultModels:
-      claude: opus
-      cursor: composer-2.5
+    agentDefaults:
+      claude: sonnet
+      cursor:
+        model: auto
+        effort: high
     symlinks:
       - .env
       - node_modules
@@ -110,7 +112,7 @@ projects:
               overrides:
                 worktree: true
             - agent: cursor
-              model: composer-2.5
+              model: auto
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
                 Apply the `review` tag to this session.

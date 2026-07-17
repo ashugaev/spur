@@ -9,6 +9,8 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  CLAUDE_EFFORTS,
+  type AgentDefaultConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
@@ -153,6 +155,12 @@ function asOptionalString(value: unknown, label: string): string | undefined {
   return asString(value, label);
 }
 
+function validateClaudeEffort(value: string, label: string): void {
+  if (!CLAUDE_EFFORTS.includes(value as (typeof CLAUDE_EFFORTS)[number])) {
+    throw new Error(`${label} must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+  }
+}
+
 function asOptionalArray<T>(
   value: unknown,
   label: string,
@@ -233,20 +241,78 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
-function parseDefaultModels(
-  value: unknown,
+function parseAgentDefaults(
+  project: Record<string, unknown>,
   label: string,
-): Partial<Record<AgentName, string>> | undefined {
-  if (value === undefined) return undefined;
-  const raw = asObject(value, `${label}.defaultModels`);
-  const models: Partial<Record<AgentName, string>> = {};
-  for (const [key, entry] of Object.entries(raw)) {
-    if (key !== "claude" && key !== "codex" && key !== "cursor") {
-      throw new Error(`${label}.defaultModels has unknown agent "${key}"`);
-    }
-    models[key] = asString(entry, `${label}.defaultModels.${key}`);
+): Partial<Record<AgentName, AgentDefaultConfig>> | undefined {
+  const value = project["agentDefaults"];
+  const defaultModels = project["defaultModels"];
+  const defaultEfforts = project["defaultEfforts"];
+  if (value === undefined && defaultModels === undefined && defaultEfforts === undefined) {
+    return undefined;
   }
-  return models;
+  const result: Partial<Record<AgentName, AgentDefaultConfig>> = {};
+  if (value !== undefined) {
+    const raw = asObject(value, `${label}.agentDefaults`);
+    for (const [key, entry] of Object.entries(raw)) {
+      if (key !== "claude" && key !== "codex" && key !== "cursor") {
+        throw new Error(`${label}.agentDefaults has unknown agent "${key}"`);
+      }
+      const entryLabel = `${label}.agentDefaults.${key}`;
+      if (typeof entry === "string") {
+        result[key] = { model: asString(entry, entryLabel) };
+        continue;
+      }
+      const entryRaw = asObject(entry, entryLabel);
+      for (const property of Object.keys(entryRaw)) {
+        if (property !== "model" && property !== "effort") {
+          throw new Error(`${entryLabel} has unknown property "${property}"`);
+        }
+      }
+      const model = asOptionalString(entryRaw["model"], `${entryLabel}.model`);
+      const effort = asOptionalString(entryRaw["effort"], `${entryLabel}.effort`);
+      if (key === "claude" && effort !== undefined) {
+        validateClaudeEffort(effort, `${entryLabel}.effort`);
+      }
+      if (model === undefined && effort === undefined) {
+        throw new Error(`${entryLabel} must define model or effort`);
+      }
+      if (key === "codex" && effort !== undefined) {
+        throw new Error(`${entryLabel}.effort is not supported for agent "codex"`);
+      }
+      result[key] = {
+        ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
+      };
+    }
+  }
+  for (const [alias, field, aliasValue] of [
+    ["defaultModels", "model", defaultModels],
+    ["defaultEfforts", "effort", defaultEfforts],
+  ] as const) {
+    if (aliasValue === undefined) continue;
+    const raw = asObject(aliasValue, `${label}.${alias}`);
+    for (const [key, entry] of Object.entries(raw)) {
+      if (key !== "claude" && key !== "codex" && key !== "cursor") {
+        throw new Error(`${label}.${alias} has unknown agent "${key}"`);
+      }
+      if (field === "effort" && key === "codex") {
+        throw new Error(`${label}.${alias} is not supported for agent "${key}"`);
+      }
+      const parsed = asString(entry, `${label}.${alias}.${key}`);
+      if (field === "effort" && key === "claude") {
+        validateClaudeEffort(parsed, `${label}.${alias}.${key}`);
+      }
+      const existing = result[key]?.[field];
+      if (existing !== undefined && existing !== parsed) {
+        throw new Error(
+          `${label}.agentDefaults.${key}.${field} conflicts with ${label}.${alias}.${key}`,
+        );
+      }
+      result[key] = { ...result[key], [field]: parsed };
+    }
+  }
+  return result;
 }
 
 function parseTriggerSpawnBlock(
@@ -263,6 +329,13 @@ function parseTriggerSpawnBlock(
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
+  const effort = asOptionalString(raw["effort"], `${label}.effort`);
+  if (effort !== undefined && agent === undefined) {
+    throw new Error(`${label}.effort requires ${label}.agent`);
+  }
+  if (effort !== undefined && agent === "codex") {
+    throw new Error(`${label}.effort is not supported for agent "codex"`);
+  }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -278,6 +351,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -314,6 +388,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "effort",
       "branch",
       "overrides",
       "selfDestruct",
@@ -1279,7 +1354,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
-  const defaultModels = parseDefaultModels(raw["defaultModels"], label);
+  const agentDefaults = parseAgentDefaults(raw, label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1369,7 +1444,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
-    ...(defaultModels !== undefined ? { defaultModels } : {}),
+    ...(agentDefaults !== undefined ? { agentDefaults } : {}),
     sources,
     backlog,
     triggers,

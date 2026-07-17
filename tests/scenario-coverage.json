@@ -5451,7 +5451,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.",
+    "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the resolved agent's normalized `agentDefaults.model` without bleeding onto another agent.",
     "tier": "v2-fast",
     "testFiles": [
       "v2/test/fast/resolve-spawn-model.test.ts",
@@ -5463,9 +5463,40 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config parses a trigger spawn block `model` and a project `defaultModels` map keyed by agent, and rejects `.model` without `.agent`, an unknown `defaultModels` agent key, and a non-string `defaultModels` value at the parse boundary.",
+    "scenario": "Config normalizes canonical `agentDefaults` shorthand/object entries and legacy `defaultModels`/`defaultEfforts` aliases into one internal map; aliases fill missing fields, equal duplicates pass, differing duplicates fail by field, and invalid agents, properties, entries, empty strings/objects, and Codex effort fail at the parse boundary.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`resolveSpawnEffort` mirrors `resolveSpawnModel`'s precedence chain for reasoning effort: an explicit request effort wins, then the resolved agent's normalized `agentDefaults.effort`, then a Claude-only code-level default; Claude threads the resolved effort through a native `--effort <value>` launch flag, while Cursor appends an `[effort=...]` bracket suffix only when a concrete (non-auto) model is set and has no code-level default of its own.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/agents-claude.test.ts",
+      "v2/test/fast/agents-cursor.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config parses trigger spawn block `model` and `effort`, requires a matching `agent`, and rejects Codex effort.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`resolveSpawnEffort` throws at the spawn boundary when an explicit request effort targets `codex` (mirroring the config-parse-time rejection) and stays silent when `codex` has no requested effort; `respawn`/`handoff` carry a source session's effort into the replacement session only when the request supplies no explicit effort and the resolved agent matches the source session's agent, otherwise the carried effort is dropped without throwing.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
     "ciJob": "quality"
   },
   {

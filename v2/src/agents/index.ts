@@ -47,6 +47,7 @@ interface AgentPlanOptions {
   restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
+  effort?: string;
   /** Pinned native session id (claude `--session-id <uuid>`). */
   agentSessionId?: string;
 }
@@ -138,6 +139,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   mcpConfigPath?: string;
   restrictWrites?: boolean;
   model?: string;
+  effort?: string;
   claudeConfigDir?: string;
   sessionId?: string;
 } {
@@ -147,6 +149,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
     ...(options?.claudeMcpConfigPath ? { mcpConfigPath: options.claudeMcpConfigPath } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.effort ? { effort: options.effort } : {}),
     ...(options?.claudeConfigDir ? { claudeConfigDir: options.claudeConfigDir } : {}),
     ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
   };
@@ -173,12 +176,14 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   planMode?: boolean;
   restrictWrites?: boolean;
   model?: string;
+  effort?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.effort ? { effort: options.effort } : {}),
   };
 }
 

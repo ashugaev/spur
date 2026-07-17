@@ -9,6 +9,9 @@ export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 
+export const DEFAULT_CLAUDE_MODEL = "sonnet";
+export const DEFAULT_CLAUDE_EFFORT = "high";
+
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
@@ -122,6 +125,7 @@ interface ClaudePlanOptions {
   mcpConfigPath?: string;
   restrictWrites?: boolean;
   model?: string;
+  effort?: string;
   claudeConfigDir?: string;
   sessionId?: string;
 }
@@ -154,10 +158,11 @@ export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): Ag
   const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
+  const effortArg = options?.effort ? ` --effort ${shellEscape(options.effort)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${effortArg}${sessionIdArg}`,
       options?.claudeConfigDir,
     ),
     initialMessage: prompt,

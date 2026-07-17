@@ -12,6 +12,7 @@ import {
   writeProjectConfigScaffold,
 } from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
+import { CLAUDE_EFFORTS } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -297,49 +298,342 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/\.model requires .*\.agent/);
   });
 
-  it("parses a project defaultModels map keyed by agent", async () => {
+  it("parses trigger spawn block effort when agent is present", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: claude
+          effort: high
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            prompt: "ship it",
+            agent: "claude",
+            effort: "high",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects a trigger spawn block effort without an agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/\.effort requires .*\.agent/);
+  });
+
+  it("rejects a trigger spawn block effort when agent is codex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: codex
+          effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/\.effort is not supported for agent "codex"/);
+  });
+
+  it("parses canonical agentDefaults shorthand and object entries", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
     defaultAgent: claude
-    defaultModels:
-      claude: opus
-      cursor: composer-2.5
+    agentDefaults:
+      claude: sonnet
+      cursor:
+        model: auto
+        effort: high
 `);
 
     const config = loadConfig(configPath);
 
     expect(config.projects["backend"]?.defaultAgent).toBe("claude");
-    expect(config.projects["backend"]?.defaultModels).toEqual({
-      claude: "opus",
-      cursor: "composer-2.5",
+    expect(config.projects["backend"]?.agentDefaults).toEqual({
+      claude: { model: "sonnet" },
+      cursor: { model: "auto", effort: "high" },
     });
   });
 
-  it("rejects a defaultModels key that is not a known agent", async () => {
+  it.each(CLAUDE_EFFORTS)("accepts canonical Claude effort %s", async (effort) => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultModels:
-      claud: opus
+    agentDefaults:
+      claude:
+        effort: ${effort}
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(/defaultModels has unknown agent "claud"/);
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({
+      claude: { effort },
+    });
   });
 
-  it("rejects a non-string defaultModels value", async () => {
+  it("rejects invalid canonical Claude effort", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultModels:
-      claude: 5
+    agentDefaults:
+      claude:
+        effort: turbo
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      /defaultModels\.claude must be a non-empty string/,
+      new RegExp(`agentDefaults\\.claude\\.effort must be one of ${CLAUDE_EFFORTS.join(", ")}`),
+    );
+  });
+
+  it("allows an empty canonical agentDefaults map", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults: {}
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({});
+  });
+
+  it("normalizes legacy aliases and fills missing canonical fields", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+        effort: medium
+      cursor:
+        model: auto
+    defaultModels:
+      claude: opus
+      cursor: auto
+    defaultEfforts:
+      claude: medium
+      cursor: high
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({
+      claude: { model: "opus", effort: "medium" },
+      cursor: { model: "auto", effort: "high" },
+    });
+  });
+
+  it.each([
+    {
+      canonical: "        model: sonnet",
+      alias: "    defaultModels:\n      claude: opus",
+      field: "model",
+      source: "defaultModels",
+    },
+    {
+      canonical: "        effort: low",
+      alias: "    defaultEfforts:\n      claude: high",
+      field: "effort",
+      source: "defaultEfforts",
+    },
+  ])("rejects a conflicting $field alias", async ({ canonical, alias, field, source }) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+${canonical}
+${alias}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      new RegExp(`agentDefaults\\.claude\\.${field} conflicts with .*${source}\\.claude`),
+    );
+  });
+
+  it("rejects an unknown canonical agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claud: sonnet
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/agentDefaults has unknown agent "claud"/);
+  });
+
+  it("rejects an unknown canonical entry property", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+        model: sonnet
+        mode: plan
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.claude has unknown property "mode"/,
+    );
+  });
+
+  it("rejects an empty canonical entry object", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.claude must define model or effort/,
+    );
+  });
+
+  it.each(["claude: 5", "claude: []"])("rejects invalid canonical entry %s", async (entry) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      ${entry}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/agentDefaults\.claude must be an object/);
+  });
+
+  it.each(["claude: '   '", "claude:\n        model: ''", "claude:\n        effort: ''"])(
+    "rejects an empty canonical string",
+    async (entry) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      ${entry}
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(/must be a non-empty string/);
+    },
+  );
+
+  it("rejects canonical Codex effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      codex:
+        effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.codex\.effort is not supported for agent "codex"/,
+    );
+  });
+
+  it.each([
+    ["defaultModels", "claud", "opus", /defaultModels has unknown agent "claud"/],
+    ["defaultEfforts", "claud", "high", /defaultEfforts has unknown agent "claud"/],
+  ])("rejects an unknown agent in legacy %s", async (field, agent, value, error) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    ${field}:
+      ${agent}: ${value}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(error);
+  });
+
+  it.each(["defaultModels", "defaultEfforts"])(
+    "rejects an invalid legacy %s value",
+    async (field) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    ${field}:
+      claude: 5
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(
+        new RegExp(`${field}\\.claude must be a non-empty string`),
+      );
+    },
+  );
+
+  it("rejects invalid legacy Claude effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      claude: turbo
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      new RegExp(`defaultEfforts\\.claude must be one of ${CLAUDE_EFFORTS.join(", ")}`),
+    );
+  });
+
+  it("rejects legacy Codex effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      codex: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /defaultEfforts is not supported for agent "codex"/,
     );
   });
 
@@ -2369,7 +2663,7 @@ projects:
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    ]).toEqual(["cursor", "auto", true, true]);
     expect([
       uiBlock?.agent,
       uiBlock?.model,

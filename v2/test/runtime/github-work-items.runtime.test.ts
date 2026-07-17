@@ -350,8 +350,9 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
     };
     Object.assign(process.env, runtimeEnv(context));
+    let service: SessionService | undefined;
     try {
-      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -429,6 +430,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         handle.stop();
       }
     } finally {
+      service?.dispose();
       for (const [key, value] of Object.entries(originalEnv)) {
         if (value === undefined) {
           Reflect.deleteProperty(process.env, key);
