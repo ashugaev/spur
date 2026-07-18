@@ -24,6 +24,7 @@ import {
   buildCursorPlan,
   buildCursorRestorePlan,
   buildCursorResumePlan,
+  CURSOR_RESTRICT_WRITES_ENV,
   cursorCommand,
   cursorConfigDirForSession,
   ensureCursorRestrictWritesConfig,
@@ -114,7 +115,11 @@ interface AgentAdapter {
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
   }>;
-  sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
+  sessionConfig?(args: {
+    dataDir: string;
+    sessionId: string;
+    restrictWrites?: boolean;
+  }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
@@ -171,13 +176,11 @@ function codexPlanOptions(options?: AgentPlanOptions): {
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
-  restrictWrites?: boolean;
   model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
-    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
   };
 }
@@ -288,15 +291,16 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (restrictWrites && cursorConfigDir) {
-        await ensureCursorRestrictWritesConfig(cursorConfigDir);
+        await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
       }
       return {};
     },
-    sessionConfig: ({ dataDir, sessionId }) => {
+    sessionConfig: ({ dataDir, sessionId, restrictWrites }) => {
       const cursorConfigDir = cursorConfigDirForSession(dataDir, sessionId);
       return {
         env: {
           CURSOR_CONFIG_DIR: cursorConfigDir,
+          ...(restrictWrites ? { [CURSOR_RESTRICT_WRITES_ENV]: "1" } : {}),
         },
         planOptions: {
           cursorConfigDir,
@@ -416,7 +420,7 @@ export async function setupAgentHooks(args: {
 
 export function agentSessionConfig(
   agent: AgentName,
-  args: { dataDir: string; sessionId: string },
+  args: { dataDir: string; sessionId: string; restrictWrites?: boolean },
 ): AgentSessionConfig {
   return agentAdapter(agent).sessionConfig?.(args) ?? {};
 }

@@ -817,17 +817,19 @@ describe("SessionService", () => {
       .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 15_000));
     agentSessionConfigMock
       .mockReset()
-      .mockImplementation((agent: string, args?: { dataDir: string; sessionId: string }) =>
-        agent === "cursor"
-          ? {
-              env: {
-                CURSOR_CONFIG_DIR: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
-              },
-              planOptions: {
-                cursorConfigDir: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
-              },
-            }
-          : {},
+      .mockImplementation(
+        (agent: string, args?: { dataDir: string; sessionId: string; restrictWrites?: boolean }) =>
+          agent === "cursor"
+            ? {
+                env: {
+                  CURSOR_CONFIG_DIR: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
+                  ...(args?.restrictWrites ? { SPUR_CURSOR_RESTRICT_WRITES: "1" } : {}),
+                },
+                planOptions: {
+                  cursorConfigDir: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
+                },
+              }
+            : {},
       );
     agentStateStrategyMock
       .mockReset()
@@ -2086,6 +2088,49 @@ describe("SessionService", () => {
         restrictWrites: true,
       }),
     );
+  });
+
+  it("carries the cursor restrict-writes gate env in the launched tmux env when restrictWrites is set", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      restrictWrites: true,
+    });
+
+    expect(agentSessionConfigMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.objectContaining({ restrictWrites: true }),
+    );
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "cursor",
+        env: expect.objectContaining({
+          SPUR_CURSOR_RESTRICT_WRITES: "1",
+        }),
+      }),
+    );
+  });
+
+  it("omits the cursor restrict-writes gate env from the launched tmux env for a normal cursor session", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+    });
+
+    expect(agentSessionConfigMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.objectContaining({ restrictWrites: false }),
+    );
+    const cursorCall = createTmuxSessionMock.mock.calls.find((call) => call[0]?.agent === "cursor");
+    expect(cursorCall?.[0]?.env).not.toHaveProperty("SPUR_CURSOR_RESTRICT_WRITES");
   });
 
   it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {

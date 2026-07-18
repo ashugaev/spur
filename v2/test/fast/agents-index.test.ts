@@ -181,10 +181,10 @@ describe("setupAgentHooks", () => {
 });
 
 describe("buildAgentLaunchPlan", () => {
-  it("omits --force for cursor when restrictWrites is enabled", () => {
+  it("keeps --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent --model 'auto'");
-    expect(plan.launchCommand).not.toContain("--force");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
+    expect(plan.launchCommand).toContain("--force");
     expect(plan.launchCommand).not.toContain("--plan");
   });
 });
