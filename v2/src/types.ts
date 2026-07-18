@@ -24,7 +24,7 @@ export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
 
-export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
+export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -160,6 +160,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
+  position: number;
 }
 
 export interface TakeBacklogItemRequest {

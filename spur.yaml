@@ -24,10 +24,6 @@ projects:
     codexArgs:
       - -c
       - 'model_reasoning_effort="high"'
-      - -c
-      - 'service_tier="fast"'
-      - --enable
-      - fast_mode
     preflight: {}
     sidecars:
       isolated-daemon:
@@ -79,7 +75,7 @@ projects:
         source: gh
         event: github:ci_failed
         send:
-          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+          prompt: "Run $manager and $github. Check failing CI on the active PR. Fix it if fixable — regardless of cause, own change or another agent's — then rerun checks and push. If not fixable, say why."
       gh-comment:
         source: gh
         event: github:comment

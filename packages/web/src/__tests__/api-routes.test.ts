@@ -187,6 +187,7 @@ describe("Spur web API routes", () => {
           title: "Fix checkout",
           url: "https://jira.example.com/browse/WEB-17",
           fetchedAt: "2026-06-16T12:00:00.000Z",
+          position: 0,
         },
       ]);
 

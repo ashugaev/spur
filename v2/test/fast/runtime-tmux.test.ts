@@ -313,6 +313,51 @@ describe("runtime-tmux", () => {
     expect(enterIndex).toBeGreaterThan(pasteIndex);
   });
 
+  it("wraps sidecar launch commands without `exec` and sets remain-on-exit before launch", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxCommandSession({
+      sessionName: "api-1--dev",
+      cwd: "/tmp/worktree",
+      launchCommand: "cd front && yarn start",
+    });
+
+    const calls = execFileAsyncMock.mock.calls;
+
+    const newSession = calls.find(([, args]) => args.includes("new-session"));
+    if (!newSession) throw new Error("expected new-session call");
+    const [, newSessionArgs] = newSession;
+    // new-session must NOT carry the user shell-command — otherwise a crash on
+    // the first line tears the session down before remain-on-exit lands.
+    expect(newSessionArgs.some((a) => typeof a === "string" && a.includes("sh -lc"))).toBe(false);
+    expect(newSessionArgs.some((a) => typeof a === "string" && a.includes("yarn start"))).toBe(
+      false,
+    );
+
+    const remainOnExitIndex = calls.findIndex(
+      ([, args]) => args[0] === "set-option" && args.includes("remain-on-exit"),
+    );
+    const respawnIndex = calls.findIndex(([, args]) => args[0] === "respawn-pane");
+    const newSessionIndex = calls.findIndex(([, args]) => args.includes("new-session"));
+
+    expect(remainOnExitIndex).toBeGreaterThan(newSessionIndex);
+    expect(respawnIndex).toBeGreaterThan(remainOnExitIndex);
+
+    // `remain-on-exit` is a pane option — requires `-p`.
+    const remainOnExitArgs = calls[remainOnExitIndex]?.[1] ?? [];
+    expect(remainOnExitArgs).toContain("-p");
+
+    const respawnArgs = calls[respawnIndex]?.[1] ?? [];
+    const respawnCommand = respawnArgs.at(-1);
+    expect(respawnCommand).toBe("sh -lc 'cd front && yarn start'");
+    // Regression: `exec cd ...` in dash fails with "exec: cd: not found".
+    expect(respawnCommand).not.toContain("exec cd");
+    expect(respawnCommand).not.toMatch(/sh -lc '?exec /);
+    expect(respawnArgs).toContain("-k");
+  });
+
   it("keeps interrupt behavior before codex atomic send", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
