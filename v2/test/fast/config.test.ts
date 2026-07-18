@@ -118,6 +118,31 @@ projects:
     expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
   });
 
+  it("resolves projectsRoot relative to the config directory when set", async () => {
+    const configPath = await writeConfig(`
+projectsRoot: ./custom-root
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projectsRoot).toBe(join(configPath, "..", "custom-root"));
+  });
+
+  it("derives projectsRoot under dataDir/projects when not set", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projectsRoot).toBe(join(config.dataDir, "projects"));
+  });
+
   it("parses tag definitions and assigns a stable color when none is given", async () => {
     const configPath = await writeConfig(`
 tags:

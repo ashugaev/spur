@@ -150,6 +150,78 @@ describe("Dashboard project create/delete", () => {
     });
   });
 
+  it("creates a project without a path, posting only displayName and prefix", async () => {
+    const projectCalls: Array<{ body: unknown }> = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+      }
+      if (url === "/api/projects" && init?.method === "POST") {
+        const parsed = JSON.parse(String(init.body)) as unknown;
+        projectCalls.push({ body: parsed });
+        const entry = {
+          id: "demo",
+          name: "Demo",
+          configured: false,
+          prefix: "demo",
+          path: "/data/projects/demo",
+        };
+        return new Response(JSON.stringify({ id: "demo", entry, projects: [entry] }), {
+          status: 201,
+        });
+      }
+      if (url === "/api/spawn") {
+        return new Response(
+          JSON.stringify({
+            id: "demo-bootstrap-1",
+            project: "demo",
+            agent: "claude",
+            prompt: "",
+            branch: "demo-bootstrap-1",
+            worktree: false,
+            tmuxSession: "demo-bootstrap-1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/data/projects/demo",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Demo" } });
+    fireEvent.change(screen.getByLabelText("Session prefix"), { target: { value: "demo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+
+    await waitFor(() => {
+      expect(projectCalls).toHaveLength(1);
+    });
+    expect(projectCalls[0]?.body).toEqual({ displayName: "Demo", prefix: "demo" });
+    expect(screen.queryByText("Path is required")).toBeNull();
+  });
+
   it("shows a create-folder alert when the daemon reports a missing path and re-posts with createMissing", async () => {
     const projectCalls: Array<{ body: unknown }> = [];
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {

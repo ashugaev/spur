@@ -1,3 +1,6 @@
+# Base dir for projects created without an explicit path. Unset falls back to <dataDir>/projects.
+projectsRoot: ~/projects
+
 projects:
   sp:
     path: ~/projects/spur

@@ -2143,22 +2143,12 @@ export class SessionService {
   createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
     const displayName = request.displayName.trim();
     const prefix = request.prefix.trim();
-    const rawPath = request.path.trim();
-    if (!displayName || !rawPath) {
-      throw new Error("displayName and path must be non-empty strings");
+    const rawPath = request.path?.trim() ?? "";
+    if (!displayName) {
+      throw new Error("displayName must be a non-empty string");
     }
     if (!PROJECT_ID_PATTERN.test(prefix)) {
       throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
-    }
-    const absolutePath = resolvePath(expandHome(rawPath));
-    if (!existsSync(absolutePath)) {
-      if (request.createMissing === true) {
-        mkdirSync(absolutePath, { recursive: true });
-      } else {
-        throw new Error(`path does not exist: ${absolutePath}`);
-      }
-    } else if (!statSync(absolutePath).isDirectory()) {
-      throw new Error(`path is not a directory: ${absolutePath}`);
     }
 
     const existingUnconfigured = this.listUnconfiguredProjects();
@@ -2181,6 +2171,26 @@ export class SessionService {
     while (usedIds.has(candidateId)) {
       candidateId = `${baseId}-${suffix}`;
       suffix += 1;
+    }
+
+    let absolutePath: string;
+    if (rawPath) {
+      absolutePath = resolvePath(expandHome(rawPath));
+      if (!existsSync(absolutePath)) {
+        if (request.createMissing === true) {
+          mkdirSync(absolutePath, { recursive: true });
+        } else {
+          throw new Error(`path does not exist: ${absolutePath}`);
+        }
+      } else if (!statSync(absolutePath).isDirectory()) {
+        throw new Error(`path is not a directory: ${absolutePath}`);
+      }
+    } else {
+      absolutePath = join(this.config.projectsRoot, candidateId);
+      if (existsSync(absolutePath)) {
+        throw new Error(`derived project folder already exists: ${absolutePath}`);
+      }
+      mkdirSync(absolutePath, { recursive: true });
     }
 
     addUnconfiguredProject(this.config.dataDir, {

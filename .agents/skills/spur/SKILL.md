@@ -57,6 +57,7 @@ server:
 
 dataDir: ~/.spur
 worktreeDir: ~/.spur-worktrees
+projectsRoot: ~/.spur/projects # optional; default <dataDir>/projects; base dir for projects created without an explicit path
 defaultAgent: claude
 
 tags:
