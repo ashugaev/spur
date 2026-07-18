@@ -374,6 +374,12 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+const REAP_INTERVAL_MS = 5 * 60 * 1000;
+// isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
+// polling loops that must keep tracking a stopped-but-not-yet-reconciled
+// session). The reaper needs the full set of statuses that mean "this
+// session's runtime is not supposed to exist anymore".
+const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1693,6 +1699,8 @@ export class SessionService {
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
+  private reaperTimer: NodeJS.Timeout | null = null;
+  private reaperRunning = false;
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -1748,6 +1756,7 @@ export class SessionService {
     this.startSidecarReaper();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
+    this.startReaperLoop();
   }
 
   /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
@@ -1767,6 +1776,10 @@ export class SessionService {
     if (this.sidecarReaperTimer) {
       clearInterval(this.sidecarReaperTimer);
       this.sidecarReaperTimer = null;
+    }
+    if (this.reaperTimer) {
+      clearInterval(this.reaperTimer);
+      this.reaperTimer = null;
     }
     this.stopDashboardCacheLoop();
   }
@@ -2784,6 +2797,80 @@ export class SessionService {
       });
     } finally {
       this.dashboardLoopRunning = false;
+    }
+  }
+
+  private startReaperLoop(): void {
+    if (this.reaperTimer) {
+      return;
+    }
+    this.reaperTimer = setInterval(() => {
+      void this.reapOrphanedTmux();
+    }, REAP_INTERVAL_MS);
+    this.reaperTimer.unref();
+  }
+
+  // Safety net: a terminal (killed/completed/stopped) session's tmux is
+  // supposed to already be gone, but restarts, crashes mid-teardown, or races
+  // can leave it running. This periodically sweeps for that and kills the
+  // orphan — but only after re-confirming, with a fresh (uncached) probe,
+  // that no agent process is actually alive in it. A live agent under a
+  // terminal record is left untouched and flagged instead of killed: killing
+  // a live session is the one mistake this loop must never make.
+  private async reapOrphanedTmux(): Promise<void> {
+    if (this.reaperRunning) {
+      return;
+    }
+    this.reaperRunning = true;
+    try {
+      const sessions = listSessions(this.config.dataDir).filter(
+        (session) =>
+          REAPABLE_SESSION_STATUSES.has(session.status) && session.stopReason !== "manual_pause",
+      );
+      let reaped = 0;
+      let liveUnderTerminal = 0;
+      for (const session of sessions) {
+        if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+          const agentAlive = await isProcessRunningInTmux(
+            session.tmuxSession,
+            sessionProcessMatchers(session),
+            { fresh: true },
+          );
+          if (agentAlive) {
+            liveUnderTerminal += 1;
+            this.logEvent("session.reaper.live_under_terminal", {
+              level: "warn",
+              sessionId: session.id,
+              message: `Session ${session.id} has status "${session.status}" but its agent process is still running in tmux "${session.tmuxSession}"; leaving it untouched.`,
+              details: { status: session.status },
+            });
+          } else {
+            await killTmuxSession(session.tmuxSession);
+            reaped += 1;
+          }
+        }
+        for (const sidecarName of session.sidecarNames ?? []) {
+          if (await sidecarTmuxAlive(session.id, sidecarName)) {
+            await killSidecarTmux(session.id, sidecarName);
+            reaped += 1;
+          }
+        }
+      }
+      if (reaped > 0 || liveUnderTerminal > 0) {
+        this.logEvent("session.reaper.swept", {
+          level: reaped > 0 ? "info" : "warn",
+          message: `Reaper sweep: reaped ${reaped} orphaned tmux session(s), ${liveUnderTerminal} live-under-terminal anomaly(ies) flagged.`,
+          details: { reaped, liveUnderTerminal },
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.reaper.failed", {
+        level: "warn",
+        message: `Reaper sweep failed: ${message}`,
+      });
+    } finally {
+      this.reaperRunning = false;
     }
   }
 
