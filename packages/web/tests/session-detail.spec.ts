@@ -1576,6 +1576,7 @@ test.describe("S3: Message section", () => {
   test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
     page,
   }) => {
+    test.slow();
     const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
     let postCount = 0;

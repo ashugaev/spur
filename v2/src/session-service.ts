@@ -3561,7 +3561,7 @@ export class SessionService {
         items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, backlogId));
       }
     }
-    return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+    return items;
   }
 
   async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {

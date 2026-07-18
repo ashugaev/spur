@@ -138,7 +138,8 @@ GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for
 skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
 (default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
 take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
-at `/backlog/available` and `/backlog/take`.
+at `/backlog/available` and `/backlog/take`. Item order is fetch/JQL order (server never re-sorts); include
+`ORDER BY Rank ASC` in `query` to surface Jira's real backlog rank order.
 
 Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
 

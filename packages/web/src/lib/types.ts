@@ -358,6 +358,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
+  position: number;
 }
 
 export interface TakeBacklogItemResponse {

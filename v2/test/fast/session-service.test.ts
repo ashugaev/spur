@@ -1126,6 +1126,7 @@ describe("SessionService", () => {
       title: "Fix checkout",
       url: "https://jira.example.com/browse/WEB-17",
       fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
     };
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -1188,6 +1189,96 @@ describe("SessionService", () => {
     expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
   });
 
+  it("concatenates per-backlog blocks in config order without a global fetchedAt/position sort", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const jiraSource = {
+      type: "jira" as const,
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "token",
+    };
+    const backlogConfig = {
+      source: "jira",
+      provider: "jira" as const,
+      query: "project = WEB",
+      intervalMs: 60_000,
+      runOnStart: false,
+    };
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { jira: jiraSource },
+          backlog: { features: backlogConfig, bugs: backlogConfig },
+        },
+      },
+    });
+    const featuresItems = [
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "F0",
+        key: "WEB-F0",
+        title: "Feature 0",
+        url: "https://jira.example.com/browse/WEB-F0",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      },
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "F1",
+        key: "WEB-F1",
+        title: "Feature 1",
+        url: "https://jira.example.com/browse/WEB-F1",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 1,
+      },
+    ];
+    const bugsItems = [
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "bugs",
+        externalId: "B0",
+        key: "WEB-B0",
+        title: "Bug 0",
+        url: "https://jira.example.com/browse/WEB-B0",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      },
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "bugs",
+        externalId: "B1",
+        key: "WEB-B1",
+        title: "Bug 1",
+        url: "https://jira.example.com/browse/WEB-B1",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 1,
+      },
+    ];
+    readAvailableBacklogItemsMock.mockImplementation(
+      (_dataDir: string, _projectId: string, backlogId: string) =>
+        backlogId === "features" ? featuresItems : bugsItems,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect(service.listAvailableBacklog().map((item) => item.externalId)).toEqual([
+      "F0",
+      "F1",
+      "B0",
+      "B1",
+    ]);
+  });
+
   it("honors the backlog spawn prompt template and agent when taking an item", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
@@ -1201,6 +1292,7 @@ describe("SessionService", () => {
       title: "Fix checkout",
       url: "https://jira.example.com/browse/WEB-17",
       fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
     };
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
