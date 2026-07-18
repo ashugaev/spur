@@ -2,12 +2,22 @@ import { describe, expect, it } from "vitest";
 import {
   buildPlaywrightSidecarConfig,
   isLeakedManagedPlaywright,
+  playwrightMcpUrl,
   resolvePlaywrightMcpBin,
   SPUR_PLAYWRIGHT_SESSION_ENV,
   SPUR_RESERVED_PORT_PLAYWRIGHT,
   type ProcessInfo,
 } from "../../src/agents/playwright-mcp.js";
 import { shellEscape } from "../../src/agents/shell-escape.js";
+
+describe("playwrightMcpUrl", () => {
+  it("uses localhost, not the bare loopback IP, in the client-facing URL", () => {
+    // @playwright/mcp's DNS-rebinding protection rejects a "127.0.0.1:<port>"
+    // Host header with HTTP 403 while accepting "localhost:<port>".
+    expect(playwrightMcpUrl(8793)).toBe("http://localhost:8793/mcp");
+    expect(playwrightMcpUrl(8793)).not.toContain("127.0.0.1");
+  });
+});
 
 describe("buildPlaywrightSidecarConfig", () => {
   const sessionId = "20240101-abcd";
