@@ -3922,6 +3922,75 @@ describe("SessionService", () => {
     });
   });
 
+  it("marks needs_input sessions opened, and a later hook event re-brightens even without a state transition", async () => {
+    let stored: SessionRecord = runningSession({ id: "api-1" });
+    readSessionMock.mockImplementation(() => stored);
+    writeSessionMock.mockImplementation((_dataDir, next) => {
+      stored = next;
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
+    mockClaudeJsonlState("needs_input");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("needs_input");
+    expect(first.hasUnseenAttention).toBe(true);
+
+    vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    const opened = await service.markOpened("api-1");
+    expect(stored.lastOpenedAt).toBe("2026-03-18T10:05:00.000Z");
+    expect(opened.hasUnseenAttention).toBe(false);
+
+    // Same needs_input state, no new activity yet: stays seen/dimmed.
+    vi.setSystemTime(new Date("2026-03-18T10:05:30.000Z"));
+    const stillSeen = await service.get("api-1");
+    expect(stillSeen.state).toBe("needs_input");
+    expect(stillSeen.hasUnseenAttention).toBe(false);
+
+    // A follow-up hook event arrives (e.g. another question) while the status
+    // string stays needs_input the whole time: this must re-brighten.
+    vi.setSystemTime(new Date("2026-03-18T10:06:00.000Z"));
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:06:00.000Z"));
+    const later = await service.get("api-1");
+    expect(later.state).toBe("needs_input");
+    expect(later.hasUnseenAttention).toBe(true);
+  });
+
+  it("renders needs_input sessions unseen after a restart when no lastOpenedAt has been recorded", async () => {
+    // Simulates the daemon-restart case: in-memory stateHistory is empty and
+    // no lastOpenedAt has ever been persisted for this session.
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    mockClaudeJsonlState("needs_input");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+    expect(view.state).toBe("needs_input");
+    expect(view.hasUnseenAttention).toBe(true);
+  });
+
+  it("never marks hasUnseenAttention for non-needs_input states, opened or not", async () => {
+    for (const [status, jsonlState] of [
+      ["running", "working"],
+      ["running", "waiting"],
+      ["stopped", undefined],
+      ["errored", undefined],
+    ] as const) {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1", status }));
+      if (jsonlState) {
+        mockClaudeJsonlState(jsonlState);
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).not.toBe("needs_input");
+      expect(view.hasUnseenAttention).toBe(false);
+      service.dispose();
+    }
+  });
+
   it("trusts hook working state for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

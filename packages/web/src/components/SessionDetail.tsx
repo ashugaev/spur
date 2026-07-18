@@ -1482,6 +1482,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const openedMarkerRef = useRef<string | null>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
   useEffect(() => {
@@ -1582,6 +1583,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadSession]);
+
+  useEffect(() => {
+    if (!session) return;
+    if (session.hasUnseenAttention !== true) return;
+    const marker = `${session.id}:${session.state}:${session.lastActivityAt}`;
+    if (openedMarkerRef.current === marker) return;
+    openedMarkerRef.current = marker;
+    void (async () => {
+      try {
+        await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+          method: "POST",
+          cache: "no-store",
+        });
+        await loadSession();
+      } catch {
+        openedMarkerRef.current = null;
+      }
+    })();
+  }, [
+    loadSession,
+    session?.hasUnseenAttention,
+    session?.id,
+    session?.lastActivityAt,
+    session?.state,
+    sessionId,
+  ]);
 
   const loadConversation = useCallback(async () => {
     if (!session || session.agent !== "claude") {

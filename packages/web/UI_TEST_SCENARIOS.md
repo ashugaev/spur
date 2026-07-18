@@ -72,6 +72,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
 - Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
 - Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
+- Rows with unopened `Needs Input` attention render the title in a brighter tone than once-viewed `Needs Input` rows; opening the session detail or terminal dims it, and any new hook event re-brightens it. Other states (`working`, `idle`, `waiting`, `stopped`, `error`) are unaffected by viewed state.
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 

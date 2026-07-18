@@ -248,8 +248,10 @@ export interface SpurSessionView {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -418,8 +420,10 @@ export interface DashboardSession {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -484,8 +488,10 @@ export function toDashboardSession(
     tmuxSession: session.tmuxSession ?? null,
     status: session.status,
     state: session.state,
+    hasUnseenAttention: session.hasUnseenAttention,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    lastOpenedAt: session.lastOpenedAt,
     lastActivityAt: session.lastActivityAt,
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,

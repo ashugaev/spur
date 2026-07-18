@@ -774,6 +774,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`POST /sessions/:id/opened` persists `lastOpenedAt`, and session views expose `hasUnseenAttention` only when the current state is `needs_input` and the session's last activity is newer than `lastOpenedAt` (no in-memory state-history dependency, so a daemon restart with no recorded `lastOpenedAt` renders bright, not dimmed).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest entries.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
@@ -2505,7 +2513,10 @@
     "section": "D3: Session rows render with correct columns",
     "scenario": "Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text",
     "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "testFiles": [
+      "packages/web/tests/dashboard.spec.ts",
+      "packages/web/tests/session-detail.spec.ts"
+    ],
     "ciJob": "playwright"
   },
   {
@@ -2536,6 +2547,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
     "scenario": "Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Rows with unopened `Needs Input` attention render the title in a brighter tone than once-viewed `Needs Input` rows; opening the session detail or terminal dims it, and any new hook event re-brightens it. Other states (`working`, `idle`, `waiting`, `stopped`, `error`) are unaffected by viewed state.",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"

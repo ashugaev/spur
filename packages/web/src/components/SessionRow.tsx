@@ -228,6 +228,13 @@ export function SessionRow({
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+  const isAttentionState = session.state === "needs_input";
+  const hasSeenAttention = isAttentionState && session.hasUnseenAttention === false;
+  const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
+  const titleColor =
+    isAttentionState && !hasSeenAttention
+      ? "text-[var(--color-text-primary)]"
+      : "text-[var(--color-text-secondary)]";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));
@@ -235,7 +242,9 @@ export function SessionRow({
 
   return (
     <DataRow>
-      <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
+      <span
+        className={`hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline ${attentionTextOpacity}`}
+      >
         {session.projectName}
       </span>
 
@@ -279,7 +288,7 @@ export function SessionRow({
       />
 
       <Link
-        className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline ${attentionTextOpacity}`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
@@ -299,7 +308,9 @@ export function SessionRow({
         </span>
       ) : null}
 
-      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
+      <span
+        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
+      >
         {session.branch}
       </span>
 

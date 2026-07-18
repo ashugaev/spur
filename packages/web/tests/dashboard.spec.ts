@@ -602,6 +602,7 @@ test.describe("D3: Session rows render with correct columns", () => {
     await page.goto("/");
     const link = page.getByRole("link", { name: "Row test session" });
     await expect(link).toBeVisible();
+    await expect(link).toHaveCSS("opacity", "1");
     const href = await link.getAttribute("href");
     expect(href).toContain("row-test-1");
   });
@@ -731,6 +732,24 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel).toHaveCount(0);
     await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
     await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
+  });
+
+  test("attention row text dims when terminal opens", async ({ page }) => {
+    const session = makeNeedsInputSession({
+      id: "unopened-needs-input-1",
+      prompt: "Needs input for review",
+      hasUnseenAttention: true,
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const titleLink = page.getByRole("link", { name: "Needs input for review" });
+    await expect(titleLink).toHaveCSS("opacity", "1");
+    await page
+      .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })
+      .click();
+
+    await expect(titleLink).toHaveCSS("opacity", "0.7");
   });
 });
 
@@ -3017,7 +3036,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await page.getByRole("link", { name: session.prompt }).first().click();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
-    await page.getByRole("link", { name: /back/i }).click();
+    await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
     await expect(page.getByText("Loading sessions...")).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
