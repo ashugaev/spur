@@ -2393,6 +2393,12 @@ projects:
     );
   });
 
+  it("does not enable codex fast mode for the sp project", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+
+    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'model_reasoning_effort="high"']);
+  });
+
   it("rejects invalid trigger spawn selfDestruct config", async () => {
     const configPath = await writeConfig(`
 projects:
