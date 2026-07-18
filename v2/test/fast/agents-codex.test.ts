@@ -717,7 +717,10 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const content = writeCall?.[1] as string;
     const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
     expect(count).toBe(1);
-    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://127.0.0.1:8742/mcp"');
+    // Client-facing URL must use "localhost", not the bare IP: @playwright/mcp's
+    // DNS-rebinding protection rejects "127.0.0.1:<port>" with HTTP 403.
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).not.toContain('url = "http://127.0.0.1:8742/mcp"');
   });
 
   it("strips a pre-existing inherited playwright table and preserves unrelated servers", async () => {
@@ -734,7 +737,8 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
     expect(count).toBe(1);
     expect(content).not.toContain('args = ["@playwright/mcp"]');
-    expect(content).toContain('url = "http://127.0.0.1:8742/mcp"');
+    expect(content).toContain('url = "http://localhost:8742/mcp"');
+    // The unrelated server's URL is preserved verbatim (not rewritten).
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 
