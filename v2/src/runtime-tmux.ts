@@ -210,7 +210,15 @@ function getFleetPaneSnapshot(): Promise<Map<string, FleetPaneEntry>> {
   });
 }
 
-export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
+// `fresh` busts the shared fleet-pane cache before reading — same rationale
+// as tmuxSessionExists's/isProcessRunningInTmux's `fresh`.
+export async function tmuxPaneDead(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
   const panes = await getFleetPaneSnapshot();
   return panes.get(sessionName)?.activePaneDead ?? true;
 }

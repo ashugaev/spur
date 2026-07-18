@@ -8178,15 +8178,25 @@ export class SessionService {
     };
   }
 
+  // `fresh` busts the fleet caches before each read so the whole snapshot is
+  // a genuinely independent re-sample, not a replay of whatever the last
+  // ~2s tick saw. Needed by reconcileUnexpectedStop's confirmation re-read —
+  // without it, a transient tmux blip cached on the first check would just
+  // be read again 1s later, agreeing with itself and marking a live session
+  // stopped.
   private async readRuntimeSnapshot(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession)) : false;
+    const fresh = options?.fresh ?? false;
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession, { fresh });
+    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession, { fresh })) : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
-        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+            fresh,
+          })
         : false;
     return {
       runtimeAlive,
@@ -8426,7 +8436,11 @@ export class SessionService {
         return { session, runtime };
       }
       await sleep(PIPELINE_POLL_INTERVAL_MS);
-      confirmedRuntime = await this.readRuntimeSnapshot(session);
+      // fresh:true — an independent re-sample, not a replay of the same
+      // ~2s-TTL cached snapshot the first check above just read. Otherwise a
+      // single transient tmux/list-sessions blip would agree with itself on
+      // both reads and mark a genuinely live session stopped.
+      confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
         confirmedRuntime.runtimeAlive &&
         confirmedRuntime.paneUsable &&
