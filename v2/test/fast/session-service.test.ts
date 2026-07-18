@@ -16356,6 +16356,111 @@ describe("SessionService", () => {
     });
   });
 
+  describe("orphaned tmux reaper", () => {
+    function seedReaperSession(overrides: Partial<SessionRecord> = {}): Map<string, SessionRecord> {
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        ...overrides,
+      });
+      return sessions;
+    }
+
+    it("kills orphaned tmux for a completed session whose agent process is not running", async () => {
+      seedReaperSession({ status: "completed" });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+      expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1", { fresh: true });
+      expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.any(Array),
+        { fresh: true },
+      );
+      service.dispose();
+    });
+
+    // "stopped" is deliberately not used here: reconcileStaleStoppedSession
+    // (existing logic, unrelated to the reaper) already self-heals a
+    // stopped-but-actually-alive session back to "running" on the very next
+    // enrich tick, racing ahead of the reaper and flipping its status out of
+    // REAPABLE_SESSION_STATUSES before the assertion. "killed" has no such
+    // self-heal path, so it isolates the reaper's own live-under-terminal
+    // safety branch.
+    it("does not kill a killed session whose agent process is still alive, and logs the anomaly", async () => {
+      seedReaperSession({ status: "killed" });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
+        ),
+      ).toBe(true);
+      service.dispose();
+    });
+
+    it("never touches a running session's tmux", async () => {
+      seedReaperSession({ status: "running" });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("skips a terminal session paused manually (stopReason manual_pause)", async () => {
+      seedReaperSession({ status: "stopped", stopReason: "manual_pause" });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("reaps an orphaned sidecar tmux under a completed session", async () => {
+      seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      service.dispose();
+    });
+  });
+
   describe("project create/delete", () => {
     let projectDir: string;
 
