@@ -2970,7 +2970,10 @@ projects:
         ) as ServiceInstanceView,
       {
         timeoutMs: 20_000,
-        accept: (value) => value.runtimeAlive === false,
+        // `remain-on-exit` now keeps the tmux session alive with a dead pane
+        // after the command finishes, so `runtimeAlive` (tmux session exists)
+        // stays true by design — poll on the pane-aware `state` field instead.
+        accept: (value) => value.state === "stopped" || value.state === "error",
       },
     );
     expect(["stopped", "error"]).toContain(stopped.state);

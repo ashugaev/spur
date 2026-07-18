@@ -274,9 +274,19 @@ export async function createTmuxCommandSession(input: {
   launchCommand: string;
   env?: Record<string, string>;
 }): Promise<void> {
-  const sessionTarget = exactSessionTarget(input.sessionName);
-  // `bash` so the exec builtin accepts `VAR=value cmd` assignments (dash rejects them).
-  const shellCommand = `bash -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
+  const paneTarget = exactPaneTarget(input.sessionName);
+  // Wrap in `sh -lc` without `exec` so shell builtins (cd, set, export, ...)
+  // in the project's sidecar command work. With `exec`, sh tries to exec the
+  // first token as a binary and a builtin-led command like `cd front && ...`
+  // dies instantly with "exec: cd: not found".
+  const shellCommand = `sh -lc ${shellEscape(input.launchCommand)}`;
+
+  // Two-step launch so `remain-on-exit on` is set BEFORE the user command
+  // runs. If we pass the shell-command directly to `new-session`, a command
+  // that crashes on first line (bad PATH, missing binary, exec-on-builtin)
+  // tears the pane down before the pane option can land — making the failure
+  // invisible. `remain-on-exit` is a pane option, so set it with `-p` on the
+  // pane we are about to respawn.
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
@@ -288,14 +298,9 @@ export async function createTmuxCommandSession(input: {
     "-c",
     input.cwd,
     ...buildEnvArgs(input.env),
-    shellCommand,
   ]);
-  await sleep(100);
-  try {
-    await tmux("set-option", "-t", sessionTarget, "remain-on-exit", "on");
-  } catch {
-    // Best effort only. The service session is already live at this point.
-  }
+  await tmux("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
+  await tmux("respawn-pane", "-k", "-t", paneTarget, shellCommand);
 }
 
 async function pasteLiteral(

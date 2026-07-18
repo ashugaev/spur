@@ -299,6 +299,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound
 - `sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port
 - Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released
+- `createTmuxCommandSession` wraps `sh -lc <cmd>` without `exec` (so builtins like `cd` work) and sets the pane option `remain-on-exit on` BEFORE respawning the launch command, so a crash on first line stays observable
 
 **Tier: runtime integration**
 
