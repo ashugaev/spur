@@ -1,5 +1,5 @@
 import { gh } from "../gh.js";
-import { readCommentSeenRegistry, recordCommentSeen } from "../metadata.js";
+import { readCommentSeenRegistry } from "../metadata.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -29,6 +29,11 @@ const FAILING_GITHUB_CI_STATES = new Set([
 ]);
 const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
 
+// Review states whose body is unsolicited feedback worth surfacing. APPROVED is
+// intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
+// actionable.
+const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+
 export function reviewCommentSeenKey(id: number | string): string {
   return `review-comment:${id}`;
 }
@@ -56,6 +61,7 @@ type GitHubPrStatusSummary = GitHubPrSummary & {
 type ReviewEntry = {
   id?: number | string | null;
   state?: string | null;
+  body?: string | null;
   user?: { login?: string | null } | null;
 };
 
@@ -308,7 +314,7 @@ async function fetchReviewSignals(
   return signals;
 }
 
-async function fetchApprovalSignals(
+async function fetchReviewSummarySignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
@@ -317,19 +323,40 @@ async function fetchApprovalSignals(
     worktreePath,
     (page) => `repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
   );
-  const seen = new Set<string>();
+  const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
-    if (review.state !== "APPROVED") continue;
     const login = review.user?.login ?? null;
-    const identity = login ?? `deleted-user-${String(review.id ?? "")}`;
-    if (seen.has(identity)) continue;
-    seen.add(identity);
-    signals.push({
-      key: `approved:${identity}`,
-      kind: "approved",
-      text: `${login ?? "A former user"} approved this PR.`,
-    });
+    // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
+    // body (no inline comments) is otherwise invisible: it is not an issue comment,
+    // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
+    // the body as a comment signal, deduped by review id through the persisted snapshot
+    // (same path as inline review comments — never marked seen before delivery).
+    //
+    // Restricted to the two unsolicited-feedback states. APPROVED bodies are excluded
+    // so the approval stays conveyed only by the baseline-suppressed `approved`
+    // lifecycle signal; emitting a non-lifecycle `comment` for it would re-surface a
+    // stale, pre-existing approval on a session's first poll. DISMISSED/PENDING are
+    // excluded as not-actionable. State is kept out of the dedup-bearing text so a later
+    // transition (e.g. dismissal) cannot re-fire the same review id.
+    const body = typeof review.body === "string" ? review.body.trim() : "";
+    if (body && REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(review.state))) {
+      signals.push({
+        key: `review:${String(review.id ?? "")}`,
+        kind: "comment",
+        text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
+      });
+    }
+    if (review.state === "APPROVED") {
+      const identity = login ?? `deleted-user-${String(review.id ?? "")}`;
+      if (approvedIdentities.has(identity)) continue;
+      approvedIdentities.add(identity);
+      signals.push({
+        key: `approved:${identity}`,
+        kind: "approved",
+        text: `${login ?? "A former user"} approved this PR.`,
+      });
+    }
   }
   return signals;
 }
@@ -338,32 +365,23 @@ async function fetchIssueCommentSignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
 ): Promise<ReviewSignal[]> {
   const comments = await fetchPagedArray<IssueComment>(
     worktreePath,
     (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
   );
-  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
-  const signals: ReviewSignal[] = [];
-  const emittedIds: string[] = [];
-  for (const comment of comments) {
-    const id = String(comment.id);
-    if (seen.has(id)) continue;
+  // Dedup is handled by the persisted snapshot diff, not by marking comments seen
+  // here. Recording seen at generation time dropped the comment from the next poll's
+  // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
+  // at first delivery — silently losing the comment. Mirror the inline-comment path.
+  return comments.map((comment) => {
     const author = comment.user?.login ?? "unknown";
-    signals.push({
-      key: `comment:${id}`,
+    return {
+      key: `comment:${String(comment.id)}`,
       kind: "comment",
       text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    });
-    emittedIds.push(id);
-  }
-  if (emittedIds.length > 0) {
-    recordCommentSeen(dataDir, projectId, sourceId, emittedIds);
-  }
-  return signals;
+    };
+  });
 }
 
 async function collectSignals(
@@ -386,17 +404,10 @@ async function collectSignals(
       ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
       : Promise.resolve([]),
     pr.repo
-      ? fetchIssueCommentSignals(
-          session.worktreePath,
-          pr.repo,
-          pr.number,
-          dataDir,
-          projectId,
-          sourceId,
-        )
+      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
       : Promise.resolve([]),
     pr.repo && pr.state !== "MERGED" && pr.state !== "CLOSED"
-      ? fetchApprovalSignals(session.worktreePath, pr.repo, pr.number)
+      ? fetchReviewSummarySignals(session.worktreePath, pr.repo, pr.number)
       : Promise.resolve([]),
   ]);
 

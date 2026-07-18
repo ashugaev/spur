@@ -5,11 +5,11 @@ import type { ProjectConfig, SourceConfig } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 function githubSource(): SourceConfig {
-  return { type: "github", runOnStart: false, intervalMs: 60_000 };
+  return { type: "github", runOnStart: false, intervalMs: 60_000, emitExisting: false };
 }
 
 function gitlabSource(): SourceConfig {
-  return { type: "gitlab", runOnStart: false, intervalMs: 60_000 };
+  return { type: "gitlab", runOnStart: false, intervalMs: 60_000, emitExisting: false };
 }
 
 function project(sources: Record<string, SourceConfig>): ProjectConfig {
@@ -18,9 +18,11 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
     defaultBranch: "main",
     sessionPrefix: "api",
     worktree: true,
+    restoreAfterReboot: false,
     symlinks: [],
     sidecars: {},
     sources,
+    backlog: {},
     triggers: {},
   };
 }

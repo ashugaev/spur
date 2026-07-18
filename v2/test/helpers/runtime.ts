@@ -4,18 +4,23 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
-import { createTempDir, execFileAsync, pollUntil } from "./common.js";
+import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
 export const CLI_PATH = join(V2_DIR, "dist/cli.js");
+// Same config the daemon loads in production. The bootstrap session cold-starts
+// the isolated tmux server, so it must apply `set -g status off` server-globally
+// here; otherwise later sessions inherit tmux's default `status on`.
+const TMUX_CONFIG_PATH = join(V2_DIR, "tmux.conf");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
 
-function setActiveTmuxSocketName(socketName: string | undefined): void {
+export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
   if (activeTmuxSocketName !== next) {
     tmuxBootstrapReady = false;
@@ -23,8 +28,13 @@ function setActiveTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = next;
 }
 
-function withTmuxSocket(args: string[]): string[] {
-  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+export function withTmuxSocket(args: string[]): string[] {
+  if (activeTmuxSocketName === null) {
+    throw new Error(
+      "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
+    );
+  }
+  return ["-L", activeTmuxSocketName, ...args];
 }
 
 export interface FakeGhState {
@@ -128,6 +138,10 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
     exit 0
   fi
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else
@@ -135,8 +149,24 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
   fi
   exit 0
 fi
+# Real claude is a TUI that treats Ctrl-C as "cancel current input", not
+# "kill the process" — an interrupt-delivered trigger send (e.g. a restored
+# session's redelivered merge-conflict alert) relies on the agent surviving
+# the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
+# action kills the script, so the interrupt drops the process instead of
+# just clearing its input line, and the send never reaches the read loop.
+trap '' INT
 mode="launch"
 resume_id=""
+pinned_session_id=""
+args=("$@")
+for ((index = 0; index < \${#args[@]}; index++)); do
+  if [[ "\${args[$index]}" == "--session-id" ]]; then
+    next_index=$((index + 1))
+    pinned_session_id="\${args[$next_index]:-}"
+    break
+  fi
+done
 encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
 session_dir="$HOME/.claude/projects/$encoded_path"
 mkdir -p "$session_dir"
@@ -149,7 +179,15 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Real claude names its transcript after --session-id when the caller pins
+  # one (Spur passes this on every launch); mirror that so sessionFileForId
+  # can find it by the pinned id instead of falling through to a fresh launch.
+  # pinned_session_id is parsed once above, before the resume/launch branch.
+  if [[ -n "$pinned_session_id" ]]; then
+    session_uuid="$pinned_session_id"
+  else
+    session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
@@ -179,6 +217,10 @@ jsonl_append() {
     exit 0
   fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$preflight_input" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"
@@ -267,11 +309,21 @@ if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
 fi`
         : `if [[ "\${1:-}" == "-p" || "\${1:-}" == "--print" ]]; then
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else
     printf 'NO_PROJECT_RULES\n'
   fi
+  exit 0
+fi
+if [[ "\${1:-}" == "models" ]]; then
+  printf 'auto - Auto\n'
+  printf 'composer-2.5 - Composer 2.5 (current)\n'
+  printf 'composer-2.5-fast - Composer 2.5 Fast (default)\n'
   exit 0
 fi
 cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
@@ -649,10 +701,13 @@ async function startTmuxServer(): Promise<void> {
 
   if (!tmuxBootstrapCleanupRegistered) {
     tmuxBootstrapCleanupRegistered = true;
+    const socketName = activeTmuxSocketName;
     process.once("exit", () => {
-      spawnSync("tmux", ["kill-session", "-t", TMUX_BOOTSTRAP_SESSION], {
-        stdio: "ignore",
-      });
+      // The bootstrap session lives on the isolated socket; tearing down the
+      // whole server is the safety net for any leaked context.
+      if (socketName) {
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+      }
     });
   }
 
@@ -665,20 +720,20 @@ async function startTmuxServer(): Promise<void> {
   }
 
   try {
-    await execFileAsync(
-      "tmux",
-      withTmuxSocket([
-        "new-session",
-        "-d",
-        "-s",
-        TMUX_BOOTSTRAP_SESSION,
-        "-x",
-        "1",
-        "-y",
-        "1",
-        "sleep 3600",
-      ]),
-    );
+    await execFileAsync("tmux", [
+      ...withTmuxSocket([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      TMUX_BOOTSTRAP_SESSION,
+      "-x",
+      "1",
+      "-y",
+      "1",
+      "sleep 3600",
+    ]);
     tmuxBootstrapReady = true;
   } catch {
     // Best effort only.
@@ -686,8 +741,10 @@ async function startTmuxServer(): Promise<void> {
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
+  // Version probe is socket-independent and runs before any isolated socket is
+  // active, so it must not go through the withTmuxSocket guard.
   try {
-    await execFileAsync("tmux", withTmuxSocket(["-V"]));
+    await execFileAsync("tmux", ["-V"]);
     return true;
   } catch {
     return false;
@@ -695,7 +752,6 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
-  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
@@ -730,10 +786,13 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
   }
 }
 
-export async function readTmuxOption(sessionName: string, option: string): Promise<string> {
+// Resolves the effective value of a tmux format variable for a session, honoring
+// global defaults (e.g. `set -g status off` in tmux.conf) that `show-options`
+// without `-g` does not surface at the session scope.
+export async function readTmuxStatus(sessionName: string): Promise<string> {
   const { stdout } = await execFileAsync(
     "tmux",
-    withTmuxSocket(["show-options", "-t", sessionName, option]),
+    withTmuxSocket(["display-message", "-t", sessionName, "-p", "#{status}"]),
   );
   return stdout.trim();
 }
@@ -754,6 +813,39 @@ export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
 
 export async function sendKeysToTmux(sessionName: string, ...keys: string[]): Promise<void> {
   await execFileAsync("tmux", withTmuxSocket(["send-keys", "-t", sessionName, ...keys]));
+}
+
+// Stops a daemon by pid and awaits its actual exit before returning. Teardown
+// must not fire-and-forget: the daemon's async shutdown can otherwise still hold
+// its port / write rootDir while the next test allocates a port, causing
+// order-dependent EADDRINUSE / info-poll flake. Bounded graceful window keeps us
+// under the afterEach hookTimeout, with SIGKILL escalation as a backstop.
+export async function stopDaemonByPid(pid?: number): Promise<void> {
+  if (!pid) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const stillAlive = await pollUntil(() => processExists(pid), {
+    timeoutMs: 10_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
+  if (stillAlive === false) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  const killed = await pollUntil(() => processExists(pid), {
+    timeoutMs: 5_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
+  if (killed !== false) {
+    throw new Error(`stopDaemonByPid: pid ${pid} still alive after SIGKILL`);
+  }
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {
@@ -811,6 +903,7 @@ export async function createRuntimeTestContext(
   port: number,
   options?: { useFakeTools?: boolean },
 ): Promise<RuntimeTestContext> {
+  _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
   const { repoDir, originDir } = await createGitRepo();
   const dataDir = join(rootDir, "data");
@@ -849,6 +942,13 @@ export async function createRuntimeTestContext(
       : {}),
   };
 
+  // Arm the isolated tmux socket eagerly so every tmux helper targets `-L
+  // spur-<port>` and never the host's default server. Only the fake-tools path
+  // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
+  if (useFakeTools) {
+    setActiveTmuxSocketName(`spur-${port}`);
+  }
+
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
     await writeFile(configPath, content, "utf8");
@@ -880,7 +980,6 @@ export async function createRuntimeTestContext(
   };
 
   const startDaemon = async (configPath: string) => {
-    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--config", configPath, "daemon", "start", "--json"],
@@ -906,31 +1005,18 @@ export async function createRuntimeTestContext(
       {
         timeoutMs: 20_000,
         accept: (value): value is RuntimeInfo => value !== null,
+        label: "daemon info",
       },
     );
-    if (!info) {
-      throw new Error("Timed out waiting for daemon info");
-    }
-
-    return { child, stdout, info };
+    // pollUntil throws before returning null, so info is guaranteed non-null here.
+    return { child, stdout, info: info as RuntimeInfo };
   };
 
   const stopDaemon = async (
     child: ChildProcessByStdio<null, Readable, Readable>,
   ): Promise<void> => {
     if (child.exitCode !== null || child.killed) return;
-    child.kill("SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        child.once("exit", () => resolve());
-      }),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          child.kill("SIGKILL");
-          resolve();
-        }, 10_000);
-      }),
-    ]);
+    await stopDaemonByPid(child.pid);
   };
 
   const readAgentLog = async (sessionId: string): Promise<string> => {
@@ -943,6 +1029,13 @@ export async function createRuntimeTestContext(
   };
 
   const cleanup = async (): Promise<void> => {
+    _resetGhPathCacheForTests();
+    if (useFakeTools) {
+      // Tear down the isolated tmux server and re-arm the guard so the next
+      // context in this file must activate its own socket.
+      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      setActiveTmuxSocketName(null);
+    }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

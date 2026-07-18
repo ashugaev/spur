@@ -13,10 +13,7 @@ export async function generateMetadata({
   params,
 }: Pick<SessionPageProps, "params">): Promise<Metadata> {
   const resolvedParams = await params;
-
-  return {
-    title: decodeRouteParam(resolvedParams.id),
-  };
+  return { title: decodeRouteParam(resolvedParams.id) };
 }
 
 export default async function SessionPage({ params, searchParams }: SessionPageProps) {

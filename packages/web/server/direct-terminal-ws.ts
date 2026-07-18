@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
 import { homedir, userInfo } from "node:os";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { findTmux, tmuxSessionExists, tmuxSocketArgs, validateSessionId } from "./tmux-utils.js";
 
@@ -52,16 +53,6 @@ interface InputMessage {
   data?: string;
 }
 
-function parsePort(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
-}
-
-function readHost(value: string | undefined, fallback: string): string {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : fallback;
-}
-
 function readSessionId(urlValue: string | undefined): string | null {
   const url = new URL(urlValue ?? "/", "ws://127.0.0.1");
   const sessionId = url.searchParams.get("session")?.trim();
@@ -80,20 +71,39 @@ function createTerminalEnvironment(): Record<string, string> {
   };
 }
 
-export function createDirectTerminalServer(tmuxPath = findTmux()) {
-  const server = createServer((request, response) => {
-    if (request.url === "/health") {
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true }) + "\n");
+export const DIRECT_TERMINAL_WS_PATH = "/ws";
+
+type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+interface AttachOptions {
+  tmuxPath?: string;
+  /** Handles upgrades on paths other than `/ws` (e.g. Next HMR in dev). */
+  fallbackUpgrade?: UpgradeHandler;
+}
+
+export function attachDirectTerminalWebSocket(server: Server, options: AttachOptions = {}) {
+  const tmuxPath = options.tmuxPath ?? findTmux();
+  const wss = new WebSocketServer({ noServer: true });
+  const sessions = new Map<string, TerminalSession>();
+
+  // Single dispatcher owns all upgrade routing on this server: terminal traffic
+  // goes to the WS server, everything else is forwarded (dev HMR) or destroyed
+  // so stray Upgrade requests never leak a hanging socket.
+  const handleUpgrade: UpgradeHandler = (request, socket, head) => {
+    const { pathname } = new URL(request.url ?? "/", "ws://127.0.0.1");
+    if (pathname === DIRECT_TERMINAL_WS_PATH) {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+      });
       return;
     }
-
-    response.writeHead(404);
-    response.end("Not found");
-  });
-
-  const wss = new WebSocketServer({ server, path: "/ws" });
-  const sessions = new Map<string, TerminalSession>();
+    if (options.fallbackUpgrade) {
+      options.fallbackUpgrade(request, socket, head);
+      return;
+    }
+    socket.destroy();
+  };
+  server.on("upgrade", handleUpgrade);
 
   wss.on("connection", (ws, request) => {
     if (!ptySpawn) {
@@ -120,7 +130,6 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
     try {
       const socketArgs = tmuxSocketArgs();
       execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
-      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "status", "off"]);
       // Bind scroll-up to enter copy mode so wheel scrolls through history.
       execFileSync(tmuxPath, [
         ...socketArgs,
@@ -215,30 +224,15 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
   });
 
   return {
-    server,
     wss,
     close() {
+      server.off("upgrade", handleUpgrade);
       for (const session of sessions.values()) {
         session.ws.close();
         session.pty.kill();
       }
       sessions.clear();
       wss.close();
-      server.close();
     },
   };
-}
-
-const port = parsePort(
-  process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
-  14801,
-);
-const host = readHost(process.env["DIRECT_TERMINAL_BIND_HOST"], "127.0.0.1");
-const shouldListen = import.meta.url === new URL(`file://${process.argv[1]}`).href;
-
-if (shouldListen) {
-  const { server } = createDirectTerminalServer();
-  server.listen(port, host, () => {
-    process.stdout.write(`[direct-terminal] listening on ${host}:${port}\n`);
-  });
 }

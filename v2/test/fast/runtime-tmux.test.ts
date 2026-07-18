@@ -23,9 +23,16 @@ vi.mock("node:timers/promises", () => ({
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
 
 describe("runtime-tmux", () => {
+  const originalSystemdScope = process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+
   afterEach(() => {
     execFileAsyncMock.mockReset();
     sleepMock.mockReset().mockResolvedValue(undefined);
+    if (originalSystemdScope === undefined) {
+      delete process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+    } else {
+      process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = originalSystemdScope;
+    }
     vi.resetModules();
   });
 
@@ -63,71 +70,146 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
-  it("hides the tmux status bar when no slot title exists", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+  it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
 
-    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
 
-    await syncTmuxStatus("api-1", undefined);
-
-    const statusLeftCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
-    );
-    expect(statusLeftCall?.[1]?.at(-1)).toBe("");
-
-    const statusCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status"),
-    );
-    expect(statusCall?.[1]?.at(-1)).toBe("off");
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
-    );
-    expect(statusRightCall?.[1]?.at(-1)).toBe("");
-    expect(execFileAsyncMock.mock.calls).toContainEqual([
-      "tmux",
-      ["unbind-key", "-n", "MouseUp1StatusRight"],
-    ]);
-  });
-
-  it("renders only the slot title in tmux status", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
-
-    await syncTmuxStatus("api-1", {
-      title: "Investigate session display cleanup",
-      links: [
-        { label: "pr", url: "https://github.com/acme/api/pull/42" },
-        { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
-      ],
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
     });
 
-    const statusLeftCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
-    );
-    if (!statusLeftCall) {
-      throw new Error("Expected syncTmuxStatus to set status-left");
+    const firstCall = execFileAsyncMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected createTmuxSession to invoke systemd-run");
     }
-    const [, leftArgs] = statusLeftCall;
-    expect(leftArgs.at(-1)).toContain("Investigate session display cleanup");
-    expect(leftArgs.at(-1)).not.toContain("api-1");
-
-    const statusCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status"),
-    );
-    if (!statusCall) {
-      throw new Error("Expected syncTmuxStatus to set status");
-    }
-    const [, args] = statusCall;
-    expect(args.at(-1)).toBe("on");
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, setArgs]) => setArgs[0] === "set-option" && setArgs.includes("status-right"),
-    );
-    expect(statusRightCall?.[1]?.at(-1)).toBe("");
-    expect(execFileAsyncMock.mock.calls).toContainEqual([
+    expect(firstCall[0]).toBe("systemd-run");
+    expect(firstCall[1].slice(0, 6)).toEqual([
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
       "tmux",
-      ["unbind-key", "-n", "MouseUp1StatusRight"],
+      "-f",
     ]);
+    expect(firstCall[1]).toContain("new-session");
+    expect(execFileAsyncMock.mock.calls.some(([file]) => file === "tmux")).toBe(true);
+  });
+
+  it("falls back to direct tmux when auto systemd scope is unavailable", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("spawn systemd-run ENOENT"), { code: "ENOENT" });
+      }
+      return {
+        stdout: args.includes("new-session") ? "" : "ok",
+        stderr: "",
+      };
+    });
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
+    });
+
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+    const fallbackCall = execFileAsyncMock.mock.calls.find(
+      ([file, args]) => file === "tmux" && args.includes("new-session"),
+    );
+    expect(fallbackCall).toBeDefined();
+  });
+
+  it("warns once (not per call) when auto systemd scope falls back, and still falls back every time", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("Failed to connect to bus"), { code: 1 });
+      }
+      return {
+        stdout: args.includes("new-session") ? "" : "ok",
+        stderr: "",
+      };
+    });
+    const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    const session = {
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude" as const,
+    };
+    await createTmuxSession(session);
+    await createTmuxSession({ ...session, sessionName: "api-2" });
+
+    const killModeWarnings = stderrWriteSpy.mock.calls.filter(([chunk]) =>
+      /KillMode=process/.test(String(chunk)),
+    );
+    expect(killModeWarnings).toHaveLength(1);
+    const tmuxFallbackCalls = execFileAsyncMock.mock.calls.filter(
+      ([file, args]) => file === "tmux" && args.includes("new-session"),
+    );
+    expect(tmuxFallbackCalls).toHaveLength(2);
+
+    stderrWriteSpy.mockRestore();
+  });
+
+  it("fails when required systemd scope is unavailable", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "1";
+    execFileAsyncMock.mockImplementation(async (file) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("Failed to connect to bus"), { code: 1 });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxSession({
+        sessionName: "api-1",
+        cwd: "/tmp/worktree",
+        launchCommand: "claude --dangerously-skip-permissions",
+        agent: "claude",
+      }),
+    ).rejects.toThrow("Failed to connect to bus");
+    expect(execFileAsyncMock.mock.calls).toHaveLength(1);
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+  });
+
+  it("starts command sessions through a user systemd scope when auto is enabled", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxCommandSession({
+      sessionName: "api-1--dev",
+      cwd: "/tmp/worktree",
+      launchCommand: "pnpm dev",
+    });
+
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+    expect(execFileAsyncMock.mock.calls[0]?.[1]).toContain("new-session");
+  });
+
+  it("disables the tmux status bar in the Spur config", async () => {
+    const { readFileSync } = await import("node:fs");
+    const config = readFileSync(expectedConfigPath, "utf-8");
+    expect(config).toMatch(/^set -g status off$/m);
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {
@@ -229,6 +311,51 @@ describe("runtime-tmux", () => {
     const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
     expect(pasteIndex).toBeGreaterThan(-1);
     expect(enterIndex).toBeGreaterThan(pasteIndex);
+  });
+
+  it("wraps sidecar launch commands without `exec` and sets remain-on-exit before launch", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxCommandSession({
+      sessionName: "api-1--dev",
+      cwd: "/tmp/worktree",
+      launchCommand: "cd front && yarn start",
+    });
+
+    const calls = execFileAsyncMock.mock.calls;
+
+    const newSession = calls.find(([, args]) => args.includes("new-session"));
+    if (!newSession) throw new Error("expected new-session call");
+    const [, newSessionArgs] = newSession;
+    // new-session must NOT carry the user shell-command — otherwise a crash on
+    // the first line tears the session down before remain-on-exit lands.
+    expect(newSessionArgs.some((a) => typeof a === "string" && a.includes("sh -lc"))).toBe(false);
+    expect(newSessionArgs.some((a) => typeof a === "string" && a.includes("yarn start"))).toBe(
+      false,
+    );
+
+    const remainOnExitIndex = calls.findIndex(
+      ([, args]) => args[0] === "set-option" && args.includes("remain-on-exit"),
+    );
+    const respawnIndex = calls.findIndex(([, args]) => args[0] === "respawn-pane");
+    const newSessionIndex = calls.findIndex(([, args]) => args.includes("new-session"));
+
+    expect(remainOnExitIndex).toBeGreaterThan(newSessionIndex);
+    expect(respawnIndex).toBeGreaterThan(remainOnExitIndex);
+
+    // `remain-on-exit` is a pane option — requires `-p`.
+    const remainOnExitArgs = calls[remainOnExitIndex]?.[1] ?? [];
+    expect(remainOnExitArgs).toContain("-p");
+
+    const respawnArgs = calls[respawnIndex]?.[1] ?? [];
+    const respawnCommand = respawnArgs.at(-1);
+    expect(respawnCommand).toBe("sh -lc 'cd front && yarn start'");
+    // Regression: `exec cd ...` in dash fails with "exec: cd: not found".
+    expect(respawnCommand).not.toContain("exec cd");
+    expect(respawnCommand).not.toMatch(/sh -lc '?exec /);
+    expect(respawnArgs).toContain("-k");
   });
 
   it("keeps interrupt behavior before codex atomic send", async () => {

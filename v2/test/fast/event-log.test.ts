@@ -1,12 +1,26 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   appendEventLog,
   readEventLog,
   readSessionEventLog,
   eventLogPath,
+  sessionEventLogPath,
+  setEventLogConfig,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  buildUserInputLogEntry,
 } from "../../src/event-log.js";
 
 const tempDirs: string[] = [];
@@ -18,6 +32,11 @@ function makeTempDir(): string {
 }
 
 afterEach(() => {
+  setEventLogConfig({
+    hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
+    shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+    retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  });
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -58,6 +77,51 @@ describe("appendEventLog", () => {
     });
     const entries = readEventLog(dataDir);
     expect(entries[0]?.timestamp).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
+describe("buildUserInputLogEntry", () => {
+  it("trims text, preserves attachment names, and keeps caller metadata", () => {
+    expect(
+      buildUserInputLogEntry({
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "pr-watch",
+        triggerId: "send",
+        kind: "trigger_send_prompt",
+        source: "trigger",
+        text: "  fix it  ",
+        attachments: [{ id: "shot.png", name: "shot.png" }],
+        details: { eventName: "github:comment" },
+      }),
+    ).toEqual({
+      event: "session.input.received",
+      level: "info",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "pr-watch",
+      triggerId: "send",
+      message: "fix it",
+      details: {
+        eventName: "github:comment",
+        inputKind: "trigger_send_prompt",
+        source: "trigger",
+        text: "fix it",
+        attachments: [{ id: "shot.png", name: "shot.png" }],
+      },
+    });
+  });
+
+  it("skips empty input without attachments", () => {
+    expect(
+      buildUserInputLogEntry({
+        sessionId: "api-1",
+        projectId: "api",
+        kind: "send_message",
+        source: "send",
+        text: "   ",
+      }),
+    ).toBeNull();
   });
 });
 
@@ -169,5 +233,159 @@ describe("readSessionEventLog", () => {
     expect(entries).toHaveLength(3);
     expect(entries[0]?.message).toBe(`${filler}-4994`);
     expect(entries[2]?.message).toBe(`${filler}-4998`);
+  });
+});
+
+describe("rotation", () => {
+  it("rotates the active log when it exceeds the configured threshold", () => {
+    // ~120-byte lines; threshold 200 bytes forces rotation after a couple of writes.
+    setEventLogConfig({ hotBytes: 200, shardHotBytes: 200, retainArchives: 5 });
+    const dataDir = makeTempDir();
+    for (let i = 0; i < 6; i += 1) {
+      appendEventLog(dataDir, { event: `e${i}`, level: "info" });
+    }
+    const live = eventLogPath(dataDir);
+    expect(existsSync(`${live}.1.gz`)).toBe(true);
+    // Live file (if present) stayed under the threshold after the most recent rotation.
+    const liveSize = existsSync(live) ? readFileSync(live).length : 0;
+    expect(liveSize).toBeLessThanOrEqual(200);
+    // All written events are still readable across archive + live.
+    expect(readEventLog(dataDir)).toHaveLength(6);
+  });
+
+  it("gzips archives and prunes beyond retainArchives", () => {
+    setEventLogConfig({ hotBytes: 1, shardHotBytes: 1, retainArchives: 2 });
+    const dataDir = makeTempDir();
+    for (let i = 0; i < 8; i += 1) {
+      appendEventLog(dataDir, { event: `e${i}`, level: "info" });
+    }
+    const live = eventLogPath(dataDir);
+    expect(existsSync(`${live}.1.gz`)).toBe(true);
+    expect(existsSync(`${live}.2.gz`)).toBe(true);
+    // retainArchives=2 keeps only .1.gz and .2.gz.
+    expect(existsSync(`${live}.3.gz`)).toBe(false);
+    // Archive content is valid gzip.
+    expect(() => gunzipSync(readFileSync(`${live}.1.gz`))).not.toThrow();
+  });
+});
+
+describe("readSessionEventLog across shards", () => {
+  it("returns entries across archived and live shards", () => {
+    setEventLogConfig({ hotBytes: 1, shardHotBytes: 1, retainArchives: 5 });
+    const dataDir = makeTempDir();
+    for (let i = 0; i < 4; i += 1) {
+      appendEventLog(dataDir, { event: `e${i}`, level: "info", sessionId: "api-1" });
+    }
+    const entries = readSessionEventLog(dataDir, "api-1");
+    expect(entries.map((e) => e.event)).toEqual(["e0", "e1", "e2", "e3"]);
+  });
+
+  it("applies limit, scope, and name filters across shards", () => {
+    setEventLogConfig({ hotBytes: 1, shardHotBytes: 1, retainArchives: 5 });
+    const dataDir = makeTempDir();
+    appendEventLog(dataDir, { event: "session.spawn", level: "info", sessionId: "api-1" });
+    appendEventLog(dataDir, {
+      event: "service.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "BOOT",
+      details: { serviceId: "web" },
+    });
+    appendEventLog(dataDir, {
+      event: "sidecar.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "READY",
+      details: { sidecarName: "isolated-ui" },
+    });
+    appendEventLog(dataDir, {
+      event: "sidecar.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "OTHER",
+      details: { sidecarName: "other" },
+    });
+
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "runtime" })).toHaveLength(3);
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "service" })).toEqual([
+      expect.objectContaining({ event: "service.output", message: "BOOT" }),
+    ]);
+    expect(
+      readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" }),
+    ).toEqual([expect.objectContaining({ event: "sidecar.output", message: "READY" })]);
+    // limit keeps the most recent N across archives.
+    const limited = readSessionEventLog(dataDir, "api-1", 2);
+    expect(limited).toHaveLength(2);
+    expect(limited[1]?.message).toBe("OTHER");
+  });
+
+  it("falls back to global scan when shard dir absent", () => {
+    const dataDir = makeTempDir();
+    // Write the global log directly without producing a shard dir.
+    const line = (event: string): string =>
+      `${JSON.stringify({ timestamp: "t", event, level: "info", sessionId: "api-1" })}\n`;
+    writeFileSync(eventLogPath(dataDir), `${line("a")}${line("b")}`);
+    expect(existsSync(join(dataDir, "sessions", "api-1"))).toBe(false);
+    const entries = readSessionEventLog(dataDir, "api-1");
+    expect(entries.map((e) => e.event)).toEqual(["a", "b"]);
+  });
+});
+
+describe("readEventLog across archives", () => {
+  it("spans global live and gzipped archives", () => {
+    setEventLogConfig({ hotBytes: 1, shardHotBytes: 1, retainArchives: 5 });
+    const dataDir = makeTempDir();
+    for (let i = 0; i < 5; i += 1) {
+      appendEventLog(dataDir, { event: `e${i}`, level: "info" });
+    }
+    expect(existsSync(`${eventLogPath(dataDir)}.1.gz`)).toBe(true);
+    const entries = readEventLog(dataDir);
+    expect(entries.map((e) => e.event)).toEqual(["e0", "e1", "e2", "e3", "e4"]);
+  });
+});
+
+describe("gzip reads", () => {
+  it("gunzip read returns byte-identical lines", () => {
+    setEventLogConfig({ hotBytes: 1, shardHotBytes: 1, retainArchives: 5 });
+    const dataDir = makeTempDir();
+    const payloads = ["alpha", "βγδ unicode", "x".repeat(500)];
+    for (const message of payloads) {
+      appendEventLog(dataDir, { event: "service.output", level: "info", message });
+    }
+    const messages = readEventLog(dataDir).map((e) => e.message);
+    expect(messages).toEqual(payloads);
+  });
+
+  it("decompression stays memory bounded for large archives", () => {
+    // Moderate threshold so each archive holds many lines (input >> 64KiB across
+    // archives) while retainArchives keeps every shard for an ordered full read.
+    setEventLogConfig({ hotBytes: 50_000, shardHotBytes: 50_000, retainArchives: 500 });
+    const dataDir = makeTempDir();
+    const total = 10_000;
+    for (let i = 0; i < total; i += 1) {
+      appendEventLog(dataDir, { event: "service.output", level: "info", message: `m-${i}` });
+    }
+    const entries = readEventLog(dataDir);
+    expect(entries).toHaveLength(total);
+    expect(entries[0]?.message).toBe("m-0");
+    expect(entries[total - 1]?.message).toBe(`m-${total - 1}`);
+  });
+});
+
+describe("dual-write", () => {
+  it("appendEventLog dual-writes global and shard for entries with sessionId", () => {
+    const dataDir = makeTempDir();
+    appendEventLog(dataDir, { event: "a", level: "info", sessionId: "api-1" });
+    expect(existsSync(eventLogPath(dataDir))).toBe(true);
+    expect(existsSync(sessionEventLogPath(dataDir, "api-1"))).toBe(true);
+    expect(readEventLog(dataDir).map((e) => e.event)).toEqual(["a"]);
+    expect(readSessionEventLog(dataDir, "api-1").map((e) => e.event)).toEqual(["a"]);
+  });
+
+  it("appendEventLog writes only global for entries without sessionId", () => {
+    const dataDir = makeTempDir();
+    appendEventLog(dataDir, { event: "a", level: "info" });
+    expect(existsSync(eventLogPath(dataDir))).toBe(true);
+    expect(existsSync(join(dataDir, "sessions"))).toBe(false);
   });
 });

@@ -7,8 +7,11 @@ vi.mock("node:fs", () => ({
 }));
 
 vi.mock("node:fs/promises", () => ({
+  chmod: vi.fn(),
   mkdir: vi.fn(),
+  readFile: vi.fn(),
   readdir: vi.fn(),
+  rename: vi.fn(),
   stat: vi.fn(),
   writeFile: vi.fn(),
 }));
@@ -22,7 +25,7 @@ vi.mock("../../src/agents/worktree-path.js", () => ({
 }));
 
 import { existsSync } from "node:fs";
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
   buildCursorPlan,
@@ -30,6 +33,7 @@ import {
   buildCursorResumePlan,
   cursorCommand,
   cursorConfigDirForSession,
+  ensureCursorRestrictWritesConfig,
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "../../src/agents/cursor.js";
@@ -39,6 +43,9 @@ const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
 const mockStat = stat as ReturnType<typeof vi.fn>;
 const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
+const mockReadFile = readFile as ReturnType<typeof vi.fn>;
+const mockRename = rename as ReturnType<typeof vi.fn>;
+const mockChmod = chmod as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
 
 function cursorHash(path: string): string {
@@ -78,14 +85,19 @@ describe("cursorConfigDirForSession", () => {
 describe("buildCursorPlan", () => {
   it("returns the default launch plan", () => {
     const plan = buildCursorPlan("ship it");
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
     expect(plan.initialMessage).toBe("ship it");
     expect(plan.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
 
   it("adds --plan when requested", () => {
     const plan = buildCursorPlan("ship it", { planMode: true });
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan --model 'auto'");
+  });
+
+  it("adds --model when provided", () => {
+    const plan = buildCursorPlan("ship it", { model: "composer-2.5-fast" });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 });
 
@@ -101,6 +113,16 @@ describe("buildCursorResumePlan", () => {
   it("adds --plan when requested", () => {
     const plan = buildCursorResumePlan("chat-123", "agent", { planMode: true });
     expect(plan.launchCommand).toContain("--plan");
+  });
+
+  it("does not add --model", () => {
+    const plan = buildCursorResumePlan("chat-123", "agent");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("always includes --force --sandbox disabled", () => {
+    const plan = buildCursorResumePlan("chat-123", "agent");
+    expect(plan.launchCommand).toContain("--force --sandbox disabled");
   });
 });
 
@@ -153,6 +175,100 @@ describe("findCursorSessionId", () => {
     expect(mockReaddir).toHaveBeenCalledWith(
       `/tmp/spur-data/cursor/api-1/chats/${cursorHash("/worktree/path")}`,
     );
+  });
+});
+
+describe("ensureCursorRestrictWritesConfig", () => {
+  const worktreePath = "/repo/worktree";
+  const cursorConfigDir = "/tmp/spur-data/cursor/api-1";
+  const scriptPath = `${cursorConfigDir}/restrict-writes-hook.js`;
+  const hooksPath = `${worktreePath}/.cursor/hooks.json`;
+
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+    mockChmod.mockResolvedValue(undefined);
+    mockRename.mockResolvedValue(undefined);
+    mockExistsSync.mockReturnValue(false);
+  });
+
+  it("writes deny Write permissions into cli-config.json", async () => {
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+      permissions: { deny: string[] };
+    };
+    expect(content.permissions.deny).toEqual(["Write(**)"]);
+  });
+
+  it("materializes the guard script with mode 0o755", async () => {
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const scriptWriteCall = mockWriteFile.mock.calls.find((call) => call[0] === scriptPath);
+    expect(scriptWriteCall).toBeDefined();
+    expect(scriptWriteCall?.[1]).toContain("#!/usr/bin/env node");
+    expect(mockChmod).toHaveBeenCalledWith(scriptPath, 0o755);
+  });
+
+  it("merges a beforeShellExecution entry with an absolute script path and failClosed", async () => {
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue(JSON.stringify({ version: 1, hooks: { stop: ["build.sh"] } }));
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    expect(mockRename).toHaveBeenCalled();
+    const [tmpPath, destPath] = mockRename.mock.calls[0] as [string, string];
+    expect(tmpPath).not.toBe(hooksPath);
+    expect(destPath).toBe(hooksPath);
+    const written = mockWriteFile.mock.calls.find((call) => call[0] === tmpPath);
+    expect(written).toBeDefined();
+    const merged = JSON.parse(written?.[1] as string) as {
+      hooks: { stop: string[]; beforeShellExecution: Array<Record<string, unknown>> };
+    };
+    expect(merged.hooks.stop).toEqual(["build.sh"]);
+    expect(merged.hooks.beforeShellExecution).toEqual([
+      { command: scriptPath, timeout: 5, failClosed: true },
+    ]);
+  });
+
+  it("does not duplicate the entry on re-invocation", async () => {
+    let hooksJson = JSON.stringify({ version: 1, hooks: {} });
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockImplementation(async () => hooksJson);
+    mockRename.mockImplementation(async (from: string) => {
+      const written = mockWriteFile.mock.calls.find((call) => call[0] === from);
+      hooksJson = written?.[1] as string;
+    });
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const merged = JSON.parse(hooksJson) as {
+      hooks: { beforeShellExecution: Array<Record<string, unknown>> };
+    };
+    expect(merged.hooks.beforeShellExecution).toHaveLength(1);
+  });
+
+  it("preserves an existing stop array untouched", async () => {
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({ version: 1, hooks: { stop: ["build.sh", "auto-push.sh"] } }),
+    );
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const tmpPath = mockRename.mock.calls[0]?.[0] as string;
+    const written = mockWriteFile.mock.calls.find((call) => call[0] === tmpPath);
+    const merged = JSON.parse(written?.[1] as string) as { hooks: { stop: string[] } };
+    expect(merged.hooks.stop).toEqual(["build.sh", "auto-push.sh"]);
+  });
+
+  it("throws instead of clobbering an unparseable existing hooks.json", async () => {
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue("{not valid json");
+
+    await expect(ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir)).rejects.toThrow();
+    expect(mockRename).not.toHaveBeenCalled();
   });
 });
 

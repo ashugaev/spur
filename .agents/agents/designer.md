@@ -30,8 +30,8 @@ Review changed UI code for layout and visual quality.
    - Density matches surrounding screens
    - No obvious overflow, clipping, or cramped composition in the implementation
 5. Read tester's `Screenshot self-analysis:` block. Use it as input — do not redo the same checks.
-6. Figma compare (when the architect plan references a Figma URL):
-   - Read tester's screenshots from `${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/`.
+6. Figma compare (when the spec's Verification references a Figma URL):
+   - Read tester's screenshots from `${SPUR_SESSION_ARTIFACTS_DIR}`.
    - Diff against the Figma reference.
    - Output table: `Element | Figma | Implementation | Match yes|no | Severity`.
 7. Report only actionable findings with file references.

@@ -1,18 +1,39 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ClaudeModule from "../../src/agents/claude.js";
 
 const {
   ensureCodexHooksConfigMock,
+  ensureClaudeRestrictWritesSettingsMock,
   captureCodexRolloutBaselineMock,
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessageMock,
+  writeFileMock,
+  captureCursorSubmitBaselineMock,
+  scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
   ensureCodexHooksConfigMock: vi.fn(),
+  ensureClaudeRestrictWritesSettingsMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
   scanClaudeJsonlForMessageMock: vi.fn(),
+  writeFileMock: vi.fn(),
+  captureCursorSubmitBaselineMock: vi.fn(),
+  scanCursorJsonlForMessageMock: vi.fn(),
 }));
+
+vi.mock("node:fs/promises", () => ({
+  writeFile: writeFileMock,
+}));
+
+vi.mock("../../src/agents/claude.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ClaudeModule>();
+  return {
+    ...actual,
+    ensureClaudeRestrictWritesSettings: ensureClaudeRestrictWritesSettingsMock,
+  };
+});
 
 vi.mock("../../src/agents/codex.js", () => ({
   buildCodexPlan: vi.fn(),
@@ -30,14 +51,27 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
-import { createAgentSubmitAckBinding, setupAgentHooks } from "../../src/agents/index.js";
+vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
+  captureCursorSubmitBaseline: captureCursorSubmitBaselineMock,
+  scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
+}));
+
+import {
+  buildAgentLaunchPlan,
+  createAgentSubmitAckBinding,
+  setupAgentHooks,
+} from "../../src/agents/index.js";
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();
+  ensureClaudeRestrictWritesSettingsMock.mockReset();
   captureCodexRolloutBaselineMock.mockReset();
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
   scanClaudeJsonlForMessageMock.mockReset();
+  writeFileMock.mockReset().mockResolvedValue(undefined);
+  captureCursorSubmitBaselineMock.mockReset();
+  scanCursorJsonlForMessageMock.mockReset();
 });
 
 describe("setupAgentHooks", () => {
@@ -52,6 +86,26 @@ describe("setupAgentHooks", () => {
     expect(ensureCodexHooksConfigMock).not.toHaveBeenCalled();
   });
 
+  it("returns claude settings path when restrictWrites is enabled", async () => {
+    ensureClaudeRestrictWritesSettingsMock.mockResolvedValue(
+      "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    );
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      restrictWrites: true,
+    });
+
+    expect(ensureClaudeRestrictWritesSettingsMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+    );
+    expect(result).toEqual({
+      claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    });
+  });
+
   it("trusts the session worktree path for codex", async () => {
     ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
 
@@ -61,12 +115,79 @@ describe("setupAgentHooks", () => {
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", [
-      "/tmp/spur-worktrees/api/api-1",
-    ]);
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      {},
+    );
     expect(result).toEqual({
       codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
     });
+  });
+
+  it("writes an http mcp-config.json and returns its path for claude when a playwright port is set", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      playwrightPort: 8742,
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [path, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(path).toBe("/tmp/spur-data/session-tools/api-1/mcp-config.json");
+    // Client-facing URL must use "localhost", not the bare IP: @playwright/mcp's
+    // DNS-rebinding protection rejects "127.0.0.1:<port>" with HTTP 403.
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
+  it("forwards the playwright port to codex hook config", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      playwrightPort: 8742,
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { playwrightPort: 8742 },
+    );
+  });
+
+  it("forwards restrictWrites to codex hook setup", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      restrictWrites: true,
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { restrictWrites: true },
+    );
+  });
+});
+
+describe("buildAgentLaunchPlan", () => {
+  it("keeps --force for cursor when restrictWrites is enabled", () => {
+    const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
+    expect(plan.launchCommand).toContain("--force");
+    expect(plan.launchCommand).not.toContain("--plan");
   });
 });
 
@@ -94,6 +215,23 @@ describe("createAgentSubmitAckBinding", () => {
       { file: "/some/file.jsonl", size: 42 },
       "hello",
       ctx.worktreePath,
+      undefined,
+    );
+  });
+
+  it("threads the pinned agentSessionId into claude baseline and scan", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
+    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+
+    const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
+    const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
+    await binding?.scan("hello");
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid");
+    expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/file.jsonl", size: 42 },
+      "hello",
+      ctx.worktreePath,
+      "pinned-uuid",
     );
   });
 
@@ -116,8 +254,24 @@ describe("createAgentSubmitAckBinding", () => {
     );
   });
 
-  it("returns null for cursor (no submit ack)", async () => {
+  it("returns null for cursor when no transcript baseline can be captured", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue(null);
     const binding = await createAgentSubmitAckBinding("cursor", ctx);
     expect(binding).toBeNull();
+  });
+
+  it("returns a binding for cursor that scans the captured transcript", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
+    scanCursorJsonlForMessageMock.mockResolvedValue(true);
+
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    expect(binding).not.toBeNull();
+    const result = await binding?.scan("hello");
+    expect(result).toEqual({ found: true, lastScannedFile: "/some/chat.jsonl" });
+    expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/chat.jsonl", size: 7 },
+      "hello",
+      ctx.worktreePath,
+    );
   });
 });

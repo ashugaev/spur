@@ -1,25 +1,70 @@
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { fileURLToPath, URL } from "node:url";
+import { parseAgentName } from "./agents/index.js";
+import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  logSpurEvent,
+  setEventLogConfig,
+  type SpurLogEntry,
+} from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  appendUserAction,
+  buildUserActionRecord,
+  readSessionUserActions,
+  readUserActionLog,
+  setUserActionLogConfig,
+  type UserActionOrigin,
+} from "./user-action-log.js";
+import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
+import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
+import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
+import { getReleases, isReleaseVersion } from "./releases-cache.js";
+import {
+  BacklogItemUnavailableError,
+  GithubPrCheckUnavailableError,
+  InvalidClearPortError,
+  InvalidSourceReplyInputError,
+  InvalidSessionMemoryInputError,
+  InvalidSessionSubscriptionInputError,
+  OpenPrActionRequiredError,
+  SessionNotRestorableError,
+  SessionRateLimitedError,
+  SessionResourceNotFoundError,
+  SessionService,
+  SidecarPortConflictError,
+} from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
-import type {
-  ConnectProjectConfigRequest,
-  CreateProjectRequest,
-  DisconnectProjectConfigRequest,
-  KillSessionRequest,
-  PreflightRequest,
-  RespawnSessionRequest,
-  RunServiceRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SpawnSessionRequest,
-  UpdateSessionSlotsRequest,
+import { version } from "./version.js";
+import {
+  SESSION_STATES,
+  isSessionState,
+  type CompleteSessionRequest,
+  type ConnectProjectConfigRequest,
+  type CreateProjectRequest,
+  type DisconnectProjectConfigRequest,
+  type KillSessionRequest,
+  type OpenPrAction,
+  type PreflightRequest,
+  type HandoffSessionRequest,
+  type RespawnSessionRequest,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type SourceReplyRequest,
+  type StartSidecarRequest,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type TakeBacklogItemRequest,
+  type UpdateProjectRequest,
+  type UpdateSessionSlotsRequest,
 } from "./types.js";
 
 interface JsonError {
@@ -31,6 +76,27 @@ interface ServiceLogger {
   warn?: (message: string) => void;
 }
 
+class InvalidJsonBodyError extends Error {
+  readonly statusCode = 400;
+}
+
+// Stashes the parsed request body on the IncomingMessage so the finally-block
+// user-action logger can decode params without re-reading the (already-consumed) stream.
+const BODY_SYMBOL = Symbol("spurParsedBody");
+
+function stashParsedBody(request: IncomingMessage, value: unknown): void {
+  (request as IncomingMessage & { [BODY_SYMBOL]?: unknown })[BODY_SYMBOL] = value;
+}
+
+function readParsedBody(request: IncomingMessage): unknown {
+  return (request as IncomingMessage & { [BODY_SYMBOL]?: unknown })[BODY_SYMBOL];
+}
+
+function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
+  if (value === "cli" || value === "ui") return value;
+  return "unknown";
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -39,6 +105,19 @@ const DEFAULT_LOGGER: ServiceLogger = {
   info: writeStderr,
   warn: writeStderr,
 };
+const SHUTDOWN_GRACE_MS = 5_000;
+
+// Upper bound on how long a reload waits for triggers.stop() to drain in-flight
+// deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
+// would otherwise hang stop() forever and leave the daemon stuck on 503. The bound
+// exceeds a delivery's own ack timeout (~2 min observed) so natural completion wins
+// the race in the common case; pathological reloads unblock within an operator-
+// tolerable window.
+const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
+
+// Bound the shutdown drain of in-flight background spawns so teardown never hangs
+// on a spawn that fails to settle.
+const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -54,13 +133,17 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 
   const body = Buffer.concat(chunks).toString("utf-8").trim();
   if (!body) {
-    return {} as T;
+    const empty = {} as T;
+    stashParsedBody(request, empty);
+    return empty;
   }
 
   try {
-    return JSON.parse(body) as T;
+    const parsed = JSON.parse(body) as T;
+    stashParsedBody(request, parsed);
+    return parsed;
   } catch {
-    throw new Error("Invalid JSON in request body");
+    throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
 }
 
@@ -73,15 +156,218 @@ function sendError(response: ServerResponse, statusCode: number, message: string
   sendJson(response, statusCode, { error: message } satisfies JsonError);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseOpenPrAction(value: unknown): OpenPrAction | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "leave_open" && value !== "close") {
+    throw new Error("prAction must be leave_open or close");
+  }
+  return value;
+}
+
+function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: StartSidecarRequest = {};
+  const callerSidecarName = raw["callerSidecarName"];
+  if (typeof callerSidecarName === "string") {
+    request.callerSidecarName = callerSidecarName;
+  }
+  const callerSidecarDepth = raw["callerSidecarDepth"];
+  if (typeof callerSidecarDepth === "number") {
+    request.callerSidecarDepth = callerSidecarDepth;
+  }
+  const clearPort = raw["clearPort"];
+  if (clearPort !== undefined) {
+    if (typeof clearPort !== "number" || !Number.isInteger(clearPort)) {
+      throw new InvalidClearPortError("clearPort must be an integer");
+    }
+    request.clearPort = clearPort;
+  }
+  return request;
+}
+
+function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: ScheduleSessionWakeRequest = {};
+  const at = raw["at"];
+  if (typeof at === "string") {
+    request.at = at;
+  }
+  const delayMs = raw["delayMs"];
+  if (typeof delayMs === "number") {
+    request.delayMs = delayMs;
+  }
+  const intervalMs = raw["intervalMs"];
+  if (typeof intervalMs === "number") {
+    request.intervalMs = intervalMs;
+  }
+  const dailyAt = raw["dailyAt"];
+  if (dailyAt !== undefined) {
+    if (!Array.isArray(dailyAt) || dailyAt.some((entry) => typeof entry !== "string")) {
+      throw new Error("dailyAt must be an array of HH:MM strings");
+    }
+    request.dailyAt = dailyAt;
+  }
+  const stopCondition = raw["stopCondition"];
+  if (typeof stopCondition === "string") {
+    request.stopCondition = stopCondition;
+  }
+  const message = raw["message"];
+  if (typeof message === "string") {
+    request.message = message;
+  }
+  return request;
+}
+
+function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== "session" && scope !== "desk") {
+    throw new Error("Invalid complete scope");
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  return {
+    ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(prAction ? { prAction } : {}),
+  };
+}
+
+function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: KillSessionRequest = {};
+  const force = raw["force"];
+  if (typeof force === "boolean") {
+    request.force = force;
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  if (prAction) {
+    request.prAction = prAction;
+  }
+  return request;
+}
+
+// Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
+// normally whether stop() completed, overran the timeout, or rejected — teardown is
+// best-effort and must never block (or fail) a reload. On timeout/rejection the old
+// controller is abandoned and `report` is called with the reason so the daemon can log
+// it; its in-flight promise keeps draining in the background.
+export async function stopTriggersBounded(
+  controller: TriggerGroupController,
+  timeoutMs: number,
+  report: (message: string) => void,
+): Promise<void> {
+  try {
+    await withTimeout(controller.stop(), timeoutMs, "triggers.stop timeout");
+  } catch (error) {
+    report(error instanceof Error ? error.message : String(error));
+  }
+}
+
+export interface ReloadApplyHooks {
+  // Swap the registry to the reloaded config, then bring automation up against it.
+  applyNext: () => void;
+  startAutomation: () => Promise<void>;
+  // Restore the previous config when the reloaded one fails to start.
+  applyPrevious: () => void;
+  onReloaded: () => void;
+  // The reloaded config failed AND the rollback failed to restart — automation is now
+  // down. Surfaced as a distinct error so a "responsive but running nothing" daemon is
+  // observable rather than looking healthy to a liveness probe.
+  onRollbackFailed: (message: string) => void;
+  setReady: (ready: boolean) => void;
+}
+
+// Applies a reloaded config and (re)starts automation, rolling back to the previous
+// config if the new one fails to start. Readiness is restored in a finally on every
+// path — including a failed rollback — so a broken reload leaves the daemon responsive
+// (degraded) instead of wedged on 503; the original error still propagates.
+export async function applyReloadedConfig(hooks: ReloadApplyHooks): Promise<void> {
+  try {
+    hooks.applyNext();
+    try {
+      await hooks.startAutomation();
+    } catch (error) {
+      hooks.applyPrevious();
+      try {
+        await hooks.startAutomation();
+      } catch (rollbackError) {
+        hooks.onRollbackFailed(
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+        );
+        throw rollbackError;
+      }
+      throw error;
+    }
+    hooks.onReloaded();
+  } finally {
+    hooks.setReady(true);
+  }
+}
+
+function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionStatesRequest {
+  if (!isRecord(raw)) {
+    throw new InvalidSessionSubscriptionInputError("request body must be a JSON object");
+  }
+  const targetSessionId = raw["targetSessionId"];
+  if (typeof targetSessionId !== "string" || !targetSessionId.trim()) {
+    throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+  }
+  const states = raw["states"];
+  if (!Array.isArray(states) || states.length === 0) {
+    throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
+  }
+  if (!states.every(isSessionState)) {
+    throw new InvalidSessionSubscriptionInputError(
+      `states must be one of: ${SESSION_STATES.join(", ")}`,
+    );
+  }
+  const message = raw["message"];
+  if (message !== undefined && typeof message !== "string") {
+    throw new InvalidSessionSubscriptionInputError("message must be a string");
+  }
+  return {
+    targetSessionId,
+    states,
+    ...(message !== undefined ? { message } : {}),
+  };
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
 ): Promise<StartedServer> {
+  const ghPathState = await initializeGhPath();
+  if (ghPathState.status === "unavailable") {
+    (logger.warn ?? writeStderr)(
+      `${ghPathState.message}; GitHub automation disabled until gh is available`,
+    );
+  }
   const service = new SessionService(configPath);
+  // Re-applied on every config (re)load, not just boot, so disk-limit changes take
+  // effect without a full daemon restart.
+  const applyLogConfigs = (cfg: typeof service.config): void => {
+    setEventLogConfig(cfg.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
+    setUserActionLogConfig(cfg.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
+  };
+  applyLogConfigs(service.config);
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -104,12 +390,38 @@ export async function startServer(
           ...(logger.info ? { info: logger.info } : {}),
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
+        listSessions: async () =>
+          (await service.list({ view: "dashboard" })).map((session) => ({
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+          })),
+        spawnSession: async (request) => {
+          const session = await service.spawn(request);
+          return {
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+          };
+        },
+      });
+      const nextBacklogs = startConfiguredBacklogs({
+        config: service.config,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
       });
       triggers = nextTriggers;
       sources = nextSources;
+      backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
+      backlogs?.stop();
+      backlogs = null;
       throw error;
     }
   };
@@ -132,46 +444,83 @@ export async function startServer(
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
 
-    sources?.stop();
+    await sources?.stop();
     sources = null;
+    backlogs?.stop();
+    backlogs = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
-      await triggers.stop();
+      // A blocked in-flight delivery must never deadlock the reload and leave the daemon
+      // permanently stuck on 503. On timeout the old controller is abandoned but its
+      // in-flight promise keeps draining in the background (see stopTriggersBounded), so a
+      // delivery is not dropped — it runs to completion concurrently with the new
+      // controller. stop() unsubscribes synchronously first, so the abandoned controller
+      // takes no new events; only its already-started deliveries race the new one.
+      await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+        logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
+      );
       triggers = null;
     }
 
-    service.applyConfig(preview.config, preview.registryPaths, {
-      unconfiguredToRemove: preview.unconfiguredToRemove,
-    });
-    try {
-      await startAutomation();
-    } catch (error) {
-      service.applyConfig(previousConfig, previousRegistryPaths);
-      await startAutomation();
-      ready = true;
-      throw error;
-    }
-
-    logEvent("daemon.registry.reloaded", {
-      level: "info",
-      message:
-        action === "connect"
-          ? `Connected daemon project registry from ${requestConfigPath}`
-          : `Disconnected daemon project registry from ${requestConfigPath}`,
-      details: {
-        configPaths: preview.registryPaths,
-        projectCount: Object.keys(preview.config.projects).length,
+    await applyReloadedConfig({
+      applyNext: () => {
+        service.applyConfig(preview.config, preview.registryPaths, {
+          unconfiguredToRemove: preview.unconfiguredToRemove,
+        });
+        applyLogConfigs(service.config);
+      },
+      startAutomation,
+      applyPrevious: () => {
+        service.applyConfig(previousConfig, previousRegistryPaths);
+        applyLogConfigs(service.config);
+      },
+      onReloaded: () =>
+        logEvent("daemon.registry.reloaded", {
+          level: "info",
+          message:
+            action === "connect"
+              ? `Connected daemon project registry from ${requestConfigPath}`
+              : `Disconnected daemon project registry from ${requestConfigPath}`,
+          details: {
+            configPaths: preview.registryPaths,
+            projectCount: Object.keys(preview.config.projects).length,
+          },
+        }),
+      onRollbackFailed: (message) =>
+        logEvent("daemon.reload.failed", {
+          level: "error",
+          message: `Reload rollback failed to restart automation; daemon is responsive but running no automation: ${message}`,
+        }),
+      setReady: (value) => {
+        ready = value;
       },
     });
-    ready = true;
+  };
+  // Serialize reloads: preview + reload must be atomic. Handlers are dispatched
+  // concurrently, so two overlapping reloads would both snapshot the same previous
+  // config and race startAutomation()'s assignment of triggers/sources/runtimeLogs,
+  // orphaning a controller (leaked flush/auto-complete timers + bus subscriptions). The
+  // bounded stop can now hold a reload for up to TRIGGERS_STOP_TIMEOUT_MS, widening that
+  // window, so the gate runs each reload (preview included) strictly after the previous.
+  let reloadGate: Promise<unknown> = Promise.resolve();
+  const withReloadGate = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = reloadGate.then(run, run);
+    reloadGate = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   };
   const handleRequest = async (
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
+    const startedAt = performance.now();
+    const origin = parseOrigin(request.headers["x-spur-origin"]);
     let method: string | undefined;
     let path: string | undefined;
+    let errorMessage: string | undefined;
     try {
       if (!request.method) {
         logEvent("http.request.failed", {
@@ -211,6 +560,108 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/versions") {
+        const releases = await getReleases();
+        sendJson(response, 200, {
+          current: version,
+          available: releases.entries,
+          ...(releases.stale ? { stale: true } : {}),
+          ...(releases.error ? { registryError: releases.error } : {}),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/deploy/switch") {
+        const body = await readJsonBody<{ version?: unknown }>(request);
+        const requestedVersion = typeof body.version === "string" ? body.version : "";
+        if (!isReleaseVersion(requestedVersion)) {
+          sendError(response, 400, "invalid version");
+          return;
+        }
+        // Guard: refuse to run when the daemon is executing from a source
+        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
+        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
+        const here = fileURLToPath(new URL(".", import.meta.url));
+        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
+        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
+          sendError(response, 409, "running from source checkout");
+          return;
+        }
+        const releases = await getReleases();
+        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
+          if (releases.entries.length === 0 && releases.error) {
+            sendError(response, 503, "npm registry unreachable");
+            return;
+          }
+          sendError(response, 400, "version not in registry");
+          return;
+        }
+        const helperPath = fileURLToPath(
+          new URL("../scripts/install-and-restart.sh", import.meta.url),
+        );
+        const child = spawn("bash", [helperPath, requestedVersion], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        sendJson(response, 202, { accepted: true, version: requestedVersion });
+        return;
+      }
+
+      if (method === "GET" && path === "/claude-accounts") {
+        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/add") {
+        const body = await readJsonBody<{ label?: unknown }>(request);
+        const label = typeof body.label === "string" ? body.label.trim() : "";
+        const account = service.addClaudeAccount(label ? { label } : {});
+        const { loginTmuxSession } = await service.startAccountLogin(account.id);
+        // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
+        sendJson(response, 201, {
+          account: {
+            id: account.id,
+            label: account.label,
+            authenticated: false,
+            lastUsedAt: account.lastUsedAt,
+          },
+          loginTmuxSession,
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/remove") {
+        const body = await readJsonBody<{ id?: unknown }>(request);
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) {
+          sendJson(response, 400, { error: "id must be a non-empty string" });
+          return;
+        }
+        try {
+          service.removeClaudeAccount(id);
+        } catch (error) {
+          // In-use guard rejection is a client-correctable conflict, not a 500.
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 409, message);
+          return;
+        }
+        sendJson(response, 200, { removed: id });
+        return;
+      }
+
+      const finishLoginAccountId = path.match(/^\/claude-accounts\/([^/]+)\/finish-login$/)?.[1];
+      if (method === "POST" && finishLoginAccountId) {
+        sendJson(response, 200, await service.finishAccountLogin(finishLoginAccountId));
+        return;
+      }
+
+      const loginStatusAccountId = path.match(/^\/claude-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && loginStatusAccountId) {
+        sendJson(response, 200, await service.getAccountLoginStatus(loginStatusAccountId));
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -226,14 +677,43 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/backlog/available") {
+        sendJson(response, 200, service.listAvailableBacklog());
+        return;
+      }
+
+      if (method === "POST" && path === "/backlog/take") {
+        const body = await readJsonBody<TakeBacklogItemRequest>(request);
+        sendJson(response, 201, await service.takeAvailableBacklog(body));
+        return;
+      }
+
+      if (method === "GET" && path === "/models") {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, { models: await listAgentModels(agent) });
+        return;
+      }
+
       if (method === "POST" && path === "/projects") {
         const body = await readJsonBody<CreateProjectRequest>(request);
-        for (const field of ["displayName", "prefix", "path"] as const) {
+        for (const field of ["displayName", "prefix"] as const) {
           const value = body[field];
           if (typeof value !== "string" || !value.trim()) {
             sendError(response, 400, `${field} must be a non-empty string`);
             return;
           }
+        }
+        const rawPath = body.path;
+        if (rawPath !== undefined && (typeof rawPath !== "string" || !rawPath.trim())) {
+          sendError(response, 400, "path must be a non-empty string when provided");
+          return;
         }
         try {
           const result = service.createUnconfiguredProject(body);
@@ -246,12 +726,55 @@ export async function startServer(
       }
 
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body)) {
+          sendError(response, 400, "Request body must be a JSON object");
+          return;
+        }
+        const displayName = body.displayName;
+        const prefix = body.prefix;
+        const projectPath = body.path;
+        if (typeof displayName !== "string" || !displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof prefix !== "string" || !prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof projectPath !== "string" || !projectPath.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        const update: UpdateProjectRequest = {
+          displayName,
+          prefix,
+          path: projectPath,
+        };
+        try {
+          const result = service.updateUnconfiguredProject(projectId, update);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
       if (method === "DELETE" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
         if (configuredConfigPath) {
-          const preview = service.previewConfigDisconnect(configuredConfigPath);
-          await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          await withReloadGate(async () => {
+            const preview = service.previewConfigDisconnect(configuredConfigPath);
+            await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          });
           sendJson(response, 200, {
             removedKind: "configured",
             projects: service.listProjects(),
@@ -276,8 +799,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigConnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "connect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigConnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "connect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
@@ -292,8 +818,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigDisconnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "disconnect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigDisconnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "disconnect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
@@ -323,9 +852,63 @@ export async function startServer(
         return;
       }
 
+      const branchExistsId = path.match(/^\/projects\/([^/]+)\/branches\/exists$/)?.[1];
+      if (method === "GET" && branchExistsId) {
+        const name = url.searchParams.get("name")?.trim() ?? "";
+        sendJson(response, 200, await service.branchStatus(branchExistsId, name));
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
+        return;
+      }
+
+      const sessionMemoryListId = path.match(/^\/sessions\/([^/]+)\/session-memory$/)?.[1];
+      if (method === "GET" && sessionMemoryListId) {
+        sendJson(response, 200, service.listSessionMemory(decodeURIComponent(sessionMemoryListId)));
+        return;
+      }
+
+      const sessionMemoryResolveMatch = path.match(
+        /^\/sessions\/([^/]+)\/session-memory\/([^/]+)\/resolve$/,
+      );
+      if (method === "POST" && sessionMemoryResolveMatch?.[1] && sessionMemoryResolveMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.resolveSessionMemory(
+            decodeURIComponent(sessionMemoryResolveMatch[1]),
+            decodeURIComponent(sessionMemoryResolveMatch[2]),
+          ),
+        );
+        return;
+      }
+
+      const sessionMemoryRecordMatch = path.match(/^\/sessions\/([^/]+)\/session-memory\/([^/]+)$/);
+      if (method === "GET" && sessionMemoryRecordMatch?.[1] && sessionMemoryRecordMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.getSessionMemory(
+            decodeURIComponent(sessionMemoryRecordMatch[1]),
+            decodeURIComponent(sessionMemoryRecordMatch[2]),
+          ),
+        );
+        return;
+      }
+      if (method === "POST" && sessionMemoryRecordMatch?.[1] && sessionMemoryRecordMatch[2]) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          service.setSessionMemory(
+            decodeURIComponent(sessionMemoryRecordMatch[1]),
+            decodeURIComponent(sessionMemoryRecordMatch[2]),
+            body,
+          ),
+        );
         return;
       }
 
@@ -354,6 +937,27 @@ export async function startServer(
         return;
       }
 
+      const userActionsSessionId = path.match(/^\/sessions\/([^/]+)\/user-actions$/)?.[1];
+      if (method === "GET" && userActionsSessionId) {
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        sendJson(
+          response,
+          200,
+          readSessionUserActions(service.info().dataDir, userActionsSessionId, { limit }),
+        );
+        return;
+      }
+
+      if (method === "GET" && path === "/user-actions") {
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        sendJson(response, 200, readUserActionLog(service.info().dataDir, { limit }));
+        return;
+      }
+
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
         sendJson(response, 200, await service.getConversation(conversationSessionId));
@@ -363,6 +967,40 @@ export async function startServer(
       const sessionSuggestionsId = path.match(/^\/sessions\/([^/]+)\/slash-commands$/)?.[1];
       if (method === "GET" && sessionSuggestionsId) {
         sendJson(response, 200, await service.getSessionSuggestions(sessionSuggestionsId));
+        return;
+      }
+
+      const subscriptionsSessionId = path.match(/^\/sessions\/([^/]+)\/subscriptions$/)?.[1];
+      if (method === "GET" && subscriptionsSessionId) {
+        sendJson(
+          response,
+          200,
+          service.listStateSubscriptions(decodeURIComponent(subscriptionsSessionId)),
+        );
+        return;
+      }
+      if (method === "POST" && subscriptionsSessionId) {
+        const body = parseSubscribeSessionStatesRequest(await readJsonBody<unknown>(request));
+        sendJson(
+          response,
+          200,
+          service.subscribeToSessionStates(decodeURIComponent(subscriptionsSessionId), body),
+        );
+        return;
+      }
+
+      const removeSubscriptionMatch = path.match(
+        /^\/sessions\/([^/]+)\/subscriptions\/([^/]+)\/remove$/,
+      );
+      if (method === "POST" && removeSubscriptionMatch?.[1] && removeSubscriptionMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.removeStateSubscription(
+            decodeURIComponent(removeSubscriptionMatch[1]),
+            decodeURIComponent(removeSubscriptionMatch[2]),
+          ),
+        );
         return;
       }
 
@@ -405,10 +1043,42 @@ export async function startServer(
         return;
       }
 
+      if (method === "POST" && path === "/shepherd/spawn") {
+        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
+        sendJson(response, 201, await service.spawnShepherd(body));
+        return;
+      }
+
       const sendSessionId = path.match(/^\/sessions\/([^/]+)\/send$/)?.[1];
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);
         sendJson(response, 200, await service.send(sendSessionId, body));
+        return;
+      }
+
+      const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
+      if (method === "POST" && sourceReplySessionId) {
+        const body = await readJsonBody<SourceReplyRequest>(request);
+        sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
+        return;
+      }
+
+      const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
+      if (method === "POST" && wakeSessionId) {
+        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
+        return;
+      }
+
+      const cancelWakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/)?.[1];
+      if (method === "POST" && cancelWakeSessionId) {
+        sendJson(response, 200, await service.cancelWake(cancelWakeSessionId));
+        return;
+      }
+
+      const openedSessionId = path.match(/^\/sessions\/([^/]+)\/opened$/)?.[1];
+      if (method === "POST" && openedSessionId) {
+        sendJson(response, 200, await service.markOpened(decodeURIComponent(openedSessionId)));
         return;
       }
 
@@ -420,13 +1090,36 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        sendJson(response, 200, await service.complete(completeSessionId));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          body.scope === "desk"
+            ? await service.completeDesk(completeSessionId, body)
+            : await service.complete(completeSessionId, body),
+        );
+        return;
+      }
+
+      const selfDestructSessionId = path.match(/^\/sessions\/([^/]+)\/self-destruct$/)?.[1];
+      if (method === "POST" && selfDestructSessionId) {
+        sendJson(response, 200, await service.selfDestruct(selfDestructSessionId));
         return;
       }
 
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        const body = await readJsonBody<KillSessionRequest>(request);
+        const body = parseKillSessionRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
@@ -434,6 +1127,13 @@ export async function startServer(
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
         sendJson(response, 200, await service.restore(restoreSessionId));
+        return;
+      }
+
+      const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
+      if (method === "POST" && handoffSessionId) {
+        const body = await readJsonBody<HandoffSessionRequest>(request);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body));
         return;
       }
 
@@ -449,14 +1149,35 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              logger.warn?.(
-                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
-              );
-            });
+            void service
+              .complete(terminateSessionId, { prAction: "leave_open" }, { retainInList: true })
+              .catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn?.(
+                  `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+                );
+              });
           });
         }
+        return;
+      }
+
+      const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
+      if (method === "POST" && switchAuthSessionId) {
+        const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
+        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+        if (!accountId) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.switchAuth(switchAuthSessionId, accountId, {
+            reason: "manual",
+            force: body.force === true,
+          }),
+        );
         return;
       }
 
@@ -469,7 +1190,7 @@ export async function startServer(
 
       const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        const body = await readJsonBody<StartSidecarRequest>(request);
+        const body = parseStartSidecarRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2], body));
         return;
       }
@@ -522,7 +1243,17 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (error instanceof SessionResourceNotFoundError) {
+      errorMessage = message;
+      if (
+        error instanceof SessionResourceNotFoundError ||
+        error instanceof BacklogItemUnavailableError ||
+        error instanceof InvalidClearPortError ||
+        error instanceof InvalidSourceReplyInputError ||
+        error instanceof InvalidSessionMemoryInputError ||
+        error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidJsonBodyError ||
+        error instanceof SessionRateLimitedError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -532,6 +1263,21 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof GithubPrCheckUnavailableError ||
+        error instanceof SessionNotRestorableError
+      ) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendJson(response, error.statusCode, error.payload);
+        return;
+      }
       logEvent("http.request.failed", {
         level: "error",
         ...(method ? { method } : {}),
@@ -539,6 +1285,25 @@ export async function startServer(
         message,
       });
       sendError(response, 500, message);
+    } finally {
+      try {
+        if (method && path) {
+          const record = buildUserActionRecord({
+            method,
+            path,
+            origin,
+            body: readParsedBody(request),
+            statusCode: response.statusCode,
+            ...(errorMessage ? { error: errorMessage } : {}),
+            latencyMs: Math.round(performance.now() - startedAt),
+          });
+          if (record) {
+            appendUserAction(service.info().dataDir, record);
+          }
+        }
+      } catch {
+        // User-action logging must never block request handling.
+      }
     }
   };
   const server = createServer((request, response) => {
@@ -547,7 +1312,11 @@ export async function startServer(
 
   const closeServer = async (): Promise<void> => {
     await new Promise<void>((resolve) => {
+      // server.closeAllConnections() destroys every tracked socket, including
+      // in-flight requests, so a stuck handler can't block shutdown past the grace period.
+      const forceTimer = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
       server.close(() => {
+        clearTimeout(forceTimer);
         resolve();
       });
     });
@@ -574,8 +1343,15 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -599,46 +1375,78 @@ export async function startServer(
     },
   });
 
-  let shuttingDown = false;
-  const shutdown = async (exitProcess: boolean) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    ready = false;
-    logEvent("daemon.stopping", {
-      level: "info",
-      message: "Stopping Spur daemon",
-    });
-    service.dispose();
-    const closePromise = closeServer();
-    sources?.stop();
-    runtimeLogs?.stop();
-    const triggerController = triggers;
-    if (triggerController) {
-      await triggerController.stop();
-    }
-    await closePromise;
-    logEvent("daemon.stopped", {
-      level: "info",
-      message: "Stopped Spur daemon",
-    });
-    if (exitProcess) {
-      process.exit(0);
-    }
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (exitProcess: boolean): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      ready = false;
+      logEvent("daemon.stopping", {
+        level: "info",
+        message: "Stopping Spur daemon",
+      });
+      service.dispose();
+      const closePromise = closeServer();
+      await sources?.stop();
+      backlogs?.stop();
+      runtimeLogs?.stop();
+      const triggerController = triggers;
+      if (triggerController) {
+        await stopTriggersBounded(triggerController, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+          logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
+        );
+      }
+      try {
+        await withTimeout(
+          service.settleBackgroundSpawns(),
+          BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS,
+          "settleBackgroundSpawns timeout",
+        );
+      } catch (error) {
+        logEvent("daemon.shutdown.spawn_drain_timeout", {
+          level: "warn",
+          message: `Background spawn drain did not settle: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+      await closePromise;
+      logEvent("daemon.stopped", {
+        level: "info",
+        message: "Stopped Spur daemon",
+      });
+      if (exitProcess) {
+        process.exit(0);
+      }
+    })();
+    return shutdownPromise;
   };
 
-  const onSigInt = () => {
+  // Registered with `on` (not `once`): a repeat SIGTERM/SIGINT arriving during the
+  // in-flight shutdown must re-enter `shutdown` and get the same shared promise
+  // rather than falling through to Node's default terminate-the-process action,
+  // which would cut off connection drain / trigger stop mid-teardown. Only the
+  // programmatic `stop()` path below removes these listeners.
+  const onShutdownSignal = () => {
     void shutdown(true);
   };
-  const onSigTerm = () => {
-    void shutdown(true);
-  };
-  process.on("SIGINT", onSigInt);
-  process.on("SIGTERM", onSigTerm);
+  process.on("SIGINT", onShutdownSignal);
+  process.on("SIGTERM", onShutdownSignal);
+
+  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {
-      process.off("SIGINT", onSigInt);
-      process.off("SIGTERM", onSigTerm);
+      process.off("SIGINT", onShutdownSignal);
+      process.off("SIGTERM", onShutdownSignal);
       await shutdown(false);
     },
   });

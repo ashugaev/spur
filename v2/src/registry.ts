@@ -155,7 +155,12 @@ export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFil
 }
 
 export function readConfigRegistry(dataDir: string): string[] {
-  return readConfigRegistryFile(dataDir).configPaths;
+  const configPaths = readConfigRegistryFile(dataDir).configPaths;
+  const filtered = configPaths.filter((configPath) => existsSync(configPath));
+  if (filtered.length !== configPaths.length) {
+    writeConfigRegistry(dataDir, filtered);
+  }
+  return filtered;
 }
 
 export function writeConfigRegistry(dataDir: string, configPaths: string[]): void {

@@ -12,15 +12,17 @@ import {
 import type { SessionRecord } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
-const { ghMock, readCurrentBranchMock } = vi.hoisted(() => ({
+const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   readCurrentBranchMock: vi.fn(),
+  isGitWorktreeMock: vi.fn().mockResolvedValue(true),
 }));
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
+  isGitWorktree: isGitWorktreeMock,
 }));
 
 const {
@@ -398,6 +400,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -452,6 +455,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -509,6 +513,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -540,6 +545,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit() {},
       signal: controller.signal,

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Deterministic ss stub for deploy tests.
+#
+# Mirrors `ss -tlnH 'sport = :PORT'`: prints a listener line iff the web
+# service is "serving". Web serves iff the last verb for spur-web.service in
+# $SPUR_DEPLOY_STATE is start or restart. The daemon port (:4310) is reported
+# when $SPUR_DEPLOY_DAEMON_PORT_PID names a living process; once that process
+# dies, if $SPUR_DEPLOY_DAEMON_REBIND_PID is set it is reported instead
+# (simulates systemd rebinding the port after the orphan is killed).
+set -euo pipefail
+
+state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
+
+# Find the requested port from the "sport = :PORT" filter argument.
+port=""
+for arg in "$@"; do
+  case "$arg" in
+  *:*)
+    port="${arg##*:}"
+    ;;
+  esac
+done
+
+web_serving() {
+  local last=""
+  if [[ -f "$state" ]]; then
+    last=$(grep -E ' spur-web\.service$' "$state" | tail -n1 | cut -d' ' -f1) || true
+  fi
+  [[ "$last" == "start" || "$last" == "restart" ]]
+}
+
+if [[ "$port" == "4310" ]]; then
+  if [[ -n "${SPUR_DEPLOY_DAEMON_PORT_PID:-}" ]] && kill -0 "$SPUR_DEPLOY_DAEMON_PORT_PID" 2>/dev/null; then
+    echo "LISTEN 0 511 127.0.0.1:4310 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_PORT_PID,fd=21))"
+  elif [[ -n "${SPUR_DEPLOY_DAEMON_REBIND_PID:-}" ]]; then
+    echo "LISTEN 0 511 127.0.0.1:4310 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_REBIND_PID,fd=21))"
+  fi
+fi
+
+if [[ "$port" == "3012" ]] && web_serving; then
+  echo 'LISTEN 0 511 127.0.0.1:3012 0.0.0.0:*'
+fi
+exit 0

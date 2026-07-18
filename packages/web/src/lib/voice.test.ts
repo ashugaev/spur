@@ -103,6 +103,21 @@ function mockAzureResponse(
   } as Response;
 }
 
+async function expectRejectsWithMessage(promise: Promise<unknown>, message: string): Promise<void> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    caught = error;
+  }
+
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected promise to reject with an Error.");
+  }
+
+  expect(caught.message).toContain(message);
+}
+
 function configureOpenAICompatibleConfig(
   language = "auto",
   options: { baseUrl?: string; writeEnvFile?: boolean } = {},
@@ -198,7 +213,7 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime"',
     );
   });
 
@@ -602,7 +617,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "Azure OpenAI transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -652,7 +668,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "bad request",
       );
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -924,6 +941,155 @@ voice:
     expect(JSON.stringify(status)).not.toContain("test-key");
   });
 
+  it("reports openai_realtime available with realtime flag when OPENAI_API_KEY is set", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-secret-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: true,
+      provider: "openai_realtime",
+      realtime: true,
+      model: "gpt-realtime-whisper",
+      language: "en",
+    });
+    expect(JSON.stringify(status)).not.toContain("sk-secret-value");
+  });
+
+  it("reports openai_realtime missing_runtime when OPENAI_API_KEY is unset", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: false,
+      provider: "openai_realtime",
+      reason: "missing_runtime",
+    });
+    expect(status.detail).toContain("OPENAI_API_KEY is not set");
+  });
+
+  it("throws from transcribeAudio for openai_realtime provider", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { transcribeAudio } = await import("./voice");
+    await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      "openai_realtime uses the realtime transport",
+    );
+  });
+
+  it("resolveRealtimeTokenConfig throws when provider is not openai_realtime", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: whisper_cpp
+  model: base
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    expect(() => resolveRealtimeTokenConfig()).toThrow(
+      'realtime token requires voice.provider="openai_realtime"',
+    );
+  });
+
+  it("resolveRealtimeTokenConfig returns model, language, and resolved apiKey", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-secret-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    const resolved = resolveRealtimeTokenConfig();
+    expect(resolved).toEqual({
+      model: "gpt-realtime-whisper",
+      language: "en",
+      apiKey: "sk-secret-value",
+    });
+  });
+
+  it("resolveRealtimeTokenConfig honors a custom voice.apiKey env-var name", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  apiKey: CUSTOM_OPENAI_KEY
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-wrong\nCUSTOM_OPENAI_KEY=sk-custom-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    const resolved = resolveRealtimeTokenConfig();
+    expect(resolved.apiKey).toBe("sk-custom-value");
+  });
+
   it("posts openai_compatible audio to <baseUrl>/audio/transcriptions with Bearer auth", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -1022,7 +1188,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "OpenAI-compatible transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -1041,7 +1208,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "bad request",
       );
       expect(fetchMock).toHaveBeenCalledTimes(1);

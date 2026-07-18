@@ -3,12 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionState } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
+import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
 export interface CursorParsedRecord {
   role: "user" | "assistant";
   hasToolUse: boolean;
   hasToolResult: boolean;
   requestsUserInput?: boolean;
+  terminalError?: boolean;
+  text?: string;
   timestampMs: number;
 }
 
@@ -21,6 +24,7 @@ export interface CursorJsonlReaderState {
 
 const TAIL_RECORD_LIMIT = 50;
 export const CURSOR_JSONL_ACTIVITY_WINDOW_MS = 60_000;
+export const CURSOR_JSONL_TOOL_USE_GRACE_MS = 15 * 60_000; // 900_000ms
 
 function tryParseJson(line: string): Record<string, unknown> | null {
   try {
@@ -81,7 +85,7 @@ export async function findLatestCursorTranscriptFile(
         await stat(pinnedPath);
         return pinnedPath;
       } catch {
-        // Fall through to latest transcript in this project dir.
+        continue;
       }
     }
     const latest = await findLatestCursorTranscriptInDir(transcriptsDir);
@@ -100,6 +104,20 @@ export function parseCursorJsonlRecord(
   if (!parsed) {
     return null;
   }
+  if (parsed["type"] === "turn_ended") {
+    const error = typeof parsed["error"] === "string" ? parsed["error"].trim() : "";
+    if (!error) {
+      return null;
+    }
+    return {
+      role: "assistant",
+      hasToolUse: false,
+      hasToolResult: false,
+      terminalError: true,
+      text: error,
+      timestampMs: fallbackTimestampMs,
+    };
+  }
   const role = parsed["role"];
   if (role !== "user" && role !== "assistant") {
     return null;
@@ -114,6 +132,7 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
+  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -129,14 +148,48 @@ export function parseCursorJsonlRecord(
     if (type === "tool_result") {
       hasToolResult = true;
     }
+    if (type === "text" && typeof tool["text"] === "string") {
+      textParts.push(tool["text"]);
+    }
   }
+  const text = textParts.join("\n").trim();
   return {
     role,
     hasToolUse,
     hasToolResult,
     ...(requestsUserInput ? { requestsUserInput: true } : {}),
+    ...(text ? { text } : {}),
     timestampMs: fallbackTimestampMs,
   };
+}
+
+// Cursor JSONL records never carry a genuine per-record timestamp (unlike Claude's
+// JSONL, which stamps real event times); `record.timestampMs` is always the wall-clock
+// moment we happened to parse the line, so a full re-read after a daemon restart stamps
+// every historical record with "now". `fileMtimeMs` (the file's real last-write time) is
+// therefore the only trustworthy staleness signal here and must take priority; the
+// record timestamp is only a last-resort fallback for callers that don't supply it.
+function lastActivityMs(record: CursorParsedRecord, fileMtimeMs?: number): number {
+  return fileMtimeMs ?? record.timestampMs;
+}
+
+function isWithinActivityWindow(
+  nowMs: number,
+  record: CursorParsedRecord,
+  fileMtimeMs: number | undefined,
+  windowMs: number,
+): boolean {
+  return nowMs - lastActivityMs(record, fileMtimeMs) <= windowMs;
+}
+
+function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
+      return record.text;
+    }
+  }
+  return null;
 }
 
 export function classifyCursorJsonlState(
@@ -149,17 +202,28 @@ export function classifyCursorJsonlState(
     if (!record) {
       continue;
     }
+    if (record.terminalError) {
+      return "needs_input";
+    }
     if (record.role === "assistant") {
       if (record.requestsUserInput) {
         return "needs_input";
       }
-      return record.hasToolUse ? "working" : "waiting";
+      if (!record.hasToolUse) {
+        return "waiting";
+      }
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_TOOL_USE_GRACE_MS)
+        ? "working"
+        : "waiting";
     }
     if (record.hasToolResult) {
-      return "working";
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
+        ? "working"
+        : "waiting";
     }
-    const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-    return nowMs - lastActivityMs <= CURSOR_JSONL_ACTIVITY_WINDOW_MS ? "working" : "waiting";
+    return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
+      ? "working"
+      : "waiting";
   }
   return "working";
 }
@@ -168,9 +232,16 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
-): Promise<{ state: SessionState; reader: CursorJsonlReaderState } | null> {
+): Promise<{
+  state: SessionState;
+  reader: CursorJsonlReaderState;
+  rateLimit: RateLimitDetection | null;
+} | null> {
+  const resolvedPath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   const filePath =
-    reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
+    resolvedPath ??
+    (agentSessionId ? null : reader?.filePath) ??
+    (agentSessionId ? null : await findLatestCursorTranscriptFile(worktreePath));
   if (!filePath) {
     return null;
   }
@@ -182,17 +253,21 @@ export async function readCursorJsonlState(
     return null;
   }
 
-  const currentReader: CursorJsonlReaderState = reader ?? {
-    filePath,
-    lastOffset: 0,
-    lastMtimeMs: 0,
-    tailRecords: [],
-  };
+  const currentReader: CursorJsonlReaderState =
+    reader && reader.filePath === filePath
+      ? reader
+      : {
+          filePath,
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        };
 
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {
       state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
+      rateLimit: detectCursorRateLimit(latestCursorTerminalError(currentReader.tailRecords)),
     };
   }
 
@@ -212,7 +287,7 @@ export async function readCursorJsonlState(
       if (!trimmed) {
         continue;
       }
-      const record = parseCursorJsonlRecord(trimmed, nowMs);
+      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
       if (record) {
         newRecords.push(record);
       }
@@ -238,5 +313,6 @@ export async function readCursorJsonlState(
   return {
     state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
+    rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };
 }
