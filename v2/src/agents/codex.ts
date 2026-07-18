@@ -13,7 +13,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { PLAYWRIGHT_CLIENT_HOST } from "./playwright-mcp.js";
+import { playwrightMcpUrl } from "./playwright-mcp.js";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -569,7 +569,7 @@ function withCodexPlaywrightServer(configText: string, port: number): string {
   const stripped = stripCodexPlaywrightTable(configText);
   const trimmed = stripped.trimEnd();
   const separator = trimmed ? "\n\n" : "";
-  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "http://${PLAYWRIGHT_CLIENT_HOST}:${port}/mcp"\n`;
+  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "${playwrightMcpUrl(port)}"\n`;
   return `${trimmed}${separator}${table}`;
 }
 

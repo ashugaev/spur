@@ -18,6 +18,10 @@ const PLAYWRIGHT_HOST = "127.0.0.1";
 // Host used in the CLIENT-FACING URL handed to agents. Must be "localhost", not
 // the bare IP: @playwright/mcp's DNS-rebinding protection checks the Host header
 // and rejects "127.0.0.1:<port>" with HTTP 403 while accepting "localhost:<port>".
+// The server binds IPv4 loopback only (PLAYWRIGHT_HOST) while "localhost" may
+// resolve ::1 first; every consumer here is Node >=20 (MCP HTTP clients + the
+// fetch readiness probe), whose Happy Eyeballs (autoSelectFamily) falls back to
+// IPv4, so this stays reachable without widening the bind past loopback.
 export const PLAYWRIGHT_CLIENT_HOST = "localhost";
 const PLAYWRIGHT_ENDPOINT_PATH = "/mcp";
 
