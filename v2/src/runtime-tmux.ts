@@ -28,6 +28,201 @@ import type { AgentName } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+
+// ── Shared short-TTL runtime-probe cache ──
+// With ~183 sessions, the dashboard-cache tick (every 2s in session-service.ts,
+// DASHBOARD_CACHE_INTERVAL_MS) and the attention monitor (every 5s) each fork
+// up to 5 tmux/ps subprocesses per session through readRuntimeSnapshot. That
+// serializes hundreds of forks per tick through one tmux server on the HTTP
+// process and starves it. These module-level caches make the fleet-wide
+// existence check, the process table, and the cheap per-session display
+// probes cost O(1) forks per TTL window instead of O(sessions) — any caller
+// (background tick or on-demand HTTP enrich) within the same ~2s window reuses
+// the same result. The TTL matches DASHBOARD_CACHE_INTERVAL_MS so state never
+// goes stale beyond what the dashboard cache already tolerates.
+const RUNTIME_PROBE_CACHE_TTL_MS = 2_000;
+
+interface ProbeCacheEntry<T> {
+  promise: Promise<T>;
+  expiresAt: number;
+}
+
+// Dedups concurrent callers within the same TTL window onto one in-flight
+// fetch. A dashboard-cache tick fires every session's probe via
+// `Promise.all` near-simultaneously, so caching only the *resolved* value
+// would still let every one of ~183 concurrent callers race past an empty
+// cache and each fork their own subprocess before the first one resolves.
+// Caching the promise itself (set before the first `await`) closes that gap.
+//
+// Per-key caches (e.g. capturePaneCache, keyed by session×lines) would
+// otherwise grow unbounded on a long-running daemon — every distinct key
+// ever probed stays resident forever. Sweep expired entries on every access
+// so each cache self-bounds to only the keys actually live within the TTL.
+// The single-key fleet caches (one entry each) pay a trivial sweep cost.
+//
+// A rejected fetch is evicted immediately rather than cached for the rest of
+// the TTL: a transient tmux/ps failure must not be replayed as "still
+// failing" to every caller in the window (e.g. a rate-limit pane scan would
+// silently miss a banner for up to 2s). Callers whose fetch always resolves
+// (the fleet snapshots swallow their own errors into safe empty defaults)
+// are unaffected; only a fetch that actually throws hits this path.
+function memoizedProbe<T>(
+  cache: Map<string, ProbeCacheEntry<T>>,
+  key: string,
+  fetch: () => Promise<T>,
+): Promise<T> {
+  const now = Date.now();
+  for (const [staleKey, entry] of cache) {
+    if (entry.expiresAt <= now) {
+      cache.delete(staleKey);
+    }
+  }
+  const cached = cache.get(key);
+  if (cached) {
+    return cached.promise;
+  }
+  const promise = fetch().catch((error: unknown) => {
+    cache.delete(key);
+    throw error;
+  });
+  cache.set(key, { promise, expiresAt: now + RUNTIME_PROBE_CACHE_TTL_MS });
+  return promise;
+}
+
+interface FleetSessionSnapshot {
+  names: Set<string>;
+  activity: Map<string, Date | null>;
+}
+
+const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
+const FLEET_SESSION_CACHE_KEY = "sessions";
+
+// Fleet-wide session existence AND activity in ONE fork instead of one
+// `has-session` plus one `display-message #{session_activity}` per session.
+// `tmuxSessionExists`/`getTmuxSessionActivity` reroute through this cached
+// snapshot so the dashboard-cache tick, the attention monitor, and on-demand
+// HTTP enrich all share the same ~2s fleet-wide read.
+function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
+  return memoizedProbe(fleetSessionCache, FLEET_SESSION_CACHE_KEY, async () => {
+    const names = new Set<string>();
+    const activity = new Map<string, Date | null>();
+    try {
+      const out = await tmux("list-sessions", "-F", "#{session_name} #{session_activity}");
+      for (const line of out.trim().split("\n")) {
+        const [sessionName, activitySeconds] = line.trim().split(/\s+/);
+        if (!sessionName) {
+          continue;
+        }
+        names.add(sessionName);
+        const seconds = Number.parseInt(activitySeconds ?? "", 10);
+        activity.set(sessionName, Number.isNaN(seconds) ? null : new Date(seconds * 1000));
+      }
+    } catch {
+      // No tmux server running (or another list-sessions failure) — an empty
+      // fleet, never a thrown error.
+    }
+    return { names, activity };
+  });
+}
+
+export async function listTmuxSessionNames(): Promise<Set<string>> {
+  return (await getFleetSessionSnapshot()).names;
+}
+
+// `fresh` busts the shared fleet-existence cache before reading, forcing one
+// independent fork instead of reusing whatever the last ~2s tick saw. Only
+// for rare imperative callers that need a genuine re-sample (e.g. a retry
+// after a delay meant to rule out a transient glitch) — the periodic fleet
+// scans never pass it.
+export async function tmuxSessionExists(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  if (options?.fresh) {
+    fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  }
+  return (await listTmuxSessionNames()).has(sessionName);
+}
+
+export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
+  const { activity } = await getFleetSessionSnapshot();
+  return activity.get(sessionName) ?? null;
+}
+
+interface FleetPaneEntry {
+  // The session's currently displayed pane (active window's active pane) —
+  // what `=name:` with no window/pane index resolves to, i.e. what
+  // tmuxPaneDead/getTmuxPanePid targeted per-session before batching.
+  activePaneDead: boolean;
+  activePanePid: number | null;
+  // Every pane's tty across the whole session (what `=name` with no window
+  // targeted before batching) — isProcessRunningInTmux needs all of them
+  // since the agent process can be in any pane/window of the session.
+  allTtys: string[];
+}
+
+const fleetPaneCache = new Map<string, ProbeCacheEntry<Map<string, FleetPaneEntry>>>();
+const FLEET_PANE_CACHE_KEY = "panes";
+
+// Fleet-wide pane state in ONE fork (`list-panes -a`) instead of one
+// `list-panes`/`display-message #{pane_dead}` per session. tmuxPaneDead,
+// getTmuxPanePid, and isProcessRunningInTmux's tty lookup all reroute through
+// this cached snapshot.
+function getFleetPaneSnapshot(): Promise<Map<string, FleetPaneEntry>> {
+  return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
+    const panes = new Map<string, FleetPaneEntry>();
+    try {
+      const out = await tmux(
+        "list-panes",
+        "-a",
+        "-F",
+        "#{session_name} #{window_active} #{pane_active} #{pane_dead} #{pane_pid} #{pane_tty}",
+      );
+      for (const line of out.trim().split("\n")) {
+        const [sessionName, windowActive, paneActive, paneDead, panePid, paneTty] = line
+          .trim()
+          .split(/\s+/);
+        if (!sessionName) {
+          continue;
+        }
+        const entry = panes.get(sessionName) ?? {
+          activePaneDead: true,
+          activePanePid: null,
+          allTtys: [],
+        };
+        if (paneTty) {
+          entry.allTtys.push(paneTty);
+        }
+        // window_active + pane_active together identify the exact pane a
+        // no-window/no-pane target (`=name:`) resolves to.
+        if (windowActive === "1" && paneActive === "1") {
+          const pid = Number.parseInt(panePid ?? "", 10);
+          entry.activePaneDead = paneDead === "1";
+          entry.activePanePid = Number.isFinite(pid) && pid > 0 ? pid : null;
+        }
+        panes.set(sessionName, entry);
+      }
+    } catch {
+      // No tmux server running (or another list-panes failure) — an empty
+      // fleet, never a thrown error.
+    }
+    return panes;
+  });
+}
+
+// `fresh` busts the shared fleet-pane cache before reading — same rationale
+// as tmuxSessionExists's/isProcessRunningInTmux's `fresh`.
+export async function tmuxPaneDead(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
+  const panes = await getFleetPaneSnapshot();
+  return panes.get(sessionName)?.activePaneDead ?? true;
+}
+
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
@@ -148,62 +343,106 @@ function exactPaneTarget(sessionName: string): string {
   return `=${sessionName}:`;
 }
 
-export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    return await tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
-  } catch {
-    return "";
+// TTL-cached, in-flight-promise-memoized like the other fleet/per-session
+// probes: capture-pane can't be batched fleet-wide (there's no `-a` form that
+// returns per-session pane *text*), so it's the last per-session fork left in
+// the classify/enrich path. Within a TTL window, the 2s dashboard tick, the
+// 5s attention monitor, the viewed page's own enrich poll, and desk-sibling
+// lookups all share one capture per (session, lines) pair instead of forking
+// one each. Keyed by lines too since callers request different tail lengths
+// (classify's default 200, attention's 15-line notice tail, sidecar's 40).
+const capturePaneCache = new Map<string, ProbeCacheEntry<string>>();
+
+// `fresh` evicts this (session, lines) cache entry before reading, forcing
+// one independent fork. Needed by imperative pollers (waitForTmuxReady) that
+// expect every iteration to see genuinely current pane text, not whatever
+// the last ~2s tick captured.
+export function captureTmuxPane(
+  sessionName: string,
+  lines = 200,
+  options?: { fresh?: boolean },
+): Promise<string> {
+  const key = `${sessionName}:${lines}`;
+  if (options?.fresh) {
+    capturePaneCache.delete(key);
   }
+  // The fetch throws on a real capture failure (rather than swallowing it
+  // into "") so memoizedProbe's evict-on-reject never caches a transient
+  // failure as a stable empty result for the rest of the TTL window.
+  return memoizedProbe(capturePaneCache, key, () => {
+    const target = exactPaneTarget(sessionName);
+    return tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
+  }).catch(() => "");
+}
+
+// Test-only introspection: capturePaneCache is keyed per (session, lines), so
+// it's the one probe cache that can accumulate a distinct entry per session
+// ever captured on a long-running daemon. Exposes its size so a test can
+// assert memoizedProbe's expired-entry sweep keeps it bounded rather than
+// growing forever.
+export function _capturePaneCacheSizeForTests(): number {
+  return capturePaneCache.size;
 }
 
 // Pid of the session's pane process (the shell hosting the agent). Used to
 // bind ambiguous agent status files to the process actually in this pane.
 export async function getTmuxPanePid(sessionName: string): Promise<number | null> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    const out = await tmux("list-panes", "-t", target, "-F", "#{pane_pid}");
-    const first = out.trim().split("\n")[0]?.trim();
-    const pid = Number.parseInt(first ?? "", 10);
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
+  const panes = await getFleetPaneSnapshot();
+  return panes.get(sessionName)?.activePanePid ?? null;
 }
 
-export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    const output = await tmux("display-message", "-t", target, "-p", "#{session_activity}");
-    const seconds = Number.parseInt(output, 10);
-    if (Number.isNaN(seconds)) {
-      return null;
+interface PsRow {
+  tty: string;
+  args: string;
+}
+
+// Shared, TTL-cached `ps` snapshot: the full process table is identical for
+// every session in a tick, so this is one fork per TTL window instead of one
+// per session.
+const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
+const PS_SNAPSHOT_CACHE_KEY = "ps";
+
+function getPsSnapshot(): Promise<PsRow[]> {
+  return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
+    try {
+      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
+        timeout: 5_000,
+      });
+      return psOut
+        .split("\n")
+        .map((line) => {
+          const cols = line.trimStart().split(/\s+/);
+          if (cols.length < 3) {
+            return null;
+          }
+          return { tty: cols[1] ?? "", args: cols.slice(2).join(" ") };
+        })
+        .filter((row): row is PsRow => row !== null);
+    } catch {
+      return [];
     }
-    return new Date(seconds * 1000);
-  } catch {
-    return null;
-  }
+  });
 }
 
+// `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —
+// same rationale as tmuxSessionExists's `fresh`: a session created after the
+// last fleet-pane snapshot is invisible to it until the cache naturally
+// expires, which would wrongly fail a post-create recovery/restore check.
 export async function isProcessRunningInTmux(
   sessionName: string,
   processMatchers: string[],
+  options?: { fresh?: boolean },
 ): Promise<boolean> {
-  const target = exactSessionTarget(sessionName);
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+    psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
+  }
   try {
-    const ttyOut = await tmux("list-panes", "-t", target, "-F", "#{pane_tty}");
-    const ttys = ttyOut
-      .trim()
-      .split("\n")
-      .map((tty) => tty.trim())
-      .filter(Boolean);
+    const panes = await getFleetPaneSnapshot();
+    const ttys = panes.get(sessionName)?.allTtys ?? [];
     if (ttys.length === 0) {
       return false;
     }
-
-    const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
-      timeout: 5_000,
-    });
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
     const processRes = processMatchers
       .filter((matcher) => matcher.trim().length > 0)
@@ -214,13 +453,12 @@ export async function isProcessRunningInTmux(
     if (processRes.length === 0) {
       return false;
     }
-    for (const line of psOut.split("\n")) {
-      const cols = line.trimStart().split(/\s+/);
-      if (cols.length < 3 || !ttySet.has(cols[1] ?? "")) {
+    const rows = await getPsSnapshot();
+    for (const row of rows) {
+      if (!ttySet.has(row.tty)) {
         continue;
       }
-      const args = cols.slice(2).join(" ");
-      if (processRes.some((processRe) => processRe.test(args))) {
+      if (processRes.some((processRe) => processRe.test(row.args))) {
         return true;
       }
     }
@@ -228,6 +466,19 @@ export async function isProcessRunningInTmux(
   } catch {
     return false;
   }
+}
+
+// Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic
+// scans, but a tmux create/kill is a real mutation the next read must see
+// immediately — otherwise a just-created session/sidecar reads as absent, or
+// a just-killed/paused one reads as still alive, for up to the ~2s TTL.
+// Create/kill are rare (not per-tick), so busting these three single-key
+// caches here doesn't touch the per-tick fork savings the fleet batching
+// exists for.
+function invalidateFleetProbeCaches(): void {
+  fleetSessionCache.clear();
+  fleetPaneCache.clear();
+  psSnapshotCache.clear();
 }
 
 export async function createTmuxSession(input: {
@@ -252,6 +503,7 @@ export async function createTmuxSession(input: {
     input.cwd,
     ...envArgs,
   ]);
+  invalidateFleetProbeCaches();
   await sleep(300);
 
   try {
@@ -263,6 +515,8 @@ export async function createTmuxSession(input: {
       await tmux("kill-session", "-t", sessionTarget);
     } catch {
       // Best effort only.
+    } finally {
+      invalidateFleetProbeCaches();
     }
     throw error;
   }
@@ -299,6 +553,9 @@ export async function createTmuxCommandSession(input: {
     input.cwd,
     ...buildEnvArgs(input.env),
   ]);
+  // The detached session now exists; bust the fleet caches so a just-created
+  // session is immediately visible to tmuxSessionExists/pane probes.
+  invalidateFleetProbeCaches();
   await tmux("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
   await tmux("respawn-pane", "-k", "-t", paneTarget, shellCommand);
 }
@@ -401,7 +658,12 @@ export async function waitForTmuxReady(
   let lastCursorTrustConfirmAt = 0;
   let cursorTrustConfirmAttempts = 0;
   while (Date.now() < deadline) {
-    const capture = await captureTmuxPane(sessionName);
+    // fresh: this loop polls every 500ms expecting genuinely current pane
+    // text (readiness detection, and the cursor trust-confirm retry gate at
+    // CURSOR_TRUST_CONFIRM_DELAY_MS=1000ms) — well under the probe cache's
+    // 2s TTL, so a cached read here would stall detection and could resend
+    // a trust-confirm Enter against stale (already-confirmed) text.
+    const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
     lastCapture = capture;
     if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
       if (cursorTrustConfirmAttempts > 0) {
@@ -445,26 +707,8 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
     await tmux("kill-session", "-t", target);
   } catch {
     // Best effort only.
-  }
-}
-
-export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
-  const target = exactSessionTarget(sessionName);
-  try {
-    await tmux("has-session", "-t", target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    const output = await tmux("display-message", "-t", target, "-p", "#{pane_dead}");
-    return output.trim() === "1";
-  } catch {
-    return true;
+  } finally {
+    invalidateFleetProbeCaches();
   }
 }
 

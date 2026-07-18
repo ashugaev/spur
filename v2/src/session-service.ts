@@ -4807,7 +4807,28 @@ export class SessionService {
         });
         continue;
       }
-      const classified = await this.classifySessionRecord(member);
+      // Desk siblings reuse the dashboard-cache tick's last-completed
+      // classification instead of re-running a full classify per sibling per
+      // viewer — that N× re-classify was a major fork-storm contributor.
+      // That cached value is usually <=DASHBOARD_CACHE_INTERVAL_MS old, but
+      // not guaranteed under tick overlap (a slow tick can leave a slightly
+      // older value in place until the next one completes). A sibling
+      // missing from the cache (freshly created, or evicted) is rare, so it
+      // gets a live classify instead of a stale/derived guess: scanPane:false
+      // still skips the capture-pane fork, but jsonl/hook sources already
+      // surface needs_input/rate_limited/error, so this stays cheap.
+      const cached = this.dashboardCache.get(member.id);
+      if (cached) {
+        members.push({
+          id: member.id,
+          agent: member.agent,
+          status: member.status,
+          state: cached.state,
+          runtimeAlive: cached.runtimeAlive,
+        });
+        continue;
+      }
+      const classified = await this.classifySessionRecord(member, { scanPane: false });
       members.push({
         id: classified.session.id,
         agent: classified.session.agent,
@@ -6892,10 +6913,15 @@ export class SessionService {
         undefined,
         { agent: session.agent },
       );
+      // fresh:true: this session's tmux pane was just created by
+      // createTmuxSession above and may postdate the last fleet-pane
+      // snapshot, which would otherwise wrongly see it as absent and abort a
+      // genuinely successful recovery.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
@@ -6941,10 +6967,13 @@ export class SessionService {
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
+      // fresh:true — same rationale as the resume-plan check above: this
+      // pane was just (re)created and may postdate the last fleet snapshot.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, freshLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -7153,10 +7182,13 @@ export class SessionService {
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });
+      // fresh:true — this pane was just created by createTmuxSession above
+      // and may postdate the last fleet-pane snapshot.
       if (
         !(await isProcessRunningInTmux(
           current.tmuxSession,
           agentProcessMatchers(current.agent, restoreLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
@@ -8065,9 +8097,15 @@ export class SessionService {
       }
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
+    // fresh:true forces an independent re-sample here — otherwise this retry
+    // would just re-read the same ~2s-TTL cached result as the first check
+    // above, making a single transient glitch look like two agreeing reads
+    // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
-    if (await tmuxSessionExists(session.tmuxSession)) {
-      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)));
+    if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+        fresh: true,
+      }));
     }
     return true;
   }
@@ -8181,15 +8219,25 @@ export class SessionService {
     };
   }
 
+  // `fresh` busts the fleet caches before each read so the whole snapshot is
+  // a genuinely independent re-sample, not a replay of whatever the last
+  // ~2s tick saw. Needed by reconcileUnexpectedStop's confirmation re-read —
+  // without it, a transient tmux blip cached on the first check would just
+  // be read again 1s later, agreeing with itself and marking a live session
+  // stopped.
   private async readRuntimeSnapshot(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession)) : false;
+    const fresh = options?.fresh ?? false;
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession, { fresh });
+    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession, { fresh })) : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
-        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+            fresh,
+          })
         : false;
     return {
       runtimeAlive,
@@ -8429,7 +8477,11 @@ export class SessionService {
         return { session, runtime };
       }
       await sleep(PIPELINE_POLL_INTERVAL_MS);
-      confirmedRuntime = await this.readRuntimeSnapshot(session);
+      // fresh:true — an independent re-sample, not a replay of the same
+      // ~2s-TTL cached snapshot the first check above just read. Otherwise a
+      // single transient tmux/list-sessions blip would agree with itself on
+      // both reads and mark a genuinely live session stopped.
+      confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
         confirmedRuntime.runtimeAlive &&
         confirmedRuntime.paneUsable &&
@@ -8603,7 +8655,11 @@ export class SessionService {
     return updated;
   }
 
-  private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
+  private async classifySessionRecord(
+    session: SessionRecord,
+    options?: { scanPane?: boolean },
+  ): Promise<SessionStateResult> {
+    const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
       this.isInRestoreWarmup(session.id)
@@ -8781,7 +8837,12 @@ export class SessionService {
       // didn't confirm a limit. For Claude, the interactive-menu check always runs
       // regardless, since the menu can show up even after jsonl already confirmed
       // the limit — that's the common case the Enter-confirm needs to catch.
-      if (strategy === "claude_jsonl") {
+      // The 2s dashboard-cache tick opts out (scanPane:false): capture-pane is the
+      // last per-session fork left in this path, and jsonl/hook sources already
+      // cover rate-limit detection for the dashboard. The 5s attention monitor and
+      // on-demand enrich of the viewed session keep scanning (through the cached
+      // captureTmuxPane, so it's still O(1) forks per session per TTL window).
+      if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const menuHit = detectClaudeUsageLimitMenu(paneText);
         if (!rateLimit?.limited) {
@@ -8793,7 +8854,7 @@ export class SessionService {
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
         }
-      } else if (!rateLimit?.limited) {
+      } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
@@ -8822,7 +8883,11 @@ export class SessionService {
   }
 
   private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
-    const classified = await this.classifySessionRecord(session);
+    // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
+    // last un-batched fork): jsonl/hook-sourced rate limits still show up
+    // immediately, and the 5s attention monitor (full enrich) plus on-demand
+    // viewed-session enrich still run the tmux-banner/usage-menu scan.
+    const classified = await this.classifySessionRecord(session, { scanPane: false });
     session = classified.session;
     const {
       queuedMessages: _queuedMessages,

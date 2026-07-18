@@ -4280,6 +4280,71 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
   });
 
+  it("dashboard-cache tick never forks capture-pane (last un-batched fork removed)", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("working", "responding");
+    mockClaudeJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain the constructor's immediate dashboard tick and baseline attention
+    // tick — the baseline attention tick's full enrich legitimately scans the
+    // pane once, so it must not pollute the measured dashboard-only tick below.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    captureTmuxPaneMock.mockClear();
+
+    // Advance exactly one 2s dashboard-tick interval (well under the 5s
+    // attention cadence) and assert it alone forks zero pane captures.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const listed = await service.list({ view: "dashboard" });
+    expect(listed[0]).toMatchObject({ id: "api-1", state: "working" });
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("still detects and auto-confirms the usage-limit menu via on-demand enrich even though the dashboard tick skips the pane scan", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The 2s dashboard tick resolves state from structured sources only —
+    // needs_input from claude status, no rate-limit menu scan.
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "needs_input" });
+
+    // The on-demand full enrich of the viewed session still scans the pane,
+    // detects the menu, and auto-confirms it.
+    const result = await service.get("api-1");
+    expect(result.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+    service.dispose();
+  });
+
   it("returns null for this test file's own raw contents (self-match regression guard)", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
@@ -7609,6 +7674,54 @@ describe("SessionService", () => {
         runtimeAlive: false,
       },
     ]);
+  });
+
+  it("reuses the dashboard-cache classification for desk siblings instead of re-classifying them per viewer", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      sessionRecord({ id: "api-2", deskId: "api-1", worktreePath: "/repo/api-2" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain the constructor's immediate dashboard + attention ticks so both
+    // desk members are already classified in the dashboard cache before the
+    // measured call, mirroring the real 2s-interval cache the background
+    // loops maintain in production.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // Every probe used by a full classify (pane pid + tmux existence) reset
+    // here — a desk-sibling re-classify would show up as a fresh call keyed
+    // by api-2's tmux session name.
+    getTmuxPanePidMock.mockClear();
+    tmuxSessionExistsMock.mockClear();
+    captureTmuxPaneMock.mockClear();
+
+    const result = await service.get("api-1");
+
+    expect(result.deskGroupMembers).toEqual([
+      { id: "api-1", agent: "claude", status: "running", state: "working", runtimeAlive: true },
+      { id: "api-2", agent: "claude", status: "running", state: "working", runtimeAlive: true },
+    ]);
+    // The primary viewed session (api-1) still classifies live; the sibling
+    // (api-2) must be served from the dashboard cache, not re-forked.
+    expect(getTmuxPanePidMock.mock.calls.some((call) => (call as unknown[])[0] === "api-2")).toBe(
+      false,
+    );
+    expect(captureTmuxPaneMock.mock.calls.some((call) => (call as unknown[])[0] === "api-2")).toBe(
+      false,
+    );
   });
 
   it("completes active same-desk sessions and skips killed or already completed members", async () => {
