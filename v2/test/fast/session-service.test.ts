@@ -4425,6 +4425,323 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it("flips codex working to waiting when the turn hung after tools beyond the staleness threshold", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-hung",
+      project: "sp",
+      agent: "codex",
+      prompt: "hung after tools",
+      branch: "feature/hung",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-hung",
+      tmuxSession: "spur-hung",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf6",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-hung/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf6",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-hung");
+
+    expect(result.state).toBe("waiting");
+    const classifiedCall = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "spur-hung",
+    );
+    expect(classifiedCall?.[1].message).toContain("codex stale, idle=");
+    expect(classifiedCall?.[1].message).not.toContain("jsonl=");
+  });
+
+  it("keeps codex working while a long exec_command tool call is still pending", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const fourMinAgoMs = now.getTime() - 4 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-exec",
+      project: "sp",
+      agent: "codex",
+      prompt: "long exec",
+      branch: "feature/exec",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-exec",
+      tmuxSession: "spur-exec",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(fourMinAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdf7",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(fourMinAgoMs).toISOString(),
+        timestampMs: fourMinAgoMs,
+        filePath: "/tmp/spur-exec/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_1",
+        turnId: "019efdf7",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-exec");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("flips codex working to waiting for a stale UserPromptSubmit hook (spur-7ce0)", async () => {
+    const now = new Date("2026-06-25T15:00:00.000Z");
+    vi.setSystemTime(now);
+    const sevenHoursAgoMs = now.getTime() - 7 * 3600_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-7ce0",
+      project: "sp",
+      agent: "codex",
+      prompt: "stale prompt submit",
+      branch: "feature/7ce0",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-7ce0",
+      tmuxSession: "spur-7ce0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-06-24T13:34:40.615Z",
+      updatedAt: "2026-06-25T07:58:53.997Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(sevenHoursAgoMs).toISOString(),
+      hookEvent: "UserPromptSubmit",
+      turnId: "019efddc",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "waiting",
+        timestamp: new Date(sevenHoursAgoMs).toISOString(),
+        timestampMs: sevenHoursAgoMs,
+        filePath: "/tmp/spur-7ce0/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "019efddc",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-24T13:34:40.615Z");
+
+    const result = await service.get("spur-7ce0");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("flips codex working to waiting for a stale dangling function_call with a non-PreToolUse hook", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const twentyFiveMinAgoMs = now.getTime() - 25 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-dangle",
+      project: "sp",
+      agent: "codex",
+      prompt: "dangling function call",
+      branch: "feature/dangle",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-dangle",
+      tmuxSession: "spur-dangle",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:05:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(twentyFiveMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf9",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(twentyFiveMinAgoMs).toISOString(),
+        timestampMs: twentyFiveMinAgoMs,
+        filePath: "/tmp/spur-dangle/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_x",
+        turnId: "019efdf9",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-dangle");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps codex working for a fresh PreToolUse hook (spur-6a90)", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const fiveSecAgoMs = now.getTime() - 5_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-6a90",
+      project: "sp",
+      agent: "codex",
+      prompt: "fresh pre-tool",
+      branch: "feature/6a90",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-6a90",
+      tmuxSession: "spur-6a90",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:29:55.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(fiveSecAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdfa",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(fiveSecAgoMs).toISOString(),
+        timestampMs: fiveSecAgoMs,
+        filePath: "/tmp/spur-6a90/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_y",
+        turnId: "019efdfa",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-6a90");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("keeps codex working when the post-tool gap is below the staleness threshold", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    // 4 min < 300s threshold: a long single inference between tool batches must not flip.
+    const thirtySecAgoMs = now.getTime() - 4 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-fresh",
+      project: "sp",
+      agent: "codex",
+      prompt: "fresh gap",
+      branch: "feature/fresh",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-fresh",
+      tmuxSession: "spur-fresh",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(thirtySecAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf8",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(thirtySecAgoMs).toISOString(),
+        timestampMs: thirtySecAgoMs,
+        filePath: "/tmp/spur-fresh/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf8",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-fresh");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("keeps existing waiting classification on task_complete", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-done",
+      project: "sp",
+      agent: "codex",
+      prompt: "task complete",
+      branch: "feature/done",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-done",
+      tmuxSession: "spur-done",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdf9",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "waiting",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-done/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "019efdf9",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-done");
+
+    expect(result.state).toBe("waiting");
+  });
+
   it("classifies the interrupted spur-00b0 UserPromptSubmit snapshot as waiting after turn_aborted", async () => {
     readSessionMock.mockReturnValue({
       id: "spur-00b0",

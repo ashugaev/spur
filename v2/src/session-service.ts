@@ -38,7 +38,11 @@ import {
   sweepLeakedPlaywright,
   waitForPlaywrightReady,
 } from "./agents/playwright-mcp.js";
-import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import {
+  deleteAgentHookState,
+  readAgentHookState,
+  type AgentHookStateRecord,
+} from "./agent-hook-state.js";
 import {
   assertBranchNameMatches,
   matchesBranchNaming,
@@ -319,6 +323,20 @@ const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+// Codex turns that hang after their tool calls complete (model inference dies between/after tools)
+// pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
+// signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
+// incrementally within a single response, so a hung inference produces no new records at all. tmux
+// activity is rejected as a corroborating signal because codex's TUI repaints a per-second
+// "Working (… • esc to interrupt)" timer, advancing #{session_activity} every second even while the
+// turn is genuinely hung — it would mask exactly this bug. Pending tool calls are excluded (a long
+// exec_command is legitimately silent), so this threshold only needs to exceed the longest plausible
+// single model inference between tool batches (large context + high reasoning, observed ~tens of
+// seconds). A false flip is low-cost but not free: the working->waiting edge lets a queued
+// interrupt:false message be typed in after a further idle gate, so we set the threshold well above
+// any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
+// still clearing an indefinite-"working" hang.
+const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 const RESTORE_WARMUP_MS = 30_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
@@ -806,6 +824,16 @@ function shouldUseCodexRolloutState(
     return sameTurn || rolloutNewerThanHook;
   }
   return !hookState || sameTurn || hookState.state === "needs_input";
+}
+
+function codexToolExecuting(hookState: AgentHookStateRecord | null): boolean {
+  // A dangling/pending rollout function_call alone is NOT proof a tool is running:
+  // the rollout records the call line before the tool returns, and a turn can stall
+  // there indefinitely. The deterministic "tool currently running" signal is the
+  // PreToolUse hook, which codex registers and which stays PreToolUse until the tool
+  // returns (PostToolUse). This protects genuine long-running exec_commands while
+  // letting a stale dangling function_call under a non-PreToolUse hook age out.
+  return hookState?.hookEvent === "PreToolUse";
 }
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
@@ -8133,6 +8161,17 @@ export class SessionService {
       source = "jsonl";
     }
 
+    if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
+      const lastActivityMs = Math.max(
+        rolloutState.timestampMs,
+        hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      );
+      if (Date.now() - lastActivityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
+        state = "waiting";
+        source = "codex_stale";
+      }
+    }
+
     return {
       state,
       source,
@@ -8673,7 +8712,19 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
-        if (stateSource === "jsonl" && codexState.rolloutState) {
+        if (stateSource === "codex_stale" && codexState.rolloutState) {
+          historySourcePath = codexState.rolloutState.filePath;
+          const lastActivityMs = Math.max(
+            codexState.rolloutState.timestampMs,
+            codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: ${state} (codex stale, idle=${Date.now() - lastActivityMs}ms)`,
+          });
+        } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
             level: "info",

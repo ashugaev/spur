@@ -24,7 +24,7 @@ export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
 
-export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
+export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
