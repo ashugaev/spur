@@ -16974,11 +16974,9 @@ describe("SessionService", () => {
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1", { fresh: true });
-      expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith(
-        "api-1",
-        expect.any(Array),
-        { fresh: true },
-      );
+      expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
+        fresh: true,
+      });
       service.dispose();
     });
 
@@ -17001,7 +16999,8 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(
         logSpurEventMock.mock.calls.some(
-          ([, entry]) => entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
+          ([, entry]) =>
+            entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
         ),
       ).toBe(true);
       service.dispose();
