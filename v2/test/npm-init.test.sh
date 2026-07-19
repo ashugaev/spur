@@ -9,56 +9,67 @@
 # web/dist-server/web-server.js, and no spur-direct-terminal / 14801
 # reference may appear in output or installed units.
 #
+# Also guards the Tailscale private-access block: a stub `tailscale` command
+# resolving a valid IPv4 must widen the installed unit's WEB_HOST to
+# `127.0.0.1,<ip>`; an unresolved tailnet (empty/"NoState") must leave it on
+# loopback only and print the `sudo tailscale up` hint; `--no-tailscale` must
+# never touch WEB_HOST or invoke tailscale/curl at all.
+#
 # Run directly: bash v2/test/npm-init.test.sh
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NPM_INIT_SRC="$HERE/../scripts/npm-init.sh"
+DEPLOY_WEB_UNIT="$HERE/../deploy/spur-web.npm.service"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-FAKE_HOME="$WORK_DIR/home"
-FAKE_BIN="$WORK_DIR/bin"
-PKG_ROOT="$WORK_DIR/pkg"
-mkdir -p "$FAKE_HOME" "$FAKE_BIN" "$PKG_ROOT/scripts" "$PKG_ROOT/deploy" "$PKG_ROOT/dist" \
-  "$PKG_ROOT/web/dist-server"
+# Builds a fresh fake PKG_ROOT + fake HOME + fake bin dir under
+# "$WORK_DIR/$1", installs the real npm-init.sh and (unless the caller writes
+# its own) the real spur-web.npm.service template so WEB_HOST sed edits have
+# something to match, and stubs node/npm/systemctl/loginctl. Prints the
+# scenario's FAKE_HOME/FAKE_BIN/PKG_ROOT paths as `HOME=... BIN=... PKG=...`
+# on stdout for the caller to capture.
+setup_scenario() {
+  local name="$1"
+  local scenario_dir="$WORK_DIR/$name"
+  local fake_home="$scenario_dir/home"
+  local fake_bin="$scenario_dir/bin"
+  local pkg_root="$scenario_dir/pkg"
 
-cp "$NPM_INIT_SRC" "$PKG_ROOT/scripts/npm-init.sh"
-chmod +x "$PKG_ROOT/scripts/npm-init.sh"
+  mkdir -p "$fake_home" "$fake_bin" "$pkg_root/scripts" "$pkg_root/deploy" "$pkg_root/dist" \
+    "$pkg_root/web/dist-server"
 
-# Required package files: empty placeholders are enough for npm-init.sh's
-# existence checks.
-: >"$PKG_ROOT/deploy/spur-daemon.npm.service"
-: >"$PKG_ROOT/deploy/spur-web.npm.service"
-: >"$PKG_ROOT/dist/cli.js"
-: >"$PKG_ROOT/web/dist-server/web-server.js"
+  cp "$NPM_INIT_SRC" "$pkg_root/scripts/npm-init.sh"
+  chmod +x "$pkg_root/scripts/npm-init.sh"
 
-# Fake node: only needs to exist for `require_cmd node`.
-cat >"$FAKE_BIN/node" <<'EOF'
+  : >"$pkg_root/deploy/spur-daemon.npm.service"
+  cp "$DEPLOY_WEB_UNIT" "$pkg_root/deploy/spur-web.npm.service"
+  : >"$pkg_root/dist/cli.js"
+  : >"$pkg_root/web/dist-server/web-server.js"
+
+  cat >"$fake_bin/node" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
 
-# Fake npm: only `npm config get prefix` is used by npm-init.sh.
-cat >"$FAKE_BIN/npm" <<EOF
+  cat >"$fake_bin/npm" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "config" ] && [ "\$2" = "get" ] && [ "\$3" = "prefix" ]; then
-  echo "$FAKE_HOME/.local"
+  echo "$fake_home/.local"
   exit 0
 fi
 exit 0
 EOF
 
-# Fake systemctl: accepts --user status/daemon-reload/enable/start/etc.
-cat >"$FAKE_BIN/systemctl" <<'EOF'
+  cat >"$fake_bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
 
-# Fake loginctl: accepts enable-linger and show-user.
-cat >"$FAKE_BIN/loginctl" <<'EOF'
+  cat >"$fake_bin/loginctl" <<'EOF'
 #!/usr/bin/env bash
 if [ "$1" = "show-user" ]; then
   echo "Linger=yes"
@@ -66,49 +77,172 @@ fi
 exit 0
 EOF
 
-chmod +x "$FAKE_BIN/node" "$FAKE_BIN/npm" "$FAKE_BIN/systemctl" "$FAKE_BIN/loginctl"
+  chmod +x "$fake_bin/node" "$fake_bin/npm" "$fake_bin/systemctl" "$fake_bin/loginctl"
 
-OUT_FILE="$WORK_DIR/output.log"
+  echo "HOME=$fake_home BIN=$fake_bin PKG=$pkg_root"
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+# --- Scenario 1: base run (--no-start), unrelated to Tailscale -------------
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario base)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+# No `tailscale` in this scenario's PATH; --no-tailscale keeps it that way
+# without ever needing the command.
+OUT_FILE="$WORK_DIR/base-output.log"
+set +e
+HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-start --no-tailscale >"$OUT_FILE" 2>&1
+rc=$?
+set -e
+
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh --no-start --no-tailscale exited $rc"; }
+
+UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+
+[ -f "$UNIT_DIR/spur-web.service" ] || fail "spur-web.service was not installed into $UNIT_DIR"
+[ -f "$UNIT_DIR/spur-daemon.service" ] || fail "spur-daemon.service was not installed into $UNIT_DIR"
+[ ! -f "$UNIT_DIR/spur-direct-terminal.service" ] || fail "spur-direct-terminal.service must not be installed"
+
+grep -qi "spur-direct-terminal\|14801" "$OUT_FILE" &&
+  fail "npm-init.sh output references the removed spur-direct-terminal unit or :14801"
+grep -qi "spur-direct-terminal\|14801" "$UNIT_DIR"/*.service &&
+  fail "an installed unit references the removed spur-direct-terminal unit or :14801"
+
+grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
+  fail "--no-tailscale must leave WEB_HOST on loopback only"
+
+echo "npm-init.test.sh: base scenario OK"
+
+# --- Scenario 2: tailscale resolves a valid IPv4 ----------------------------
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario tailscale-up)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+cat >"$FAKE_BIN/tailscale" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "ip" ]; then
+  echo "100.64.11.22"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$FAKE_BIN/tailscale"
+
+# curl must not be invoked in this scenario (tailscale is already present) —
+# fail loudly if npm-init.sh tries to fetch the install script anyway.
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected curl invocation: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/curl"
+
+OUT_FILE="$WORK_DIR/tailscale-up-output.log"
 set +e
 HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
   bash "$PKG_ROOT/scripts/npm-init.sh" --no-start >"$OUT_FILE" 2>&1
 rc=$?
 set -e
 
-if [ "$rc" -ne 0 ]; then
-  echo "FAIL: npm-init.sh --no-start exited $rc" >&2
-  cat "$OUT_FILE" >&2
-  exit 1
-fi
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh --no-start (tailscale up) exited $rc"; }
 
 UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+grep -q '^Environment=WEB_HOST=127\.0\.0\.1,100\.64\.11\.22$' "$UNIT_DIR/spur-web.service" ||
+  fail "tailscale IP was not applied to WEB_HOST (expected 127.0.0.1,100.64.11.22)"
+grep -qi "unexpected curl invocation" "$OUT_FILE" &&
+  fail "npm-init.sh invoked curl even though tailscale was already installed"
 
-if [ ! -f "$UNIT_DIR/spur-web.service" ]; then
-  echo "FAIL: spur-web.service was not installed into $UNIT_DIR" >&2
-  cat "$OUT_FILE" >&2
+echo "npm-init.test.sh: tailscale-up scenario OK"
+
+# --- Scenario 3: tailscale installed but tailnet not up (empty/NoState) ----
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario tailscale-down)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+cat >"$FAKE_BIN/tailscale" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "ip" ]; then
+  echo "NoState"
   exit 1
 fi
+exit 0
+EOF
+chmod +x "$FAKE_BIN/tailscale"
 
-if [ ! -f "$UNIT_DIR/spur-daemon.service" ]; then
-  echo "FAIL: spur-daemon.service was not installed into $UNIT_DIR" >&2
-  cat "$OUT_FILE" >&2
-  exit 1
-fi
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected curl invocation: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/curl"
 
-if [ -f "$UNIT_DIR/spur-direct-terminal.service" ]; then
-  echo "FAIL: spur-direct-terminal.service must not be installed" >&2
-  exit 1
-fi
+OUT_FILE="$WORK_DIR/tailscale-down-output.log"
+set +e
+HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-start >"$OUT_FILE" 2>&1
+rc=$?
+set -e
 
-if grep -qi "spur-direct-terminal\|14801" "$OUT_FILE"; then
-  echo "FAIL: npm-init.sh output references the removed spur-direct-terminal unit or :14801" >&2
-  cat "$OUT_FILE" >&2
-  exit 1
-fi
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh --no-start (tailscale down) exited $rc"; }
 
-if grep -qi "spur-direct-terminal\|14801" "$UNIT_DIR"/*.service; then
-  echo "FAIL: an installed unit references the removed spur-direct-terminal unit or :14801" >&2
-  exit 1
-fi
+UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
+  fail "an unresolved tailnet must leave WEB_HOST on loopback only"
+grep -qi "sudo tailscale up" "$OUT_FILE" ||
+  fail "expected the 'sudo tailscale up' hint when the tailnet is not up"
+grep -qi "unexpected curl invocation" "$OUT_FILE" &&
+  fail "npm-init.sh invoked curl even though tailscale was already installed"
+
+echo "npm-init.test.sh: tailscale-down scenario OK"
+
+# --- Scenario 4: --no-tailscale never calls tailscale or WEB_HOST edits ----
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario no-tailscale)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+cat >"$FAKE_BIN/tailscale" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected tailscale invocation: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/tailscale"
+
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected curl invocation: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/curl"
+
+OUT_FILE="$WORK_DIR/no-tailscale-output.log"
+set +e
+HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-start --no-tailscale >"$OUT_FILE" 2>&1
+rc=$?
+set -e
+
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh --no-start --no-tailscale exited $rc"; }
+
+UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
+  fail "--no-tailscale must leave WEB_HOST on loopback only"
+grep -qi "unexpected tailscale invocation\|unexpected curl invocation" "$OUT_FILE" &&
+  fail "--no-tailscale must never invoke tailscale or curl"
+
+echo "npm-init.test.sh: no-tailscale scenario OK"
 
 echo "npm-init.test.sh: OK"

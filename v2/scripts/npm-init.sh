@@ -3,7 +3,7 @@
 # npm does not register or start systemd services — run once per host:
 #   spur init
 # or:
-#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>]
+#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>] [--tailscale|--no-tailscale]
 
 set -euo pipefail
 
@@ -12,6 +12,7 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 NO_START=0
 EXPOSE_WEB=0
 WEB_PORT=""
+TAILSCALE=1
 
 usage() {
   sed -n '3,8p' "$0"
@@ -29,6 +30,8 @@ while [[ $# -gt 0 ]]; do
       }
       shift 2
       ;;
+    --tailscale) TAILSCALE=1; shift ;;
+    --no-tailscale) TAILSCALE=0; shift ;;
     -h | --help)
       usage
       exit 0
@@ -81,6 +84,31 @@ if [[ -n "$WEB_PORT" ]]; then
     sed -i "s/^Environment=PORT=.*/Environment=PORT=$WEB_PORT/" "$UNIT_DIR/spur-web.service"
   else
     sed -i "/^\\[Service\\]/a Environment=PORT=$WEB_PORT" "$UNIT_DIR/spur-web.service"
+  fi
+fi
+
+# Private remote access over the user's own tailnet, on by default. This is
+# additional to the always-on loopback bind (never a replacement) and is
+# skipped when --expose-web already opted into the public 0.0.0.0 bind (that
+# is a separate, more permissive, explicit override).
+if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" -eq 1 ]]; then
+  if ! command -v tailscale >/dev/null 2>&1; then
+    echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
+    curl -fsSL https://tailscale.com/install.sh | sh || {
+      echo "npm-init: tailscale install failed — install manually: https://tailscale.com/download (continuing without it)" >&2
+    }
+  fi
+
+  ts_ip=""
+  if command -v tailscale >/dev/null 2>&1; then
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+  fi
+
+  if [[ "$ts_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    sed -i "s/^Environment=WEB_HOST=.*/Environment=WEB_HOST=127.0.0.1,$ts_ip/" "$UNIT_DIR/spur-web.service"
+    echo "npm-init: web UI will bind 127.0.0.1 and tailnet $ts_ip"
+  else
+    echo "npm-init: Tailscale not up yet — web UI stays on 127.0.0.1 only. Run: sudo tailscale up  (authenticate in browser), then re-run: spur init"
   fi
 fi
 

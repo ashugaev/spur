@@ -299,6 +299,7 @@ describe("createRealUpdateDeps reinit", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "6200",
       exposeWeb: true,
+      tailscale: false,
     });
   });
 
@@ -324,6 +325,33 @@ describe("createRealUpdateDeps reinit", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
       exposeWeb: false,
+      tailscale: false,
+    });
+  });
+
+  it("re-applies --tailscale when the live unit already carries a Tailscale bind", async () => {
+    const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(
+      join(unitDir, "spur-daemon.service"),
+      "[Service]\nExecStart=/usr/bin/node cli.js\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(unitDir, "spur-web.service"),
+      "[Service]\nEnvironment=PORT=4311\nEnvironment=WEB_HOST=127.0.0.1,100.64.0.1\n",
+      "utf-8",
+    );
+    process.env["HOME"] = home;
+
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    deps.reinit();
+
+    expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      webPort: "4311",
+      exposeWeb: false,
+      tailscale: true,
     });
   });
 });
