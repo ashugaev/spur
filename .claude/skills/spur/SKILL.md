@@ -10,6 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
+- `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `v2/README.md` Config and `docs/install-from-npm.md`.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:

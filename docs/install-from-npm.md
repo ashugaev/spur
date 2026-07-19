@@ -49,8 +49,23 @@ Options:
 | `--no-start`        | Install units and linger only; do not enable/start services |
 | `--expose-web`      | Bind web UI to `0.0.0.0` (default `127.0.0.1`)              |
 | `--web-port <port>` | Web listen port (default `4311`)                            |
+| `--no-tailscale`    | Skip Tailscale private-access setup (see below; on by default) |
 
 `spur doctor` runs the same host checks and suggests `spur init` when something is missing.
+
+### Private access with Tailscale
+
+By default, `spur init` sets up private remote access to the web UI over your own [Tailscale](https://tailscale.com) tailnet — reachable only from your own devices, never the public internet. Decline it with `spur init --no-tailscale` (web UI stays on `127.0.0.1` only).
+
+What happens:
+
+1. `spur init` installs Tailscale (`curl -fsSL https://tailscale.com/install.sh | sh`) if the `tailscale` command isn't already on the host. This step is best-effort — if it fails, `spur init` continues without it.
+2. You authenticate the host on your tailnet yourself: `sudo tailscale up`, then open the printed URL in a browser and sign in. This is a user-side interactive gate (like agent CLI login) — `spur init` cannot do this for you and does not run `sudo tailscale up` itself.
+3. Re-run `spur init` once the tailnet is up. It resolves your tailnet IPv4 address and widens `spur-web.service`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>` — the web UI now also serves on that address, reachable only within your tailnet.
+
+If the tailnet isn't up yet when `spur init` runs, it leaves `WEB_HOST` on `127.0.0.1` only and prints the `sudo tailscale up` hint instead of failing.
+
+`--expose-web` (bind to `0.0.0.0`, reachable from the public internet) is a separate, more permissive, explicit override — it supersedes Tailscale and is not the recommended default. Tailscale (loopback + tailnet, never public) is the recommended safe default for remote access.
 
 Verify:
 
@@ -199,19 +214,21 @@ SYSTEMCTL=sudo systemctl
 
 ## Troubleshooting
 
-| Symptom                                 | Cause                                          | Fix                                                        |
-| --------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------- |
-| Nothing listens after `npm install`     | expected — npm does not start systemd          | run `spur init`                                            |
-| Units stop after SSH logout             | linger off                                     | `loginctl enable-linger $USER`                             |
-| `spur --version` runs wrong binary      | `PATH` picks another install                   | `~/.local/bin/spur`                                        |
-| systemd `status=203/EXEC`               | npm prefix not `~/.local`                      | step 1, reinstall                                          |
-| stale system `codex` in sessions        | `/usr/bin` before `~/.local/bin`               | npm-install codex; check PATH in unit                      |
-| Codex login prompt                      | no agent auth on host                          | `codex login` or API key locally                           |
-| Two daemons on `:4310`                  | manual daemon + systemd                        | kill manual; `systemctl --user restart spur-daemon`        |
-| Project missing in UI                   | config not connected                           | `spur connect --config`                                    |
-| Web terminal `/ws` 404 or won't connect | `spur-web.service` not running (in-process WS) | `spur init` or `systemctl --user restart spur-web`         |
-| Terminal connects then closes           | `node-pty` not built on Linux                  | restart `spur-web.service` (`ExecStartPre` runs the build) |
-| UI switch "not confirmed"               | `systemctl --user` on system units             | set `SYSTEMCTL=sudo systemctl` in daemon env               |
+| Symptom                                 | Cause                                                      | Fix                                                                    |
+| --------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------- |
+| Nothing listens after `npm install`     | expected — npm does not start systemd                     | run `spur init`                                                       |
+| Units stop after SSH logout             | linger off                                                | `loginctl enable-linger $USER`                                        |
+| `spur --version` runs wrong binary      | `PATH` picks another install                              | `~/.local/bin/spur`                                                   |
+| systemd `status=203/EXEC`               | npm prefix not `~/.local`                                 | step 1, reinstall                                                     |
+| stale system `codex` in sessions        | `/usr/bin` before `~/.local/bin`                          | npm-install codex; check PATH in unit                                 |
+| Codex login prompt                      | no agent auth on host                                     | `codex login` or API key locally                                     |
+| Two daemons on `:4310`                  | manual daemon + systemd                                   | kill manual; `systemctl --user restart spur-daemon`                   |
+| Project missing in UI                   | config not connected                                      | `spur connect --config`                                              |
+| Web terminal `/ws` 404 or won't connect | `spur-web.service` not running (in-process WS)            | `spur init` or `systemctl --user restart spur-web`                    |
+| Terminal connects then closes           | `node-pty` not built on Linux                             | restart `spur-web.service` (`ExecStartPre` runs the build)            |
+| UI switch "not confirmed"               | `systemctl --user` on system units                        | set `SYSTEMCTL=sudo systemctl` in daemon env                          |
+| Web UI not reachable over Tailscale     | tailnet not up yet                                        | `sudo tailscale up`, authenticate in browser, then re-run `spur init` |
+| `spur init` skipped Tailscale setup     | ran with `--no-tailscale`, or `--expose-web` superseded it | re-run `spur init` without `--no-tailscale`/`--expose-web`            |
 
 ## Reference
 

@@ -592,3 +592,7 @@ If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 
 Shared workspace sessions keep the project path intact on `kill` and are not restorable from `list`.
+
+### `spur init` (npm install host flags)
+
+`spur init` (see [install-from-npm.md](../docs/install-from-npm.md)) installs the `spur-daemon`/`spur-web` systemd user units and takes: `--no-start`, `--expose-web` (binds the web UI to `0.0.0.0`, default `127.0.0.1`), `--web-port <port>` (default `4311`), and `--tailscale`/`--no-tailscale` (default on). Tailscale support widens `spur-web.service`'s `WEB_HOST` env to `127.0.0.1,<tailnet-ip>` once the host's tailnet is up, so the web UI also serves privately over Tailscale — loopback stays bound either way, and this never binds `0.0.0.0`. `--expose-web` is a separate, more permissive, explicit public-bind override that supersedes it. `WEB_HOST` itself accepts a comma-separated host list (`packages/web/server/web-hosts.ts`); the npm-installed unit sets it, `spur-web`'s custom production server binds one listener per host.
