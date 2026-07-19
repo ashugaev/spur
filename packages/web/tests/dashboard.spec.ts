@@ -1766,11 +1766,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       rightGroup.getByRole("button", { name: "Show Spur version information" }),
     ).toBeVisible();
 
-    // Count reflects only authenticated accounts (1 of 2) once the list loads,
-    // shown as a small counter badge overlaid on the icon.
+    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
     await trigger.click();
     await expect(page.getByText("1 ready")).toBeVisible();
-    await expect(trigger.getByTestId("claude-accounts-count")).toHaveText("1");
   });
 
   test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({

@@ -217,28 +217,14 @@ export function ClaudeAccountsMenu() {
       <button
         aria-expanded={popover.open}
         aria-haspopup="true"
-        aria-label={
-          authenticatedCount > 0
-            ? `Manage Claude accounts, ${authenticatedCount} ready`
-            : "Manage Claude accounts"
-        }
+        aria-label="Manage Claude accounts"
         className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         data-testid="claude-accounts-trigger"
         title="Manage Claude accounts"
         type="button"
         onClick={popover.toggle}
       >
-        <span className="relative inline-flex">
-          <AccountsIcon className="h-4 w-4" />
-          {authenticatedCount > 0 ? (
-            <span
-              className="absolute -right-1 -top-1 flex h-[0.9rem] min-w-[0.9rem] items-center justify-center bg-[var(--color-status-ready)] px-[3px] text-[10px] font-bold leading-none text-[var(--color-bg-elevated)]"
-              data-testid="claude-accounts-count"
-            >
-              {authenticatedCount}
-            </span>
-          ) : null}
-        </span>
+        <AccountsIcon className="h-4 w-4" />
       </button>
       {popover.open ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(22rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
@@ -255,7 +241,7 @@ export function ClaudeAccountsMenu() {
             <div className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
               {accountsQuery.isError
                 ? (accountsQuery.error as Error).message
-                : "No accounts yet. Add one to log in."}
+                : "No accounts yet. Add extra accounts to rotate between them — manually, or automatically onto a fresh one when the current account runs out of quota."}
             </div>
           ) : (
             <ul className="mb-2 flex max-h-48 flex-col gap-1 overflow-y-auto">
