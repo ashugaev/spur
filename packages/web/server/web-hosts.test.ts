@@ -11,10 +11,7 @@ describe("parseWebHosts", () => {
   });
 
   it("splits a comma-separated list of hosts", () => {
-    expect(parseWebHosts("127.0.0.1,100.64.0.1", "127.0.0.1")).toEqual([
-      "127.0.0.1",
-      "100.64.0.1",
-    ]);
+    expect(parseWebHosts("127.0.0.1,100.64.0.1", "127.0.0.1")).toEqual(["127.0.0.1", "100.64.0.1"]);
   });
 
   it("collapses to the wildcard bind when 0.0.0.0 is present", () => {

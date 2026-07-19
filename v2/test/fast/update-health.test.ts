@@ -60,7 +60,8 @@ describe("parseWebUnitOptions", () => {
   });
 
   it("flags a comma-separated WEB_HOST as a live Tailscale bind", () => {
-    const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1,100.64.0.1\n";
+    const contents =
+      "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1,100.64.0.1\n";
     expect(parseWebUnitOptions(contents)).toEqual({
       webPort: 6200,
       exposeWeb: false,
