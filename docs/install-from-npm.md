@@ -13,10 +13,10 @@ This is the official guide to install Spur on a fresh Linux server (e.g. Ubuntu 
 
 On Ubuntu (and most Linux distros), long-running Spur processes are managed by **two systemd user units** installed by `spur init`:
 
-| Unit                  | Role                                                                                                 |
-| --------------------- | ----------------------------------------------------------------------------------------------------- |
-| `spur-daemon.service` | HTTP API on `:4310`, tmux sessions                                                                    |
-| `spur-web.service`    | Web UI on `:4311`, serves the terminal WebSocket in-process on `/ws` (same port, no separate unit)    |
+| Unit                  | Role                                                                                               |
+| --------------------- | -------------------------------------------------------------------------------------------------- |
+| `spur-daemon.service` | HTTP API on `:4310`, tmux sessions                                                                 |
+| `spur-web.service`    | Web UI on `:4311`, serves the terminal WebSocket in-process on `/ws` (same port, no separate unit) |
 
 `npm install -g` alone does not register or start either of them.
 
@@ -199,19 +199,19 @@ SYSTEMCTL=sudo systemctl
 
 ## Troubleshooting
 
-| Symptom                             | Cause                                 | Fix                                                 |
-| ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
-| Nothing listens after `npm install` | expected — npm does not start systemd | run `spur init`                                     |
-| Units stop after SSH logout         | linger off                            | `loginctl enable-linger $USER`                      |
-| `spur --version` runs wrong binary  | `PATH` picks another install          | `~/.local/bin/spur`                                 |
-| systemd `status=203/EXEC`           | npm prefix not `~/.local`             | step 1, reinstall                                   |
-| stale system `codex` in sessions    | `/usr/bin` before `~/.local/bin`      | npm-install codex; check PATH in unit               |
-| Codex login prompt                  | no agent auth on host                 | `codex login` or API key locally                    |
-| Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
-| Project missing in UI               | config not connected                  | `spur connect --config`                             |
-| Web terminal `/ws` 404 or won't connect | `spur-web.service` not running (in-process WS) | `spur init` or `systemctl --user restart spur-web` |
-| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-web.service` (`ExecStartPre` runs the build) |
-| UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env        |
+| Symptom                                 | Cause                                          | Fix                                                        |
+| --------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------- |
+| Nothing listens after `npm install`     | expected — npm does not start systemd          | run `spur init`                                            |
+| Units stop after SSH logout             | linger off                                     | `loginctl enable-linger $USER`                             |
+| `spur --version` runs wrong binary      | `PATH` picks another install                   | `~/.local/bin/spur`                                        |
+| systemd `status=203/EXEC`               | npm prefix not `~/.local`                      | step 1, reinstall                                          |
+| stale system `codex` in sessions        | `/usr/bin` before `~/.local/bin`               | npm-install codex; check PATH in unit                      |
+| Codex login prompt                      | no agent auth on host                          | `codex login` or API key locally                           |
+| Two daemons on `:4310`                  | manual daemon + systemd                        | kill manual; `systemctl --user restart spur-daemon`        |
+| Project missing in UI                   | config not connected                           | `spur connect --config`                                    |
+| Web terminal `/ws` 404 or won't connect | `spur-web.service` not running (in-process WS) | `spur init` or `systemctl --user restart spur-web`         |
+| Terminal connects then closes           | `node-pty` not built on Linux                  | restart `spur-web.service` (`ExecStartPre` runs the build) |
+| UI switch "not confirmed"               | `systemctl --user` on system units             | set `SYSTEMCTL=sudo systemctl` in daemon env               |
 
 ## Reference
 
