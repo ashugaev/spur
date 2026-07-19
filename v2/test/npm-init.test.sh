@@ -292,4 +292,32 @@ grep -qi "unexpected tailscale invocation\|unexpected curl invocation" "$OUT_FIL
 
 echo "npm-init.test.sh: no-tailscale scenario OK"
 
+# --- Scenario 6: a pre-#573 stale spur-direct-terminal.service is removed ---
+# Hosts that ran `spur init` before the in-process /ws change carry a
+# spur-direct-terminal.service whose ExecStart now points at attach-only code;
+# re-running npm-init.sh (e.g. via `spur update`) must stop/disable/remove it
+# so it can't crash-loop under Restart=always.
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario stale-terminal-unit)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+mkdir -p "$UNIT_DIR"
+echo "stale pre-#573 unit" >"$UNIT_DIR/spur-direct-terminal.service"
+
+OUT_FILE="$WORK_DIR/stale-terminal-output.log"
+set +e
+HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-start --no-tailscale >"$OUT_FILE" 2>&1
+rc=$?
+set -e
+
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh (stale terminal unit) exited $rc"; }
+[ ! -f "$UNIT_DIR/spur-direct-terminal.service" ] ||
+  fail "npm-init.sh must remove a pre-existing spur-direct-terminal.service"
+
+echo "npm-init.test.sh: stale-terminal-unit scenario OK"
+
 echo "npm-init.test.sh: OK"

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import nextImport from "next";
 import { attachDirectTerminalWebSocket } from "./direct-terminal-ws.js";
 import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
+import { findTmux } from "./tmux-utils.js";
 import { parseWebHosts } from "./web-hosts.js";
 
 // Next ships a CommonJS module; under Node16 ESM interop the callable factory is
@@ -43,6 +44,11 @@ await app.prepare();
 // In dev, non-terminal upgrades (Next HMR) are forwarded to Next's own handler.
 const devUpgrade = dev ? app.getUpgradeHandler() : undefined;
 
+// Resolve the tmux binary once: findTmux() probes candidate paths with
+// execFileSync, so doing it per host would repeat that blocking work for a
+// multi-host WEB_HOST (e.g. the loopback + Tailscale bind).
+const tmuxPath = findTmux();
+
 // One HTTP server per host: Node's `server.listen(port, host)` binds a single
 // interface, so a comma-separated WEB_HOST (loopback plus e.g. a Tailscale IP)
 // needs one server per interface, each with its own terminal WebSocket attach.
@@ -53,6 +59,7 @@ for (const host of hosts) {
 
   // Terminal WebSocket shares this server on `/ws` (no separate port or proxy config).
   attachDirectTerminalWebSocket(server, {
+    tmuxPath,
     fallbackUpgrade: devUpgrade
       ? (request, socket, head) => void devUpgrade(request, socket, head)
       : undefined,

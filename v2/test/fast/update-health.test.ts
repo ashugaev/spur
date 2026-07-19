@@ -68,6 +68,20 @@ describe("parseWebUnitOptions", () => {
       tailscale: true,
     });
   });
+
+  it("recognizes a legacy pre-#573 HOSTNAME=0.0.0.0 exposure so update does not downgrade it", () => {
+    const contents = [
+      "[Service]",
+      "Environment=PORT=6200",
+      "Environment=HOSTNAME=0.0.0.0",
+      "ExecStart=/usr/bin/node server.js",
+    ].join("\n");
+    expect(parseWebUnitOptions(contents)).toEqual({
+      webPort: 6200,
+      exposeWeb: true,
+      tailscale: false,
+    });
+  });
 });
 
 describe("makeTargets", () => {

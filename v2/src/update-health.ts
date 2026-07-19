@@ -69,8 +69,11 @@ export interface WebUnitOptions {
 // bind that npm-init.sh already resolved; only re-apply `--tailscale` when one
 // is live, so an unattended `spur update` never triggers a fresh Tailscale
 // install/lookup on a host that had it declined or not yet up.
+// Pre-#573 units set the bind via `HOSTNAME=` rather than `WEB_HOST=`; still
+// recognize that legacy var here so updating a `--expose-web` install doesn't
+// downgrade its public bind back to loopback.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
-  const exposeWeb = /^Environment=WEB_HOST=0\.0\.0\.0\s*$/m.test(unitFileContents);
+  const exposeWeb = /^Environment=(?:WEB_HOST|HOSTNAME)=0\.0\.0\.0\s*$/m.test(unitFileContents);
   const tailscale = /^Environment=WEB_HOST=127\.0\.0\.1,\S+/m.test(unitFileContents);
   return { webPort: resolveWebPort(unitFileContents), exposeWeb, tailscale };
 }

@@ -82,10 +82,12 @@ Upgrade (units already installed):
 
 ```bash
 npm install -g @shugaev/spur@<version>
-systemctl --user restart spur-daemon.service spur-web.service
+spur init   # refresh unit files, then restart
 ```
 
-Or use `scripts/install-and-restart.sh <version>` (same steps, logs to `~/.spur/logs/install-and-restart.log`). When the running daemon supports it, `POST /deploy/switch` invokes that script.
+Re-run `spur init` on upgrade, not just `systemctl restart`: a plain restart reuses the old unit files. Upgrading from a version before the in-process `/ws` terminal keeps the old `spur-web.service` (`ExecStart` → `server.js`, `HOSTNAME=`) and leaves a now-dead `spur-direct-terminal.service` crash-looping. `spur init` rewrites `spur-web.service` (`ExecStart` → `web-server.js`, `WEB_HOST=`) and removes the stale terminal unit; it preserves your `--web-port` / `--expose-web` / Tailscale bind. `spur update` performs the same reinit automatically. Once units are current, later same-topology upgrades can just `systemctl --user restart spur-daemon.service spur-web.service`.
+
+`scripts/install-and-restart.sh <version>` (logs to `~/.spur/logs/install-and-restart.log`) only installs and restarts — it does not refresh unit files, so run `spur init` (or `spur update`) once when crossing the `/ws` topology change. The daemon's `POST /deploy/switch` invokes that script.
 
 On Linux, `npm install -g` may ship `node-pty` without a native binding; `spur-web.service`'s `ExecStartPre` builds it when missing. After a manual `npm install -g`, restart both units so the in-process terminal reloads `node-pty`.
 

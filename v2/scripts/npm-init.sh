@@ -75,6 +75,14 @@ mkdir -p "$UNIT_DIR"
 install -m 644 "$PKG_ROOT/deploy/spur-daemon.npm.service" "$UNIT_DIR/spur-daemon.service"
 install -m 644 "$PKG_ROOT/deploy/spur-web.npm.service" "$UNIT_DIR/spur-web.service"
 
+# Remove the obsolete direct-terminal unit left by pre-#573 installs. Its
+# ExecStart now points at attach-only library code (the terminal WS is served
+# in-process by spur-web), so under Restart=always it would crash-loop silently.
+# A re-run of this script (e.g. via `spur update`) must clean it up.
+systemctl --user stop spur-direct-terminal.service 2>/dev/null || true
+systemctl --user disable spur-direct-terminal.service 2>/dev/null || true
+rm -f "$UNIT_DIR/spur-direct-terminal.service"
+
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   sed -i 's/Environment=WEB_HOST=127.0.0.1/Environment=WEB_HOST=0.0.0.0/' "$UNIT_DIR/spur-web.service"
 fi
