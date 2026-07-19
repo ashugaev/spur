@@ -59,9 +59,13 @@ for (const host of hosts) {
   });
 
   server.once("error", (err) => {
-    if (host === "127.0.0.1") {
-      // Loopback is the always-on primary bind; if it can't be acquired the
-      // web UI has no reachable interface at all, so fail hard.
+    // Fatal when this is the loopback host, or when it's the only host in
+    // play (e.g. --expose-web's single-entry `0.0.0.0` list): either way a
+    // bind failure here leaves the process with zero listeners, silently
+    // idle. Exiting non-zero lets systemd restart it instead. A non-loopback
+    // host that's merely additive to a still-present loopback bind (e.g. a
+    // Tailscale IP that isn't up yet) stays warn-and-continue.
+    if (host === "127.0.0.1" || hosts.length === 1) {
       process.stderr.write(`[web] fatal: could not bind ${host}:${port}: ${String(err)}\n`);
       process.exit(1);
     }

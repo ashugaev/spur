@@ -10,10 +10,11 @@
 # reference may appear in output or installed units.
 #
 # Also guards the Tailscale private-access block: a stub `tailscale` command
-# resolving a valid IPv4 must widen the installed unit's WEB_HOST to
-# `127.0.0.1,<ip>`; an unresolved tailnet (empty/"NoState") must leave it on
-# loopback only and print the `sudo tailscale up` hint; `--no-tailscale` must
-# never touch WEB_HOST or invoke tailscale/curl at all.
+# resolving a valid tailnet (100.x) IPv4 must widen the installed unit's
+# WEB_HOST to `127.0.0.1,<ip>`; an unresolved tailnet (empty/"NoState") or a
+# resolved-but-non-100.x address (e.g. 0.0.0.0) must leave it on loopback only
+# and print the `sudo tailscale up` hint; `--no-tailscale` must never touch
+# WEB_HOST or invoke tailscale/curl at all.
 #
 # Run directly: bash v2/test/npm-init.test.sh
 
@@ -207,7 +208,53 @@ grep -qi "unexpected curl invocation" "$OUT_FILE" &&
 
 echo "npm-init.test.sh: tailscale-down scenario OK"
 
-# --- Scenario 4: --no-tailscale never calls tailscale or WEB_HOST edits ----
+# --- Scenario 4: tailscale resolves a non-tailnet (non-100.x) address ------
+# A stub returning a wildcard/public-looking value (e.g. 0.0.0.0) must never
+# be baked into WEB_HOST; it must be rejected exactly like the tailnet-down
+# case, staying on loopback only with the "sudo tailscale up" hint.
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario tailscale-non-cgnat)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+
+cat >"$FAKE_BIN/tailscale" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "ip" ]; then
+  echo "0.0.0.0"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$FAKE_BIN/tailscale"
+
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected curl invocation: $*" >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/curl"
+
+OUT_FILE="$WORK_DIR/tailscale-non-cgnat-output.log"
+set +e
+HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-start >"$OUT_FILE" 2>&1
+rc=$?
+set -e
+
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "npm-init.sh --no-start (tailscale non-cgnat) exited $rc"; }
+
+UNIT_DIR="$FAKE_HOME/.config/systemd/user"
+grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
+  fail "a non-100.x tailscale IP must be rejected, leaving WEB_HOST on loopback only"
+grep -qi "sudo tailscale up" "$OUT_FILE" ||
+  fail "expected the 'sudo tailscale up' hint when the resolved IP is not a tailnet 100.x address"
+grep -qi "unexpected curl invocation" "$OUT_FILE" &&
+  fail "npm-init.sh invoked curl even though tailscale was already installed"
+
+echo "npm-init.test.sh: tailscale-non-cgnat scenario OK"
+
+# --- Scenario 5: --no-tailscale never calls tailscale or WEB_HOST edits ----
 
 read -r home_kv bin_kv pkg_kv < <(setup_scenario no-tailscale)
 FAKE_HOME="${home_kv#HOME=}"

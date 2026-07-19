@@ -104,7 +104,10 @@ if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" -eq 1 ]]; then
     ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
   fi
 
-  if [[ "$ts_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+  # Tailscale always assigns IPv4 from the CGNAT range 100.64.0.0/10, so
+  # require a 100.x address here — a wildcard/public value (e.g. 0.0.0.0)
+  # must never be baked into WEB_HOST and collapse to a public bind.
+  if [[ "$ts_ip" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     sed -i "s/^Environment=WEB_HOST=.*/Environment=WEB_HOST=127.0.0.1,$ts_ip/" "$UNIT_DIR/spur-web.service"
     echo "npm-init: web UI will bind 127.0.0.1 and tailnet $ts_ip"
   else
