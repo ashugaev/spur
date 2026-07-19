@@ -217,7 +217,11 @@ export function ClaudeAccountsMenu() {
       <button
         aria-expanded={popover.open}
         aria-haspopup="true"
-        aria-label="Manage Claude accounts"
+        aria-label={
+          authenticatedCount > 0
+            ? `Manage Claude accounts, ${authenticatedCount} ready`
+            : "Manage Claude accounts"
+        }
         className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         data-testid="claude-accounts-trigger"
         title="Manage Claude accounts"
@@ -280,6 +284,7 @@ export function ClaudeAccountsMenu() {
                       className="cursor-not-allowed border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] opacity-50 outline-none"
                       data-testid={`use-account-${account.id}`}
                       disabled
+                      tabIndex={-1}
                       title="Switching accounts is per-session (pick this account when starting a session); no global switch is available yet."
                       type="button"
                     >
