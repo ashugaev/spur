@@ -6217,6 +6217,12 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    // "leave_open" never touches GitHub, so skip the gh calls entirely. This keeps
+    // session teardown working even when gh is unreachable (auth, rate limit, network).
+    if (action === "leave_open") {
+      return session;
+    }
+
     if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
       return session;
     }
@@ -6247,8 +6253,19 @@ export class SessionService {
         });
       }
 
-      if (action === "close") {
+      // action is "close" here (leave_open returned early, undefined threw above).
+      // A failed PR close must not strand the session — warn and continue teardown.
+      try {
         await closeSessionPr(session.worktreePath, binding);
+      } catch (error) {
+        this.logEvent("session.pr.close.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Failed to close pull request #${binding.number} for ${session.id}; continuing teardown: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
       }
       if (updatedSession) {
         writeSession(this.config.dataDir, updatedSession);

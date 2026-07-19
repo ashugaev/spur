@@ -8151,8 +8151,51 @@ describe("SessionService", () => {
 
     const result = await service.complete("api-1", { prAction: "leave_open" });
 
-    expect(ghMock).not.toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    // leave_open must not touch GitHub at all, so teardown survives a gh outage.
+    expect(ghMock).not.toHaveBeenCalled();
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(result.status).toBe("completed");
+  });
+
+  it("continues completion when closing the pull request fails", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      pr: {
+        number: 42,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/42",
+      },
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("gh pr close failed: API rate limit exceeded"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1", { prAction: "close" });
+
+    expect(ghMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeWorktreeMock).toHaveBeenCalled();
     expect(result.status).toBe("completed");
   });
 
