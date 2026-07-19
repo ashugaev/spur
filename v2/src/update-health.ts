@@ -58,15 +58,21 @@ export function readWebPort(scope: SystemdScope): number {
 export interface WebUnitOptions {
   webPort: number;
   exposeWeb: boolean;
+  tailscale: boolean;
 }
 
 // The live web unit is the source of truth for what is currently deployed:
 // `Environment=PORT=<n>` is the listen port and `Environment=WEB_HOST=0.0.0.0`
 // marks external exposure (set by npm-init.sh --expose-web). Reinit must
 // re-apply both so an update or rollback never silently resets to loopback:4311.
+// A comma-separated WEB_HOST (e.g. `127.0.0.1,100.64.0.1`) marks a Tailscale
+// bind that npm-init.sh already resolved; only re-apply `--tailscale` when one
+// is live, so an unattended `spur update` never triggers a fresh Tailscale
+// install/lookup on a host that had it declined or not yet up.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
   const exposeWeb = /^Environment=WEB_HOST=0\.0\.0\.0\s*$/m.test(unitFileContents);
-  return { webPort: resolveWebPort(unitFileContents), exposeWeb };
+  const tailscale = /^Environment=WEB_HOST=127\.0\.0\.1,\S+/m.test(unitFileContents);
+  return { webPort: resolveWebPort(unitFileContents), exposeWeb, tailscale };
 }
 
 export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
@@ -74,7 +80,7 @@ export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
   try {
     return parseWebUnitOptions(readFileSync(unitPath, "utf-8"));
   } catch {
-    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false };
+    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false, tailscale: false };
   }
 }
 

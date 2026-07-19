@@ -156,7 +156,7 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
 
 export function runNpmInit(
   cliEntrypoint: string,
-  options: { noStart?: boolean; exposeWeb?: boolean; webPort?: string },
+  options: { noStart?: boolean; exposeWeb?: boolean; webPort?: string; tailscale?: boolean },
 ): void {
   const script = resolveNpmInitScript(cliEntrypoint);
   if (!existsSync(script)) {
@@ -172,5 +172,6 @@ export function runNpmInit(
   if (options.webPort) {
     args.push("--web-port", options.webPort);
   }
+  args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
   execFileSync("bash", [script, ...args], { stdio: "inherit" });
 }

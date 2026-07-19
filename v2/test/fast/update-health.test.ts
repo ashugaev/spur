@@ -32,6 +32,7 @@ describe("parseWebUnitOptions", () => {
     expect(parseWebUnitOptions("[Service]\nExecStart=/usr/bin/node server.js\n")).toEqual({
       webPort: 4311,
       exposeWeb: false,
+      tailscale: false,
     });
   });
 
@@ -42,12 +43,29 @@ describe("parseWebUnitOptions", () => {
       "Environment=WEB_HOST=0.0.0.0",
       "ExecStart=/usr/bin/node server.js",
     ].join("\n");
-    expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: true });
+    expect(parseWebUnitOptions(contents)).toEqual({
+      webPort: 6200,
+      exposeWeb: true,
+      tailscale: false,
+    });
   });
 
   it("does not flag loopback WEB_HOST as exposed", () => {
     const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1\n";
-    expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: false });
+    expect(parseWebUnitOptions(contents)).toEqual({
+      webPort: 6200,
+      exposeWeb: false,
+      tailscale: false,
+    });
+  });
+
+  it("flags a comma-separated WEB_HOST as a live Tailscale bind", () => {
+    const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1,100.64.0.1\n";
+    expect(parseWebUnitOptions(contents)).toEqual({
+      webPort: 6200,
+      exposeWeb: false,
+      tailscale: true,
+    });
   });
 });
 

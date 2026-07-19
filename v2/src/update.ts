@@ -172,10 +172,10 @@ export function createRealUpdateDeps(
       execFileSync("npm", ["install", "-g", `${PACKAGE_SPEC}@${target}`], { stdio: "inherit" });
     },
     reinit: () => {
-      // Preserve the live web port / external exposure the operator deployed
-      // instead of resetting the units to loopback:4311.
-      const { webPort, exposeWeb } = readWebUnitOptions(scope);
-      runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb });
+      // Preserve the live web port / external exposure / Tailscale bind the
+      // operator deployed instead of resetting the units to loopback:4311.
+      const { webPort, exposeWeb, tailscale } = readWebUnitOptions(scope);
+      runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb, tailscale });
     },
     currentVersion: version,
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
