@@ -288,7 +288,7 @@ describe("createRealUpdateDeps reinit", () => {
     );
     await writeFile(
       join(unitDir, "spur-web.service"),
-      "[Service]\nEnvironment=PORT=6200\nEnvironment=HOSTNAME=0.0.0.0\n",
+      "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=0.0.0.0\n",
       "utf-8",
     );
     process.env["HOME"] = home;

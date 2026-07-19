@@ -8,9 +8,8 @@ const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_WEB_PORT = 4311;
-const TERMINAL_PORT = 14801;
 
-export type ServiceId = "daemon" | "web" | "terminal";
+export type ServiceId = "daemon" | "web";
 
 export type ProbeResult =
   | { ok: true }
@@ -32,7 +31,6 @@ export interface ProbeTarget {
 export const SERVICE_UNITS: Record<ServiceId, string> = {
   daemon: "spur-daemon.service",
   web: "spur-web.service",
-  terminal: "spur-direct-terminal.service",
 };
 
 // The web unit carries its listen port as `Environment=PORT=<n>`; npm-init.sh
@@ -63,11 +61,11 @@ export interface WebUnitOptions {
 }
 
 // The live web unit is the source of truth for what is currently deployed:
-// `Environment=PORT=<n>` is the listen port and `Environment=HOSTNAME=0.0.0.0`
+// `Environment=PORT=<n>` is the listen port and `Environment=WEB_HOST=0.0.0.0`
 // marks external exposure (set by npm-init.sh --expose-web). Reinit must
 // re-apply both so an update or rollback never silently resets to loopback:4311.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
-  const exposeWeb = /^Environment=HOSTNAME=0\.0\.0\.0\s*$/m.test(unitFileContents);
+  const exposeWeb = /^Environment=WEB_HOST=0\.0\.0\.0\s*$/m.test(unitFileContents);
   return { webPort: resolveWebPort(unitFileContents), exposeWeb };
 }
 
@@ -89,7 +87,6 @@ export function makeTargets(ports: ProbePorts): Record<ServiceId, ProbeTarget> {
   return {
     daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/sessions` },
     web: { id: "web", url: `http://127.0.0.1:${ports.web}/` },
-    terminal: { id: "terminal", url: `http://127.0.0.1:${TERMINAL_PORT}/health` },
   };
 }
 
