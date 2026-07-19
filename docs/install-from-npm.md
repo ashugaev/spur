@@ -1,6 +1,6 @@
 # Install Spur from npm
 
-Install `@shugaev/spur` on a Linux host without cloning the repo.
+This is the official guide to install Spur on a fresh Linux server (e.g. Ubuntu 24.04). The npm package ships the web UI prebuilt — there is no on-box build step, so the install works on a minimal 1 GB VM (e.g. GCP e2-micro) with no swap. Maintainers doing source/dev deploys: see [ubuntu-vm-deploy.md](ubuntu-vm-deploy.md).
 
 ## npm install does not start services
 
@@ -36,6 +36,10 @@ npm install -g @shugaev/spur@<version>
 
 # one-time host setup: units + linger + start
 spur init
+
+# install an agent CLI and authenticate it ON THIS HOST (required to spawn sessions)
+npm install -g @openai/codex@latest
+codex login          # or install Claude Code and run `claude` to sign in
 ```
 
 Options:
@@ -89,14 +93,14 @@ command -v tmux git node npm
 
 Install `tmux`/`git` with the host's package manager if missing. For Node, use the NodeSource/nvm step in Quick setup above — apt's packaged `nodejs` on Ubuntu 24.04 is v18, below the required engine range.
 
-## Ports (default npm layout)
+## Ports
 
 | Service         | Bind (default) | Port |
 | --------------- | -------------- | ---- |
 | Daemon HTTP API | `127.0.0.1`    | 4310 |
 | Web UI          | `127.0.0.1`    | 4311 |
 
-Source-deploy layouts may use different ports (e.g. nginx front `:5555`, web `:3012`). Override with `spur init --web-port` when fronting with an existing reverse proxy.
+Override the web port with `spur init --web-port <port>` if `:4311` is taken or you front Spur with an existing reverse proxy.
 
 ## Manual setup (what `spur init` does)
 
