@@ -11,19 +11,24 @@ Install `@shugaev/spur` on a Linux host without cloning the repo.
 - start the daemon or web UI
 - survive reboot by itself
 
-On Ubuntu (and most Linux distros), long-running Spur processes are managed by **three systemd user units** installed by `spur init`:
+On Ubuntu (and most Linux distros), long-running Spur processes are managed by **two systemd user units** installed by `spur init`:
 
-| Unit                           | Role                                                  |
-| ------------------------------ | ----------------------------------------------------- |
-| `spur-daemon.service`          | HTTP API on `:4310`, tmux sessions                    |
-| `spur-web.service`             | Next.js UI (default `:4311`, or `:3012` behind nginx) |
-| `spur-direct-terminal.service` | WebSocket terminal on `:14801` (nginx proxies `/ws`)  |
+| Unit                  | Role                                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------------------------- |
+| `spur-daemon.service` | HTTP API on `:4310`, tmux sessions                                                                    |
+| `spur-web.service`    | Web UI on `:4311`, serves the terminal WebSocket in-process on `/ws` (same port, no separate unit)    |
 
-`npm install -g` alone does not register or start any of them.
+`npm install -g` alone does not register or start either of them.
 
 ## Quick setup
 
 ```bash
+# Node 20+ is required — fresh Ubuntu ships no node/npm, and apt's nodejs is v18
+# (below the ^20.19 || ^22.13 || >=24 engine requirement).
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v   # expect v20.x or later
+
 npm config set prefix ~/.local
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -46,22 +51,24 @@ Options:
 Verify:
 
 ```bash
-systemctl --user is-active spur-daemon.service spur-web.service spur-direct-terminal.service
+systemctl --user is-active spur-daemon.service spur-web.service
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
-curl -fsS http://127.0.0.1:14801/health                                        # {"ok":true}
 ```
+
+The web UI at `http://127.0.0.1:4311/` opens the terminal over `/ws` on the
+same port — no separate port or health check needed.
 
 Upgrade (units already installed):
 
 ```bash
 npm install -g @shugaev/spur@<version>
-systemctl --user restart spur-daemon.service spur-web.service spur-direct-terminal.service
+systemctl --user restart spur-daemon.service spur-web.service
 ```
 
 Or use `scripts/install-and-restart.sh <version>` (same steps, logs to `~/.spur/logs/install-and-restart.log`). When the running daemon supports it, `POST /deploy/switch` invokes that script.
 
-On Linux, `npm install -g` may ship `node-pty` without a native binding; `install-and-restart.sh` and `spur-direct-terminal.service` build it when missing. After a manual `npm install -g`, restart all three units so the terminal WS reloads `node-pty`.
+On Linux, `npm install -g` may ship `node-pty` without a native binding; `spur-web.service`'s `ExecStartPre` builds it when missing. After a manual `npm install -g`, restart both units so the in-process terminal reloads `node-pty`.
 
 ## Security
 
@@ -80,7 +87,7 @@ systemctl --user status >/dev/null 2>&1 && echo user-systemd-ok
 command -v tmux git node npm
 ```
 
-Install anything missing with the host's package manager before continuing.
+Install `tmux`/`git` with the host's package manager if missing. For Node, use the NodeSource/nvm step in Quick setup above — apt's packaged `nodejs` on Ubuntu 24.04 is v18, below the required engine range.
 
 ## Ports (default npm layout)
 
@@ -198,8 +205,8 @@ SYSTEMCTL=sudo systemctl
 | Codex login prompt                  | no agent auth on host                 | `codex login` or API key locally                    |
 | Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
 | Project missing in UI               | config not connected                  | `spur connect --config`                             |
-| Web terminal `/ws` 502              | `spur-direct-terminal` not running    | `spur init` or restart `spur-direct-terminal`       |
-| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-direct-terminal` (unit runs build)    |
+| Web terminal `/ws` 404 or won't connect | `spur-web.service` not running (in-process WS) | `spur init` or `systemctl --user restart spur-web` |
+| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-web.service` (`ExecStartPre` runs the build) |
 | UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env        |
 
 ## Reference
