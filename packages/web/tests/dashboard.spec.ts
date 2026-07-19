@@ -1755,6 +1755,10 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(trigger).toBeVisible();
     await expect(versionMenu).toBeVisible();
 
+    // Trigger renders an accounts icon (not the old plain-text label).
+    await expect(trigger.locator("svg")).toBeVisible();
+    await expect(trigger.getByText("Claude accounts", { exact: true })).toHaveCount(0);
+
     // Trigger sits in the same right-aligned footer group as the version menu.
     const rightGroup = footer.locator("div.ml-auto");
     await expect(rightGroup.getByRole("button", { name: "Manage Claude accounts" })).toBeVisible();
@@ -1762,10 +1766,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       rightGroup.getByRole("button", { name: "Show Spur version information" }),
     ).toBeVisible();
 
-    // Count reflects only authenticated accounts (1 of 2) once the list loads.
+    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
     await trigger.click();
     await expect(page.getByText("1 ready")).toBeVisible();
-    await expect(trigger).toContainText("1");
   });
 
   test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
@@ -1788,9 +1791,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     await page.getByRole("button", { name: "Manage Claude accounts" }).click();
 
-    // Labelled account renders its label with the "ready" badge and a Remove action.
+    // Labelled account renders its label with the "ready" badge, a disabled Use
+    // action, and a Remove action.
     const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
     await expect(labelledRow).toContainText("ready");
+    await expect(labelledRow.getByTestId("use-account-acc-labelled-01")).toBeDisabled();
     await expect(
       labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
     ).toBeVisible();
@@ -1798,6 +1803,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
     const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
     await expect(shortIdRow).toContainText("not logged in");
+    await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
     await expect(
       shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
     ).toBeVisible();
