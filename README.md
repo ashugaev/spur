@@ -4,7 +4,7 @@ Local daemon + CLI orchestrator. `v2/` ships the runtime. `packages/web/` is an 
 
 ## Installation
 
-- npm: `npm install -g @shugaev/spur` then `spur init` — see [docs/install-from-npm.md](docs/install-from-npm.md).
+- npm: `npm install -g @shugaev/spur` then `spur init` — see [docs/agentic-install-from-npm.md](docs/agentic-install-from-npm.md).
 
 ## Run From Source
 
