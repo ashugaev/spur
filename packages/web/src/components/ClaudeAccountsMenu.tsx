@@ -228,7 +228,7 @@ export function ClaudeAccountsMenu() {
           <AccountsIcon className="h-4 w-4" />
           {authenticatedCount > 0 ? (
             <span
-              className="absolute -right-1 -top-1 min-w-[0.9rem] rounded-full bg-[var(--color-status-ready)] px-[3px] text-center text-[10px] font-bold leading-none text-[var(--color-bg-elevated)]"
+              className="absolute -right-1 -top-1 flex h-[0.9rem] min-w-[0.9rem] items-center justify-center bg-[var(--color-status-ready)] px-[3px] text-[10px] font-bold leading-none text-[var(--color-bg-elevated)]"
               data-testid="claude-accounts-count"
             >
               {authenticatedCount}
@@ -277,7 +277,7 @@ export function ClaudeAccountsMenu() {
                   <span className="flex shrink-0 items-center gap-1.5">
                     <button
                       aria-label={`Use Claude account ${accountName(account)}`}
-                      className="cursor-not-allowed border border-[var(--color-border-subtle)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-tertiary)] opacity-50 outline-none"
+                      className="cursor-not-allowed border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] opacity-50 outline-none"
                       data-testid={`use-account-${account.id}`}
                       disabled
                       title="Switching accounts is per-session (pick this account when starting a session); no global switch is available yet."
