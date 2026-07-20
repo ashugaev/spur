@@ -33,6 +33,7 @@ Property modifiers (orthogonal, add to any tier):
 | Property | Add |
 |---|---|
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
+| Introduces or changes visible `packages/web` UI | `design-author` before `architect` (Claude runtime); manager hard-stops for user approval of the exported design-spec before any implementation |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Any code change | `reviewer` -> `tester`; `github` close-out (mandatory PR) |
@@ -43,7 +44,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 
 ## Canonical gate order
 
-`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
 ## Process
 
@@ -52,6 +53,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 3. Execute gates in canonical order, one delegation per step:
    - Research: `researcher` -> `critic`. Critic selects one approach.
    - Clarify: only when ambiguity changes implementation. One batched round.
+   - Design: `design-author` for tasks that introduce or change visible UI; runs before architect. After it returns `PENDING_APPROVAL`, manager pings the user (`telegram` skill) with the project URL + summary and HARD-STOPS (await input); on change requests re-invoke `design-author`; never proceed to architect/developer until the user approves `design-spec.md`.
    - Plan: `architect`.
    - Implement: `developer`.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
@@ -79,6 +81,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 - Across fix cycles (CHANGES_REQUESTED/FAIL -> developer -> rerun), append new findings to the existing spec/decision record; do not re-summarize from scratch (avoids context collapse).
 - When a handoff is insufficient, the agent re-reads the repository rather than reconstructing narrative.
 - On longer or multi-cycle tasks (Tier 2/3), invoke `curator` between gates to append new stable facts and a short reflection to the task-memory artifact and refresh the compact handoff. Curator appends and reflects; it never re-summarizes prior entries (context-collapse antipattern). At each handoff, point the receiving gate at `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md`; the gate reads it when present as starting context.
+- After an approved design, curator records an "Accepted design" entry in `task-memory.md` pointing at `design-spec.md` with its approval status; `design-author`, `architect`, `developer`, and `designer` read it there.
 
 ## Output
 
