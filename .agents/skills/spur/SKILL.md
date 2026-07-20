@@ -36,7 +36,9 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   persists across daemon restarts. `github:merged` and `github:closed` fire only while owning
   session runs; dropped if stopped (same as other github signals).
 - `github` with `query` emits `github:work_item.new` per open PR. First poll per repo records
-  backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
+  backlog, no emit. `emitExisting: true` emits backlog once, capped at 10. Poll excludes drafts by
+  default (`--draft=false`); set `draft: true` on the source to poll draft PRs only. An `is:draft`
+  qualifier in `query` cannot override this flag.
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
 - `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
