@@ -33,7 +33,7 @@ Property modifiers (orthogonal, add to any tier):
 | Property | Add |
 |---|---|
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
-| Introduces or changes visible `packages/web` UI | `design-author` before `architect` (Claude runtime); manager hard-stops for user approval of the exported design-spec before any implementation |
+| Introduces or changes visible `packages/web` UI | `design-author` before `architect` (Claude runtime); manager hard-stops for user approval of the exported design-spec before any implementation; on a non-Claude runtime design-author is consume-only (use an existing approved design-spec, else route the design step to a Claude session; never stall) |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Any code change | `reviewer` -> `tester`; `github` close-out (mandatory PR) |
@@ -45,6 +45,8 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 ## Canonical gate order
 
 `researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+
+`design-author` and `designer` apply only to tasks with visible `packages/web` changes; both are skipped otherwise.
 
 ## Process
 

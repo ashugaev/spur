@@ -23,12 +23,13 @@ Claude Design tools exist only on the Claude runtime, so the design gate must ru
 
 Location: `$SPUR_SESSION_ARTIFACTS_DIR/design/` — session-scoped, renders inline in Spur UI, not committed from the worktree.
 
-| File | Contents |
-|---|---|
-| `design-spec.md` | Handoff doc, see below |
+| File                   | Contents                                                                                  |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `design-spec.md`       | Handoff doc, see below                                                                    |
 | `*.html` (one or more) | Self-contained component previews, renderable inline in Spur UI and readable by any agent |
 
 `design-spec.md` sections:
+
 - Design summary
 - Claude Design project (name + URL)
 - Components: each with states + variants
@@ -45,12 +46,15 @@ Handoff: curator records an "Accepted design" entry in `$SPUR_SESSION_ARTIFACTS_
 Trigger: task introduces or changes visible `packages/web` UI.
 
 Position in canonical order:
+
 ```
 researcher -> critic -> design-author (approval stop) -> architect -> developer -> ...
 ```
+
 Tier 0/1 (no researcher/critic): `design-author` runs before architect/developer.
 
 `design-author` steps:
+
 1. Read task-memory / spec.
 2. `/design-login` if scopes missing.
 3. Update/author components in the "Spur Design System" project (`DesignSync` + `/design-sync`).
@@ -69,4 +73,5 @@ Handoff to coding: architect binds acceptance criteria to the approved `design-s
 - Component granularity: `/design-sync` is one-component-at-a-time by design; large UI changes need several sync passes. Keep exports scoped to the components the task touches.
 
 ---
+
 Stage 2 (agent + skill + manager wiring) follows this spec.
