@@ -615,12 +615,14 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
 ): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
+  const draft = asOptionalBoolean(raw["draft"], `${label}.draft`);
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
+    ...(draft !== undefined ? { draft } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
