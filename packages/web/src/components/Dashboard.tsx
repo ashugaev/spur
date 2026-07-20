@@ -842,9 +842,7 @@ function EditProjectModal({
             role="alert"
           >
             <span>
-              {project.configured
-                ? `Disconnect ${project.name}? Spur will stop tracking its spur.yaml.`
-                : `Delete ${project.name}?`}
+              {project.configured ? `Disconnect ${project.name}?` : `Delete ${project.name}?`}
             </span>
             <div className="flex flex-wrap gap-2">
               <button
@@ -1241,9 +1239,9 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
   const emptyStateMessage = hasActiveFilters
-    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    ? `No matching sessions${projectId ? ` in ${activeProjectName}` : ""}.`
     : grouped.done.length > 0
-      ? "No current sessions are visible."
+      ? "No active sessions."
       : undefined;
 
   const configuredProjectOptions = useMemo(
@@ -2084,7 +2082,7 @@ export function Dashboard() {
                       searchVoice.toggleRecording();
                     }
                   }}
-                  placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+                  placeholder={voicePlaceholder("Filter...", searchVoice)}
                   ref={searchInputRef}
                   value={searchQuery}
                 />
@@ -2296,9 +2294,9 @@ export function Dashboard() {
             }
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
-            promptAriaLabel="Prompt for the new session..."
+            promptAriaLabel="Prompt..."
             promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
-            promptPlaceholder="Prompt for the new session..."
+            promptPlaceholder="Prompt..."
             promptRef={spawnPromptRef}
             showCancel={false}
             slashEndpoint={
@@ -2316,7 +2314,7 @@ export function Dashboard() {
         ) : null}
 
         {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
         ) : null}
 
         {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (

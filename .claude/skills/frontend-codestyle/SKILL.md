@@ -76,7 +76,7 @@ description: Visual codestyle and design system rules for packages/web. Use when
 
 - Use normal spaces in UI labels: "Spawn Session", "Needs Input", "All Projects" — not underscores.
 - Button text is always uppercase via `uppercase` class.
-- Placeholder text uses normal casing: "Filter sessions...", "Prompt for the new session..."
+- Placeholder text uses normal casing: "Filter...", "Prompt..."
 
 ### Voice input
 

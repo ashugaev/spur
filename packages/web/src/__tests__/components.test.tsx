@@ -153,8 +153,8 @@ function sessionsPayload() {
   };
 }
 
-const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
-const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt for the new session... Voice ⌘ + .";
+const SPAWN_PROMPT_PLACEHOLDER = "Prompt...";
+const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt... Voice ⌘ + .";
 const MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 
 function setMobileViewport(matches: boolean) {
@@ -462,7 +462,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.queryByText("Loading sessions...")).not.toBeInTheDocument();
+      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
@@ -491,7 +491,7 @@ describe("Dashboard", () => {
     });
 
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("Message to the running agent")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Message...")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
@@ -800,11 +800,11 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+        screen.getByText("No matching sessions in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 
-    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    const searchInput = screen.getByPlaceholderText("Filter...");
     fireEvent.change(searchInput, { target: { value: "zzz" } });
     expect(searchInput).toHaveValue("zzz");
 
@@ -899,7 +899,7 @@ describe("Dashboard", () => {
     expect(searchInput).toHaveValue("Fix");
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Filter... Voice ⌘ + .")).toBeInTheDocument();
     });
 
     fireEvent.keyDown(searchInput, { key: ".", metaKey: true });

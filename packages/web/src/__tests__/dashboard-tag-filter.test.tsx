@@ -140,7 +140,7 @@ describe("Dashboard tag filter", () => {
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
 
     // Narrow search so no session matches, revealing the empty placeholder.
-    fireEvent.change(screen.getByPlaceholderText(/filter sessions/i), {
+    fireEvent.change(screen.getByPlaceholderText(/^Filter/i), {
       target: { value: "zzz-no-match" },
     });
     await waitFor(() =>

@@ -211,7 +211,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Cmd+Enter submits
 - Cmd+Enter submits from the prompt textarea via the shared modal container keydown handler, with no duplicate textarea-level handler
 - Cmd+. toggles voice recording on/off inside the modal
-- Prompt textarea placeholder is "Prompt for the new session..." without voice support, and appends `Voice ⌘ + .` when voice is available and idle
+- Prompt textarea placeholder is "Prompt..." without voice support, and appends `Voice ⌘ + .` when voice is available and idle
 - The spawn prompt shows an inline image-picker button inside the textarea chrome
 - Pasting, dropping, or picking an image adds a compact thumbnail preview inside the textarea chrome with an inline remove button
 - Spawn payload includes those image attachments, and successful spawn clears the inline preview list
@@ -276,7 +276,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7d: Sessions list cache on revisit
 
-- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading..." text
 - Background refetch on the 5s interval silently replaces the list only when the server response differs
 
 ## Session Detail

@@ -1248,9 +1248,6 @@ function LogEntryRow({
 
       {isStateTransition ? (
         <div className="flex flex-wrap items-center gap-3 px-3 py-3">
-          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-            Status transition
-          </div>
           <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
             <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
               {formatStateLabel(fromState ?? "")}
@@ -1312,7 +1309,7 @@ function LogEntryRow({
               {entry.message}
             </pre>
           ) : (
-            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+            <div className="text-[var(--color-text-tertiary)]">No message.</div>
           )}
         </div>
       )}
@@ -2706,8 +2703,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
                     <p className="mt-2 text-[var(--color-text-secondary)]">
-                      Awaiting agent prompt. Queued messages will send automatically when the agent
-                      is ready.
+                      Awaiting agent prompt — queued messages will send automatically.
                     </p>
                   ) : null}
                 </section>
@@ -2743,7 +2739,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           current.filter((_, currentIndex) => currentIndex !== index),
                         )
                       }
-                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
+                      placeholder={voicePlaceholder("Message...", voice)}
                       textareaRef={messageRef}
                       value={message}
                       voice={voice}
@@ -2920,13 +2916,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       })}
                     </div>
                   ) : (
-                    <p className="py-2 text-[var(--color-text-secondary)]">
-                      {artifactCategory === "attached"
-                        ? "No attached artifacts yet."
-                        : artifactCategory === "system"
-                          ? "No system artifacts yet."
-                          : "No agent artifacts yet."}
-                    </p>
+                    <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}
                 </section>
               ) : null}
@@ -3165,9 +3155,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <div>
                   <div className="font-bold uppercase text-[var(--color-text-primary)]">
                     Logs {session.id}
-                  </div>
-                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Spur orchestrator events and runtime output
                   </div>
                 </div>
                 <button
@@ -3550,7 +3537,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
               promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
-              promptPlaceholder="Edit the initial message..."
+              promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
@@ -3651,7 +3638,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
+        <p className="mt-5 text-[var(--color-text-secondary)]">Loading...</p>
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
