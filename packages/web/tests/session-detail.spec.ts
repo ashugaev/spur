@@ -3004,13 +3004,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-rate-limited" });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
     await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
       await route.fulfill({
         status: 409,

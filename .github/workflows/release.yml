@@ -52,7 +52,7 @@ jobs:
           npm run install --prefix v2/web/node_modules/node-pty
       - name: Verify bundled web boots
         run: |
-          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          WEB_HOST=127.0.0.1 PORT=41799 NODE_ENV=production node v2/web/dist-server/web-server.js &
           web_pid=$!
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)

@@ -52,7 +52,7 @@ fi
 SYSTEMCTL="${SYSTEMCTL:-systemctl --user}"
 read -r -a systemctl_cmd <<<"$SYSTEMCTL"
 if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
-  "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service spur-direct-terminal.service
+  "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
   exit "$restart_rc"

@@ -136,16 +136,19 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
       fix: `${scope.restartCmd} spur-web.service`,
     });
 
+    // Pre-split-topology hosts may still carry the obsolete
+    // spur-direct-terminal.service (terminal WS moved into spur-web.service).
+    // Left in place it crash-loops under Restart=always + linger forever.
+    // npm-init.sh removes it on the next `spur init`/`spur update`; surface it
+    // here so `spur doctor` warns before that happens.
     const terminalUnit = join(scope.unitDir, "spur-direct-terminal.service");
     if (existsSync(terminalUnit)) {
-      const terminalActive = isActive(scope.ctl, "spur-direct-terminal.service");
       checks.push({
-        id: "spur-direct-terminal",
-        ok: terminalActive,
-        detail: terminalActive
-          ? "spur-direct-terminal.service active"
-          : "spur-direct-terminal.service not active (web terminal /ws will fail)",
-        fix: `${scope.restartCmd} spur-direct-terminal.service`,
+        id: "spur-direct-terminal-stale",
+        ok: false,
+        detail:
+          "spur-direct-terminal.service is a stale obsolete unit — will be removed on next update",
+        fix: `${scope.restartCmd.replace("restart", "disable --now")} spur-direct-terminal.service`,
       });
     }
   }

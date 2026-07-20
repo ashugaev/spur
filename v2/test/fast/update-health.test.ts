@@ -8,8 +8,8 @@ import {
 } from "../../src/update-health.js";
 
 describe("resolveWebPort", () => {
-  it("defaults to 4311 when no PORT environment line is present", () => {
-    expect(resolveWebPort("[Service]\nExecStart=/usr/bin/node server.js\n")).toBe(4311);
+  it("defaults to 3012 when no PORT environment line is present", () => {
+    expect(resolveWebPort("[Service]\nExecStart=/usr/bin/node server.js\n")).toBe(3012);
   });
 
   it("reads a single Environment=PORT line", () => {
@@ -28,9 +28,9 @@ describe("resolveWebPort", () => {
 });
 
 describe("parseWebUnitOptions", () => {
-  it("returns the default loopback:4311 config for a bare unit", () => {
+  it("returns the default loopback:3012 config for a bare unit", () => {
     expect(parseWebUnitOptions("[Service]\nExecStart=/usr/bin/node server.js\n")).toEqual({
-      webPort: 4311,
+      webPort: 3012,
       exposeWeb: false,
     });
   });
@@ -39,24 +39,33 @@ describe("parseWebUnitOptions", () => {
     const contents = [
       "[Service]",
       "Environment=PORT=6200",
-      "Environment=HOSTNAME=0.0.0.0",
+      "Environment=WEB_HOST=0.0.0.0",
       "ExecStart=/usr/bin/node server.js",
     ].join("\n");
     expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: true });
   });
 
-  it("does not flag loopback HOSTNAME as exposed", () => {
-    const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=HOSTNAME=127.0.0.1\n";
+  it("does not flag loopback WEB_HOST as exposed", () => {
+    const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1\n";
     expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: false });
+  });
+
+  it("detects the legacy Environment=HOSTNAME=0.0.0.0 exposure form", () => {
+    const contents = [
+      "[Service]",
+      "Environment=PORT=6200",
+      "Environment=HOSTNAME=0.0.0.0",
+      "ExecStart=/usr/bin/node server.js",
+    ].join("\n");
+    expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: true });
   });
 });
 
 describe("makeTargets", () => {
-  it("builds daemon, web, and terminal probe URLs from the resolved ports", () => {
+  it("builds daemon and web probe URLs from the resolved ports", () => {
     const targets = makeTargets({ daemon: 4310, web: 6200 });
     expect(targets.daemon.url).toBe("http://127.0.0.1:4310/sessions");
     expect(targets.web.url).toBe("http://127.0.0.1:6200/");
-    expect(targets.terminal.url).toBe("http://127.0.0.1:14801/health");
   });
 
   it("honors a non-default daemon port so a custom server.port host is probed correctly", () => {

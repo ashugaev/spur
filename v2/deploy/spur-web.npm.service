@@ -2,7 +2,8 @@
 #
 # Pairs with spur-daemon.npm.service. The web bundle ships inside the
 # npm tarball under `<prefix>/lib/node_modules/@shugaev/spur/web` and serves
-# on 127.0.0.1. Install to ~/.config/systemd/user/spur-web.service.
+# on 127.0.0.1. The terminal WebSocket rides the same port at `/ws` (no
+# separate unit or port). Install to ~/.config/systemd/user/spur-web.service.
 
 [Unit]
 Description=Spur web UI (npm install)
@@ -12,9 +13,14 @@ Requires=spur-daemon.service
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
-Environment=PORT=4311
-Environment=HOSTNAME=127.0.0.1
-ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/server.js
+EnvironmentFile=-%h/.spur/daemon.env
+Environment=NODE_ENV=production
+Environment=WEB_HOST=127.0.0.1
+Environment=PORT=3012
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/bash -c 'PTY=%h/.local/lib/node_modules/@shugaev/spur/web/node_modules/node-pty; test -f "$PTY/build/Release/pty.node" || (cd "$PTY" && npm run install)'
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/dist-server/web-server.js
 Restart=always
 RestartSec=3
 

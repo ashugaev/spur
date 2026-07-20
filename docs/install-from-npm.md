@@ -11,15 +11,14 @@ Install `@shugaev/spur` on a Linux host without cloning the repo.
 - start the daemon or web UI
 - survive reboot by itself
 
-On Ubuntu (and most Linux distros), long-running Spur processes are managed by **three systemd user units** installed by `spur init`:
+On Ubuntu (and most Linux distros), long-running Spur processes are managed by **two systemd user units** installed by `spur init`:
 
-| Unit                           | Role                                                  |
-| ------------------------------ | ----------------------------------------------------- |
-| `spur-daemon.service`          | HTTP API on `:4310`, tmux sessions                    |
-| `spur-web.service`             | Next.js UI (default `:4311`, or `:3012` behind nginx) |
-| `spur-direct-terminal.service` | WebSocket terminal on `:14801` (nginx proxies `/ws`)  |
+| Unit                  | Role                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `spur-daemon.service` | HTTP API on `:4310`, tmux sessions                                                         |
+| `spur-web.service`    | Next.js UI, default `:3012` — also serves the terminal WebSocket on the same port at `/ws` |
 
-`npm install -g` alone does not register or start any of them.
+`npm install -g` alone does not register or start either of them.
 
 ## Quick setup
 
@@ -39,29 +38,28 @@ Options:
 | ------------------- | ----------------------------------------------------------- |
 | `--no-start`        | Install units and linger only; do not enable/start services |
 | `--expose-web`      | Bind web UI to `0.0.0.0` (default `127.0.0.1`)              |
-| `--web-port <port>` | Web listen port (default `4311`)                            |
+| `--web-port <port>` | Web listen port (default `3012`)                            |
 
 `spur doctor` runs the same host checks and suggests `spur init` when something is missing.
 
 Verify:
 
 ```bash
-systemctl --user is-active spur-daemon.service spur-web.service spur-direct-terminal.service
+systemctl --user is-active spur-daemon.service spur-web.service
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
-curl -fsS http://127.0.0.1:14801/health                                        # {"ok":true}
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3012/             # 200
 ```
 
 Upgrade (units already installed):
 
 ```bash
 npm install -g @shugaev/spur@<version>
-systemctl --user restart spur-daemon.service spur-web.service spur-direct-terminal.service
+systemctl --user restart spur-daemon.service spur-web.service
 ```
 
 Or use `scripts/install-and-restart.sh <version>` (same steps, logs to `~/.spur/logs/install-and-restart.log`). When the running daemon supports it, `POST /deploy/switch` invokes that script.
 
-On Linux, `npm install -g` may ship `node-pty` without a native binding; `install-and-restart.sh` and `spur-direct-terminal.service` build it when missing. After a manual `npm install -g`, restart all three units so the terminal WS reloads `node-pty`.
+On Linux, `npm install -g` may ship `node-pty` without a native binding; `install-and-restart.sh` and `spur-web.service` build it when missing. After a manual `npm install -g`, restart the web unit so the terminal WS reloads `node-pty`.
 
 ## Security
 
@@ -87,9 +85,9 @@ Install anything missing with the host's package manager before continuing.
 | Service         | Bind (default) | Port |
 | --------------- | -------------- | ---- |
 | Daemon HTTP API | `127.0.0.1`    | 4310 |
-| Web UI          | `127.0.0.1`    | 4311 |
+| Web UI          | `127.0.0.1`    | 3012 |
 
-Source-deploy layouts may use different ports (e.g. nginx front `:5555`, web `:3012`). Override with `spur init --web-port` when fronting with an existing reverse proxy.
+Source-deploy layouts may front the web unit with nginx (e.g. `:5555`). Override with `spur init --web-port` when fronting with an existing reverse proxy.
 
 ## Manual setup (what `spur init` does)
 
@@ -188,19 +186,20 @@ SYSTEMCTL=sudo systemctl
 
 ## Troubleshooting
 
-| Symptom                             | Cause                                 | Fix                                                 |
-| ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
-| Nothing listens after `npm install` | expected — npm does not start systemd | run `spur init`                                     |
-| Units stop after SSH logout         | linger off                            | `loginctl enable-linger $USER`                      |
-| `spur --version` runs wrong binary  | `PATH` picks another install          | `~/.local/bin/spur`                                 |
-| systemd `status=203/EXEC`           | npm prefix not `~/.local`             | step 1, reinstall                                   |
-| stale system `codex` in sessions    | `/usr/bin` before `~/.local/bin`      | npm-install codex; check PATH in unit               |
-| Codex login prompt                  | no agent auth on host                 | `codex login` or API key locally                    |
-| Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
-| Project missing in UI               | config not connected                  | `spur connect --config`                             |
-| Web terminal `/ws` 502              | `spur-direct-terminal` not running    | `spur init` or restart `spur-direct-terminal`       |
-| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-direct-terminal` (unit runs build)    |
-| UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env        |
+| Symptom                               | Cause                                 | Fix                                                                                                          |
+| ------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Nothing listens after `npm install`   | expected — npm does not start systemd | run `spur init`                                                                                              |
+| Units stop after SSH logout           | linger off                            | `loginctl enable-linger $USER`                                                                               |
+| `spur --version` runs wrong binary    | `PATH` picks another install          | `~/.local/bin/spur`                                                                                          |
+| systemd `status=203/EXEC`             | npm prefix not `~/.local`             | step 1, reinstall                                                                                            |
+| stale system `codex` in sessions      | `/usr/bin` before `~/.local/bin`      | npm-install codex; check PATH in unit                                                                        |
+| Codex login prompt                    | no agent auth on host                 | `codex login` or API key locally                                                                             |
+| Two daemons on `:4310`                | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon`                                                          |
+| Project missing in UI                 | config not connected                  | `spur connect --config`                                                                                      |
+| Web terminal `/ws` 502                | `spur-web` not running                | `spur init` or restart `spur-web`                                                                            |
+| Terminal connects then closes         | `node-pty` not built on Linux         | restart `spur-web` (unit runs build)                                                                         |
+| Web terminal `/ws` fails behind proxy | proxy missing Upgrade headers         | add `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` |
+| UI switch "not confirmed"             | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env                                                                 |
 
 ## Reference
 
