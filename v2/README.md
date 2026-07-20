@@ -399,8 +399,6 @@ projects:
         runOnStart: false
         # `gh search prs` query. One Spur session per matched PR, ever.
         query: "is:pr is:open repo:acme/backend-api label:needs-review"
-        # Optional: poll draft PRs only (default unset excludes drafts).
-        draft: false
       web-watch:
         type: service
         service: web
