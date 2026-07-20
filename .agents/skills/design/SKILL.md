@@ -5,7 +5,7 @@ description: Author and export a UI design via Claude Design (claude.ai/design) 
 
 # Design
 
-Full spec: `docs/design-workflow.md`.
+This skill is the authoritative export contract. For workflow rationale and gate wiring, see `docs/design-workflow.md`.
 
 ## DesignSync flow
 
@@ -36,4 +36,4 @@ Location: `$SPUR_SESSION_ARTIFACTS_DIR/design/` — session-scoped, renders inli
 
 `design-author` exports and returns `PENDING_APPROVAL` — it never waits on the user itself. The manager owns the hard-stop: ping the user with the project URL + summary, await input, and only resume architect/developer once `design-spec.md` approval status flips to `approved`.
 
-Handoff: curator records an "Accepted design" entry in `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` pointing at `design-spec.md` with the approval status. Downstream gates (architect, developer, designer) read it there.
+Handoff: architect, developer, and designer read `design-spec.md` directly from the known path above and honor its Approval status field — no dependency on curator or task-memory. On Tier 2/3, curator may additionally note an "Accepted design" entry in `task-memory.md`.

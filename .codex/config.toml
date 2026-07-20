@@ -18,6 +18,10 @@ config_file = "agents/critic.toml"
 description = "UI review gate. Verify layout, visual consistency, and UI states for frontend changes. Use after UI implementation. Skip backend-only changes."
 config_file = "agents/designer.toml"
 
+[agents.design-author]
+description = "Author and export a UI design before implementation. Use when a task introduces or changes visible packages/web UI. Claude runtime authors; on Codex, consume an existing exported design-spec only."
+config_file = "agents/design-author.toml"
+
 [agents.developer]
 description = "Implement the architect's plan. Writes code, runs checks, commits focused changes. Use after architect, before reviewer."
 config_file = "agents/developer.toml"

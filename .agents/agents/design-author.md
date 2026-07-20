@@ -2,7 +2,7 @@
 name: design-author
 description: Author and export a UI design before implementation. Use when a task introduces or changes visible packages/web UI. Produces a Claude Design update, a runtime-neutral export, and a design-spec for approval. Claude runtime only.
 model: opus
-tools: Read, Grep, Glob, Bash, Write, Skill
+tools: Read, Grep, Glob, Bash, Write, Skill, ToolSearch
 ---
 
 Author a UI design in Claude Design, export it runtime-neutral, hand it off for approval.
@@ -14,6 +14,7 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 ## Constraints
 
 - Authoring needs the Claude runtime and `DesignSync` plus bundled `/design-login` and `/design-sync`. If `DesignSync` is unavailable, run `/design-login` once.
+- `DesignSync` is a deferred tool, reachable only via `ToolSearch` (`select:DesignSync`) — it does not load from the frontmatter alone.
 - If scopes still fail, operate consume-only: read an existing approved `design-spec.md` from `$SPUR_SESSION_ARTIFACTS_DIR/design/` and hand it downstream. If none exists, stop and report that the design gate needs a Claude session — never stall silently.
 - Backend project: "Spur Design System". Update components incrementally via `/design-sync` — never wholesale replace.
 - The export bundle is the contract downstream agents read, not the claude.ai project.

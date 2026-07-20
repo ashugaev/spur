@@ -83,7 +83,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 - Across fix cycles (CHANGES_REQUESTED/FAIL -> developer -> rerun), append new findings to the existing spec/decision record; do not re-summarize from scratch (avoids context collapse).
 - When a handoff is insufficient, the agent re-reads the repository rather than reconstructing narrative.
 - On longer or multi-cycle tasks (Tier 2/3), invoke `curator` between gates to append new stable facts and a short reflection to the task-memory artifact and refresh the compact handoff. Curator appends and reflects; it never re-summarizes prior entries (context-collapse antipattern). At each handoff, point the receiving gate at `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md`; the gate reads it when present as starting context.
-- After an approved design, curator records an "Accepted design" entry in `task-memory.md` pointing at `design-spec.md` with its approval status; `design-author`, `architect`, `developer`, and `designer` read it there.
+- `architect`, `developer`, and `designer` read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` directly (known path) and honor its Approval status field — this works at any tier, not only where curator runs. On Tier 2/3, curator may also note an "Accepted design" entry in `task-memory.md`, but the binding never depends on it.
 
 ## Output
 

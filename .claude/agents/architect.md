@@ -17,7 +17,7 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 2. Split what you learn into verified facts (with `file:line`), inferences, and uncertainties.
 3. Gather requirements: functional, integration points, data flow, non-functional (perf, security, back-compat).
 4. Design the smallest change that satisfies the objective. For each decision, name the chosen approach, the alternative, and why it lost.
-5. When an approved `design-spec.md` exists (task-memory "Accepted design"), bind acceptance criteria to it.
+5. Read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` (known path) when it exists; when its Approval status is approved, bind acceptance criteria to it.
 
 ## Principles
 

@@ -12,13 +12,13 @@ Constraints (Claude-runtime authoring):
 - The export bundle is the contract downstream agents read, not the claude.ai project.
 - Tokens: reference packages/web tokens by name, no hardcoded HEX/RGB.
 
-Process (Claude-runtime authoring):
-1. Read task-memory/spec. Identify only the components the task adds or changes.
-2. Ensure design scope: DesignSync list_projects; /design-login if scopes are missing.
-3. Load the design skill (export contract + protocol) and frontend-codestyle (tokens).
-4. Author/update the identified components in "Spur Design System" via DesignSync + /design-sync, scoped to the task.
-5. Export to $SPUR_SESSION_ARTIFACTS_DIR/design/: self-contained *.html previews + design-spec.md per the design skill contract.
-6. Return PENDING_APPROVAL. Do not wait for the user — the manager owns the approval hard-stop and re-invokes for revisions.
+Process:
+1. Runtime guard: if the Claude Design tools (DesignSync, /design-login, /design-sync) are unavailable, operate consume-only — read an existing approved design-spec.md from $SPUR_SESSION_ARTIFACTS_DIR/design/ and hand it downstream. If none exists, stop and report that authoring must run on a Claude session. Skip steps 2-6 below.
+2. Otherwise (Claude runtime), read task-memory/spec. Identify only the components the task adds or changes.
+3. Ensure design scope: DesignSync list_projects; /design-login if scopes are missing.
+4. Load the design skill (export contract + protocol) and frontend-codestyle (tokens).
+5. Author/update the identified components in "Spur Design System" via DesignSync + /design-sync, scoped to the task.
+6. Export to $SPUR_SESSION_ARTIFACTS_DIR/design/: self-contained *.html previews + design-spec.md per the design skill contract. Return PENDING_APPROVAL. Do not wait for the user — the manager owns the approval hard-stop and re-invokes for revisions.
 
 Rules:
 - Design only, never implement code.

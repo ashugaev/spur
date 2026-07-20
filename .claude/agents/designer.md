@@ -30,7 +30,7 @@ Review changed UI code for layout and visual quality.
    - Density matches surrounding screens
    - No obvious overflow, clipping, or cramped composition in the implementation
 5. Read tester's `Screenshot self-analysis:` block. Use it as input — do not redo the same checks.
-6. If task-memory references an approved `design-spec.md`, read it and verify the built UI matches its components, states, tokens, and acceptance criteria.
+6. Read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` (known path) when it exists and its Approval status is approved; verify the built UI matches its components, states, tokens, and acceptance criteria.
 7. Figma compare (when the spec's Verification references a Figma URL):
    - Read tester's screenshots from `${SPUR_SESSION_ARTIFACTS_DIR}`.
    - Diff against the Figma reference.

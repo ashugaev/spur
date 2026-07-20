@@ -21,25 +21,9 @@ Claude Design tools exist only on the Claude runtime, so the design gate must ru
 
 ## 4. Export contract
 
-Location: `$SPUR_SESSION_ARTIFACTS_DIR/design/` — session-scoped, renders inline in Spur UI, not committed from the worktree.
+Bundle exports to `$SPUR_SESSION_ARTIFACTS_DIR/design/`: a `design-spec.md` handoff doc plus self-contained `*.html` component previews. Downstream gates read `design-spec.md` from that known path directly, no curator dependency.
 
-| File                   | Contents                                                                                  |
-| ---------------------- | ----------------------------------------------------------------------------------------- |
-| `design-spec.md`       | Handoff doc, see below                                                                    |
-| `*.html` (one or more) | Self-contained component previews, renderable inline in Spur UI and readable by any agent |
-
-`design-spec.md` sections:
-
-- Design summary
-- Claude Design project (name + URL)
-- Components: each with states + variants
-- Design tokens: reference `packages/web` tokens by name, no hardcoded HEX/RGB (per `frontend-codestyle` skill)
-- Layout / responsive notes
-- UI states: loading, empty, error, disabled, focus
-- Acceptance criteria: visual, testable
-- Approval status: `pending` | `approved by user @ <ISO-timestamp>`
-
-Handoff: curator records an "Accepted design" entry in `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` pointing at `design-spec.md` with the approval status. Downstream gates (architect, developer, designer) read it there.
+See the `design` skill (`.claude/skills/design/SKILL.md`) for the authoritative export contract.
 
 ## 5. Gate flow in $manager
 
