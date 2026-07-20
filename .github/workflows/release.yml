@@ -52,15 +52,51 @@ jobs:
           npm run install --prefix v2/web/node_modules/node-pty
       - name: Verify bundled web boots
         run: |
-          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          NODE_ENV=production WEB_HOST=127.0.0.1 PORT=41799 node v2/web/dist-server/web-server.js &
           web_pid=$!
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)
             if [ "$code" = "200" ]; then break; fi
             sleep 1
           done
+          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; kill "$web_pid" || true; exit 1; }
+          # Terminal WS is served in-process on /ws (attachDirectTerminalWebSocket) —
+          # confirm the upgrade handshake succeeds (101), not a 404, via a raw socket.
+          node -e '
+            const net = require("node:net");
+            const crypto = require("node:crypto");
+            const key = crypto.randomBytes(16).toString("base64");
+            const socket = net.connect(41799, "127.0.0.1", () => {
+              socket.write(
+                "GET /ws?session=nonexistent HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:41799\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                `Sec-WebSocket-Key: ${key}\r\n` +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "\r\n"
+              );
+            });
+            let data = "";
+            const done = (ok) => { socket.destroy(); process.exit(ok ? 0 : 1); };
+            socket.on("data", (chunk) => {
+              data += chunk.toString();
+              if (data.includes("\r\n\r\n")) {
+                const statusLine = data.split("\r\n")[0];
+                if (statusLine.includes("101")) {
+                  console.log("ws upgrade ok:", statusLine);
+                  done(true);
+                } else {
+                  console.error("ws upgrade failed:", statusLine);
+                  done(false);
+                }
+              }
+            });
+            socket.on("error", (err) => { console.error("ws socket error:", err.message); done(false); });
+            setTimeout(() => { console.error("ws upgrade timed out"); done(false); }, 10000);
+          ' && ws_rc=0 || ws_rc=1
           kill "$web_pid" || true
-          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
+          [ "$ws_rc" -eq 0 ] || { echo "bundled web /ws upgrade did not return 101"; exit 1; }
       - name: Build v2
         env:
           SPUR_DISABLE_AUTOSTART: "1"

@@ -8,9 +8,8 @@ const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_WEB_PORT = 4311;
-const TERMINAL_PORT = 14801;
 
-export type ServiceId = "daemon" | "web" | "terminal";
+export type ServiceId = "daemon" | "web";
 
 export type ProbeResult =
   | { ok: true }
@@ -32,7 +31,6 @@ export interface ProbeTarget {
 export const SERVICE_UNITS: Record<ServiceId, string> = {
   daemon: "spur-daemon.service",
   web: "spur-web.service",
-  terminal: "spur-direct-terminal.service",
 };
 
 // The web unit carries its listen port as `Environment=PORT=<n>`; npm-init.sh
@@ -60,15 +58,24 @@ export function readWebPort(scope: SystemdScope): number {
 export interface WebUnitOptions {
   webPort: number;
   exposeWeb: boolean;
+  tailscale: boolean;
 }
 
 // The live web unit is the source of truth for what is currently deployed:
-// `Environment=PORT=<n>` is the listen port and `Environment=HOSTNAME=0.0.0.0`
+// `Environment=PORT=<n>` is the listen port and `Environment=WEB_HOST=0.0.0.0`
 // marks external exposure (set by npm-init.sh --expose-web). Reinit must
 // re-apply both so an update or rollback never silently resets to loopback:4311.
+// A comma-separated WEB_HOST (e.g. `127.0.0.1,100.64.0.1`) marks a Tailscale
+// bind that npm-init.sh already resolved; only re-apply `--tailscale` when one
+// is live, so an unattended `spur update` never triggers a fresh Tailscale
+// install/lookup on a host that had it declined or not yet up.
+// Pre-#573 units set the bind via `HOSTNAME=` rather than `WEB_HOST=`; still
+// recognize that legacy var here so updating a `--expose-web` install doesn't
+// downgrade its public bind back to loopback.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
-  const exposeWeb = /^Environment=HOSTNAME=0\.0\.0\.0\s*$/m.test(unitFileContents);
-  return { webPort: resolveWebPort(unitFileContents), exposeWeb };
+  const exposeWeb = /^Environment=(?:WEB_HOST|HOSTNAME)=0\.0\.0\.0\s*$/m.test(unitFileContents);
+  const tailscale = /^Environment=WEB_HOST=127\.0\.0\.1,\S+/m.test(unitFileContents);
+  return { webPort: resolveWebPort(unitFileContents), exposeWeb, tailscale };
 }
 
 export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
@@ -76,7 +83,7 @@ export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
   try {
     return parseWebUnitOptions(readFileSync(unitPath, "utf-8"));
   } catch {
-    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false };
+    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false, tailscale: false };
   }
 }
 
@@ -89,7 +96,6 @@ export function makeTargets(ports: ProbePorts): Record<ServiceId, ProbeTarget> {
   return {
     daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/sessions` },
     web: { id: "web", url: `http://127.0.0.1:${ports.web}/` },
-    terminal: { id: "terminal", url: `http://127.0.0.1:${TERMINAL_PORT}/health` },
   };
 }
 

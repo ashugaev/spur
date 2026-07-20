@@ -592,3 +592,9 @@ If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 
 Shared workspace sessions keep the project path intact on `kill` and are not restorable from `list`.
+
+### `spur init` (npm install host flags)
+
+Intended direction (not yet implemented): `spur init` runs as an interactive setup agent. It asks a few defaults — task tracker (GitHub/GitLab), workflow, dev settings — hands them to an agent that asks follow-ups, then offers to pick and start an agent. The flags below are the non-interactive path and stay valid.
+
+Today `spur init` installs the `spur-daemon`/`spur-web` systemd user units. Flags: `--no-start`; `--expose-web` (public `0.0.0.0` bind, default `127.0.0.1`); `--web-port <port>` (default `4311`); `--tailscale`/`--no-tailscale` (default on — widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once the tailnet is up; loopback stays bound; never `0.0.0.0`). `--expose-web` is the explicit public override and supersedes Tailscale. `WEB_HOST` takes a comma-separated host list (`packages/web/server/web-hosts.ts`); `spur-web`'s production server binds one listener per host. Full walkthrough: [agentic-install-from-npm.md](../docs/agentic-install-from-npm.md).
