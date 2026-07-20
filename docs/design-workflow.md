@@ -1,6 +1,6 @@
 # Design workflow (Claude Design pre-implementation gate)
 
-Stage 1 spec. Design only — no agent/skill/manager wiring yet (Stage 2).
+Spec for the Claude Design pre-implementation gate, wired into the `$manager` workflow (agent `design-author`, skill `design`, gate order).
 
 ## 1. Summary
 
@@ -71,7 +71,3 @@ Handoff to coding: architect binds acceptance criteria to the approved `design-s
 - Cross-session handoff: `$SPUR_SESSION_ARTIFACTS_DIR` is session-scoped. Fine within one Spur task/session (manager + subagents share the dir). If a different Spur session on another runtime picks up the coding work, artifacts don't transfer automatically — needs a shared/agreed path or committing `design-spec.md`. Unresolved; decide before relying on cross-runtime handoff.
 - Approval reliability: hard-stop is an orchestration rule, not enforced by the Spur runtime. Risk of an autonomous run auto-proceeding. Mitigation: explicit manager rule + Telegram ping + await-input.
 - Component granularity: `/design-sync` is one-component-at-a-time by design; large UI changes need several sync passes. Keep exports scoped to the components the task touches.
-
----
-
-Stage 2 (agent + skill + manager wiring) follows this spec.
