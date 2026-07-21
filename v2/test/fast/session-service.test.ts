@@ -4582,6 +4582,74 @@ describe("SessionService", () => {
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
 
+  it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "PostToolUse",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "  Field 1/1",
+        '  Allow the playwright MCP server to run tool "browser_navigate"?',
+        "  › 1. Allow                   Run the tool and continue.",
+        "    2. Allow for this session  Run the tool and remember this choice for this session.",
+        "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+        "    4. Cancel                  Cancel this tool call",
+      ].join("\n"),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so they
+    // don't race with the deliberate live classify below.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // A live (scanPane:true) classify — e.g. the on-demand viewed-session
+    // enrich, or the 5s attention monitor — detects the dialog and records
+    // the override.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("needs_input");
+    captureTmuxPaneMock.mockClear();
+
+    // The next scanPane:false dashboard tick must reuse that override instead
+    // of forking a fresh capture-pane, and must still surface needs_input
+    // rather than reverting to the soft-signal-driven rate_limited.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "needs_input" });
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
   it("classifies working state from hook for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

@@ -359,6 +359,11 @@ const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
+// with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
+// showing the corrected needs_input state between live pane scans instead of
+// reverting to rate_limited every cycle.
+const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1599,6 +1604,11 @@ export class SessionService {
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
+  // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
+  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
+  // scanPane:false dashboard tick apply the same needs_input demotion without
+  // forking a capture-pane (the tick's whole reason for existing).
+  private readonly codexMcpDialogOverrides = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -2490,6 +2500,12 @@ export class SessionService {
       this.lastObservedRunStates.clear();
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
+      }
+      const liveIds = new Set(sessions.map((session) => session.id));
+      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+        if (!liveIds.has(sessionId)) {
+          this.codexMcpDialogOverrides.delete(sessionId);
+        }
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -8930,15 +8946,30 @@ export class SessionService {
         const hardHit = scanTmuxRateLimit(paneText);
         if (hardHit?.limited) {
           rateLimit = hardHit;
+          this.codexMcpDialogOverrides.delete(session.id);
         } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
+          this.codexMcpDialogOverrides.set(session.id, Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS);
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
             message: "State: needs_input (codex MCP permission dialog, overrides soft rate limit)",
           });
+        } else {
+          this.codexMcpDialogOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "hook" && rateLimit?.limited) {
+        // The scanPane:false dashboard tick can't afford its own capture-pane
+        // fork (see enrichDashboard), but it can still reuse the last live
+        // pane-scan's dialog confirmation while it's fresh, so the dashboard
+        // doesn't keep showing rate_limited for a session the 5s attention
+        // monitor already knows is parked on a live MCP permission dialog.
+        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
+        if (expiresAt !== undefined && expiresAt > Date.now()) {
+          state = "needs_input";
+          rateLimit = null;
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
