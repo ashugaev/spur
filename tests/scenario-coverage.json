@@ -4733,7 +4733,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "While a `Queue` or `Insert` send is in flight, the clicked action shows a spinning loader icon next to a busy-state label (`Queueing...` / `Inserting...`), and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves",
+    "scenario": "While a `Queue` or `Insert` send is in flight (single shared busy flag), both `Queue` and `Insert` show a spinning loader icon next to their own busy-state label (`Queueing...` / `Inserting...`) at the same time, and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves",
     "tier": "web-unit",
     "testFiles": [
       "packages/web/src/__tests__/voice-input.test.tsx",

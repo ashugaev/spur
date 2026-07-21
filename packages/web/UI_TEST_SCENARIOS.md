@@ -461,7 +461,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Cmd+. toggles popup voice recording on/off
 - While recording inside the popup, the mic slot switches to cancel and shows a vertical stop button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
-- While a `Queue` or `Insert` send is in flight, the clicked action shows a spinning loader icon next to a busy-state label (`Queueing...` / `Inserting...`), and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves
+- While a `Queue` or `Insert` send is in flight (single shared busy flag), both `Queue` and `Insert` show a spinning loader icon next to their own busy-state label (`Queueing...` / `Inserting...`) at the same time, and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves
 - Recording cancel inside the confirmation popup stops only the active recording and keeps the popup draft open; closing the popup remains the full close/reset path
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls

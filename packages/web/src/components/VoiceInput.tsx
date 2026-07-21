@@ -417,7 +417,9 @@ export function VoiceConfirmModal({
               </div>
             </div>
           </div>
-          {(voice.recording || voice.voiceBusy) && (
+          {(voice.recording ||
+            voice.voiceBusy === "starting" ||
+            voice.voiceBusy === "transcribing") && (
             <p className="text-xs text-[var(--color-text-tertiary)]">
               <VoiceStatusHint voice={voice} />
             </p>
