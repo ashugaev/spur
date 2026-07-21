@@ -1782,6 +1782,55 @@ describe("SessionDetail voice input", () => {
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });
 
+  it("hard-wraps long tokens rendered through markdown-specific elements (inline code, autolinked URL)", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+    const codeText = `code with \`${longToken}\` inline`;
+    const linkToken = `https://${longToken}.example.com`;
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages: [
+                { role: "assistant", text: codeText, timestampMs: 1 },
+                { role: "assistant", text: linkToken, timestampMs: 2 },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
+    expect(dialogSection).not.toBeNull();
+
+    const codeElement = within(dialogSection as HTMLElement).getByText(longToken, {
+      selector: "code",
+    });
+    expect(codeElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(codeElement.closest("div")).toHaveClass("min-w-0");
+    expect(codeElement.closest("div")).toHaveClass("break-words");
+
+    const linkElement = within(dialogSection as HTMLElement).getByRole("link", {
+      name: linkToken,
+    });
+    expect(linkElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(linkElement.closest("div")).toHaveClass("min-w-0");
+    expect(linkElement.closest("div")).toHaveClass("break-words");
+  });
+
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
     const intervalCallbacks: Array<() => void | Promise<void>> = [];
     const setIntervalSpy = vi

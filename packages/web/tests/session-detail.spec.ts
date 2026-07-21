@@ -1407,6 +1407,47 @@ test.describe("S2b: Conversation dialog", () => {
     expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
+
+  test("long unbroken dialog and queued tokens hard-wrap on desktop without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-2",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+  });
 });
 
 // S3: Message section
