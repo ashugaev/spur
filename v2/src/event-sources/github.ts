@@ -229,7 +229,7 @@ async function pollWorkItems(
     ...tokenizeSearchQuery(query),
     "--state",
     "open",
-    "--draft=false",
+    deps.config.draft === true ? "--draft=true" : "--draft=false",
     "--json",
     "number,title,url,repository",
     "--limit",
