@@ -8950,7 +8950,10 @@ export class SessionService {
         } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
-          this.codexMcpDialogOverrides.set(session.id, Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS);
+          this.codexMcpDialogOverrides.set(
+            session.id,
+            Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+          );
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
