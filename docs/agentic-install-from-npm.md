@@ -102,9 +102,10 @@ cd <your-repo> && ~/.local/bin/spur connect --config spur.yaml
 | stale system `codex` in sessions    | `/usr/bin` before `~/.local/bin`                           | npm-install codex; check unit PATH                         |
 | Two daemons on `:4310`              | manual daemon + systemd                                    | kill manual; `systemctl --user restart spur-daemon`        |
 | Web terminal `/ws` won't connect    | `spur-web.service` not running (in-process WS)             | `spur init` or `systemctl --user restart spur-web`         |
-| Terminal connects then closes       | `node-pty` not built on Linux                              | restart `spur-web.service` (`ExecStartPre` builds it)      |
+| Terminal `/ws` closes immediately   | `pty.node` prebuild missing for this host (non-glibc/non-x64) | UI unaffected, terminal disabled — file an issue with `uname -m`/libc |
 | Web UI not reachable over Tailscale | tailnet not up yet                                         | `sudo tailscale up`, authenticate, then re-run `spur init` |
 | `spur init` skipped Tailscale       | ran with `--no-tailscale`, or `--expose-web` superseded it | re-run without `--no-tailscale`/`--expose-web`             |
+| `spur update` fails preflight for `terminal` | old updater (pre-#573) probes the removed terminal unit | run `spur update --force`                          |
 
 ## Reference
 

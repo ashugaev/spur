@@ -147,9 +147,9 @@ fi
 web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
 [[ -n "$web_port" ]] || web_port=4311
 
-# The web unit's ExecStartPre may build node-pty on first start; poll instead
-# of sampling is-active once immediately after `start` returns (F2: a racy
-# immediate check reported false-positive "active" before a later crash).
+# Poll instead of sampling is-active once immediately after `start` returns
+# (F2: a racy immediate check reported false-positive "active" before a
+# later crash).
 active_daemon=0
 active_web=0
 for _ in $(seq 1 10); do
@@ -171,5 +171,7 @@ echo "  curl -fsS -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:4310/sessio
 echo "  curl -fsS -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:${web_port}/"
 
 if [[ "$active_daemon" -ne 1 || "$active_web" -ne 1 || "$daemon_code" != "200" || "$web_code" != "200" ]]; then
-  die "one or more units failed to start — check: journalctl --user -u spur-daemon -u spur-web -n 40 --no-pager"
+  web_active_state="$(systemctl --user show -p ActiveState --value spur-web.service 2>/dev/null || echo unknown)"
+  web_last_log="$(journalctl --user -u spur-web -n 5 --no-pager 2>/dev/null | tail -1)"
+  die "one or more units failed to start — spur-web ActiveState=$web_active_state, last log: ${web_last_log:-<none>} — check: journalctl --user -u spur-daemon -u spur-web -n 40 --no-pager"
 fi
