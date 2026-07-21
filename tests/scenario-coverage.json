@@ -4005,6 +4005,22 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Long unbroken tokens still hard-wrap when rendered through markdown-specific elements (inline code spans, GFM-autolinked URLs)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Long unbroken tokens hard-wrap without widening the dialog on desktop viewports too, not just mobile",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
     "scenario": "Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
