@@ -12,6 +12,7 @@ import {
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { ClaudeAccountsMenu } from "@/components/ClaudeAccountsMenu";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
@@ -356,6 +357,7 @@ export function StatusBar() {
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]">
+        <ThemeToggle />
         <ClaudeAccountsMenu />
         <VersionMenu />
       </div>

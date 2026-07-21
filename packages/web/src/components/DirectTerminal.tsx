@@ -14,7 +14,7 @@ import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/V
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
-import { TERMINAL_THEME } from "@/design/colors";
+import { getTerminalTheme } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
@@ -28,6 +28,7 @@ import { TerminalStatusDot } from "@/components/TerminalStatusDot";
 import { ToastViewport } from "@/components/Toast";
 import { useToasts } from "@/hooks/useToasts";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { useTheme } from "@/lib/theme-context";
 import type { SpurSessionState } from "@/lib/types";
 
 interface DirectTerminalProps {
@@ -200,12 +201,14 @@ export function DirectTerminal({
   onClose,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const terminalInstanceRef = useRef<TerminalType | null>(null);
   const hotkeyMenuRef = useRef<HTMLDivElement>(null);
   const arrowMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const inputSeqRef = useRef(0);
   const pendingAckRef = useRef<PendingInputAck | null>(null);
   const hotkeys = getAgentHotkeys(agent);
+  const { theme } = useTheme();
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">(
     "connecting",
   );
@@ -518,11 +521,12 @@ export function DirectTerminal({
           fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
-          theme: TERMINAL_THEME,
+          theme: getTerminalTheme(theme),
           minimumContrastRatio: 1,
           scrollback: 10_000,
           allowProposedApi: true,
         });
+        terminalInstanceRef.current = terminal;
 
         fit = new FitAddon();
         terminal.loadAddon(fit);
@@ -753,8 +757,17 @@ export function DirectTerminal({
       websocketRef.current?.close();
       websocketRef.current = null;
       terminal?.dispose();
+      terminalInstanceRef.current = null;
     };
   }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
+
+  // Swap the live xterm theme when the UI theme changes, without tearing
+  // down the websocket connection (that effect intentionally excludes `theme`).
+  useEffect(() => {
+    const instance = terminalInstanceRef.current;
+    if (!instance) return;
+    instance.options.theme = getTerminalTheme(theme);
+  }, [theme]);
 
   const terminalControlButtonClass =
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";

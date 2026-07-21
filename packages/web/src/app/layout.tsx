@@ -37,6 +37,13 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning className={`dark ${jetbrainsMono.variable}`}>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem("spur:theme");if(t==="light"){document.documentElement.dataset.theme="light"}}catch(e){}`,
+          }}
+        />
+      </head>
       <body suppressHydrationWarning className="antialiased">
         <Providers>{children}</Providers>
       </body>
