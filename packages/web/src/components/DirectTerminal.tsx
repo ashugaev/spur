@@ -209,6 +209,10 @@ export function DirectTerminal({
   const pendingAckRef = useRef<PendingInputAck | null>(null);
   const hotkeys = getAgentHotkeys(agent);
   const { theme } = useTheme();
+  // Always holds the latest theme so the async terminal construction below
+  // reads the current value even if the user toggled while `import("xterm")`
+  // was still pending (the mount effect closes over a possibly-stale `theme`).
+  const themeRef = useRef(theme);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">(
     "connecting",
   );
@@ -521,7 +525,7 @@ export function DirectTerminal({
           fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
-          theme: getTerminalTheme(theme),
+          theme: getTerminalTheme(themeRef.current),
           minimumContrastRatio: 1,
           scrollback: 10_000,
           allowProposedApi: true,
@@ -764,6 +768,7 @@ export function DirectTerminal({
   // Swap the live xterm theme when the UI theme changes, without tearing
   // down the websocket connection (that effect intentionally excludes `theme`).
   useEffect(() => {
+    themeRef.current = theme;
     const instance = terminalInstanceRef.current;
     if (!instance) return;
     instance.options.theme = getTerminalTheme(theme);

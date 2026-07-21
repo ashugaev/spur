@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useLayoutEffect,
   useState,
   type ReactNode,
@@ -48,6 +49,20 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // re-reading localStorage, so state and DOM never disagree.
   useLayoutEffect(() => {
     setThemeState(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+  }, []);
+
+  // Cross-tab sync: mirror theme changes made in other tabs. The `storage`
+  // event fires only in other documents, so this never loops with our own
+  // writes; we update state + DOM but do not write back to localStorage.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== THEME_STORAGE_KEY) return;
+      const next: Theme = event.newValue === "light" ? "light" : "dark";
+      setThemeState(next);
+      applyTheme(next);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const setTheme = useCallback((next: Theme) => {

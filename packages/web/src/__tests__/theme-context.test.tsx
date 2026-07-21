@@ -66,4 +66,37 @@ describe("ThemeProvider", () => {
     expect(result.current.theme).toBe("dark");
     expect(() => result.current.toggleTheme()).not.toThrow();
   });
+
+  it("syncs from a storage event fired by another tab", () => {
+    const { result } = renderProvider();
+    expect(result.current.theme).toBe("dark");
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "light" }),
+      );
+    });
+
+    expect(result.current.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "dark" }),
+      );
+    });
+
+    expect(result.current.theme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
+  it("ignores storage events for unrelated keys", () => {
+    const { result } = renderProvider();
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: "spur:something-else", newValue: "light" }),
+      );
+    });
+    expect(result.current.theme).toBe("dark");
+  });
 });
