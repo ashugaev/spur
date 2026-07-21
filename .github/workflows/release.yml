@@ -56,12 +56,15 @@ jobs:
           # CI-built binary into the prebuilds layout node-pty already checks
           # (lib/utils.js loadNativeModule: build/Release, build/Debug, then
           # prebuilds/<platform>-<arch>) so it survives packaging.
+          # spawn-helper is a macOS-only binding.gyp target (pty.cc guards its
+          # use with `#if defined(__APPLE__)`; on Linux it calls forkpty()
+          # directly) — a Linux build/Release/ never contains it, so only
+          # pty.node is copied here.
           pty_dir="v2/web/node_modules/node-pty"
           arch="$(node -p process.arch)"
           prebuild_dir="$pty_dir/prebuilds/linux-$arch"
           mkdir -p "$prebuild_dir"
           cp "$pty_dir/build/Release/pty.node" "$prebuild_dir/pty.node"
-          cp "$pty_dir/build/Release/spawn-helper" "$prebuild_dir/spawn-helper"
           rm -rf "$pty_dir/build"
           echo "note: only linux-$arch prebuild is bundled (self-hosted runner is single-arch); linux-arm64 is NOT bundled"
       - name: Verify node-pty prebuild is packed
@@ -70,10 +73,6 @@ jobs:
           pack_list="$(npm pack --dry-run 2>&1)"
           echo "$pack_list" | grep -q 'web/node_modules/node-pty/prebuilds/linux-x64/pty.node' || {
             echo "packed tarball is missing node-pty/prebuilds/linux-x64/pty.node"
-            exit 1
-          }
-          echo "$pack_list" | grep -q 'web/node_modules/node-pty/prebuilds/linux-x64/spawn-helper' || {
-            echo "packed tarball is missing node-pty/prebuilds/linux-x64/spawn-helper"
             exit 1
           }
       - name: Verify bundled web boots
