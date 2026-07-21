@@ -347,6 +347,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Long unbroken tokens still hard-wrap when rendered through markdown-specific elements (inline code spans, GFM-autolinked URLs)
 - Long unbroken tokens hard-wrap without widening the dialog on desktop viewports too, not just mobile
+- Wide markdown images are constrained to the bubble width instead of being clipped by the dialog's overflow-x containment
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
