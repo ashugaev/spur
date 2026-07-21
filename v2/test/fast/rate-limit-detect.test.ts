@@ -395,6 +395,15 @@ describe("detectCodexMcpPermissionDialog", () => {
     const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
     expect(detectCodexMcpPermissionDialog(source)).toBe(false);
   });
+
+  it("returns false once the dialog has scrolled out of the pane's recent tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `  line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${DIALOG_TEXT}\n${subsequentOutput}`;
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
+  });
 });
 
 describe("scanTmuxRateLimit", () => {

@@ -197,8 +197,18 @@ const CODEX_MCP_DIALOG_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*allow for this session
 const CODEX_MCP_DIALOG_OPTION_THREE = /^[^0-9a-z]{0,3}3\.\s*always allow\b/i;
 const CODEX_MCP_DIALOG_OPTION_FOUR = /^[^0-9a-z]{0,3}4\.\s*cancel\b/i;
 
+// The dialog blocks the TUI, so a genuinely live one always renders at the
+// pane's tail. captureTmuxPane's default 200-line capture is sized for
+// scanTmuxRateLimit's banner search, not this check — without a tail bound, an
+// already-answered dialog can still match here until ~200 lines of subsequent
+// output scroll it out, which would keep wrongly un-masking a real rate limit.
+const CODEX_MCP_DIALOG_TAIL_LINES = 20;
+
 export function detectCodexMcpPermissionDialog(paneText: string): boolean {
-  const lines = paneText.split("\n").map((line) => line.trim());
+  const allLines = paneText.split("\n").map((line) => line.trim());
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1] === "") end--;
+  const lines = allLines.slice(Math.max(0, end - CODEX_MCP_DIALOG_TAIL_LINES), end);
   const hasHeader = lines.some((line) => CODEX_MCP_DIALOG_HEADER.test(line));
   const hasOptionOne = lines.some((line) => CODEX_MCP_DIALOG_OPTION_ONE.test(line));
   const hasOptionTwo = lines.some((line) => CODEX_MCP_DIALOG_OPTION_TWO.test(line));
