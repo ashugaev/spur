@@ -334,9 +334,7 @@ export function useVoiceInput(options: {
   const [recording, setRecording] = useState(false);
   const [hasRetainedTake, setHasRetainedTake] = useState(false);
   const [retainedTakePlaying, setRetainedTakePlaying] = useState(false);
-  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | "sending" | null>(
-    null,
-  );
+  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | "sending" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
