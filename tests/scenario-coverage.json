@@ -4021,6 +4021,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Wide markdown images are constrained to the bubble width instead of being clipped by the dialog's overflow-x containment",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
     "scenario": "Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],

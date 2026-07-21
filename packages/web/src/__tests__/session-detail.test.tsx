@@ -1786,6 +1786,8 @@ describe("SessionDetail voice input", () => {
     const longToken = "supercalifragilisticexpialidocious".repeat(8);
     const codeText = `code with \`${longToken}\` inline`;
     const linkToken = `https://${longToken}.example.com`;
+    const imageAlt = "wide diagram";
+    const imageText = `![${imageAlt}](https://example.com/wide-diagram.png)`;
 
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1799,6 +1801,7 @@ describe("SessionDetail voice input", () => {
               messages: [
                 { role: "assistant", text: codeText, timestampMs: 1 },
                 { role: "assistant", text: linkToken, timestampMs: 2 },
+                { role: "assistant", text: imageText, timestampMs: 3 },
               ],
             }),
           ),
@@ -1829,6 +1832,12 @@ describe("SessionDetail voice input", () => {
     expect(linkElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
     expect(linkElement.closest("div")).toHaveClass("min-w-0");
     expect(linkElement.closest("div")).toHaveClass("break-words");
+
+    const imageElement = within(dialogSection as HTMLElement).getByRole("img", {
+      name: imageAlt,
+    });
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:max-w-full");
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:h-auto");
   });
 
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
