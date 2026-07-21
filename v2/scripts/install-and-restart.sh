@@ -10,7 +10,7 @@
 #
 # Usage: install-and-restart.sh <version>
 # Env overrides:
-#   NPM, SYSTEMCTL, SPUR_PKG — substitute commands / package root (used by tests)
+#   NPM, SYSTEMCTL — substitute commands (used by tests)
 #   SPUR_INSTALL_LOG_DIR — override the log directory
 
 set -u
@@ -37,18 +37,11 @@ if [ "$install_rc" -ne 0 ]; then
   exit "$install_rc"
 fi
 
-SPUR_PKG="${SPUR_PKG:-$HOME/.local/lib/node_modules/@shugaev/spur}"
-PTY="$SPUR_PKG/web/node_modules/node-pty"
-if [ -f "$PTY/package.json" ] && [ ! -f "$PTY/build/Release/pty.node" ]; then
-  echo "$(date -u +%FT%TZ) install-and-restart building node-pty"
-  (cd "$PTY" && npm run install)
-  pty_rc=$?
-  if [ "$pty_rc" -ne 0 ]; then
-    echo "$(date -u +%FT%TZ) install-and-restart node-pty build failed rc=$pty_rc"
-    exit "$pty_rc"
-  fi
-fi
-
+# node-pty ships a prebuilt linux binary inside the published tarball's
+# web/node_modules/node-pty/prebuilds/ (release.yml bundles it there); no
+# on-host build is needed. If a prebuild is genuinely unavailable for this
+# host, web-server.ts degrades gracefully (UI stays up, /ws terminal
+# disabled) — do not gate this restart on building node-pty.
 SYSTEMCTL="${SYSTEMCTL:-systemctl --user}"
 read -r -a systemctl_cmd <<<"$SYSTEMCTL"
 if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then

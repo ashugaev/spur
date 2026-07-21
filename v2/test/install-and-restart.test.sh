@@ -39,6 +39,13 @@ if ! grep -q "restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+# The prebuilt node-pty binary ships inside the tarball (release.yml); this
+# script must never gate the restart on an on-host node-pty build.
+if grep -qi "node-pty" "$LOG_FILE"; then
+  echo "FAIL: install-and-restart must not attempt an on-host node-pty build" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
 
 # Case 2: invalid version exits 2 and logs the rejection.
 rm -f "$LOG_FILE"
