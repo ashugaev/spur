@@ -937,9 +937,7 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [takingBacklogKeys, setTakingBacklogKeys] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [takingBacklogKeys, setTakingBacklogKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
