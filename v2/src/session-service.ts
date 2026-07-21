@@ -64,6 +64,7 @@ import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -8918,6 +8919,20 @@ export class SessionService {
         }
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
+        }
+      } else if (scanPane && strategy === "hook") {
+        // Codex-specific: a hard rate-limit banner always wins. Otherwise, a
+        // soft has_credits:false rollout signal can be a false positive when
+        // the session is actually parked on a live MCP tool-permission dialog
+        // (hook-independent — this can show up under any hookEvent, including
+        // PostToolUse) rather than genuinely rate limited.
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const hardHit = scanTmuxRateLimit(paneText);
+        if (hardHit?.limited) {
+          rateLimit = hardHit;
+        } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
+          state = "needs_input";
+          rateLimit = null;
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
