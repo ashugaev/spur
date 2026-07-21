@@ -302,7 +302,7 @@ export interface UseVoiceInput {
   recording: boolean;
   hasRetainedTake: boolean;
   retainedTakePlaying: boolean;
-  voiceBusy: "starting" | "transcribing" | null;
+  voiceBusy: "starting" | "transcribing" | "sending" | null;
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
@@ -334,7 +334,9 @@ export function useVoiceInput(options: {
   const [recording, setRecording] = useState(false);
   const [hasRetainedTake, setHasRetainedTake] = useState(false);
   const [retainedTakePlaying, setRetainedTakePlaying] = useState(false);
-  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
+  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | "sending" | null>(
+    null,
+  );
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
@@ -762,6 +764,7 @@ export function useVoiceInput(options: {
     async (onInsert: (text: string) => unknown, options?: { allowEmpty?: boolean }) => {
       const trimmed = voiceDraft.trim();
       if (!trimmed && !options?.allowEmpty) return;
+      setVoiceBusy("sending");
       try {
         const inserted = await onInsert(trimmed);
         if (inserted === false) {
@@ -772,6 +775,8 @@ export function useVoiceInput(options: {
         setVoiceDraft("");
       } catch (error) {
         setVoiceError(error instanceof Error ? error.message : INSERT_ERROR);
+      } finally {
+        setVoiceBusy(null);
       }
     },
     [voiceDraft],

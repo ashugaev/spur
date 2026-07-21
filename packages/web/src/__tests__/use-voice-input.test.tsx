@@ -435,6 +435,63 @@ describe("useVoiceInput", () => {
     expect(result.current.hasRetainedTake).toBe(false);
   });
 
+  it("confirmDraft marks voiceBusy as sending while the send callback is in flight", async () => {
+    buildFetch([{ text: "unused" }]);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:confirm-busy" }));
+
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+    act(() => {
+      result.current.openDraft("queued message");
+    });
+
+    let resolveSend!: () => void;
+    const send = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    let confirmPromise!: Promise<void>;
+    act(() => {
+      confirmPromise = result.current.confirmDraft(send);
+    });
+
+    await waitFor(() => expect(result.current.voiceBusy).toBe("sending"));
+    expect(result.current.voiceModalOpen).toBe(true);
+
+    await act(async () => {
+      resolveSend();
+      await confirmPromise;
+    });
+
+    expect(result.current.voiceBusy).toBe(null);
+    expect(result.current.voiceModalOpen).toBe(false);
+    expect(send).toHaveBeenCalledWith("queued message");
+  });
+
+  it("confirmDraft clears voiceBusy after the send callback rejects", async () => {
+    buildFetch([{ text: "unused" }]);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:confirm-fail" }));
+
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+    act(() => {
+      result.current.openDraft("queued message");
+    });
+
+    await act(async () => {
+      await result.current.confirmDraft(async () => {
+        throw new Error("send failed");
+      });
+    });
+
+    expect(result.current.voiceBusy).toBe(null);
+    expect(result.current.voiceError).toBe("send failed");
+    expect(result.current.voiceModalOpen).toBe(true);
+  });
+
   it("cancelRecording preserves modal draft and skips transcription", async () => {
     const fetchMock = buildFetch([{ text: "cancelled text" }]);
     const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:cancel-modal" }));

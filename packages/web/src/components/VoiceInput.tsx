@@ -430,7 +430,8 @@ export function VoiceConfirmModal({
           <div className="flex items-center justify-end gap-2">
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              disabled={!!voice.voiceBusy}
               onClick={dismiss}
               type="button"
             >
@@ -439,7 +440,7 @@ export function VoiceConfirmModal({
             {onQueue ? (
               <button
                 aria-label="Add to queue"
-                className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 disabled={
                   (!voice.voiceDraft.trim() && !hasAttachments) ||
                   voice.recording ||
@@ -448,7 +449,10 @@ export function VoiceConfirmModal({
                 onClick={queueDraft}
                 type="button"
               >
-                Queue
+                {voice.voiceBusy === "sending" ? (
+                  <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                ) : null}
+                <span>{voice.voiceBusy === "sending" ? "Queueing..." : "Queue"}</span>
               </button>
             ) : null}
             <button
@@ -461,13 +465,18 @@ export function VoiceConfirmModal({
               onClick={confirmDraft}
               type="button"
             >
-              <span>Insert</span>
-              <span
-                aria-hidden="true"
-                className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
-              >
-                {PRIMARY_SUBMIT_HINT}
-              </span>
+              {voice.voiceBusy === "sending" ? (
+                <Spinner className="h-3 w-3" strokeWidth={1.5} />
+              ) : null}
+              <span>{voice.voiceBusy === "sending" ? "Inserting..." : "Insert"}</span>
+              {voice.voiceBusy !== "sending" ? (
+                <span
+                  aria-hidden="true"
+                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
+                >
+                  {PRIMARY_SUBMIT_HINT}
+                </span>
+              ) : null}
             </button>
           </div>
         </div>

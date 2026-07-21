@@ -3378,6 +3378,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
+    "scenario": "While the submit request is in flight, the submit button shows a spinning loader icon next to the busy-state label (spawn/respawn/desk-agent modals share this footer)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/spawn-modal.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
     "scenario": "Click outside modal (backdrop) closes it",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -4720,6 +4728,17 @@
     "scenario": "While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "While a `Queue` or `Insert` send is in flight, the clicked action shows a spinning loader icon next to a busy-state label (`Queueing...` / `Inserting...`), and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/voice-input.test.tsx",
+      "packages/web/src/__tests__/use-voice-input.test.tsx"
+    ],
     "ciJob": "quality"
   },
   {
