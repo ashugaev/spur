@@ -4988,6 +4988,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "While a take is in flight, only that row's `Take` button disables and pulses; other rows stay enabled and can be taken concurrently (in-flight state is tracked per item, not globally).",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R3: Desktop (>1024px)",
     "scenario": "Full layout: all columns visible",
     "tier": "web-playwright",
