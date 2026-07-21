@@ -504,6 +504,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Backlog section appears above session zones only when `/api/sessions` includes available backlog items.
 - Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.
 - Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.
+- While a take is in flight, only that row's `Take` button disables and pulses; other rows stay enabled and can be taken concurrently (in-flight state is tracked per item, not globally).
 
 ### R3: Desktop (>1024px)
 

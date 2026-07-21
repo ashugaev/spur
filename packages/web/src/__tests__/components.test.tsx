@@ -306,7 +306,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("disables every backlog take button while one take is pending", async () => {
+  it("disables only the pending backlog take button, leaving neighbors clickable", async () => {
     const backlogItems = [
       {
         provider: "jira",
@@ -331,7 +331,8 @@ describe("Dashboard", () => {
         position: 1,
       },
     ];
-    let resolveTake: ((response: Response) => void) | null = null;
+    const takeResolvers: ((response: Response) => void)[] = [];
+    let takeRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -339,8 +340,9 @@ describe("Dashboard", () => {
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/backlog/take") {
+        takeRequests += 1;
         return new Promise<Response>((resolve) => {
-          resolveTake = resolve;
+          takeResolvers.push(resolve);
         });
       }
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
@@ -355,20 +357,33 @@ describe("Dashboard", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
 
+    // Only the pending row disables; the neighbor stays enabled.
     await waitFor(() => {
       const takeButtons = screen.getAllByRole("button", { name: "Take task" });
       expect(takeButtons).toHaveLength(2);
-      for (const button of takeButtons) expect(button).toBeDisabled();
+      expect(takeButtons[0]).toBeDisabled();
+      expect(takeButtons[1]).toBeEnabled();
+    });
+    expect(takeRequests).toBe(1);
+
+    // Clicking the still-enabled neighbor while the first take is in flight fires
+    // its own request (per-item guard, not a global single-flight) — no dead click.
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
+    await waitFor(() => expect(takeRequests).toBe(2));
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons[0]).toBeDisabled();
+      expect(takeButtons[1]).toBeDisabled();
     });
 
-    resolveTake?.(
-      new Response(
-        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
-        {
-          status: 201,
-        },
-      ),
-    );
+    for (const [index, resolve] of takeResolvers.entries()) {
+      resolve(
+        new Response(
+          JSON.stringify({ item: backlogItems[index], session: sessionsPayload().sessions[0] }),
+          { status: 201 },
+        ),
+      );
+    }
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {

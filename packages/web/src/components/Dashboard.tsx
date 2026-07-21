@@ -153,12 +153,12 @@ function StatItem({
 function BacklogZone({
   items,
   projectNameMap,
-  takingKey,
+  takingKeys,
   onTake,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
-  takingKey: string | null;
+  takingKeys: ReadonlySet<string>;
   onTake: (item: AvailableBacklogItem) => Promise<void>;
 }) {
   if (items.length === 0) return null;
@@ -192,11 +192,11 @@ function BacklogZone({
             </span>
             <RowIconButton
               activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              disabled={takingKey !== null}
+              disabled={takingKeys.has(itemKey)}
               label="Take task"
               onClick={() => void onTake(item)}
             >
-              <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
+              <span className={takingKeys.has(itemKey) ? "animate-pulse" : undefined}>
                 <IconTake />
               </span>
             </RowIconButton>
@@ -937,7 +937,7 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
+  const [takingBacklogKeys, setTakingBacklogKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -1492,8 +1492,8 @@ export function Dashboard() {
 
   const handleTakeBacklog = async (item: AvailableBacklogItem) => {
     const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
-    if (takingBacklogKey) return;
-    setTakingBacklogKey(itemKey);
+    if (takingBacklogKeys.has(itemKey)) return;
+    setTakingBacklogKeys((prev) => new Set(prev).add(itemKey));
     try {
       const response = await fetch("/api/backlog/take", {
         method: "POST",
@@ -1529,7 +1529,11 @@ export function Dashboard() {
     } catch (takeError) {
       showErrorToast(errorMessage(takeError, "Failed to take backlog item"));
     } finally {
-      setTakingBacklogKey(null);
+      setTakingBacklogKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(itemKey);
+        return next;
+      });
     }
   };
 
@@ -2345,7 +2349,7 @@ export function Dashboard() {
               <BacklogZone
                 items={visibleBacklog}
                 projectNameMap={projectNameMap}
-                takingKey={takingBacklogKey}
+                takingKeys={takingBacklogKeys}
                 onTake={handleTakeBacklog}
               />
             ) : null}

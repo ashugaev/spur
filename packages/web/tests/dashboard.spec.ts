@@ -1483,6 +1483,61 @@ test.describe("D6a: Backlog zone", () => {
 
     await expect(page.getByText("Backlog")).toHaveCount(0);
   });
+
+  test("disables only the taken row, leaving neighbors clickable", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    // Hold the take request open so the pending state stays observable.
+    let releaseTake: (() => void) | null = null;
+    const takeGate = new Promise<void>((resolve) => {
+      releaseTake = resolve;
+    });
+    await page.route("/api/backlog/take", async (route) => {
+      await takeGate;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          item: { projectId: "my-project", backlogId: "features", externalId: "10001" },
+          session: makeWorkingSession(),
+        }),
+      });
+    });
+
+    await page.goto("/");
+
+    const takeButtons = page.getByRole("button", { name: "Take task" });
+    await expect(takeButtons).toHaveCount(2);
+
+    await takeButtons.first().click();
+
+    // Only the clicked row disables; the neighbor stays clickable.
+    await expect(takeButtons.first()).toBeDisabled();
+    await expect(takeButtons.nth(1)).toBeEnabled();
+
+    releaseTake?.();
+  });
 });
 
 // D6b: Footer
