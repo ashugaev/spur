@@ -8933,6 +8933,12 @@ export class SessionService {
         } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: needs_input (codex MCP permission dialog, overrides soft rate limit)",
+          });
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
