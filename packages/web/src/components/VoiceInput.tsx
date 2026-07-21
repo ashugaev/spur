@@ -289,6 +289,7 @@ export function VoiceConfirmModal({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hasAttachments = attachments.length > 0;
   const dismiss = () => {
+    if (voice.voiceBusy === "sending") return;
     onDismiss?.();
     voice.dismissModal();
   };
@@ -334,6 +335,7 @@ export function VoiceConfirmModal({
         }
         if (isPrimarySubmitHotkey(event)) {
           event.preventDefault();
+          if (voice.voiceBusy || voice.recording) return;
           confirmDraft();
         }
       }}
@@ -346,7 +348,8 @@ export function VoiceConfirmModal({
           </span>
           <button
             aria-label="Close voice draft"
-            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
+            disabled={voice.voiceBusy === "sending"}
             onClick={dismiss}
             title="Close voice draft"
             type="button"
@@ -433,7 +436,7 @@ export function VoiceConfirmModal({
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
               className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-              disabled={!!voice.voiceBusy}
+              disabled={voice.voiceBusy === "sending"}
               onClick={dismiss}
               type="button"
             >

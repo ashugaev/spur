@@ -85,6 +85,19 @@ describe("VoiceInput", () => {
     expect(cancelButton).toBeDisabled();
   });
 
+  it("ignores Cmd+Enter and Escape while a send is in flight", () => {
+    const voice = createVoice({ voiceBusy: "sending" });
+
+    render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Confirm voice input" });
+    fireEvent.keyDown(dialog, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(voice.confirmDraft).not.toHaveBeenCalled();
+    expect(voice.dismissModal).not.toHaveBeenCalled();
+  });
+
   it("clears the voice draft from the corner button", () => {
     const voice = createVoice();
 
