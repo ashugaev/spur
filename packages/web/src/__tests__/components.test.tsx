@@ -306,7 +306,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("disables every backlog take button while one take is pending", async () => {
+  it("disables only the pending backlog take button, leaving neighbors clickable", async () => {
     const backlogItems = [
       {
         provider: "jira",
@@ -358,7 +358,8 @@ describe("Dashboard", () => {
     await waitFor(() => {
       const takeButtons = screen.getAllByRole("button", { name: "Take task" });
       expect(takeButtons).toHaveLength(2);
-      for (const button of takeButtons) expect(button).toBeDisabled();
+      expect(takeButtons[0]).toBeDisabled();
+      expect(takeButtons[1]).toBeEnabled();
     });
 
     resolveTake?.(

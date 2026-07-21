@@ -192,7 +192,7 @@ function BacklogZone({
             </span>
             <RowIconButton
               activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              disabled={takingKey !== null}
+              disabled={takingKey === itemKey}
               label="Take task"
               onClick={() => void onTake(item)}
             >
