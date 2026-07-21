@@ -8,6 +8,7 @@ import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeRateLimit,
   detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   detectCodexRateLimit,
   detectCursorRateLimit,
   scanTmuxRateLimit,
@@ -354,6 +355,54 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
       false,
     );
+  });
+});
+
+describe("detectCodexMcpPermissionDialog", () => {
+  // Real captured render (session-artifacts/shp-a4bc, intelas-f45c): codex mid
+  // tool call, hit the interactive MCP permission gate for playwright.
+  const DIALOG_TEXT = [
+    "  Field 1/1",
+    '  Allow the playwright MCP server to run tool "browser_navigate"?',
+    "",
+    "  url: https://github.com/intelas/intelas-web/pull/3905/files",
+    "",
+    "  › 1. Allow                   Run the tool and continue.",
+    "    2. Allow for this session  Run the tool and remember this choice for this session.",
+    "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+    "    4. Cancel                  Cancel this tool call",
+    "  enter to submit | esc to cancel",
+  ].join("\n");
+
+  it("returns true for the real captured MCP permission dialog render", () => {
+    expect(detectCodexMcpPermissionDialog(DIALOG_TEXT)).toBe(true);
+  });
+
+  it("returns false for prose that merely mentions similar wording", () => {
+    const paneText = [
+      "I noticed you could allow the mcp server later if needed.",
+      "For now let's keep working on the diff.",
+    ].join("\n");
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false once the dialog has scrolled out of the pane's recent tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `  line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${DIALOG_TEXT}\n${subsequentOutput}`;
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
   });
 });
 

@@ -4051,6 +4051,169 @@ describe("SessionService", () => {
     expect(result.state).toBe("rate_limited");
   });
 
+  it("classifies needs_input for codex when the pane shows a live MCP permission dialog despite a soft rate-limit signal (hook-independent)", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "PostToolUse",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "  Field 1/1",
+        '  Allow the playwright MCP server to run tool "browser_navigate"?',
+        "",
+        "  › 1. Allow                   Run the tool and continue.",
+        "    2. Allow for this session  Run the tool and remember this choice for this session.",
+        "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+        "    4. Cancel                  Cancel this tool call",
+        "  enter to submit | esc to cancel",
+      ].join("\n"),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("keeps rate_limited for codex when a hard rate-limit banner co-occurs with the MCP permission dialog", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "PostToolUse",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+        "  Field 1/1",
+        '  Allow the playwright MCP server to run tool "browser_navigate"?',
+        "  › 1. Allow                   Run the tool and continue.",
+        "    2. Allow for this session  Run the tool and remember this choice for this session.",
+        "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+        "    4. Cancel                  Cancel this tool call",
+      ].join("\n"),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("stays rate_limited for codex on a soft has_credits:false signal with a benign idle pane (no dialog, no banner)", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue("Waiting for the next task.");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("stays rate_limited for codex when an already-answered MCP dialog has scrolled out of the pane's recent tail", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    const answeredDialog = [
+      "  Field 1/1",
+      '  Allow the playwright MCP server to run tool "browser_navigate"?',
+      "  › 1. Allow                   Run the tool and continue.",
+      "    2. Allow for this session  Run the tool and remember this choice for this session.",
+      "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+      "    4. Cancel                  Cancel this tool call",
+    ].join("\n");
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `  line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    captureTmuxPaneMock.mockResolvedValue(`${answeredDialog}\n${subsequentOutput}`);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
   it("classifies rate_limited for claude over a waiting status when the transcript shows a rate-limit error", async () => {
     readSessionMock.mockReturnValue(runningSession());
     mockClaudeSessionStatus("waiting", "idle");
@@ -4417,6 +4580,74 @@ describe("SessionService", () => {
   it("returns null for this test file's own raw contents (self-match regression guard)", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "PostToolUse",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "  Field 1/1",
+        '  Allow the playwright MCP server to run tool "browser_navigate"?',
+        "  › 1. Allow                   Run the tool and continue.",
+        "    2. Allow for this session  Run the tool and remember this choice for this session.",
+        "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+        "    4. Cancel                  Cancel this tool call",
+      ].join("\n"),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so they
+    // don't race with the deliberate live classify below.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // A live (scanPane:true) classify — e.g. the on-demand viewed-session
+    // enrich, or the 5s attention monitor — detects the dialog and records
+    // the override.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("needs_input");
+    captureTmuxPaneMock.mockClear();
+
+    // The next scanPane:false dashboard tick must reuse that override instead
+    // of forking a fresh capture-pane, and must still surface needs_input
+    // rather than reverting to the soft-signal-driven rate_limited.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "needs_input" });
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    service.dispose();
   });
 
   it("classifies working state from hook for codex sessions", async () => {

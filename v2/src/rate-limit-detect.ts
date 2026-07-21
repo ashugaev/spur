@@ -181,6 +181,42 @@ export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
     .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
 }
 
+// Codex's MCP tool-permission confirmation dialog (e.g. "Allow the playwright
+// MCP server to run tool "browser_navigate"?" with four numbered options). This
+// is a live needs_input prompt, not a rate limit — but the same turn can carry
+// soft has_credits:false telemetry that would otherwise force rate_limited.
+// Mirrors detectClaudeUsageLimitMenu's anti-self-trigger discipline: requires
+// the header line plus all four option lines as distinct whole physical lines,
+// so prose that merely mentions "allow the mcp server" can't bare-reproduce a
+// matching set of lines and self-trigger. Option lines end with `\b` rather
+// than `$` because codex renders a trailing description after each option
+// (e.g. "1. Allow                   Run the tool and continue.").
+const CODEX_MCP_DIALOG_HEADER = /^allow the .+ mcp server to run tool /i;
+const CODEX_MCP_DIALOG_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*allow\b/i;
+const CODEX_MCP_DIALOG_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*allow for this session\b/i;
+const CODEX_MCP_DIALOG_OPTION_THREE = /^[^0-9a-z]{0,3}3\.\s*always allow\b/i;
+const CODEX_MCP_DIALOG_OPTION_FOUR = /^[^0-9a-z]{0,3}4\.\s*cancel\b/i;
+
+// The dialog blocks the TUI, so a genuinely live one always renders at the
+// pane's tail. captureTmuxPane's default 200-line capture is sized for
+// scanTmuxRateLimit's banner search, not this check — without a tail bound, an
+// already-answered dialog can still match here until ~200 lines of subsequent
+// output scroll it out, which would keep wrongly un-masking a real rate limit.
+const CODEX_MCP_DIALOG_TAIL_LINES = 20;
+
+export function detectCodexMcpPermissionDialog(paneText: string): boolean {
+  const allLines = paneText.split("\n").map((line) => line.trim());
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1] === "") end--;
+  const lines = allLines.slice(Math.max(0, end - CODEX_MCP_DIALOG_TAIL_LINES), end);
+  const hasHeader = lines.some((line) => CODEX_MCP_DIALOG_HEADER.test(line));
+  const hasOptionOne = lines.some((line) => CODEX_MCP_DIALOG_OPTION_ONE.test(line));
+  const hasOptionTwo = lines.some((line) => CODEX_MCP_DIALOG_OPTION_TWO.test(line));
+  const hasOptionThree = lines.some((line) => CODEX_MCP_DIALOG_OPTION_THREE.test(line));
+  const hasOptionFour = lines.some((line) => CODEX_MCP_DIALOG_OPTION_FOUR.test(line));
+  return hasHeader && hasOptionOne && hasOptionTwo && hasOptionThree && hasOptionFour;
+}
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
