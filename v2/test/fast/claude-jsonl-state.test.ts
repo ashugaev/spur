@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
+  hasTrailingClaudeServerError,
   parseConversationLines,
+  parseJsonlRecord,
   readClaudeJsonlState,
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
@@ -182,6 +184,138 @@ describe("classifyClaudeJsonlState", () => {
   it("returns working for unknown record types (fallback)", () => {
     const records = [rec({ type: "unknown_type" })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  // ── trailing server_error → error ───────────────────────────────────
+
+  it("returns error for a trailing server_error record", () => {
+    const records = [rec({ type: "assistant", stopReason: "stop_sequence", serverError: true })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("error");
+  });
+
+  it("keeps error when a progress record follows the server_error record", () => {
+    const records = [
+      rec({ type: "assistant", stopReason: "stop_sequence", serverError: true }),
+      rec({ type: "progress" }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("error");
+  });
+
+  it("keeps error when a system record follows the server_error record", () => {
+    const records = [
+      rec({ type: "assistant", stopReason: "stop_sequence", serverError: true }),
+      rec({ type: "system" }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("error");
+  });
+});
+
+// ── parseJsonlRecord: server_error detector ──────────────────────────
+
+describe("parseJsonlRecord server_error detection", () => {
+  const CLAUDE_SERVER_ERROR_WITH_STATUS_LINE = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    apiErrorStatus: 529,
+    error: "server_error",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "API Error: 529 Overloaded." }],
+    },
+  });
+  const CLAUDE_SERVER_ERROR_NO_STATUS_LINE = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    error: "server_error",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "API Error: Unable to connect to API (ConnectionRefused)" }],
+    },
+  });
+  const CLAUDE_RATE_LIMIT_LINE = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    error: "rate_limit",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "You've hit your session limit · resets 1pm (UTC)" }],
+    },
+  });
+  const CLAUDE_PROSE_MENTIONING_500_LINE = JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "The server returned API Error: 500 earlier, now fixed." }],
+    },
+  });
+
+  it("flags a server_error record with apiErrorStatus", () => {
+    const record = parseJsonlRecord(CLAUDE_SERVER_ERROR_WITH_STATUS_LINE, 0);
+    expect(record?.serverError).toBe(true);
+  });
+
+  it("flags a server_error record with no apiErrorStatus (connection-refused class)", () => {
+    const record = parseJsonlRecord(CLAUDE_SERVER_ERROR_NO_STATUS_LINE, 0);
+    expect(record?.serverError).toBe(true);
+  });
+
+  it("does not flag a rate_limit record", () => {
+    const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
+    expect(record?.serverError).toBeUndefined();
+    expect(record?.rateLimited).toBe(true);
+  });
+
+  it("does not flag assistant prose that merely mentions API Error: 500", () => {
+    const record = parseJsonlRecord(CLAUDE_PROSE_MENTIONING_500_LINE, 0);
+    expect(record?.serverError).toBeUndefined();
+  });
+});
+
+// ── hasTrailingClaudeServerError ──────────────────────────────────────
+
+describe("hasTrailingClaudeServerError", () => {
+  it("returns true for a trailing server_error record", () => {
+    const records = [rec({ type: "assistant", serverError: true })];
+    expect(hasTrailingClaudeServerError(records)).toBe(true);
+  });
+
+  it("skips bookkeeping records to find the trailing server_error record", () => {
+    const records = [
+      rec({ type: "assistant", serverError: true }),
+      rec({ type: "system" }),
+      rec({ type: "file-history-snapshot" }),
+    ];
+    expect(hasTrailingClaudeServerError(records)).toBe(true);
+  });
+
+  it("returns false once a normal assistant end_turn record follows", () => {
+    const records = [
+      rec({ type: "assistant", serverError: true }),
+      rec({ type: "system" }),
+      rec({ type: "assistant", stopReason: "end_turn" }),
+    ];
+    expect(hasTrailingClaudeServerError(records)).toBe(false);
+  });
+
+  it("returns false once a plain user record follows", () => {
+    const records = [
+      rec({ type: "assistant", serverError: true }),
+      rec({ type: "system" }),
+      rec({ type: "user", role: "user" }),
+    ];
+    expect(hasTrailingClaudeServerError(records)).toBe(false);
+  });
+
+  it("returns false with no records", () => {
+    expect(hasTrailingClaudeServerError([])).toBe(false);
   });
 });
 
@@ -374,4 +508,87 @@ describe("readClaudeJsonlState rate limit detection", () => {
       }
     },
   );
+});
+
+describe("readClaudeJsonlState server error detection", () => {
+  const fixtures = [
+    "servererror-trailing-system-record-38ce.jsonl",
+    "servererror-connection-refused-trailing-system-record-ao.jsonl",
+  ];
+
+  it.each(fixtures)("flags %s as error despite the trailing system record", async (fixtureName) => {
+    const fixturePath = join(__dirname, "../fixtures/agent-history/claude", fixtureName);
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "servererror-trailing-system-record-"));
+    const tempFile = join(tempDir, fixtureName);
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.state).toBe("error");
+      expect(result.serverError).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns serverError: false for the existing rate-limit fixture", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/ratelimit-trailing-system-record-0f9e.jsonl",
+    );
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "ratelimit-not-server-error-"));
+    const tempFile = join(tempDir, "ratelimit-trailing-system-record-0f9e.jsonl");
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.serverError).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns serverError: false for the existing waiting fixture", async () => {
+    const fixturePath = join(__dirname, "../fixtures/agent-history/claude/waiting-end-turn.jsonl");
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "waiting-not-server-error-"));
+    const tempFile = join(tempDir, "waiting-end-turn.jsonl");
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.serverError).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -17557,6 +17557,120 @@ describe("SessionService", () => {
     });
   });
 
+  describe("Claude server-error reactivation", () => {
+    const SERVER_ERROR_REACTIVATION_PROMPT =
+      "Claude hit a temporary server error earlier. Please try to continue the task now.";
+
+    function mockServerError() {
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        serverError: true,
+      });
+    }
+
+    function reactivatedEventCount(): number {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.server_error.reactivated",
+      ).length;
+    }
+
+    it("classifies error and persists serverErrorAt for a server-error transcript", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockServerError();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+
+      expect(view.state).toBe("error");
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T10:05:00.000Z");
+      service.dispose();
+    });
+
+    it("clears serverErrorAt once the transcript recovers", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+
+      expect(view.state).not.toBe("error");
+      expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("types the reactivation prompt once serverErrorAt is at least 30 minutes old and re-arms it", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:30:00.000Z" }));
+      mockServerError();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T09:30:00.000Z");
+      sendMessageToTmuxMock.mockClear();
+
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        SERVER_ERROR_REACTIVATION_PROMPT,
+        {
+          agent: "claude",
+          interrupt: false,
+        },
+      );
+      expect(reactivatedEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T10:05:01.000Z");
+      service.dispose();
+    });
+
+    it("does nothing while serverErrorAt is younger than 30 minutes", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:40:00.000Z" }));
+      mockServerError();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      sendMessageToTmuxMock.mockClear();
+
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(reactivatedEventCount()).toBe(0);
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T09:40:00.000Z");
+      service.dispose();
+    });
+
+    it("keeps rate_limited priority over a coincident server-error record", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: { limited: true, reason: "claude rate_limit" },
+        serverError: true,
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+
+      expect(view.state).toBe("rate_limited");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+      expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
+      service.dispose();
+    });
+  });
+
   describe("respawn bootstrap", () => {
     let projectDir: string;
 
