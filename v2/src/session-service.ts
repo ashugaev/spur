@@ -79,6 +79,7 @@ import {
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   addAccount,
+  ensureAccountProjectsLink,
   findAccount,
   isAccountAuthenticated,
   listAccounts,
@@ -992,6 +993,7 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
+  ensureAccountProjectsLink(account);
   return { claudeConfigDir: account.configDir };
 }
 

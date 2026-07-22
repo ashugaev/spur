@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addAccount,
+  ensureAccountProjectsLink,
   findAccount,
   isAccountAuthenticated,
   listAccounts,
@@ -66,5 +67,41 @@ describe("claude-accounts store", () => {
     expect(findAccount(dataDir, account.id)?.lastUsedAt).toBeUndefined();
     touchAccountUsed(dataDir, account.id);
     expect(findAccount(dataDir, account.id)?.lastUsedAt).toBeTruthy();
+  });
+});
+
+describe("ensureAccountProjectsLink", () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "spur-accounts-"));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("addAccount creates a symlink at <configDir>/projects pointing at homedir()/.claude/projects", () => {
+    const account = addAccount(dataDir);
+    const link = join(account.configDir, "projects");
+    const target = join(homedir(), ".claude", "projects");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(existsSync(target)).toBe(true);
+    expect(readlinkSync(link)).toBe(join(homedir(), ".claude", "projects"));
+  });
+
+  it("ensureAccountProjectsLink is idempotent", () => {
+    const account = addAccount(dataDir);
+    expect(() => ensureAccountProjectsLink(account)).not.toThrow();
+    const link = join(account.configDir, "projects");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it("throws when <configDir>/projects is a real directory", () => {
+    const account = addAccount(dataDir);
+    const link = join(account.configDir, "projects");
+    unlinkSync(link);
+    mkdirSync(link);
+    expect(() => ensureAccountProjectsLink(account)).toThrow(/exists as a real directory/);
   });
 });

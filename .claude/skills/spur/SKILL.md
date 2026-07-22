@@ -179,7 +179,7 @@ active account; remove drops it.
 
 Per-session switch auth (claude sessions only): kills and relaunches the session
 under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
-switches even while the session is working.
+switches even while the session is working. Each account's `CLAUDE_CONFIG_DIR/projects` symlinks to shared `~/.claude/projects`, so `--resume <uuid>` resolves the same transcript across accounts; history preserved on rotation.
 
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;

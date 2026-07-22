@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 // Runtime store of Claude login accounts. Each account is an isolated
@@ -80,6 +81,26 @@ export function findAccount(dataDir: string, id: string): ClaudeAccount | undefi
   return listAccounts(dataDir).find((account) => account.id === id);
 }
 
+export function ensureAccountProjectsLink(account: ClaudeAccount): void {
+  const target = join(homedir(), ".claude", "projects");
+  mkdirSync(target, { recursive: true });
+  const link = join(account.configDir, "projects");
+  let stat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    stat = lstatSync(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      symlinkSync(target, link);
+      return;
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    return;
+  }
+  throw new Error(`${link} exists as a real directory; expected a symlink`);
+}
+
 export function addAccount(dataDir: string, opts: { label?: string } = {}): ClaudeAccount {
   const id = randomUUID();
   const configDir = accountConfigDir(dataDir, id);
@@ -92,6 +113,7 @@ export function addAccount(dataDir: string, opts: { label?: string } = {}): Clau
     createdAt: new Date().toISOString(),
   };
   writeAccounts(dataDir, [...listAccounts(dataDir), account]);
+  ensureAccountProjectsLink(account);
   return account;
 }
 
