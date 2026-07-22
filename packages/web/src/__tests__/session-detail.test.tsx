@@ -1819,6 +1819,12 @@ describe("SessionDetail voice input", () => {
     const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
     expect(dialogSection).not.toBeNull();
 
+    const dialogScrollContainer = (dialogSection as HTMLElement).querySelector(
+      ".overflow-x-hidden",
+    );
+    expect(dialogScrollContainer).not.toBeNull();
+    expect(dialogScrollContainer).toHaveClass("overflow-y-auto");
+
     const codeElement = within(dialogSection as HTMLElement).getByText(longToken, {
       selector: "code",
     });

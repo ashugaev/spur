@@ -1447,6 +1447,15 @@ test.describe("S2b: Conversation dialog", () => {
 
     expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+
+    const dialogOverflowX = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("h2")).find((h) =>
+        /dialog/i.test(h.textContent ?? ""),
+      );
+      const container = heading?.parentElement?.querySelector(".overflow-x-hidden");
+      return container ? getComputedStyle(container).overflowX : null;
+    });
+    expect(dialogOverflowX).toBe("hidden");
   });
 });
 
