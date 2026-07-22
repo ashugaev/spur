@@ -7864,7 +7864,12 @@ export class SessionService {
 
     const readySession = await this.ensureSessionReadyForSend(session);
     const classified = await this.classifySessionRecord(readySession);
-    if (classified.state !== "waiting") {
+    // A live claude server-error wedge behaves like "waiting" for delivery
+    // purposes: typing the queued message is exactly what un-wedges Claude
+    // (the same mechanism as the reactivation nudge in processScheduledWakes),
+    // so an ordinary queued send must not sit for up to 30 minutes waiting
+    // for that nudge to fire on its own.
+    if (classified.state !== "waiting" && !classified.serverError) {
       return false;
     }
     if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
@@ -8581,8 +8586,14 @@ export class SessionService {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
     if (serverErrorAt) {
+      // Guard against an overlapping tick's stale in-hand session (the caller
+      // only checked !session.serverErrorAt before calling this): re-reading
+      // here can find the marker already armed by another tick, and writing
+      // again would restart the 30-minute window for no reason.
+      if (current.serverErrorAt) return;
       writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
     } else {
+      if (!current.serverErrorAt) return;
       const { serverErrorAt: _serverErrorAt, ...base } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
     }
@@ -9093,8 +9104,9 @@ export class SessionService {
       source: stateSource,
       historySourcePath,
       // Only true when the override above actually applied: a rate_limit
-      // record always wins state, and serverErrorAt must stay untouched
-      // (independent field, independent owner) when that happens.
+      // record always wins state, so when that happens this reports false
+      // and updateStateHistory's clear branch drops any stale serverErrorAt
+      // instead of arming it — the two markers stay independently owned.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
     };

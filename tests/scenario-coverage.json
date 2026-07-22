@@ -723,6 +723,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "A running claude session whose live state is `error` (the server-error wedge above) is treated as still active, not closed, everywhere `error` used to mean a dead session: `triggers.ts` keeps a pending send-batch queued instead of dropping it as `closed_session` and suppresses a duplicate work-item spawn exactly as it would for an active `working`/`waiting`/`needs_input` owner, while an ordinary queued `send()` (`tryDeliverQueuedMessage`) delivers immediately — typing the message itself is enough to un-wedge Claude — instead of sitting queued for up to 30 minutes waiting on the reactivation nudge. A session whose `status` is not `running` (a genuinely closed/errored session) is unaffected and still drops as `closed_session`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts", "v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "When a Claude session's tmux pane shows Claude Code's interactive `stop and wait for limit to reset` / `ask your admin for more usage` usage-limit menu, `classifySessionRecord` sends a bare Enter keystroke via `sendSubmitKeyToTmux` to confirm the pre-selected `stop and wait` option (gated by a 10s per-session cooldown so a redraw-lag doesn't double-send), logging `session.rate_limit.usage_menu_confirmed` on success or `session.rate_limit.usage_menu_confirm_failed` on failure; this is scoped strictly to Claude sessions and never fires for Codex or Cursor.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
