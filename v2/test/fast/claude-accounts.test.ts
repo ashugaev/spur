@@ -1,4 +1,15 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -90,7 +101,11 @@ describe("ensureDefaultAccount", () => {
     ensureDefaultAccount(dataDir, defaultConfigDir);
     const accounts = listAccounts(dataDir);
     expect(accounts).toHaveLength(1);
-    expect(accounts[0]).toMatchObject({ id: "default", label: "default", configDir: defaultConfigDir });
+    expect(accounts[0]).toMatchObject({
+      id: "default",
+      label: "default",
+      configDir: defaultConfigDir,
+    });
   });
 
   it("idempotent: calling twice keeps length 1", () => {
@@ -108,13 +123,24 @@ describe("ensureDefaultAccount", () => {
 
 describe("ensureAccountProjectsLink", () => {
   let dataDir: string;
+  let fakeHome: string;
+  let originalHome: string | undefined;
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), "spur-accounts-"));
+    fakeHome = mkdtempSync(join(tmpdir(), "spur-fake-home-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
   });
 
   afterEach(() => {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
     rmSync(dataDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 
   it("addAccount creates a symlink at <configDir>/projects pointing at homedir()/.claude/projects", () => {
@@ -123,22 +149,59 @@ describe("ensureAccountProjectsLink", () => {
     const target = join(homedir(), ".claude", "projects");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(existsSync(target)).toBe(true);
-    expect(readlinkSync(link)).toBe(join(homedir(), ".claude", "projects"));
+    expect(readlinkSync(link)).toBe(target);
   });
 
-  it("ensureAccountProjectsLink is idempotent", () => {
+  it("idempotent: second call on an already-linked account is a no-op", () => {
     const account = addAccount(dataDir);
     expect(() => ensureAccountProjectsLink(account)).not.toThrow();
     const link = join(account.configDir, "projects");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(join(homedir(), ".claude", "projects"));
   });
 
-  it("throws when <configDir>/projects is a real directory", () => {
+  it("wrong-target: re-points a symlink that points to a different directory", () => {
     const account = addAccount(dataDir);
     const link = join(account.configDir, "projects");
+    const target = join(homedir(), ".claude", "projects");
+    const wrongTarget = mkdtempSync(join(tmpdir(), "spur-wrong-"));
+    try {
+      unlinkSync(link);
+      symlinkSync(wrongTarget, link);
+      ensureAccountProjectsLink(account);
+      expect(readlinkSync(link)).toBe(target);
+    } finally {
+      rmSync(wrongTarget, { recursive: true, force: true });
+    }
+  });
+
+  it("migration: moves existing real directory contents into shared target", () => {
+    const account = addAccount(dataDir);
+    const link = join(account.configDir, "projects");
+    const target = join(homedir(), ".claude", "projects");
     unlinkSync(link);
-    mkdirSync(link);
-    expect(() => ensureAccountProjectsLink(account)).toThrow(/exists as a real directory/);
+    const sub = join(link, "sess-abc");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "x.jsonl"), "transcript", "utf-8");
+    ensureAccountProjectsLink(account);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(target);
+    expect(readFileSync(join(target, "sess-abc", "x.jsonl"), "utf-8")).toBe("transcript");
+  });
+
+  it("migration-merge: merges into pre-existing shared target subdirectory", () => {
+    const account = addAccount(dataDir);
+    const link = join(account.configDir, "projects");
+    const target = join(homedir(), ".claude", "projects");
+    unlinkSync(link);
+    const sub = join(link, "sess-shared");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "a.jsonl"), "from-account", "utf-8");
+    mkdirSync(join(target, "sess-shared"), { recursive: true });
+    writeFileSync(join(target, "sess-shared", "b.jsonl"), "pre-existing", "utf-8");
+    ensureAccountProjectsLink(account);
+    expect(readFileSync(join(target, "sess-shared", "a.jsonl"), "utf-8")).toBe("from-account");
+    expect(readFileSync(join(target, "sess-shared", "b.jsonl"), "utf-8")).toBe("pre-existing");
   });
 
   it("default-link-noop: default account configDir skips symlink creation", () => {
@@ -161,7 +224,11 @@ describe("ensureAccountProjectsLink", () => {
     const accountsPath = join(dataDir, "claude-accounts.json");
     writeFileSync(
       accountsPath,
-      JSON.stringify(accounts.map((a) => (a.id === account.id ? { ...a, configDir: externalDir } : a)), null, 2) + "\n",
+      JSON.stringify(
+        accounts.map((a) => (a.id === account.id ? { ...a, configDir: externalDir } : a)),
+        null,
+        2,
+      ) + "\n",
       "utf-8",
     );
     removeAccount(dataDir, account.id);
