@@ -43,8 +43,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 INSTALL_PREFIX=""
 case "$SCRIPT_DIR" in
-  */lib/node_modules/@shugaev/spur/scripts)
-    INSTALL_PREFIX="${SCRIPT_DIR%/lib/node_modules/@shugaev/spur/scripts}"
+  */lib/node_modules/$PACKAGE/scripts)
+    INSTALL_PREFIX="${SCRIPT_DIR%/lib/node_modules/$PACKAGE/scripts}"
     ;;
 esac
 

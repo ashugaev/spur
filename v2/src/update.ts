@@ -206,7 +206,16 @@ export function createRealUpdateDeps(
       args.push(`${PACKAGE_SPEC}@${target}`);
       execFileSync("npm", args, { stdio: "inherit" });
     },
-    reinit: () => reinitUnits(cliEntrypoint),
+    reinit: () => {
+      // Match install-and-restart.sh: pin the npm prefix for the reinit chain
+      // (npm-init.sh requires `npm config get prefix == ~/.local`) so `spur
+      // update` also succeeds when the ambient npm prefix diverges from the
+      // install location, not just the daemon deploy/switch path.
+      if (installPrefix) {
+        process.env["npm_config_prefix"] = installPrefix;
+      }
+      reinitUnits(cliEntrypoint);
+    },
     currentVersion: version,
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),

@@ -438,4 +438,33 @@ describe("createRealUpdateDeps reinit delegation", () => {
       tailscale: false,
     });
   });
+
+  it("pins npm_config_prefix from the derived install prefix before reinit", async () => {
+    const originalPrefix = process.env["npm_config_prefix"];
+    const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(
+      join(unitDir, "spur-daemon.service"),
+      "[Service]\nExecStart=/usr/bin/node cli.js\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(unitDir, "spur-web.service"),
+      "[Service]\nExecStart=/usr/bin/node server.js\n",
+      "utf-8",
+    );
+    process.env["HOME"] = home;
+    delete process.env["npm_config_prefix"];
+
+    try {
+      const entrypoint = `${home}/.local/lib/node_modules/@shugaev/spur/dist/cli.js`;
+      const deps = createRealUpdateDeps(entrypoint, join(home, "state.json"));
+      deps.reinit();
+      expect(process.env["npm_config_prefix"]).toBe(`${home}/.local`);
+    } finally {
+      if (originalPrefix === undefined) delete process.env["npm_config_prefix"];
+      else process.env["npm_config_prefix"] = originalPrefix;
+    }
+  });
 });
