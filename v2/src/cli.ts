@@ -1557,7 +1557,10 @@ async function runInteractiveSessionList(
   });
 }
 
-async function outputResult<T>(args: {
+// Exported so the exit-code wiring (the only externally observable effect
+// besides stdout) can be unit-tested directly, without driving the full
+// commander parse + host/config seams doctor's action depends on.
+export async function outputResult<T>(args: {
   json: boolean;
   label: string;
   action: () => Promise<T>;
@@ -1667,10 +1670,14 @@ export function createProgram(cliEntrypoint: string): Command {
           if (existingProjectConfigPath) {
             try {
               loadProjectConfig(existingProjectConfigPath);
+              // Severity is the check's static importance if it fails (an
+              // invalid spur.yaml blocks connect/spawn — always "error"), not
+              // a flag that flips with the outcome; the renderer only
+              // surfaces it once `ok` is false.
               hostChecks.push({
                 id: "project-config-valid",
                 ok: true,
-                severity: "warn",
+                severity: "error",
                 detail: "spur.yaml parses and validates",
               });
             } catch (error) {

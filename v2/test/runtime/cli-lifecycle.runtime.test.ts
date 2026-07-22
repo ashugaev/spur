@@ -34,7 +34,13 @@ import {
 const tmuxOk = await isTmuxAvailable();
 
 interface DoctorResult {
-  hostChecks: Array<{ id: string; ok: boolean; detail: string; fix?: string }>;
+  hostChecks: Array<{
+    id: string;
+    ok: boolean;
+    severity: "error" | "warn" | "info";
+    detail: string;
+    fix?: string;
+  }>;
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -747,6 +753,82 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       true,
     );
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
+
+  it("doctor --json without --scaffold never creates spur.yaml or the global/pinned instance config on a never-initialized host", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    const sessionPrefix = `rt-doctor-readonly-${context.port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
+    // Unlike the other doctor tests, deliberately do NOT pre-create the
+    // pinned instance config — this is the exact never-run-Spur-before
+    // scenario the read-only invariant guards, so `SPUR_CONFIG` must point at
+    // a path that does not exist yet.
+    const instanceConfigPath = join(context.rootDir, "never-created-instance.yaml");
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+      timeout: 60_000,
+    });
+
+    const doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    expect(doctor.configPath).toBeUndefined();
+    expect(doctor.existingProjectConfigPath).toBeUndefined();
+    expect(existsSync(join(context.repoDir, "spur.yaml"))).toBe(false);
+    expect(existsSync(globalConfigPath)).toBe(false);
+    expect(existsSync(instanceConfigPath)).toBe(false);
+  });
+
+  it("doctor reports project-config-valid ok:false and a non-zero exit for a malformed spur.yaml, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-malformed-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(join(context.repoDir, "spur.yaml"), "projects: [\n", "utf8");
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    let stdout: string;
+    let exitCode: number | undefined;
+    try {
+      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      exitCode = 0;
+    } catch (error) {
+      const execError = error as { stdout?: string; code?: number };
+      stdout = execError.stdout ?? "";
+      exitCode = execError.code;
+    }
+
+    expect(exitCode).toBe(1);
+    const doctor = JSON.parse(stdout) as DoctorResult;
+    expect(doctor.hostChecks.find((check) => check.id === "project-config-valid")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
   });
 
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {

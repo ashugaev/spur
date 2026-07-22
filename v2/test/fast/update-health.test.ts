@@ -1,13 +1,63 @@
-import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createTempDir } from "../helpers/common.js";
 import {
+  DEFAULT_DAEMON_PORT,
   makeTargets,
   parseWebUnitOptions,
   probeInfoWith,
   probeWith,
+  resolveDaemonPort,
+  resolveDaemonPortReadOnly,
   resolveWebPort,
   type FetchLike,
   type JsonFetchLike,
 } from "../../src/update-health.js";
+
+const tempDirs: string[] = [];
+const initialSpurConfig = process.env["SPUR_CONFIG"];
+
+afterEach(async () => {
+  if (initialSpurConfig === undefined) {
+    delete process.env["SPUR_CONFIG"];
+  } else {
+    process.env["SPUR_CONFIG"] = initialSpurConfig;
+  }
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+// Regression guard for the doctor read-only invariant: `spur doctor` must
+// never bootstrap `~/.spur/config.yaml` (or any pinned instance config) on a
+// host that has never run any Spur command before. Swapping
+// `resolveDaemonPortReadOnly` for `resolveDaemonPort` in `host-install.ts`
+// must turn this test red — verified manually while implementing this fix.
+describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)", () => {
+  it("resolveDaemonPortReadOnly never creates the pinned instance config, and falls back to the default port", async () => {
+    const dir = await createTempDir("spur-daemon-port-readonly-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "does-not-exist.yaml");
+    process.env["SPUR_CONFIG"] = configPath;
+
+    const port = resolveDaemonPortReadOnly();
+
+    expect(port).toBe(DEFAULT_DAEMON_PORT);
+    expect(existsSync(configPath)).toBe(false);
+  });
+
+  it("resolveDaemonPort DOES bootstrap-create the pinned instance config when it is missing", async () => {
+    const dir = await createTempDir("spur-daemon-port-write-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "does-not-exist.yaml");
+    process.env["SPUR_CONFIG"] = configPath;
+
+    const port = resolveDaemonPort();
+
+    expect(port).toBe(DEFAULT_DAEMON_PORT);
+    expect(existsSync(configPath)).toBe(true);
+  });
+});
 
 describe("resolveWebPort", () => {
   it("defaults to 4311 when no PORT environment line is present", () => {

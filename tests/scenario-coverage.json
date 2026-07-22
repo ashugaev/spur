@@ -74,6 +74,70 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`resolveDaemonPortReadOnly` never bootstrap-creates the pinned instance config file and falls back to the default daemon port, while `resolveDaemonPort` does create it when missing (same fallback port) — the one difference between the two that keeps `doctor` read-only.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/update-health.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor`'s `npm-bin-on-path` check carries static `severity:error`, independent of whether it currently passes, and is skipped as `info` when no npm-installed `spur` binary is detected under the resolved npm prefix.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor`'s `tmux-installed`, `git-installed`, and `node-version` (checked against `engines.node`) each carry static `severity:error`, independent of whether they currently pass.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` probes the daemon's `/info` endpoint (never the heavier `GET /sessions` view) for liveness and reuses that same response for the version-drift check; reports a service `*-reachable` failure as `error` only when systemd already reports the unit active but HTTP is unreachable; reports a `*-port-conflict` as `error` only after confirming the busy port does not itself answer `/info` as a Spur daemon; and reports the plain not-yet-started state as `warn` exactly once, without duplicating the systemd `spur-daemon`/`spur-web` \"not active\" fact at a second severity.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` reports `systemd-not-applicable` as `ok:true, severity:info` instead of the systemd-unit block on a non-Linux host.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor`'s exit code is non-zero if and only if at least one check is `ok:false` with `severity:error`; `outputResult`'s optional `exitCode` callback wires a command's returned value to `process.exitCode`, and leaves it untouched when the callback returns `undefined` or is absent.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts", "v2/test/fast/cli-output-result.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`renderHostInstallChecks` always renders a passing check as `[ok]` and a failing check by its own `severity` (`[error]`/`[warn]`/`[info]`), so a user can tell which failures caused a non-zero exit.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`findListenerPids` bounds its `lsof`/`ss` lookups with a timeout, so a hung listener-lookup process cannot make `doctor` hang.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/port-probe.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
@@ -1099,6 +1163,22 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "`doctor --scaffold` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "`doctor --json` without `--scaffold` never creates `spur.yaml`, the global instance config, or a pinned-but-missing instance config on a never-initialized host.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "`doctor` reports `project-config-valid` as `ok:true` for an existing, valid `spur.yaml`, and as `ok:false, severity:error` with a non-zero exit for a malformed one, without throwing.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"

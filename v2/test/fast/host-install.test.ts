@@ -49,6 +49,7 @@ import {
   checkVersionDrift,
   collectHostInstallChecks,
   hasErrorSeverity,
+  renderHostInstallChecks,
   resolveSystemdScope,
   satisfiesNodeEngineRange,
   type SystemdScope,
@@ -153,9 +154,12 @@ describe("collectHostInstallChecks", () => {
 
   it("reports node-version ok:true for the currently running interpreter", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
+    // Severity is the check's static importance if it fails ("error"), not a
+    // flag that flips with the outcome — a passing check keeps that same
+    // field value; only the renderer treats it as invisible when `ok:true`.
     expect(checks.find((check) => check.id === "node-version")).toMatchObject({
       ok: true,
-      severity: "info",
+      severity: "error",
     });
   });
 
@@ -171,7 +175,7 @@ describe("collectHostInstallChecks", () => {
     expect(hasErrorSeverity(checks)).toBe(false);
   });
 
-  it("marks spur-daemon/spur-web as error severity once systemd units are installed", async () => {
+  it("marks spur-daemon/spur-web severity as warn regardless of active state", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-units-"));
     const unitDir = join(fakeHome, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -180,18 +184,46 @@ describe("collectHostInstallChecks", () => {
     execState.systemctlAvailable = true;
     execState.daemonActiveState = "inactive";
     execState.webActiveState = "active";
+    // Keep the HTTP-health layer fully healthy so this test isolates the
+    // systemd-derived severity, independent of `checkServiceHealth`'s own
+    // (correctly error-grade) active-but-unreachable/port-conflict branches.
+    probeMock.mockResolvedValue({ ok: true });
+    probeInfoMock.mockResolvedValue({ version });
 
     const checks = await collectHostInstallChecks(fakeHome);
 
     expect(checks.find((check) => check.id === "spur-daemon")).toMatchObject({
       ok: false,
-      severity: "error",
+      severity: "warn",
     });
     expect(checks.find((check) => check.id === "spur-web")).toMatchObject({
       ok: true,
-      severity: "error",
+      severity: "warn",
     });
-    expect(hasErrorSeverity(checks)).toBe(true);
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("does not duplicate a systemd-reported inactive daemon as a second, differently-severed check", async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-single-owner-"));
+    const unitDir = join(fakeHome, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
+    await writeFile(join(unitDir, "spur-web.service"), "[Service]\n", "utf8");
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "inactive";
+    execState.webActiveState = "inactive";
+    // Both unreachable, both ports free: the only fact here is "not active",
+    // and `spur-daemon`/`spur-web` already own that fact.
+    probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    probeInfoMock.mockResolvedValue(undefined);
+    isHostPortFreeMock.mockResolvedValue(true);
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "spur-daemon")).toMatchObject({ ok: false });
+    expect(checks.find((check) => check.id === "spur-web")).toMatchObject({ ok: false });
+    expect(checks.find((check) => check.id === "daemon-reachable")).toBeUndefined();
+    expect(checks.find((check) => check.id === "web-reachable")).toBeUndefined();
   });
 });
 
@@ -261,7 +293,9 @@ describe("checkSpurOnPath", () => {
     const originalPath = process.env["PATH"];
     process.env["PATH"] = `${join(prefix, "bin")}:/usr/bin`;
     try {
-      expect(checkSpurOnPath(prefix)).toMatchObject({ ok: true, severity: "info" });
+      // Static severity (see item-5 comment on `checkSpurOnPath`): "error" is
+      // the check's static importance, unaffected by the passing outcome.
+      expect(checkSpurOnPath(prefix)).toMatchObject({ ok: true, severity: "error" });
     } finally {
       process.env["PATH"] = originalPath;
     }
@@ -276,10 +310,23 @@ describe("checkServiceHealth", () => {
     restartCmd: "systemctl --user restart",
   };
 
+  it("probes the daemon's /info endpoint for liveness, not /sessions (F6 must not hit the heavy view=full path)", async () => {
+    probeInfoMock.mockResolvedValue({ version });
+    await checkServiceHealth(scope, false, false, false);
+    expect(probeInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "daemon", url: expect.stringContaining("/info") }),
+    );
+  });
+
   it("reports error severity when the service is active but the HTTP probe is unreachable", async () => {
+    probeInfoMock.mockResolvedValue(undefined);
     probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
-    const result = await checkServiceHealth(scope, true, true);
+    const result = await checkServiceHealth(scope, true, true, false);
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+    expect(result.checks.find((check) => check.id === "web-reachable")).toMatchObject({
       ok: false,
       severity: "error",
     });
@@ -287,10 +334,10 @@ describe("checkServiceHealth", () => {
   });
 
   it("reports a port-conflict check whose detail includes the foreign PID", async () => {
-    probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    probeInfoMock.mockResolvedValue(undefined);
     isHostPortFreeMock.mockResolvedValue(false);
     findListenerPidsMock.mockResolvedValue([4242]);
-    const result = await checkServiceHealth(scope, false, false);
+    const result = await checkServiceHealth(scope, false, false, false);
     const conflict = result.checks.find((check) => check.id === "daemon-port-conflict");
     expect(conflict).toBeDefined();
     expect(conflict?.ok).toBe(false);
@@ -298,20 +345,45 @@ describe("checkServiceHealth", () => {
     expect(conflict?.detail).toContain("4242");
   });
 
+  it("does not blame Spur's own daemon for a busy port (probes /info there before declaring a conflict)", async () => {
+    // First call is the primary daemon liveness probe (unreachable); second
+    // is the daemon port's foreign-vs-Spur recheck once it's found busy. Only
+    // the daemon's own port (4310, the default with no instance config) is
+    // busy here, so the web side never enters its own conflict branch.
+    probeInfoMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ version });
+    isHostPortFreeMock.mockImplementation(async (port: number) => port !== 4310);
+    const result = await checkServiceHealth(scope, false, false, false);
+    expect(result.checks.find((check) => check.id === "daemon-port-conflict")).toBeUndefined();
+    expect(findListenerPidsMock).not.toHaveBeenCalled();
+    const reachable = result.checks.find((check) => check.id === "daemon-reachable");
+    expect(reachable).toMatchObject({ ok: false, severity: "warn" });
+    expect(reachable?.detail).toContain("already held by a Spur daemon");
+  });
+
   it("reports warn severity when the service simply has not started yet", async () => {
-    probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    probeInfoMock.mockResolvedValue(undefined);
     isHostPortFreeMock.mockResolvedValue(true);
-    const result = await checkServiceHealth(scope, false, false);
+    const result = await checkServiceHealth(scope, false, false, false);
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
       ok: false,
       severity: "warn",
     });
   });
 
+  it("suppresses the plain not-running check once systemd already reported the same inactive fact", async () => {
+    probeInfoMock.mockResolvedValue(undefined);
+    probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    isHostPortFreeMock.mockResolvedValue(true);
+    const result = await checkServiceHealth(scope, false, false, true);
+    expect(result.checks.find((check) => check.id === "daemon-reachable")).toBeUndefined();
+    expect(result.checks.find((check) => check.id === "web-reachable")).toBeUndefined();
+  });
+
   it("marks the daemon reachable when the probe succeeds", async () => {
-    probeMock.mockResolvedValue({ ok: true });
-    const result = await checkServiceHealth(scope, false, false);
+    probeInfoMock.mockResolvedValue({ version });
+    const result = await checkServiceHealth(scope, false, false, false);
     expect(result.daemonReachable).toBe(true);
+    expect(result.daemonVersion).toBe(version);
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
       ok: true,
       severity: "info",
@@ -320,27 +392,18 @@ describe("checkServiceHealth", () => {
 });
 
 describe("checkVersionDrift", () => {
-  it("stays silent when the daemon was not reachable", async () => {
-    const result = await checkVersionDrift(false, 4310);
-    expect(result).toBeUndefined();
-    expect(probeInfoMock).not.toHaveBeenCalled();
+  it("stays silent when the daemon was not reachable", () => {
+    expect(checkVersionDrift(undefined)).toBeUndefined();
   });
 
-  it("stays silent when the version info can't be resolved", async () => {
-    probeInfoMock.mockResolvedValue(undefined);
-    expect(await checkVersionDrift(true, 4310)).toBeUndefined();
-  });
-
-  it("flags a warn-severity drift when the daemon version differs from the installed one", async () => {
-    probeInfoMock.mockResolvedValue({ version: "0.0.0-does-not-match" });
-    const result = await checkVersionDrift(true, 4310);
+  it("flags a warn-severity drift when the daemon version differs from the installed one", () => {
+    const result = checkVersionDrift("0.0.0-does-not-match");
     expect(result).toMatchObject({ id: "version-drift", ok: false, severity: "warn" });
   });
 
-  it("reports ok:true when versions match", async () => {
-    probeInfoMock.mockResolvedValue({ version });
-    const result = await checkVersionDrift(true, 4310);
-    expect(result).toMatchObject({ ok: true, severity: "info" });
+  it("reports ok:true when versions match", () => {
+    const result = checkVersionDrift(version);
+    expect(result).toMatchObject({ ok: true, severity: "warn" });
   });
 });
 
@@ -361,5 +424,22 @@ describe("hasErrorSeverity", () => {
         { id: "b", ok: false, severity: "error", detail: "" },
       ]),
     ).toBe(true);
+  });
+});
+
+describe("renderHostInstallChecks", () => {
+  it("always renders a passing check as [ok], and a failing check by its own severity", () => {
+    const output = renderHostInstallChecks([
+      { id: "a", ok: true, severity: "error", detail: "a is fine" },
+      { id: "b", ok: false, severity: "error", detail: "b is broken", fix: "fix b" },
+      { id: "c", ok: false, severity: "warn", detail: "c is iffy" },
+      { id: "d", ok: false, severity: "info", detail: "d is skipped" },
+    ]);
+    const lines = output.split("\n");
+    expect(lines[0]).toContain("[ok] a is fine");
+    expect(lines[1]).toContain("[error] b is broken");
+    expect(lines[1]).toContain("fix: fix b");
+    expect(lines[2]).toContain("[warn] c is iffy");
+    expect(lines[3]).toContain("[info] d is skipped");
   });
 });

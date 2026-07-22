@@ -59,14 +59,21 @@ export function readWebPort(scope: SystemdScope): number {
 
 // Host-level daemon port resolution: read the bootstrap instance config, same
 // as the daemon itself, defaulting to 4310 when it is unset or unreadable.
-// Used by `spur update`, which always runs after `spur init` has already
-// bootstrapped `~/.spur/config.yaml`, so auto-creating it here is safe.
-export function resolveDaemonPort(): number {
+// `allowBootstrapWrite` gates whether a missing instance config may be
+// auto-created by `loadConfig` (its bootstrap side effect) before being read.
+function resolveDaemonPortImpl(allowBootstrapWrite: boolean): number {
   try {
+    if (!allowBootstrapWrite && !instanceConfigExists()) return DEFAULT_DAEMON_PORT;
     return loadConfig().server.port;
   } catch {
     return DEFAULT_DAEMON_PORT;
   }
+}
+
+// Used by `spur update`, which always runs after `spur init` has already
+// bootstrapped `~/.spur/config.yaml`, so auto-creating it here is safe.
+export function resolveDaemonPort(): number {
+  return resolveDaemonPortImpl(true);
 }
 
 // Read-only daemon port resolution for `spur doctor`: never triggers
@@ -74,12 +81,7 @@ export function resolveDaemonPort(): number {
 // has never run any Spur command before. Falls back to the same default port
 // as `resolveDaemonPort` when the instance config does not exist yet.
 export function resolveDaemonPortReadOnly(): number {
-  try {
-    if (!instanceConfigExists()) return DEFAULT_DAEMON_PORT;
-    return loadConfig().server.port;
-  } catch {
-    return DEFAULT_DAEMON_PORT;
-  }
+  return resolveDaemonPortImpl(false);
 }
 
 export interface WebUnitOptions {

@@ -25,6 +25,14 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
 - Instance bootstrap auto-creates `~/.spur/config.yaml` when missing, applies defaults for daemon host/port, tmux socket, and UI port, and keeps local project discovery separate.
 - `doctor --scaffold` renders a minimal local `spur.yaml` at the git repo root, writes it without calling `connect`, does not create `~/.spur/config.yaml`, and refuses to overwrite an existing `spur.yaml` or `spur.yml`.
+- `resolveDaemonPortReadOnly` never bootstrap-creates the pinned instance config file and falls back to the default daemon port, while `resolveDaemonPort` does create it when missing (same fallback port) — the one difference between the two that keeps `doctor` read-only.
+- `doctor`'s `npm-bin-on-path` check carries static `severity:error`, independent of whether it currently passes, and is skipped as `info` when no npm-installed `spur` binary is detected under the resolved npm prefix.
+- `doctor`'s `tmux-installed`, `git-installed`, and `node-version` (checked against `engines.node`) each carry static `severity:error`, independent of whether they currently pass.
+- `doctor` probes the daemon's `/info` endpoint (never the heavier `GET /sessions` view) for liveness and reuses that same response for the version-drift check; reports a service `*-reachable` failure as `error` only when systemd already reports the unit active but HTTP is unreachable; reports a `*-port-conflict` as `error` only after confirming the busy port does not itself answer `/info` as a Spur daemon; and reports the plain not-yet-started state as `warn` exactly once, without duplicating the systemd `spur-daemon`/`spur-web` "not active" fact at a second severity.
+- `doctor` reports `systemd-not-applicable` as `ok:true, severity:info` instead of the systemd-unit block on a non-Linux host.
+- `doctor`'s exit code is non-zero if and only if at least one check is `ok:false` with `severity:error`; `outputResult`'s optional `exitCode` callback wires a command's returned value to `process.exitCode`, and leaves it untouched when the callback returns `undefined` or is absent.
+- `renderHostInstallChecks` always renders a passing check as `[ok]` and a failing check by its own `severity` (`[error]`/`[warn]`/`[info]`), so a user can tell which failures caused a non-zero exit.
+- `findListenerPids` bounds its `lsof`/`ss` lookups with a timeout, so a hung listener-lookup process cannot make `doctor` hang.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
@@ -169,6 +177,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 ## Runtime Integration
 
 - `doctor --scaffold` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.
+- `doctor --json` without `--scaffold` never creates `spur.yaml`, the global instance config, or a pinned-but-missing instance config on a never-initialized host.
+- `doctor` reports `project-config-valid` as `ok:true` for an existing, valid `spur.yaml`, and as `ok:false, severity:error` with a non-zero exit for a malformed one, without throwing.
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.
 - `spawn` auto-inits the global instance config when missing and auto-connects the nearest local project config before project validation.
 - `send`, `pause`, `complete`, `kill`, `service`, and hidden `daemon` commands use the global instance config but do not auto-connect a local project config.

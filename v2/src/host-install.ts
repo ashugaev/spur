@@ -5,12 +5,10 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
-  makeTargets,
   probe,
   probeInfo,
   readWebPort,
   resolveDaemonPortReadOnly,
-  type ProbeTarget,
   type ServiceId,
 } from "./update-health.js";
 import { version } from "./version.js";
@@ -63,7 +61,18 @@ export function resolveSystemdScope(home: string): SystemdScope {
   // under a test's overridden `$HOME` — where `home` defaults to `homedir()`
   // and would otherwise trivially equal itself — must not spuriously pick up
   // a real system-wide install that belongs to a different invocation.
-  if (home === userInfo().homedir && existsSync("/etc/systemd/system/spur-daemon.service")) {
+  // `userInfo()` does a passwd lookup and throws when the current uid has no
+  // passwd entry (common in containers/CI); `resolveSystemdScope` is on the
+  // hot path of both `doctor` and `update`, so that must not crash either —
+  // fall back to `undefined`, which never matches `home` and therefore never
+  // reports a false "system" scope.
+  let accountHome: string | undefined;
+  try {
+    accountHome = userInfo().homedir;
+  } catch {
+    accountHome = undefined;
+  }
+  if (accountHome !== undefined && home === accountHome && existsSync("/etc/systemd/system/spur-daemon.service")) {
     return {
       kind: "system",
       unitDir: "/etc/systemd/system",
@@ -101,10 +110,13 @@ export function checkSpurOnPath(npmPrefix: string | undefined): HostInstallCheck
     };
   }
   const onPath = (process.env["PATH"] ?? "").split(delimiter).includes(binDir);
+  // Severity is the check's static importance if it fails, not a flag that
+  // flips with the outcome — the renderer decides whether to surface it at
+  // all, based on `ok` (see `renderHostInstallChecks`).
   return {
     id: "npm-bin-on-path",
     ok: onPath,
-    severity: onPath ? "info" : "error",
+    severity: "error",
     detail: onPath ? `${binDir} is on PATH` : `${binDir} is not on PATH`,
     ...(onPath ? {} : { fix: `add ${binDir} to PATH` }),
   };
@@ -210,10 +222,12 @@ function checkNodeVersion(): HostInstallCheck {
     };
   }
   const satisfied = satisfiesNodeEngineRange(range, process.version);
+  // Static severity (see `checkSpurOnPath`): always "error" here — a passing
+  // check simply never renders it.
   return {
     id: "node-version",
     ok: satisfied,
-    severity: satisfied ? "info" : "error",
+    severity: "error",
     detail: satisfied
       ? `node ${process.version} satisfies ${range}`
       : `node ${process.version} does not satisfy required range ${range}`,
@@ -225,6 +239,63 @@ export interface ServiceHealthResult {
   checks: HostInstallCheck[];
   daemonReachable: boolean;
   daemonPort: number;
+  daemonVersion?: string;
+}
+
+function activeButUnreachableCheck(
+  id: ServiceId,
+  unit: string,
+  url: string,
+  reason: string | undefined,
+  restartCmd: string,
+): HostInstallCheck {
+  return {
+    id: `${id}-reachable`,
+    ok: false,
+    severity: "error",
+    detail: reason
+      ? `${unit} is active but unreachable at ${url} (${reason})`
+      : `${unit} is active but unreachable at ${url}`,
+    fix: `${restartCmd} ${unit}`,
+  };
+}
+
+// Before blaming a busy port on a foreign process, ask the candidate whether
+// it IS a Spur daemon (its `/info` responds with a version body). `daemon`
+// and `web` are both host-global fallback ports (the daemon defaults to 4310
+// with no instance config, the web unit to 4311 with no unit file), so a
+// live-but-unmanaged Spur daemon bound there must not be reported as a
+// foreign port conflict.
+async function portConflictCheck(
+  id: ServiceId,
+  unit: string,
+  port: number,
+): Promise<HostInstallCheck> {
+  const heldBySpur = (await probeInfo({ id, url: `http://127.0.0.1:${port}/info` })) !== undefined;
+  if (heldBySpur) {
+    return {
+      id: `${id}-reachable`,
+      ok: false,
+      severity: "warn",
+      detail: `${unit} is not running, but port ${port} is already held by a Spur daemon`,
+    };
+  }
+  const pids = await findListenerPids(port);
+  return {
+    id: `${id}-port-conflict`,
+    ok: false,
+    severity: "error",
+    detail: `port ${port} expected for ${unit} is held by another process (pid ${pids.join(", ") || "unknown"})`,
+  };
+}
+
+function notRunningCheck(id: ServiceId, unit: string, port: number): HostInstallCheck {
+  return {
+    id: `${id}-reachable`,
+    ok: false,
+    severity: "warn",
+    detail: `${unit} is not running (port ${port} is free)`,
+  };
 }
 
 // F6: distinguishes "not started yet" (warn) from "systemd says active but HTTP
@@ -232,97 +303,91 @@ export interface ServiceHealthResult {
 // already-computed `daemonActive`/`webActive` booleans instead of re-querying
 // systemd a second time. Exported so fast tests can drive daemon/web
 // active-vs-inactive scenarios directly, without simulating systemctl.
+//
+// The daemon's liveness probe hits `/info`, not `/sessions` — `/sessions`
+// resolves to the heavy `view=full` enrichment path (`server.ts`), so under
+// load a healthy-but-busy daemon could time out and get misreported as an
+// error. `/info` doubles as the F8 version-drift source, fetched at most once
+// here and threaded through `daemonVersion` so a reachable daemon costs one
+// round trip, not two.
+//
+// `systemdReportsActivity` is true exactly when the caller already pushed a
+// `spur-daemon`/`spur-web` "active"/"not active" check from systemd state —
+// in that case the plain "not running, port free" fact here would just
+// repeat the same condition at a second severity, so it is suppressed; the
+// error-grade branches (active-but-unreachable, port-conflict) still surface
+// because they carry information systemd alone does not have.
 export async function checkServiceHealth(
   scope: SystemdScope,
   daemonActive: boolean,
   webActive: boolean,
+  systemdReportsActivity: boolean,
 ): Promise<ServiceHealthResult> {
   const daemonPort = resolveDaemonPortReadOnly();
   const webPort = readWebPort(scope);
-  const targets = makeTargets({ daemon: daemonPort, web: webPort });
-
-  const services: Array<{
-    id: ServiceId;
-    unit: string;
-    active: boolean;
-    port: number;
-    target: ProbeTarget;
-  }> = [
-    {
-      id: "daemon",
-      unit: "spur-daemon.service",
-      active: daemonActive,
-      port: daemonPort,
-      target: targets.daemon,
-    },
-    { id: "web", unit: "spur-web.service", active: webActive, port: webPort, target: targets.web },
-  ];
+  const daemonInfoUrl = `http://127.0.0.1:${daemonPort}/info`;
 
   const checks: HostInstallCheck[] = [];
   let daemonReachable = false;
+  let daemonVersion: string | undefined;
 
-  for (const service of services) {
-    const result = await probe(service.target);
-    if (result.ok) {
-      if (service.id === "daemon") daemonReachable = true;
-      checks.push({
-        id: `${service.id}-reachable`,
-        ok: true,
-        severity: "info",
-        detail: `${service.unit} responded at ${service.target.url}`,
-      });
-      continue;
-    }
-    if (service.active) {
-      checks.push({
-        id: `${service.id}-reachable`,
-        ok: false,
-        severity: "error",
-        detail: `${service.unit} is active but unreachable at ${service.target.url} (${result.reason})`,
-        fix: `${scope.restartCmd} ${service.unit}`,
-      });
-      continue;
-    }
-    const portFree = await isHostPortFree(service.port);
-    if (!portFree) {
-      const pids = await findListenerPids(service.port);
-      checks.push({
-        id: `${service.id}-port-conflict`,
-        ok: false,
-        severity: "error",
-        detail: `port ${service.port} expected for ${service.unit} is held by another process (pid ${pids.join(", ") || "unknown"})`,
-      });
-      continue;
-    }
+  const daemonInfo = await probeInfo({ id: "daemon", url: daemonInfoUrl });
+  if (daemonInfo) {
+    daemonReachable = true;
+    daemonVersion = daemonInfo.version;
     checks.push({
-      id: `${service.id}-reachable`,
-      ok: false,
-      severity: "warn",
-      detail: `${service.unit} is not running (port ${service.port} is free)`,
+      id: "daemon-reachable",
+      ok: true,
+      severity: "info",
+      detail: `spur-daemon.service responded at ${daemonInfoUrl}`,
     });
+  } else if (daemonActive) {
+    checks.push(
+      activeButUnreachableCheck("daemon", "spur-daemon.service", daemonInfoUrl, undefined, scope.restartCmd),
+    );
+  } else if (!(await isHostPortFree(daemonPort))) {
+    checks.push(await portConflictCheck("daemon", "spur-daemon.service", daemonPort));
+  } else if (!systemdReportsActivity) {
+    checks.push(notRunningCheck("daemon", "spur-daemon.service", daemonPort));
   }
 
-  return { checks, daemonReachable, daemonPort };
+  const webUrl = `http://127.0.0.1:${webPort}/`;
+  const webResult = await probe({ id: "web", url: webUrl });
+  if (webResult.ok) {
+    checks.push({
+      id: "web-reachable",
+      ok: true,
+      severity: "info",
+      detail: `spur-web.service responded at ${webUrl}`,
+    });
+  } else if (webActive) {
+    checks.push(
+      activeButUnreachableCheck("web", "spur-web.service", webUrl, webResult.reason, scope.restartCmd),
+    );
+  } else if (!(await isHostPortFree(webPort))) {
+    checks.push(await portConflictCheck("web", "spur-web.service", webPort));
+  } else if (!systemdReportsActivity) {
+    checks.push(notRunningCheck("web", "spur-web.service", webPort));
+  }
+
+  return { checks, daemonReachable, daemonPort, ...(daemonVersion ? { daemonVersion } : {}) };
 }
 
-// F8: only probed once F6 already confirmed the daemon answers HTTP, so a
-// down/unreachable daemon never produces a spurious drift check. Exported for
-// direct testing alongside `checkServiceHealth`.
-export async function checkVersionDrift(
-  daemonReachable: boolean,
-  daemonPort: number,
-): Promise<HostInstallCheck | undefined> {
-  if (!daemonReachable) return undefined;
-  const info = await probeInfo({ id: "daemon", url: `http://127.0.0.1:${daemonPort}/info` });
-  if (!info) return undefined;
-  const drifted = info.version !== version;
+// F8: derived from the `/info` body `checkServiceHealth` already fetched for
+// liveness — never issues a second request, and stays silent when the daemon
+// was unreachable (no version to compare).
+export function checkVersionDrift(daemonVersion: string | undefined): HostInstallCheck | undefined {
+  if (!daemonVersion) return undefined;
+  const drifted = daemonVersion !== version;
+  // Static severity (see `checkSpurOnPath`): always "warn" — drift is never
+  // exit-code-affecting, whether or not it is currently present.
   return {
     id: "version-drift",
     ok: !drifted,
-    severity: drifted ? "warn" : "info",
+    severity: "warn",
     detail: drifted
-      ? `daemon reports version ${info.version}, installed package is ${version}`
-      : `daemon version ${info.version} matches the installed package`,
+      ? `daemon reports version ${daemonVersion}, installed package is ${version}`
+      : `daemon version ${daemonVersion} matches the installed package`,
     ...(drifted ? { fix: "spur update" } : {}),
   };
 }
@@ -343,6 +408,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
 
   let daemonActive = false;
   let webActive = false;
+  let systemdReportsActivity = false;
 
   if (scope.kind === "missing" && platform() !== "linux") {
     checks.push({
@@ -391,12 +457,22 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     const [ctlBin, ...ctlArgs] = scope.ctl;
     const systemdAvailable =
       ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
-    if (unitsInstalled && systemdAvailable) {
+    systemdReportsActivity = unitsInstalled && systemdAvailable;
+    if (systemdReportsActivity) {
+      // "not active" alone is a `warn`, not an `error`: it is the normal
+      // transient state right after `spur init` before the unit reaches
+      // active, and right after a deliberate stop. The error-grade signal for
+      // a genuinely broken daemon/web (active-but-unreachable, or something
+      // else squatting the expected port) lives solely in `checkServiceHealth`
+      // below — `daemon-reachable`/`web-reachable`'s plain "not running" case
+      // is suppressed there when this block already reported the same fact,
+      // so the condition has exactly one severity owner (see F6/F8 module
+      // doc).
       daemonActive = isActive(scope.ctl, "spur-daemon.service");
       checks.push({
         id: "spur-daemon",
         ok: daemonActive,
-        severity: "error",
+        severity: "warn",
         detail: daemonActive ? "spur-daemon.service active" : "spur-daemon.service not active",
         fix: `${scope.restartCmd} spur-daemon.service`,
       });
@@ -405,7 +481,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
       checks.push({
         id: "spur-web",
         ok: webActive,
-        severity: "error",
+        severity: "warn",
         detail: webActive ? "spur-web.service active" : "spur-web.service not active",
         fix: `${scope.restartCmd} spur-web.service`,
       });
@@ -417,9 +493,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
 
-  const health = await checkServiceHealth(scope, daemonActive, webActive);
+  const health = await checkServiceHealth(scope, daemonActive, webActive, systemdReportsActivity);
   checks.push(...health.checks);
-  const drift = await checkVersionDrift(health.daemonReachable, health.daemonPort);
+  const drift = checkVersionDrift(health.daemonVersion);
   if (drift) checks.push(drift);
 
   return checks;
@@ -430,8 +506,11 @@ export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
 }
 
 export function renderHostInstallChecks(checks: HostInstallCheck[]): string {
+  // Severity is a static per-check importance, not a pass/fail flag (see
+  // `checkSpurOnPath`) — only surface it once a check has actually failed, so
+  // a passing check is never rendered as `[error]`.
   const lines = checks.map((check) => {
-    const mark = check.ok ? "ok" : "missing";
+    const mark = check.ok ? "ok" : check.severity;
     const fix = check.ok || !check.fix ? "" : ` — fix: ${check.fix}`;
     return dimText(`[${mark}] ${check.detail}${fix}`);
   });

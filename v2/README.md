@@ -24,14 +24,15 @@ spur list
 spur spawn <project> "Fix the flaky auth test"
 ```
 
-`spur doctor` is read-only by default: it checks npm/systemd host install, PATH, core deps
-(`tmux`/`git`/node version), project config validity, and daemon/web health, then exits non-zero
-only when a check reports `severity: "error"`. Pass `--scaffold` to write a minimal local
-`spur.yaml` at the git repo root for the current checkout when none exists yet; it never overwrites
-an existing `spur.yaml`/`spur.yml`, never calls `connect`, never starts the daemon, and never
-creates `~/.spur/config.yaml`. The first normal Spur command still auto-initializes that global
-instance config, and `spur list` / `spur spawn` auto-connect the local project config through the
-existing config path.
+`spur doctor` writes no Spur config or state by default: it checks npm/systemd host install, PATH,
+core deps (`tmux`/`git`/node version), project config validity, and daemon/web health, then exits
+non-zero only when a check reports `severity: "error"`. (It may still shell out to `npm config get
+prefix`, which can create npm's own `~/.npm/_logs/*-debug-0.log` — that is npm's logging, not a
+Spur file.) Pass `--scaffold` to write a minimal local `spur.yaml` at the git repo root for the
+current checkout when none exists yet; it never overwrites an existing `spur.yaml`/`spur.yml`,
+never calls `connect`, never starts the daemon, and never creates `~/.spur/config.yaml`. The first
+normal Spur command still auto-initializes that global instance config, and `spur list` / `spur
+spawn` auto-connect the local project config through the existing config path.
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
 
