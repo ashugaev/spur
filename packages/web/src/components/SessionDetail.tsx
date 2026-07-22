@@ -2337,7 +2337,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
             {promptView &&
@@ -2355,7 +2355,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onCopy={copyLabeledValue}
                       />
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                    <p
+                      className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                    >
                       {promptView.task}
                     </p>
                   </div>

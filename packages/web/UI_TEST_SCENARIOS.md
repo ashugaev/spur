@@ -298,6 +298,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
 - Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
+- Long unbroken tokens hard-wrap in the title heading and the Task summary paragraph instead of widening the page
 - White bottom border (2px) under header
 
 ### S2: Actions bar

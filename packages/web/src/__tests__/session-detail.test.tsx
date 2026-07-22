@@ -4173,3 +4173,48 @@ describe("SessionDetail GitHub PR check unavailable", () => {
     expect(completeBodies).toEqual([{}, { skipPrCheck: true }]);
   });
 });
+
+describe("SessionDetail header wrap", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("hard-wraps a long unbroken token in the title heading and the task summary", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ title: longToken, prompt: longToken })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const heading = await screen.findByRole("heading", { name: longToken });
+    expect(heading.tagName).toBe("H1");
+    expect(heading).toHaveClass("[overflow-wrap:anywhere]");
+
+    const taskLabel = await screen.findByText("Task");
+    const taskSection = taskLabel.parentElement?.parentElement as HTMLElement;
+    const taskParagraph = within(taskSection).getByText(longToken, { selector: "p" });
+    expect(taskParagraph).toHaveClass("min-w-0");
+    expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
+    expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
+  });
+});
