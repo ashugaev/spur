@@ -425,17 +425,6 @@ test_missing_next_rebuild() {
   printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
   rm -f "$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
 
-  local root="$MAIN_DEPLOY_ROOT"
-  for template in "$repo_root/deploy/"*.service; do
-    local name content
-    name=$(basename "$template")
-    content=$(<"$template")
-    content="${content//\{\{SPUR_ROOT\}\}/$root}"
-    content="${content//\{\{SPUR_SERVICE_USER\}\}/$(id -un)}"
-    content="${content//\{\{SPUR_SERVICE_HOME\}\}/$HOME}"
-    printf '%s\n' "$content" >"$MAIN_DEPLOY_SYSTEMD_DIR/$name"
-  done
-
   local ref="/_next/static/chunks/main-rebuilt.js"
   local pnpm_stub="$work/sudobin/pnpm"
   cat >"$pnpm_stub" <<EOF
@@ -454,6 +443,45 @@ fi
 exit 0
 EOF
   chmod +x "$pnpm_stub"
+
+  # Pre-render the unit files with the exact NODE_BIN/PNPM_BIN/SPUR_NVM_BIN_PREFIX
+  # the script itself will resolve (via resolve_runtime_bins, same PATH), so
+  # install_service_files sees no diff and this test can exercise the
+  # web_build_exists / "build missing" branch instead of the service-file-changed
+  # restart branch.
+  local node_bin pnpm_bin nvm_prefix
+  node_bin="$(
+    # shellcheck source=/dev/null
+    source "$script"
+    resolve_runtime_bins
+    printf '%s' "$NODE_BIN"
+  )"
+  pnpm_bin="$(
+    # shellcheck source=/dev/null
+    source "$script"
+    resolve_runtime_bins
+    printf '%s' "$PNPM_BIN"
+  )"
+  nvm_prefix="$(
+    # shellcheck source=/dev/null
+    source "$script"
+    resolve_runtime_bins
+    printf '%s' "$SPUR_NVM_BIN_PREFIX"
+  )"
+
+  local root="$MAIN_DEPLOY_ROOT"
+  for template in "$repo_root/deploy/"*.service; do
+    local name content
+    name=$(basename "$template")
+    content=$(<"$template")
+    content="${content//\{\{SPUR_ROOT\}\}/$root}"
+    content="${content//\{\{SPUR_SERVICE_USER\}\}/$(id -un)}"
+    content="${content//\{\{SPUR_SERVICE_HOME\}\}/$HOME}"
+    content="${content//\{\{NODE_BIN\}\}/$node_bin}"
+    content="${content//\{\{PNPM_BIN\}\}/$pnpm_bin}"
+    content="${content//\{\{SPUR_NVM_BIN_PREFIX\}\}/$nvm_prefix}"
+    printf '%s\n' "$content" >"$MAIN_DEPLOY_SYSTEMD_DIR/$name"
+  done
   mkdir -p "$MAIN_DEPLOY_ROOT/v2/bin" "$MAIN_DEPLOY_ROOT/v2/dist"
   cp "$repo_root/v2/bin/restart-daemon-if-running.mjs" "$MAIN_DEPLOY_ROOT/v2/bin/"
   printf 'export function instanceConfigExists(){return false}\nexport function resolveInstanceConfigPath(){return ""}\n' \

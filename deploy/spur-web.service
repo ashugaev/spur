@@ -1,7 +1,8 @@
 # Spur web UI systemd unit template
 #
-# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
-# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-web.service.
+# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}},
+# {{SPUR_SERVICE_HOME}}, {{PNPM_BIN}}, and {{SPUR_NVM_BIN_PREFIX}}, then writes
+# /etc/systemd/system/spur-web.service.
 
 [Unit]
 Description=Spur web UI
@@ -13,10 +14,10 @@ Type=simple
 User={{SPUR_SERVICE_USER}}
 WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME={{SPUR_SERVICE_HOME}}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH={{SPUR_NVM_BIN_PREFIX}}/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
 Environment=PORT=3012
-ExecStart=/usr/bin/pnpm ui:start
+ExecStart={{PNPM_BIN}} ui:start
 Restart=always
 RestartSec=3
 

@@ -246,6 +246,9 @@ install_service_files() {
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
     content="${content//\{\{SPUR_SERVICE_USER\}\}/$service_user}"
     content="${content//\{\{SPUR_SERVICE_HOME\}\}/$service_home}"
+    content="${content//\{\{NODE_BIN\}\}/$NODE_BIN}"
+    content="${content//\{\{PNPM_BIN\}\}/$PNPM_BIN}"
+    content="${content//\{\{SPUR_NVM_BIN_PREFIX\}\}/$SPUR_NVM_BIN_PREFIX}"
 
     # Fail fast on unsubstituted placeholders. Writing a unit with literal
     # `{{...}}` would put systemd into a status=217/USER restart loop.
@@ -268,6 +271,30 @@ install_service_files() {
   fi
 }
 
+nvm_bin_prefix() {
+  local node="$1"
+  case "$node" in
+    "$service_home"/.nvm/versions/node/*/bin/node) printf '%s:' "${node%/*}" ;;
+  esac
+}
+
+resolve_runtime_bins() {
+  local node pnpm
+  node="$(command -v node || true)"
+  pnpm="$(command -v pnpm || true)"
+  if [[ -z "$node" ]]; then
+    echo "main:deploy aborting: node not found on PATH (resolve via nvm/corepack before deploy)" >&2
+    exit 1
+  fi
+  if [[ -z "$pnpm" ]]; then
+    echo "main:deploy aborting: pnpm not found on PATH (corepack enable / nvm use before deploy)" >&2
+    exit 1
+  fi
+  export NODE_BIN="$node"
+  export PNPM_BIN="$pnpm"
+  export SPUR_NVM_BIN_PREFIX="$(nvm_bin_prefix "$node")"
+}
+
 print_cli_install_hint() {
   local sha="$1"
   local cli_path="$deploy_root/v2/dist/cli.js"
@@ -280,94 +307,102 @@ print_cli_install_hint() {
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# Serialize the ENTIRE deploy across overlapping runs: git fetch/reset, build,
-# restart, and verify/heal. The git mutation of the one shared deploy_root clone
-# is itself a race (two runs collide on .git/index.lock), so the lock must be
-# held from before the first git command through the final verify.
-#
-# Acquired once, only on the direct invocation (MAIN_DEPLOY_REEXECED unset). The
-# re-exec below uses `exec`, which does NOT close FD 9 (no CLOEXEC), so the
-# re-execed origin/main child inherits the very same open file description and
-# keeps the lock held continuously. The child must NOT run `exec 9>` again: that
-# would open a new file description and release the parent's lock — hence the
-# guard skips re-acquisition when MAIN_DEPLOY_REEXECED=1.
-if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" ]]; then
-  mkdir -p "$(dirname "$LOCKFILE")"
-  exec 9>"$LOCKFILE"
-  flock -w 600 9 || {
-    echo "main:deploy FATAL: could not acquire deploy lock within 600s" >&2
-    exit 1
-  }
-fi
+main() {
+  # Serialize the ENTIRE deploy across overlapping runs: git fetch/reset, build,
+  # restart, and verify/heal. The git mutation of the one shared deploy_root clone
+  # is itself a race (two runs collide on .git/index.lock), so the lock must be
+  # held from before the first git command through the final verify.
+  #
+  # Acquired once, only on the direct invocation (MAIN_DEPLOY_REEXECED unset). The
+  # re-exec below uses `exec`, which does NOT close FD 9 (no CLOEXEC), so the
+  # re-execed origin/main child inherits the very same open file description and
+  # keeps the lock held continuously. The child must NOT run `exec 9>` again: that
+  # would open a new file description and release the parent's lock — hence the
+  # guard skips re-acquisition when MAIN_DEPLOY_REEXECED=1.
+  if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" ]]; then
+    mkdir -p "$(dirname "$LOCKFILE")"
+    exec 9>"$LOCKFILE"
+    flock -w 600 9 || {
+      echo "main:deploy FATAL: could not acquire deploy lock within 600s" >&2
+      exit 1
+    }
+  fi
 
-ensure_deploy_clone
+  ensure_deploy_clone
 
-git -C "$deploy_root" fetch origin main
-remote_head="$(git -C "$deploy_root" rev-parse origin/main)"
-# Reset deploy_root to origin/main before anything else, including the re-exec
-# below. Guarantees the script we run from there matches origin/main.
-git -C "$deploy_root" reset --hard origin/main
-git -C "$deploy_root" checkout -B main origin/main
-git -C "$deploy_root" reset --hard "$remote_head"
-git -C "$deploy_root" clean -fd
+  git -C "$deploy_root" fetch origin main
+  remote_head="$(git -C "$deploy_root" rev-parse origin/main)"
+  # Reset deploy_root to origin/main before anything else, including the re-exec
+  # below. Guarantees the script we run from there matches origin/main.
+  git -C "$deploy_root" reset --hard origin/main
+  git -C "$deploy_root" checkout -B main origin/main
+  git -C "$deploy_root" reset --hard "$remote_head"
+  git -C "$deploy_root" clean -fd
 
-# Re-exec from deploy_root so substitution logic and template format stay
-# locked together. Without this, an old caller script can write half-substituted
-# unit files and put systemd into a status=217/USER restart loop. FD 9 (the held
-# deploy lock) is inherited across this exec, so the child stays serialized.
-deploy_script="$deploy_root/scripts/main-deploy.sh"
-if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" != "$(realpath "$deploy_script")" ]]; then
-  echo "main:deploy re-executing from $deploy_script"
-  exec env \
-    MAIN_DEPLOY_ROOT="$deploy_root" \
-    MAIN_DEPLOY_STAMP_FILE="$deployed_sha_file" \
-    MAIN_DEPLOY_SERVICE_USER="$service_user" \
-    MAIN_DEPLOY_SERVICE_HOME="$service_home" \
-    MAIN_DEPLOY_REEXECED=1 \
-    bash "$deploy_script" "$@"
-fi
+  # Re-exec from deploy_root so substitution logic and template format stay
+  # locked together. Without this, an old caller script can write half-substituted
+  # unit files and put systemd into a status=217/USER restart loop. FD 9 (the held
+  # deploy lock) is inherited across this exec, so the child stays serialized.
+  deploy_script="$deploy_root/scripts/main-deploy.sh"
+  if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" != "$(realpath "$deploy_script")" ]]; then
+    echo "main:deploy re-executing from $deploy_script"
+    exec env \
+      MAIN_DEPLOY_ROOT="$deploy_root" \
+      MAIN_DEPLOY_STAMP_FILE="$deployed_sha_file" \
+      MAIN_DEPLOY_SERVICE_USER="$service_user" \
+      MAIN_DEPLOY_SERVICE_HOME="$service_home" \
+      MAIN_DEPLOY_REEXECED=1 \
+      bash "$deploy_script" "$@"
+  fi
 
-deployed_head=""
-if [[ -f "$deployed_sha_file" ]]; then
-  deployed_head="$(<"$deployed_sha_file")"
-fi
+  resolve_runtime_bins
 
-if [[ "$deployed_head" == "$remote_head" ]]; then
+  deployed_head=""
+  if [[ -f "$deployed_sha_file" ]]; then
+    deployed_head="$(<"$deployed_sha_file")"
+  fi
+
+  if [[ "$deployed_head" == "$remote_head" ]]; then
+    install_service_files "$deploy_root"
+    if [[ "$SERVICES_CHANGED" == true ]]; then
+      echo "Service files updated — restarting"
+      restart_and_verify
+      echo "Already deployed origin/main $remote_head"
+      exit 0
+    fi
+    if web_is_healthy; then
+      echo "Already deployed origin/main $remote_head"
+      exit 0
+    fi
+    if web_build_exists; then
+      echo "main:deploy spur-web unhealthy at $remote_head — restarting" >&2
+      restart_and_verify
+      echo "Already deployed origin/main $remote_head"
+      exit 0
+    fi
+    echo "main:deploy spur-web build missing at $remote_head — rebuilding" >&2
+  fi
+
+  export CI=1
+  if systemctl_cmd is-active --quiet spur-web.service; then
+    echo "main:deploy stopping spur-web before build" >&2
+    systemctl_cmd stop spur-web.service
+  fi
+  pnpm -C "$deploy_root" install --frozen-lockfile
+  # Build with managed-prod autostart disabled so the build-triggered daemon
+  # restart path cannot fork a rogue listener outside systemd during the
+  # service restart window.
+  SPUR_DISABLE_AUTOSTART=1 pnpm -C "$deploy_root" build
   install_service_files "$deploy_root"
-  if [[ "$SERVICES_CHANGED" == true ]]; then
-    echo "Service files updated — restarting"
-    restart_and_verify
-    echo "Already deployed origin/main $remote_head"
-    exit 0
-  fi
-  if web_is_healthy; then
-    echo "Already deployed origin/main $remote_head"
-    exit 0
-  fi
-  if web_build_exists; then
-    echo "main:deploy spur-web unhealthy at $remote_head — restarting" >&2
-    restart_and_verify
-    echo "Already deployed origin/main $remote_head"
-    exit 0
-  fi
-  echo "main:deploy spur-web build missing at $remote_head — rebuilding" >&2
-fi
+  # Safe to restart: the systemd unit uses KillMode=process, so only the
+  # daemon's node process is stopped. Tmux sessions and agents survive.
+  # The daemon re-discovers living sessions on startup.
+  restart_and_verify
+  printf '%s\n' "$remote_head" >"$deployed_sha_file"
+  echo "main deployed: $remote_head"
+  print_cli_install_hint "$remote_head"
+}
 
-export CI=1
-if systemctl_cmd is-active --quiet spur-web.service; then
-  echo "main:deploy stopping spur-web before build" >&2
-  systemctl_cmd stop spur-web.service
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-pnpm -C "$deploy_root" install --frozen-lockfile
-# Build with managed-prod autostart disabled so the build-triggered daemon
-# restart path cannot fork a rogue listener outside systemd during the
-# service restart window.
-SPUR_DISABLE_AUTOSTART=1 pnpm -C "$deploy_root" build
-install_service_files "$deploy_root"
-# Safe to restart: the systemd unit uses KillMode=process, so only the
-# daemon's node process is stopped. Tmux sessions and agents survive.
-# The daemon re-discovers living sessions on startup.
-restart_and_verify
-printf '%s\n' "$remote_head" >"$deployed_sha_file"
-echo "main deployed: $remote_head"
-print_cli_install_hint "$remote_head"
