@@ -49,7 +49,13 @@ vi.mock("node:child_process", async () => {
   };
 });
 
-import { createRealUpdateDeps, reinitUnits, runUpdate, type UpdateDeps } from "../../src/update.js";
+import {
+  createRealUpdateDeps,
+  reinitUnits,
+  resolveInstallPrefix,
+  runUpdate,
+  type UpdateDeps,
+} from "../../src/update.js";
 import type { ProbeResult, ProbeTarget } from "../../src/update-health.js";
 import type { RollbackState } from "../../src/update-state.js";
 
@@ -225,6 +231,47 @@ describe("runUpdate", () => {
     const fake = buildRunFake({ initialState: EMPTY_STATE });
     await runUpdate("/tmp/cli.js", { version: "0.2.0" }, fake.deps);
     expect(fake.installLog).toEqual(["0.2.0"]);
+  });
+});
+
+describe("resolveInstallPrefix", () => {
+  it("derives the prefix from an @shugaev/spur node_modules entrypoint", () => {
+    expect(
+      resolveInstallPrefix("/home/alek/.local/lib/node_modules/@shugaev/spur/dist/cli.js"),
+    ).toBe("/home/alek/.local");
+  });
+
+  it("returns null for a source-checkout entrypoint outside the install layout", () => {
+    expect(resolveInstallPrefix("/home/alek/spur/v2/dist/cli.js")).toBeNull();
+  });
+});
+
+describe("createRealUpdateDeps installVersion", () => {
+  beforeEach(() => {
+    execFileSyncCalls.length = 0;
+  });
+
+  it("pins --prefix to the derived install prefix", () => {
+    const deps = createRealUpdateDeps(
+      "/home/alek/.local/lib/node_modules/@shugaev/spur/dist/cli.js",
+      "/tmp/state.json",
+    );
+    deps.installVersion("0.2.0");
+    const call = execFileSyncCalls.find((entry) => entry.file === "npm");
+    expect(call?.args).toEqual([
+      "install",
+      "-g",
+      "--prefix",
+      "/home/alek/.local",
+      "@shugaev/spur@0.2.0",
+    ]);
+  });
+
+  it("omits --prefix for a source-checkout entrypoint", () => {
+    const deps = createRealUpdateDeps("/home/alek/spur/v2/dist/cli.js", "/tmp/state.json");
+    deps.installVersion("0.2.0");
+    const call = execFileSyncCalls.find((entry) => entry.file === "npm");
+    expect(call?.args).toEqual(["install", "-g", "@shugaev/spur@0.2.0"]);
   });
 });
 

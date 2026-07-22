@@ -158,6 +158,24 @@ function resolveDaemonPort(): number {
   }
 }
 
+// Derive the npm prefix from the location the running spur package occupies, so
+// `npm install -g` lands the new version in the SAME place instead of npm's
+// configured/default prefix (on prod that is `/usr`, unwritable by the daemon
+// user -> EACCES). Returns null when the entrypoint is not inside an
+// `@shugaev/spur` install (source checkout / dev), where the bare install is the
+// correct default.
+export function resolveInstallPrefix(entrypoint: string): string | null {
+  const marker = `/lib/node_modules/${PACKAGE_SPEC}/`;
+  let resolved: string;
+  try {
+    resolved = realpathSync(entrypoint);
+  } catch {
+    resolved = entrypoint;
+  }
+  const index = resolved.indexOf(marker);
+  return index === -1 ? null : resolved.slice(0, index);
+}
+
 // Reinstall the user systemd units, preserving the live web port / external
 // exposure / Tailscale bind the operator deployed instead of resetting the
 // units to loopback:4311. Shared by `spur update`'s reinit dep and the
@@ -174,13 +192,19 @@ export function createRealUpdateDeps(
   statePath: string = defaultRollbackStatePath(),
 ): UpdateDeps {
   const scope = resolveSystemdScope(homedir());
+  const installPrefix = resolveInstallPrefix(cliEntrypoint);
   return {
     now: () => Date.now(),
     sleep: (ms) => delay(ms),
     probe: (target) => probe(target),
     unitState: (unit) => unitStateWith(scope, unit),
     installVersion: (target) => {
-      execFileSync("npm", ["install", "-g", `${PACKAGE_SPEC}@${target}`], { stdio: "inherit" });
+      const args = ["install", "-g"];
+      if (installPrefix) {
+        args.push("--prefix", installPrefix);
+      }
+      args.push(`${PACKAGE_SPEC}@${target}`);
+      execFileSync("npm", args, { stdio: "inherit" });
     },
     reinit: () => reinitUnits(cliEntrypoint),
     currentVersion: version,
