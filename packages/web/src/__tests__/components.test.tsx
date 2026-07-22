@@ -2520,6 +2520,8 @@ describe("StatusBar", () => {
     expect(footer.className).toContain("pb-[max(0.25rem,env(safe-area-inset-bottom))]");
     expect(footer.className).toContain("pl-[max(0.5rem,env(safe-area-inset-left))]");
     expect(footer.className).toContain("pr-[max(0.5rem,env(safe-area-inset-right))]");
+    expect(footer.className).toContain("sm:pl-[max(1rem,env(safe-area-inset-left))]");
+    expect(footer.className).toContain("sm:pr-[max(1rem,env(safe-area-inset-right))]");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {
