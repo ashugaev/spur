@@ -122,6 +122,19 @@ describe("detectCodexRateLimit", () => {
     expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
   });
 
+  it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: null,
+        secondary: { used_percent: 3, window_minutes: 10080 },
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: false, reason: "" });
+  });
+
   it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
     expect(
       detectCodexRateLimit({
