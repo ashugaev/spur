@@ -64,6 +64,36 @@ spur init   # refresh units, then restart
 
 Re-run `spur init` (or `spur update`), not just `systemctl restart`: a restart reuses old unit files. Crossing the in-process `/ws` change, the old `spur-web.service` still runs `server.js` and a dead `spur-direct-terminal.service` crash-loops. `spur init` rewrites the web unit (`ExecStart` → `web-server.js`, `HOSTNAME` → `WEB_HOST`), removes the stale terminal unit, and preserves your port/expose/Tailscale bind. Later same-topology upgrades can just restart both units. `install-and-restart.sh` and `POST /deploy/switch` restart only — they don't refresh units.
 
+## Recovering a stuck host (manual migration)
+
+Hosts on a pre-0.24.3 installer run `npm install -g` without `--prefix`. If the host's ambient npm prefix resolves outside the Spur install root (a system service env with no `npm_config_prefix` resolves to `/usr`), install fails with `EACCES mkdir /usr/lib/node_modules/@shugaev` and the host stays on the old version. The old installer can never ship its own fix — the upgrade must be applied once by hand, pinning the prefix to the real install root.
+
+User units (default `spur init` scope):
+
+```bash
+npm_config_prefix="$HOME/.local" npm install -g @shugaev/spur@<version>
+npm_config_prefix="$HOME/.local" ~/.local/bin/spur reinit
+```
+
+System units (`User=`, `/etc/systemd/system/`, `SYSTEMCTL="sudo systemctl"`):
+
+```bash
+npm_config_prefix="$HOME/.local" npm install -g @shugaev/spur@<version>
+sudo systemctl restart spur-daemon.service spur-web.service
+```
+
+Do not run `spur reinit` on a system-unit host: it writes user units (`systemctl --user`) and leaves the system units untouched. Restart the system units directly.
+
+Verify:
+
+```bash
+~/.local/bin/spur --version                                                # <version>
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions  # 200
+ls /usr/lib/node_modules/@shugaev 2>/dev/null && echo LEAKED || echo clean # clean
+```
+
+Once the host runs 0.24.3 or later, `POST /deploy/switch` and `spur update` pin `--prefix` from the install location themselves; no further manual step is needed.
+
 ## Security
 
 - Never copy `~/.spur/daemon.env`, project `.env`, API keys, SSH keys, or `NPM_TOKEN` between hosts.
@@ -107,6 +137,7 @@ cd <your-repo> && ~/.local/bin/spur connect --config spur.yaml
 | `spur init` skipped Tailscale                                            | ran with `--no-tailscale`, or `--expose-web` superseded it                                                                              | re-run without `--no-tailscale`/`--expose-web`                        |
 | `spur update` fails preflight for `terminal`                             | old updater (pre-#573) probes the removed terminal unit                                                                                 | run `spur update --force`                                             |
 | Web down after a UI version switch (`/deploy/switch`) on a pre-#573 host | deploy/switch restarts only; a stale pre-#573 `spur-web.service` keeps its `ExecStartPre` node-pty build, which fails with no toolchain | run `spur init` (or `spur update`) once to refresh the unit           |
+| `EACCES mkdir /usr/lib/node_modules/@shugaev` on deploy/switch or `spur update` | host on a pre-0.24.3 installer; ambient npm prefix resolves to `/usr` | one-time manual pinned install, see [Recovering a stuck host](#recovering-a-stuck-host-manual-migration) |
 
 ## Reference
 
