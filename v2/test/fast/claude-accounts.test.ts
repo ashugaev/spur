@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addAccount,
   ensureAccountProjectsLink,
+  ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
   listAccounts,
@@ -70,6 +71,41 @@ describe("claude-accounts store", () => {
   });
 });
 
+describe("ensureDefaultAccount", () => {
+  let dataDir: string;
+  let defaultConfigDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "spur-accounts-"));
+    defaultConfigDir = mkdtempSync(join(tmpdir(), "spur-default-claude-"));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(defaultConfigDir, { recursive: true, force: true });
+  });
+
+  it("adopt-present: adopts default account when credentials exist", () => {
+    writeFileSync(join(defaultConfigDir, ".credentials.json"), "{}", "utf-8");
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+    const accounts = listAccounts(dataDir);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({ id: "default", label: "default", configDir: defaultConfigDir });
+  });
+
+  it("idempotent: calling twice keeps length 1", () => {
+    writeFileSync(join(defaultConfigDir, ".credentials.json"), "{}", "utf-8");
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+    expect(listAccounts(dataDir)).toHaveLength(1);
+  });
+
+  it("absent-noop: no credentials, store stays empty", () => {
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+    expect(listAccounts(dataDir)).toEqual([]);
+  });
+});
+
 describe("ensureAccountProjectsLink", () => {
   let dataDir: string;
 
@@ -103,5 +139,35 @@ describe("ensureAccountProjectsLink", () => {
     unlinkSync(link);
     mkdirSync(link);
     expect(() => ensureAccountProjectsLink(account)).toThrow(/exists as a real directory/);
+  });
+
+  it("default-link-noop: default account configDir skips symlink creation", () => {
+    const account = {
+      id: "default",
+      label: "default",
+      configDir: join(homedir(), ".claude"),
+      createdAt: new Date().toISOString(),
+    };
+    expect(() => ensureAccountProjectsLink(account)).not.toThrow();
+  });
+
+  it("remove-safety: removeAccount only removes <accountsRoot>/<id>, not an external configDir", () => {
+    const externalDir = mkdtempSync(join(tmpdir(), "spur-external-"));
+    const sentinel = join(externalDir, "sentinel.txt");
+    writeFileSync(sentinel, "keep-me", "utf-8");
+    const account = addAccount(dataDir, { label: "ext" });
+    // Patch stored configDir to simulate an external (e.g. default) account
+    const accounts = listAccounts(dataDir);
+    const accountsPath = join(dataDir, "claude-accounts.json");
+    writeFileSync(
+      accountsPath,
+      JSON.stringify(accounts.map((a) => (a.id === account.id ? { ...a, configDir: externalDir } : a)), null, 2) + "\n",
+      "utf-8",
+    );
+    removeAccount(dataDir, account.id);
+    expect(listAccounts(dataDir)).toEqual([]);
+    expect(existsSync(externalDir)).toBe(true);
+    expect(existsSync(sentinel)).toBe(true);
+    rmSync(externalDir, { recursive: true, force: true });
   });
 });

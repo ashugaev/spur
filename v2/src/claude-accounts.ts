@@ -85,6 +85,7 @@ export function ensureAccountProjectsLink(account: ClaudeAccount): void {
   const target = join(homedir(), ".claude", "projects");
   mkdirSync(target, { recursive: true });
   const link = join(account.configDir, "projects");
+  if (link === target) return;
   let stat: ReturnType<typeof lstatSync> | undefined;
   try {
     stat = lstatSync(link);
@@ -129,6 +130,19 @@ export function removeAccount(dataDir: string, id: string): void {
 
 export function isAccountAuthenticated(account: ClaudeAccount): boolean {
   return existsSync(join(account.configDir, ".credentials.json"));
+}
+
+export function ensureDefaultAccount(dataDir: string, defaultConfigDir: string = join(homedir(), ".claude")): void {
+  if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
+  const existing = listAccounts(dataDir);
+  if (existing.some((a) => a.configDir === defaultConfigDir)) return;
+  const account: ClaudeAccount = {
+    id: "default",
+    label: "default",
+    configDir: defaultConfigDir,
+    createdAt: new Date().toISOString(),
+  };
+  writeAccounts(dataDir, [...existing, account]);
 }
 
 export function touchAccountUsed(dataDir: string, id: string): void {

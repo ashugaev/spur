@@ -175,7 +175,7 @@ Rotate Claude login accounts across the rate limit. Each account is an isolated
 Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
 accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
 Spur auto-detects the account once `.credentials.json` lands. Select sets the
-active account; remove drops it.
+active account; remove drops it. The default ~/.claude login is auto-adopted as an account named "default" when its .credentials.json exists.
 
 Per-session switch auth (claude sessions only): kills and relaunches the session
 under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force

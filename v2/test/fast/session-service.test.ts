@@ -141,6 +141,7 @@ const addAccountMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
 const ensureAccountProjectsLinkMock = vi.fn();
+const ensureDefaultAccountMock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -167,6 +168,7 @@ function resetAccountStoreMocks(): void {
   addAccountMock.mockReset();
   removeAccountMock.mockReset();
   ensureAccountProjectsLinkMock.mockReset();
+  ensureDefaultAccountMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
@@ -242,6 +244,7 @@ vi.mock("../../src/claude-accounts.js", () => ({
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
   ensureAccountProjectsLink: ensureAccountProjectsLinkMock,
+  ensureDefaultAccount: ensureDefaultAccountMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -3918,6 +3921,16 @@ describe("SessionService", () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(runningSession({ status: "completed" }));
       expect(request.claudeAccountId).toBeUndefined();
+    });
+  });
+
+  describe("listClaudeAccounts", () => {
+    it("calls ensureDefaultAccount before listing", async () => {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.listClaudeAccounts();
+      expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
+      service.dispose();
     });
   });
 

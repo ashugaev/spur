@@ -80,6 +80,7 @@ import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   addAccount,
   ensureAccountProjectsLink,
+  ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
   listAccounts,
@@ -7690,6 +7691,7 @@ export class SessionService {
     authenticated: boolean;
     lastUsedAt?: string;
   }[] {
+    ensureDefaultAccount(this.config.dataDir);
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
