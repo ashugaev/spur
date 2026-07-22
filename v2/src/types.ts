@@ -486,6 +486,7 @@ export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
+  autoCompleteOnPrMerge?: boolean;
   worktree: boolean;
   restoreAfterReboot: boolean;
   symlinks: string[];

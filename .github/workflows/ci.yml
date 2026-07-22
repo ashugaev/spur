@@ -43,7 +43,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 20
-          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir packages/web exec playwright install chromium
       - run: pnpm --dir packages/web build

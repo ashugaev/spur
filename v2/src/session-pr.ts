@@ -225,6 +225,24 @@ export async function discoverSessionPrBinding(
   };
 }
 
+export async function resolveSessionPrMergedAt(
+  worktreePath: string,
+  pr: SessionPrBinding,
+): Promise<string | null> {
+  const raw = await gh(worktreePath, "pr", "view", String(pr.number), "--json", "mergedAt");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const mergedAt = (parsed as { mergedAt?: unknown }).mergedAt;
+  return typeof mergedAt === "string" && mergedAt.length > 0 ? mergedAt : null;
+}
+
 export async function viewSessionPrState(
   worktreePath: string,
   pr: SessionPrBinding,

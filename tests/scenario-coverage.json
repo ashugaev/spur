@@ -555,6 +555,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Project config defaults `autoCompleteOnPrMerge` to `true`, and the PR auto-detect monitor completes a running session through the normal `complete` cleanup path only when the tracked PR is merged; `autoCompleteOnPrMerge: false` and closed-unmerged PRs do not auto-complete.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/pr-auto-detect.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
@@ -1613,6 +1621,14 @@
     "scenario": "GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a bound PR.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "A merged GitHub PR bound to a running session through the built daemon auto-completes that session, removing its owned worktree and runtime artifacts.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/automation.runtime.test.ts"],
     "ciJob": "runtime-integration"
   },
   {

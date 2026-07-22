@@ -208,6 +208,7 @@ import {
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
   resolveSessionPrBinding,
+  resolveSessionPrMergedAt,
   viewSessionPrState,
 } from "./session-pr.js";
 import {
@@ -384,6 +385,8 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+  mergeHandled: boolean;
+  checking: boolean;
 }
 
 export class SessionResourceNotFoundError extends Error {
@@ -2584,46 +2587,48 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    if (session.pr) {
-      return;
-    }
-    // Skip terminal states
     if (isTerminalSessionStatus(session.status)) {
       return;
     }
-    // Skip if no worktree
     if (!session.worktree || !session.worktreePath) {
       return;
     }
 
+    const project = this.resolveProjectForSession(session);
+    const autoCompleteOnPrMerge = project?.autoCompleteOnPrMerge ?? true;
     const tracker = this.prCheckTrackers.get(session.id) ?? {
       waitingChecks: 0,
       lastState: null,
       lastCheckAt: 0,
       found: false,
+      mergeHandled: false,
+      checking: false,
     };
     if (!this.prCheckTrackers.has(session.id)) {
       this.prCheckTrackers.set(session.id, tracker);
     }
 
-    // Already found
-    if (tracker.found) {
+    if (session.pr) {
+      tracker.found = true;
+    }
+
+    if (
+      tracker.checking ||
+      (tracker.found && (!session.pr || !autoCompleteOnPrMerge || tracker.mergeHandled))
+    ) {
       return;
     }
 
-    // Reset waitingChecks on state change
     if (tracker.lastState !== null && tracker.lastState !== state) {
       tracker.waitingChecks = 0;
       tracker.lastCheckAt = 0;
     }
     tracker.lastState = state;
 
-    // Back off after limit in waiting with no state change
     if (state === "waiting" && tracker.waitingChecks >= PR_CHECK_WAITING_LIMIT) {
       return;
     }
 
-    // Throttle between gh calls
     if (Date.now() - tracker.lastCheckAt < PR_CHECK_THROTTLE_MS) {
       return;
     }
@@ -2633,46 +2638,80 @@ export class SessionService {
       tracker.waitingChecks += 1;
     }
 
-    // Fire and forget
-    void this.runPrCheck(session).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.pr_auto_detect.failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `PR auto-detect failed for ${session.id}: ${message}`,
+    tracker.checking = true;
+    void this.runPrCheck(session, project, tracker)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.pr_auto_detect.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `PR auto-detect failed for ${session.id}: ${message}`,
+        });
+      })
+      .finally(() => {
+        tracker.checking = false;
       });
-    });
   }
 
-  private async runPrCheck(session: SessionRecord): Promise<void> {
-    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+  private async runPrCheck(
+    session: SessionRecord,
+    project: ProjectConfig | undefined,
+    tracker: PrCheckTracker,
+  ): Promise<void> {
+    const autoCompleteOnPrMerge = project?.autoCompleteOnPrMerge ?? true;
+    let binding = session.pr;
+    if (!binding) {
+      binding = (await discoverSessionPrBinding(session.worktreePath, session.branch)) ?? undefined;
+    }
+
     if (binding) {
-      const tracker = this.prCheckTrackers.get(session.id);
-      if (tracker) {
-        tracker.found = true;
-      }
+      tracker.found = true;
 
       const current = readSession(this.config.dataDir, session.id);
-      if (!current?.worktreePath || current.pr) {
+      if (!current?.worktreePath) {
         return;
       }
 
-      const updated: SessionRecord = {
-        ...current,
-        pr: binding,
-      };
-      writeSession(this.config.dataDir, updated);
-      this.logEvent("session.pr_auto_detect.found", {
+      const currentBinding = current.pr ?? binding;
+      if (!current.pr) {
+        const updated: SessionRecord = {
+          ...current,
+          pr: binding,
+        };
+        writeSession(this.config.dataDir, updated);
+        this.logEvent("session.pr_auto_detect.found", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-detected PR for ${session.id}: ${binding.url}`,
+        });
+      }
+
+      if (!autoCompleteOnPrMerge || current.status !== "running") {
+        return;
+      }
+
+      const mergedAt = await resolveSessionPrMergedAt(current.worktreePath, currentBinding);
+      if (!mergedAt) {
+        return;
+      }
+
+      await this.complete(current.id, { skipPrCheck: true });
+      tracker.mergeHandled = true;
+      this.logEvent("session.pr_auto_complete.completed", {
         level: "info",
         sessionId: session.id,
         projectId: session.project,
-        message: `Auto-detected PR for ${session.id}: ${binding.url}`,
+        message: `Auto-completed ${session.id} after PR merge`,
+        details: {
+          prUrl: currentBinding.url,
+          mergedAt,
+        },
       });
       return;
     }
 
-    const project = this.config.projects[session.project];
     const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
     const providerIds = (await orderedReviewProviderIds(session.worktreePath, project)).filter(
       (providerId) => providerId !== "github",
@@ -2692,12 +2731,8 @@ export class SessionService {
     }
     if (!reviewUrl) return;
 
-    const tracker = this.prCheckTrackers.get(session.id);
-    if (tracker) {
-      tracker.found = true;
-    }
+    tracker.found = true;
 
-    // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
     if (!current?.worktreePath || current.pr) {
       return;

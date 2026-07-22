@@ -86,6 +86,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
+- Project config defaults `autoCompleteOnPrMerge` to `true`, and the PR auto-detect monitor completes a running session through the normal `complete` cleanup path only when the tracked PR is merged; `autoCompleteOnPrMerge: false` and closed-unmerged PRs do not auto-complete.
 - Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
@@ -231,6 +232,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `cron` `runOnStart: true` can also reach `trigger.spawn.prompt` plus optional `trigger.spawn.steps` and deliver the same ordered pipeline behavior as manual spawn.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.
 - GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a bound PR.
+- A merged GitHub PR bound to a running session through the built daemon auto-completes that session, removing its owned worktree and runtime artifacts.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the bound PR, even if the worktree branch later drifts.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.

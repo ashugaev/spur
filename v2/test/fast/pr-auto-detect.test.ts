@@ -65,10 +65,12 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: vi.fn(),
 }));
 vi.mock("../../src/metadata.js", () => ({
+  deleteRuntimeLogCursorsForSession: vi.fn(),
   deleteServiceInstance: vi.fn(),
   deleteServiceInstancesForSession: vi.fn(),
   deleteServiceSourceStatesForService: vi.fn(),
   deleteServiceSourceStatesForSession: vi.fn(),
+  deleteTelegramSourceStateForSession: vi.fn(),
   listActiveServiceProblems: vi.fn().mockReturnValue([]),
   listServiceInstancesForSession: vi.fn().mockReturnValue([]),
   listSessions: listSessionsMock,
@@ -184,6 +186,7 @@ function baseConfig(): AppConfig {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
+        autoCompleteOnPrMerge: true,
         worktree: true,
         restoreAfterReboot: false,
         symlinks: [],
@@ -235,6 +238,35 @@ function setupEnrich(state: string = "working"): void {
 async function loadModule() {
   vi.resetModules();
   return import("../../src/session-service.js");
+}
+
+interface TestSessionService {
+  resolveProjectForSession(session: SessionRecord): ProjectConfig | undefined;
+  runPrCheck(
+    session: SessionRecord,
+    project: ProjectConfig | undefined,
+    tracker: {
+      waitingChecks: number;
+      lastState: string | null;
+      lastCheckAt: number;
+      found: boolean;
+      mergeHandled: boolean;
+      checking: boolean;
+    },
+  ): Promise<void>;
+}
+
+async function invokeRunPrCheck(service: unknown, session: SessionRecord): Promise<void> {
+  const testService = service as unknown as TestSessionService;
+  const project = testService.resolveProjectForSession(session);
+  await testService.runPrCheck(session, project, {
+    waitingChecks: 0,
+    lastState: null,
+    lastCheckAt: 0,
+    found: false,
+    mergeHandled: false,
+    checking: false,
+  });
 }
 
 const PR_WAITING_LIMIT = 5;
@@ -422,12 +454,13 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/1" }]));
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghMock).toHaveBeenCalledOnce();
     service.dispose();
   });
 
@@ -447,11 +480,21 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("does not call gh again when PR already found", async () => {
+  it("does not call gh again when PR slot already exists and auto-complete is disabled", async () => {
     const session = makeSession();
+    const config = baseConfig();
+    const project = config.projects.api;
+    if (!project) {
+      throw new Error("Missing api project fixture");
+    }
+    project.autoCompleteOnPrMerge = false;
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
+    buildMergedConfigMock.mockReturnValue({
+      config,
+      configPaths: ["/tmp/spur.yaml"],
+    });
     ghMock.mockResolvedValue(
       JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
     );
@@ -465,6 +508,88 @@ describe("PR auto-detect", () => {
     await vi.advanceTimersByTimeAsync(35_000);
     // gh should not be called again since tracker.found = true
     expect(ghMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("auto-completes the session when the PR is merged", async () => {
+    const session = makeSession();
+    let currentRecord: SessionRecord = { ...session };
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockImplementation(() => currentRecord);
+    writeSessionMock.mockImplementation((_dataDir: string, record: SessionRecord) => {
+      currentRecord = record;
+    });
+    setupEnrich();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([{ number: 42, title: "Done", url: "https://github.com/org/repo/pull/42" }]),
+    );
+    ghMock.mockResolvedValueOnce(JSON.stringify({ mergedAt: "2026-04-14T10:00:00Z" }));
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await invokeRunPrCheck(service, session);
+
+    expect(writeSessionMock.mock.calls.some(([, record]) => record.status === "completed")).toBe(
+      true,
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: "session.pr_auto_complete.completed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not auto-complete when project disables autoCompleteOnPrMerge", async () => {
+    const session = makeSession();
+    const config = baseConfig();
+    const project = config.projects.api;
+    if (!project) {
+      throw new Error("Missing api project fixture");
+    }
+    project.autoCompleteOnPrMerge = false;
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ number: 42, title: "Done", url: "https://github.com/org/repo/pull/42" }]),
+    );
+    buildMergedConfigMock.mockReturnValue({
+      config,
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await invokeRunPrCheck(service, session);
+
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "completed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not auto-complete when the PR is closed but not merged", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([{ number: 42, title: "Closed", url: "https://github.com/org/repo/pull/42" }]),
+    );
+    ghMock.mockResolvedValueOnce(JSON.stringify({ mergedAt: null }));
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await invokeRunPrCheck(service, session);
+
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "completed" }),
+    );
 
     service.dispose();
   });
