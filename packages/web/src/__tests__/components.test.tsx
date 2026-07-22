@@ -2514,6 +2514,14 @@ describe("StatusBar", () => {
     expect(html).toContain("Show Spur version information");
   });
 
+  it("insets the footer with safe-area padding for rounded/notched screens", () => {
+    renderStatusBar();
+    const footer = screen.getByRole("contentinfo");
+    expect(footer.className).toContain("pb-[max(0.25rem,env(safe-area-inset-bottom))]");
+    expect(footer.className).toContain("pl-[max(0.5rem,env(safe-area-inset-left))]");
+    expect(footer.className).toContain("pr-[max(0.5rem,env(safe-area-inset-right))]");
+  });
+
   it("renders resource metrics when runtime resources are available", async () => {
     mockStatusBarFetch({
       resources: {
