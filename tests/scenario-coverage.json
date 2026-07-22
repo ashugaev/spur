@@ -2930,6 +2930,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6b: Footer",
+    "scenario": "Footer edge padding uses safe-area insets (`env(safe-area-inset-*)`) so content clears rounded corners and the home indicator on notched devices",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/responsive.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6b: Footer",
     "scenario": "Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

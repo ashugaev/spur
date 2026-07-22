@@ -17,6 +17,18 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("footer edge padding uses safe-area insets", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "mob-safe-1" })]);
+    await page.goto("/");
+
+    const footer = page.getByRole("contentinfo");
+    await expect(footer).toBeVisible();
+    const className = await footer.getAttribute("class");
+    expect(className).toContain("pb-[max(0.25rem,env(safe-area-inset-bottom))]");
+    expect(className).toContain("pl-[max(0.5rem,env(safe-area-inset-left))]");
+    expect(className).toContain("pr-[max(0.5rem,env(safe-area-inset-right))]");
+  });
+
   test("no horizontal scroll on mobile", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "mob-scroll-1" })]);
     await page.goto("/");
