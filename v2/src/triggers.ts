@@ -11,13 +11,16 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
+  GITHUB_WORK_ITEM_NEW_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
+  type GitHubWorkItemEventData,
   type SendTriggerConfig,
   type SessionView,
   type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
+  type WorkItemScreenshotAttachment,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import {
@@ -71,6 +74,8 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*]\(\s*(?:<[^>]+>|[^)\s]+)(?:\s+["'][^"']*["'])?\s*\)/g;
+const HTML_IMG_RE = /<img\b[^>]*>/gi;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
@@ -89,6 +94,28 @@ function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   );
 }
 
+function isGitHubWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
+  if (!isWorkItemEventData(data)) return false;
+  const record = data as Partial<Record<keyof GitHubWorkItemEventData, unknown>>;
+  return (
+    typeof record.body === "string" &&
+    Array.isArray(record.screenshots) &&
+    record.screenshots.every(isWorkItemScreenshotAttachment)
+  );
+}
+
+function isWorkItemScreenshotAttachment(value: unknown): value is WorkItemScreenshotAttachment {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<Record<keyof WorkItemScreenshotAttachment, unknown>>;
+  return (
+    typeof record.url === "string" &&
+    typeof record.name === "string" &&
+    typeof record.mimeType === "string" &&
+    typeof record.size === "number" &&
+    typeof record.data === "string"
+  );
+}
+
 function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
   if (session.allowedTriggers === undefined) {
     return true;
@@ -101,10 +128,84 @@ function createWorkItemLifecycleBase(
   autoComplete: boolean,
 ): WorkItemLifecycleBaseDraft {
   return {
-    ...workItemData,
+    externalId: workItemData.externalId,
+    url: workItemData.url,
+    number: workItemData.number,
+    title: workItemData.title,
+    repo: workItemData.repo,
     autoComplete,
     createdAt: new Date().toISOString(),
   };
+}
+
+function cleanBriefLine(line: string): string {
+  return line
+    .replace(MARKDOWN_IMAGE_RE, "")
+    .replace(HTML_IMG_RE, "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/[*_`>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function bodyBriefLines(body: string, limit: number): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = cleanBriefLine(rawLine);
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    lines.push(line);
+    if (lines.length >= limit) break;
+  }
+  return lines;
+}
+
+function formatWorkItemBrief(
+  workItemData: GitHubWorkItemEventData,
+  renderedPrompt: string,
+): string {
+  const bodyLines = bodyBriefLines(workItemData.body, 12);
+  const requested = bodyLines.slice(0, 6);
+  const questions = bodyLines.filter((line) => line.includes("?")).slice(0, 5);
+  const lines = [
+    "Developer brief",
+    "",
+    "Source:",
+    `- GitHub PR: ${workItemData.title}`,
+    `- Repo: ${workItemData.repo}`,
+    `- Link: ${workItemData.url}`,
+    "",
+    "Do:",
+  ];
+
+  lines.push(`- Address the task: ${workItemData.title}.`);
+  for (const item of requested) {
+    lines.push(`- ${item}`);
+  }
+  const cleanedPrompt = cleanBriefLine(renderedPrompt);
+  if (cleanedPrompt && !lines.includes(`- ${cleanedPrompt}`)) {
+    lines.push(`- ${cleanedPrompt}`);
+  }
+  if (workItemData.screenshots.length > 0) {
+    lines.push(
+      `- Use ${workItemData.screenshots.length} attached screenshot(s) as visual context.`,
+    );
+  }
+
+  lines.push("", "Open questions:");
+  if (questions.length === 0) {
+    lines.push("- None identified from the task.");
+  } else {
+    for (const question of questions) {
+      lines.push(`- ${question}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function isSessionNotFoundError(message: string): boolean {
@@ -219,6 +320,10 @@ async function runSpawnTrigger(
 
   const workItemData =
     WORK_ITEM_NEW_EVENT_NAMES.has(eventName) && isWorkItemEventData(eventData) ? eventData : null;
+  const githubWorkItem =
+    eventName === GITHUB_WORK_ITEM_NEW_EVENT && isGitHubWorkItemEventData(eventData)
+      ? eventData
+      : null;
 
   try {
     if (autoComplete && !workItemData) {
@@ -261,9 +366,20 @@ async function runSpawnTrigger(
       }
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
+        const spawnPrompt = githubWorkItem
+          ? formatWorkItemBrief(githubWorkItem, renderedPrompt)
+          : renderedPrompt;
+        const attachments =
+          githubWorkItem && githubWorkItem.screenshots.length > 0
+            ? githubWorkItem.screenshots.map((screenshot) => ({
+                name: screenshot.name,
+                data: screenshot.data,
+              }))
+            : undefined;
         const session = await service.spawn({
           project: projectId,
-          prompt: renderedPrompt,
+          prompt: spawnPrompt,
+          ...(attachments !== undefined ? { attachments } : {}),
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),

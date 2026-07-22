@@ -135,6 +135,14 @@ export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 
+export interface WorkItemScreenshotAttachment {
+  url: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+}
+
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
@@ -147,6 +155,11 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export interface GitHubWorkItemEventData extends WorkItemEventData {
+  body: string;
+  screenshots: WorkItemScreenshotAttachment[];
 }
 
 export type BacklogProviderId = "jira";

@@ -11,13 +11,17 @@ import type {
 } from "../types.js";
 import {
   hasMergeConflict,
+  isRecord,
   normalizeReviewDecision,
   normalizeReviewState,
+  parseJson,
+  readNumber,
+  readString,
   shortText,
 } from "./shared.js";
 import type { ReviewProvider } from "./types.js";
 
-export { hasMergeConflict, normalizeReviewDecision, shortText } from "./shared.js";
+export { hasMergeConflict, normalizeReviewDecision, parseJson, shortText } from "./shared.js";
 
 const FAILING_GITHUB_CI_STATES = new Set([
   "FAILURE",
@@ -64,26 +68,6 @@ type ReviewEntry = {
   body?: string | null;
   user?: { login?: string | null } | null;
 };
-
-function parseJson(raw: string): unknown | null {
-  try {
-    return JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" ? value : null;
-}
 
 function readRollupState(value: unknown): string {
   if (Array.isArray(value)) {

@@ -270,78 +270,6 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
   };
 }
 
-function workItemFanoutSpawnConfig() {
-  return {
-    dataDir: "/tmp/spur-data",
-    projects: {
-      api: {
-        sources: {
-          "pr-watch": {
-            type: "github",
-            query: "is:pr is:open",
-          },
-        },
-        triggers: {
-          "pick-up": {
-            source: "pr-watch",
-            event: "github:work_item.new",
-            spawn: {
-              blocks: [
-                {
-                  agent: "claude",
-                  prompt: "Claude review {{url}}.",
-                },
-                {
-                  agent: "codex",
-                  prompt: "Codex review {{url}}.",
-                },
-              ],
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
-function workItemReadOnlyFanoutSpawnConfig() {
-  return {
-    dataDir: "/tmp/spur-data",
-    projects: {
-      api: {
-        sources: {
-          "pr-watch": {
-            type: "github",
-            query: "is:pr is:open",
-          },
-        },
-        triggers: {
-          "pick-up": {
-            source: "pr-watch",
-            event: "github:work_item.new",
-            spawn: {
-              restrictWrites: true,
-              allowedTriggers: [],
-              blocks: [
-                {
-                  agent: "claude",
-                  model: "sonnet",
-                  prompt: "Claude review {{url}}.",
-                },
-                {
-                  agent: "cursor",
-                  model: "composer-2.5",
-                  prompt: "Cursor review {{url}}.",
-                },
-              ],
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
 function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -556,7 +484,10 @@ function recentActivity(): string {
   return new Date(Date.now() - 10_000).toISOString();
 }
 
-function workItemEvent() {
+function workItemEvent(options?: {
+  body?: string;
+  screenshots?: Array<{ url: string; name: string; mimeType: string; size: number; data: string }>;
+}) {
   return {
     name: "github:work_item.new",
     projectId: "api",
@@ -567,6 +498,8 @@ function workItemEvent() {
       number: 42,
       title: "Fix the bug",
       repo: "acme/api",
+      body: options?.body ?? "Make the empty state useful.\nShould copy mention retries?",
+      screenshots: options?.screenshots ?? [],
     },
   };
 }
@@ -2156,7 +2089,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("seeds the pr slot link when a work-item event spawns a session", async () => {
+  it("formats a developer brief and seeds the pr slot link when a work-item event spawns", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -2173,11 +2106,38 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      const request = spawnMock.mock.calls[0]?.[0] as unknown;
+      expect(request).toEqual(
+        expect.objectContaining({
+          project: "api",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("Developer brief"),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("GitHub PR: Fix the bug"),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("- Make the empty state useful."),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("- Should copy mention retries?"),
+        }),
+      );
+      expect(request).not.toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("Implementation plan"),
+        }),
+      );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         DATA_DIR,
         "api",
@@ -2198,89 +2158,47 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("spawns each work-item trigger block with the pr slot link", async () => {
-    const spawnMock = vi
-      .fn()
-      .mockResolvedValueOnce({ id: "api-9" })
-      .mockResolvedValueOnce({ id: "api-10" });
+  it("passes work-item screenshots through as spawn attachments", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
-      config: workItemFanoutSpawnConfig() as never,
+      config: workItemSpawnConfig() as never,
       bus,
       sessionService: { spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
     });
 
-    try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "codex",
-        prompt: "Codex review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("applies restrictWrites and allowedTriggers to every work-item block", async () => {
-    const spawnMock = vi
-      .fn()
-      .mockResolvedValueOnce({ id: "api-9" })
-      .mockResolvedValueOnce({ id: "api-10" });
-    useWorkItemLifecycleStore();
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemReadOnlyFanoutSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
+    const screenshots = [
+      {
+        url: "https://example.com/a.png",
+        name: "a.png",
+        mimeType: "image/png",
+        size: 12,
+        data: "AAAA",
+      },
+      {
+        url: "https://example.com/b.png",
+        name: "b.png",
+        mimeType: "image/png",
+        size: 34,
+        data: "BBBB",
+      },
+    ];
 
     try {
-      bus.emit(workItemEvent());
+      bus.emit(workItemEvent({ screenshots }));
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        model: "sonnet",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "cursor",
-        model: "composer-2.5",
-        prompt: "Cursor review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "pr-watch",
+      const request = spawnMock.mock.calls[0]?.[0] as unknown;
+      expect(request).toEqual(
         expect.objectContaining({
-          externalId: "acme/api#42",
-          state: "running",
-          autoComplete: false,
+          attachments: [
+            { name: "a.png", data: "AAAA" },
+            { name: "b.png", data: "BBBB" },
+          ],
         }),
       );
     } finally {
@@ -2479,7 +2397,7 @@ describe("startConfiguredTriggers", () => {
       expect(spawnMock).toHaveBeenCalledWith(
         expect.objectContaining({
           project: "api",
-          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
+          prompt: expect.stringContaining("Developer brief"),
         }),
       );
     } finally {

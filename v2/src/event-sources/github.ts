@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { basename } from "node:path";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
 import { extractGithubErrorText, gh, isGitHubRateLimitError } from "../gh.js";
@@ -8,9 +10,10 @@ import {
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
+  type GitHubWorkItemEventData,
   type ReviewEventData,
   type ReviewSignal,
-  type WorkItemEventData,
+  type WorkItemScreenshotAttachment,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -42,6 +45,18 @@ export {
 export type { GitHubCheck, GitHubPrSummary };
 
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+const WORK_ITEM_SCREENSHOT_LIMIT = 10;
+const WORK_ITEM_SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
+const WORK_ITEM_SCREENSHOT_TIMEOUT_MS = 10_000;
+const RASTER_MIME_TYPES = new Map([
+  ["image/png", "png"],
+  ["image/jpeg", "jpg"],
+  ["image/gif", "gif"],
+  ["image/webp", "webp"],
+]);
+const IMAGE_URL_RE =
+  /!\[[^\]]*]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+["'][^"']*["'])?\s*\)|<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+
 const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
 
@@ -50,6 +65,7 @@ interface GitHubSearchPrItem {
   title: string;
   url: string;
   repository: { nameWithOwner: string };
+  body?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,7 +78,8 @@ function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
     Number.isInteger(value.number) &&
     typeof value.title === "string" &&
     typeof value.url === "string" &&
-    typeof value.repository.nameWithOwner === "string"
+    typeof value.repository.nameWithOwner === "string" &&
+    (value.body === undefined || typeof value.body === "string")
   );
 }
 
@@ -189,6 +206,117 @@ function emitSignalsByKind(
     });
   }
 }
+
+function isGitHubHostedUrl(url: URL): boolean {
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return host === "github.com" || host.endsWith(".githubusercontent.com");
+}
+
+function extractImageUrls(body: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const match of body.matchAll(IMAGE_URL_RE)) {
+    const rawUrl = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
+    if (!rawUrl) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      continue;
+    }
+    if (!isGitHubHostedUrl(parsed)) continue;
+    const normalized = parsed.toString();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    urls.push(normalized);
+    if (urls.length >= WORK_ITEM_SCREENSHOT_LIMIT) break;
+  }
+  return urls;
+}
+
+function screenshotName(url: string, index: number, mimeType: string): string {
+  const extension = RASTER_MIME_TYPES.get(mimeType) ?? "png";
+  let name: string;
+  try {
+    name = basename(new URL(url).pathname);
+  } catch {
+    name = "";
+  }
+  if (!name || !name.includes(".")) {
+    return `screenshot-${index + 1}.${extension}`;
+  }
+  return name.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+async function fetchScreenshot(
+  url: string,
+  index: number,
+): Promise<WorkItemScreenshotAttachment | null> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => {
+    controller.abort();
+  }, WORK_ITEM_SCREENSHOT_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { redirect: "follow", signal: controller.signal });
+    if (!response.ok) return null;
+    const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (!mimeType || !RASTER_MIME_TYPES.has(mimeType)) return null;
+    const contentLength = response.headers.get("content-length");
+    if (contentLength) {
+      const size = Number(contentLength);
+      if (!Number.isFinite(size) || size > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
+    }
+    if (!response.body) return null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let overLimit = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > WORK_ITEM_SCREENSHOT_MAX_BYTES) {
+            overLimit = true;
+            controller.abort();
+            break;
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    if (overLimit) return null;
+    const buffer = Buffer.concat(chunks);
+    if (buffer.length === 0 || buffer.length > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
+    return {
+      url,
+      name: screenshotName(url, index, mimeType),
+      mimeType,
+      size: buffer.length,
+      data: buffer.toString("base64"),
+    };
+  } catch {
+    return null;
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
+async function collectWorkItemScreenshots(body: string): Promise<WorkItemScreenshotAttachment[]> {
+  const screenshots: WorkItemScreenshotAttachment[] = [];
+  for (const url of extractImageUrls(body)) {
+    const screenshot = await fetchScreenshot(url, screenshots.length);
+    if (screenshot) {
+      screenshots.push(screenshot);
+    }
+  }
+  return screenshots;
+}
+
 export function tokenizeSearchQuery(query: string): string[] {
   const tokens: string[] = [];
   let current = "";
@@ -231,22 +359,27 @@ async function pollWorkItems(
     "open",
     deps.config.draft === true ? "--draft=true" : "--draft=false",
     "--json",
-    "number,title,url,repository",
+    "number,title,url,repository,body",
     "--limit",
     "100",
   );
   const items = parseGitHubSearchPrItems(raw);
-  const candidates = items.map((item) => {
-    const repo = item.repository.nameWithOwner;
-    const data: WorkItemEventData = {
-      externalId: `${repo}#${item.number}`,
-      url: item.url,
-      number: item.number,
-      title: item.title,
-      repo,
-    };
-    return { repo, externalId: data.externalId, data };
-  });
+  const candidates = await Promise.all(
+    items.map(async (item) => {
+      const repo = item.repository.nameWithOwner;
+      const body = item.body ?? "";
+      const data: GitHubWorkItemEventData = {
+        externalId: `${repo}#${item.number}`,
+        url: item.url,
+        number: item.number,
+        title: item.title,
+        repo,
+        body,
+        screenshots: await collectWorkItemScreenshots(body),
+      };
+      return { repo, externalId: data.externalId, data };
+    }),
+  );
   emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
 }
 

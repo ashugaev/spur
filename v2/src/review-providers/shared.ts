@@ -18,6 +18,26 @@ export function shortText(value: string, limit = 140): string {
   return `${clean.slice(0, limit - 1).trimEnd()}…`;
 }
 
+export function parseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function readString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+export function readNumber(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
 export function normalizeReviewDecision(value: string | null | undefined): ReviewDecision {
   const normalized = (value ?? "").trim().toUpperCase();
   if (normalized === "APPROVED") return "approved";
