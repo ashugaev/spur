@@ -6,6 +6,9 @@
   },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
   "type": "module",
   "bin": {
     "spur": "dist/cli.js"

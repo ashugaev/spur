@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   makeTargets,
   parseWebUnitOptions,
+  probeInfoWith,
   probeWith,
   resolveWebPort,
   type FetchLike,
+  type JsonFetchLike,
 } from "../../src/update-health.js";
 
 describe("resolveWebPort", () => {
@@ -134,5 +136,47 @@ describe("probeWith", () => {
   it("maps an arbitrary/unknown transport error to the neutral unknown bucket", async () => {
     const fetchLike: FetchLike = () => Promise.reject(new Error("socket hang up"));
     expect(await probeWith(fetchLike, target)).toEqual({ ok: false, reason: "unknown" });
+  });
+});
+
+describe("probeInfoWith", () => {
+  const target = { id: "daemon" as const, url: "http://127.0.0.1:4310/info" };
+
+  it("returns the version from a well-formed JSON body", async () => {
+    const fetchLike: JsonFetchLike = async () => ({
+      ok: true,
+      json: async () => ({ version: "1.2.3" }),
+    });
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ version: "1.2.3" });
+  });
+
+  it("returns undefined for a non-2xx response", async () => {
+    const fetchLike: JsonFetchLike = async () => ({
+      ok: false,
+      json: async () => ({ version: "1.2.3" }),
+    });
+    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+  });
+
+  it("returns undefined when the body is missing a string version field", async () => {
+    const fetchLike: JsonFetchLike = async () => ({ ok: true, json: async () => ({}) });
+    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+  });
+
+  it("returns undefined when the body fails to parse as JSON", async () => {
+    const fetchLike: JsonFetchLike = async () => ({
+      ok: true,
+      json: () => Promise.reject(new SyntaxError("Unexpected token")),
+    });
+    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+  });
+
+  it("returns undefined on a timeout/abort", async () => {
+    const fetchLike: JsonFetchLike = () => {
+      const error = new Error("The operation was aborted");
+      error.name = "TimeoutError";
+      return Promise.reject(error);
+    };
+    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
   });
 });

@@ -16,7 +16,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 
 ## Fast
 
-- Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
+- Root help also exposes `doctor`, and `doctor --help` explains the read-only default, the `--scaffold` write flow, and the follow-up auto-connect flow through `list` or `spawn`.
 - Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, `subscribe`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.
@@ -24,7 +24,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `GET /sessions?view=dashboard` returns a lean dashboard payload that keeps attention-critical fields plus `hasServiceIssues`, skips artifact/service/sidecar/workspace/state-history expansion, and still leaves `GET /sessions/:id` on the full detail shape.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
 - Instance bootstrap auto-creates `~/.spur/config.yaml` when missing, applies defaults for daemon host/port, tmux socket, and UI port, and keeps local project discovery separate.
-- `doctor` renders a minimal local `spur.yaml` at the git repo root, writes it without calling `connect`, does not create `~/.spur/config.yaml`, and refuses to overwrite an existing `spur.yaml` or `spur.yml`.
+- `doctor --scaffold` renders a minimal local `spur.yaml` at the git repo root, writes it without calling `connect`, does not create `~/.spur/config.yaml`, and refuses to overwrite an existing `spur.yaml` or `spur.yml`.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
@@ -168,7 +168,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 
 ## Runtime Integration
 
-- `doctor` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.
+- `doctor --scaffold` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.
 - `spawn` auto-inits the global instance config when missing and auto-connects the nearest local project config before project validation.
 - `send`, `pause`, `complete`, `kill`, `service`, and hidden `daemon` commands use the global instance config but do not auto-connect a local project config.

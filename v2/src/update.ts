@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
@@ -19,6 +18,7 @@ import {
   probe,
   readWebPort,
   readWebUnitOptions,
+  resolveDaemonPort,
   SERVICE_UNITS,
   unitStateWith,
   type PollSample,
@@ -40,7 +40,6 @@ import { version } from "./version.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
-const DEFAULT_DAEMON_PORT = 4310;
 const VERIFY_ATTEMPTS = 5;
 const VERIFY_INTERVAL_MS = 3_000;
 
@@ -143,18 +142,6 @@ function realPidAlive(pid: number): boolean {
     return typeof error === "object" && error !== null && "code" in error
       ? (error as { code?: unknown }).code === "EPERM"
       : false;
-  }
-}
-
-// `spur update` is host-level, so resolve the daemon's listen port the same way
-// the daemon does: read the bootstrap instance config, defaulting to 4310 when
-// it is unset or unreadable. Otherwise a non-default `server.port` host would
-// see the daemon probe as connection-refused and false-rollback a healthy update.
-function resolveDaemonPort(): number {
-  try {
-    return loadConfig().server.port;
-  } catch {
-    return DEFAULT_DAEMON_PORT;
   }
 }
 

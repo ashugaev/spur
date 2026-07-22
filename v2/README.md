@@ -11,6 +11,7 @@ Local daemon + CLI orchestrator.
 ```bash
 pnpm --dir v2 build
 node v2/dist/cli.js doctor
+node v2/dist/cli.js doctor --scaffold
 node v2/dist/cli.js list
 node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
 ```
@@ -18,21 +19,25 @@ node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
 First run in a repo you want Spur to manage:
 
 ```bash
-spur doctor
+spur doctor --scaffold
 spur list
 spur spawn <project> "Fix the flaky auth test"
 ```
 
-`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
-does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
-first normal Spur command still auto-initializes that global instance config, and `spur list` /
-`spur spawn` auto-connect the local project config through the existing config path.
+`spur doctor` is read-only by default: it checks npm/systemd host install, PATH, core deps
+(`tmux`/`git`/node version), project config validity, and daemon/web health, then exits non-zero
+only when a check reports `severity: "error"`. Pass `--scaffold` to write a minimal local
+`spur.yaml` at the git repo root for the current checkout when none exists yet; it never overwrites
+an existing `spur.yaml`/`spur.yml`, never calls `connect`, never starts the daemon, and never
+creates `~/.spur/config.yaml`. The first normal Spur command still auto-initializes that global
+instance config, and `spur list` / `spur spawn` auto-connect the local project config through the
+existing config path.
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
 
 ## Local Project Config
 
-`spur doctor` writes the same minimal shape shown below:
+`spur doctor --scaffold` writes the same minimal shape shown below:
 
 ```yaml
 projects:

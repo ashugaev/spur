@@ -2,12 +2,14 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { instanceConfigExists, loadConfig } from "./config.js";
 import type { SystemdScope } from "./host-install.js";
 
 const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_WEB_PORT = 4311;
+export const DEFAULT_DAEMON_PORT = 4_310;
 
 export type ServiceId = "daemon" | "web";
 
@@ -52,6 +54,31 @@ export function readWebPort(scope: SystemdScope): number {
     return resolveWebPort(readFileSync(unitPath, "utf-8"));
   } catch {
     return DEFAULT_WEB_PORT;
+  }
+}
+
+// Host-level daemon port resolution: read the bootstrap instance config, same
+// as the daemon itself, defaulting to 4310 when it is unset or unreadable.
+// Used by `spur update`, which always runs after `spur init` has already
+// bootstrapped `~/.spur/config.yaml`, so auto-creating it here is safe.
+export function resolveDaemonPort(): number {
+  try {
+    return loadConfig().server.port;
+  } catch {
+    return DEFAULT_DAEMON_PORT;
+  }
+}
+
+// Read-only daemon port resolution for `spur doctor`: never triggers
+// `loadConfig`'s auto-bootstrap write of `~/.spur/config.yaml` on a host that
+// has never run any Spur command before. Falls back to the same default port
+// as `resolveDaemonPort` when the instance config does not exist yet.
+export function resolveDaemonPortReadOnly(): number {
+  try {
+    if (!instanceConfigExists()) return DEFAULT_DAEMON_PORT;
+    return loadConfig().server.port;
+  } catch {
+    return DEFAULT_DAEMON_PORT;
   }
 }
 
@@ -135,6 +162,43 @@ const realFetch: FetchLike = (url, init) => fetch(url, init);
 
 export function probe(target: ProbeTarget): Promise<ProbeResult> {
   return probeWith(realFetch, target);
+}
+
+export type JsonFetchLike = (
+  url: string,
+  init: { signal: AbortSignal },
+) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+
+function isVersionBody(value: unknown): value is { version: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { version?: unknown }).version === "string"
+  );
+}
+
+// F8 version-drift probe: fetches a target's JSON body (daemon `/info`) with
+// the same hard timeout as `probeWith`. Any transport/parse failure resolves
+// to `undefined` rather than throwing, so a doctor version-drift check can
+// stay silent instead of false-flagging on a slow or malformed response.
+export async function probeInfoWith(
+  fetchLike: JsonFetchLike,
+  target: ProbeTarget,
+): Promise<{ version: string } | undefined> {
+  try {
+    const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    return isVersionBody(body) ? { version: body.version } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const realJsonFetch: JsonFetchLike = (url, init) => fetch(url, init);
+
+export function probeInfo(target: ProbeTarget): Promise<{ version: string } | undefined> {
+  return probeInfoWith(realJsonFetch, target);
 }
 
 function parseUnitState(raw: string): UnitState {

@@ -2,6 +2,7 @@
 
 import {
   collectHostInstallChecks,
+  hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
   type HostInstallCheck,
@@ -800,8 +801,12 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText("Next: `spur list` to auto-connect this repo."),
       dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
     );
+    return lines.join("\n");
   }
-  const failed = result.hostChecks.filter((check) => !check.ok);
+  lines.push(
+    dimText("No project config found. Rerun with `spur doctor --scaffold` to create one."),
+  );
+  const failed = result.hostChecks.filter((check) => !check.ok && check.severity === "error");
   if (failed.length > 0) {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
@@ -935,9 +940,9 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "doctor") {
     return [
-      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
-      "Run `spur init` if host checks report missing units, linger, or inactive services.",
-      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Read-only by default: checks npm/systemd host install, PATH, core deps, project config, and daemon/web health.",
+      "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
+      "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
   }
@@ -1558,16 +1563,21 @@ async function outputResult<T>(args: {
   action: () => Promise<T>;
   render: (value: T) => string;
   success?: (value: T) => string;
+  exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
-    return;
+  } else {
+    if (args.success) {
+      writeStdout(brandLine(args.success(value)));
+    }
+    writeStdout(args.render(value));
   }
-  if (args.success) {
-    writeStdout(brandLine(args.success(value)));
+  const code = args.exitCode?.(value);
+  if (code !== undefined) {
+    process.exitCode = code;
   }
-  writeStdout(args.render(value));
 }
 
 function resolveCliSpawnOverrides(options: {
@@ -1643,18 +1653,40 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("doctor")
-    .description("Check host install and scaffold a local Spur project config.")
+    .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
+    .option("--scaffold", "Write spur.yaml when no project config is found")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = collectHostInstallChecks();
+          const hostChecks = await collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
+            try {
+              loadProjectConfig(existingProjectConfigPath);
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: true,
+                severity: "warn",
+                detail: "spur.yaml parses and validates",
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: false,
+                severity: "error",
+                detail: message,
+                fix: "Fix the reported error in spur.yaml",
+              });
+            }
             return { hostChecks, existingProjectConfigPath };
+          }
+          if (!options.scaffold) {
+            return { hostChecks };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1674,8 +1706,9 @@ export function createProgram(cliEntrypoint: string): Command {
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
             : result.configPath
               ? `Created ${displayPathFromCwd(result.configPath)}.`
-              : "Created project config.",
+              : "Host and project checks complete.",
         render: renderDoctorResult,
+        exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
       });
     });
 
