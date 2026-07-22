@@ -124,6 +124,7 @@ import {
 import {
   claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
+  deleteSessionGroup,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
@@ -142,6 +143,7 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeServiceInstance,
+  writeSessionGroup,
   writeSession,
 } from "./metadata.js";
 import {
@@ -257,6 +259,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SessionGroupRecord,
   type SidecarConfig,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
@@ -278,11 +281,13 @@ import {
   type SessionView,
   type SessionListView,
   type SessionStateTransition,
+  type SpawnResult,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
   type SpawnOverrides,
+  type SpawnSessionMemberRequest,
   type SpawnSessionRequest,
   type StateSource,
   type TakeBacklogItemRequest,
@@ -673,11 +678,15 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  members?: SpawnSessionMemberRequest[];
   restrictWrites: boolean;
   allowedTriggers?: string[];
   selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  if (request.agent !== undefined && request.members !== undefined) {
+    throw new Error("agent and members cannot be combined");
+  }
   const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
@@ -685,9 +694,30 @@ function normalizeSpawnRequest(
     }
     return step.trim();
   });
+  const members = request.members?.map((member, index) => {
+    const parsedAgent = parseAgentName(member.agent);
+    if (
+      member.branch !== undefined &&
+      (typeof member.branch !== "string" || !member.branch.trim())
+    ) {
+      throw new Error(`members[${index}].branch must be a non-empty string when provided`);
+    }
+    if (member.name !== undefined && (typeof member.name !== "string" || !member.name.trim())) {
+      throw new Error(`members[${index}].name must be a non-empty string when provided`);
+    }
+    return {
+      agent: parsedAgent,
+      ...(member.branch?.trim() ? { branch: member.branch.trim() } : {}),
+      ...(member.name?.trim() ? { name: member.name.trim() } : {}),
+    };
+  });
+  if (members !== undefined && members.length === 0) {
+    throw new Error("members must contain at least one entry");
+  }
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    ...(members ? { members } : {}),
     restrictWrites: request.restrictWrites === true,
     ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -4174,6 +4204,168 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
+  async spawn(
+    request: SpawnSessionRequest,
+    options?: { promptKind?: UserInputKind },
+  ): Promise<SpawnResult> {
+    if (!request.members) {
+      const session = await this.spawnSingleSession(request, options);
+      return { ...session, sessions: [session] };
+    }
+    try {
+      const project = this.getProject(request.project);
+      const { prompt, steps, planMode, members } = normalizeSpawnRequest(
+        request,
+        project.spawn?.steps,
+      );
+      if (request.branch !== undefined) {
+        throw new Error("branch cannot be combined with members");
+      }
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      const worktree = resolveSpawnWorktree(project, overrides);
+      const spawnMembers = members ?? [];
+      if (spawnMembers.length > 1 && !worktree) {
+        throw new Error("multi-agent spawn requires worktree mode");
+      }
+
+      const { members: _requestMembers, ...restRequest } = request;
+
+      const [singleMember] = spawnMembers;
+      if (singleMember && spawnMembers.length === 1) {
+        const session = await this.spawnSingleSession({
+          ...restRequest,
+          agent: singleMember.agent,
+          ...(singleMember.branch ? { branch: singleMember.branch } : {}),
+        });
+        return {
+          ...session,
+          sessions: [session],
+        };
+      }
+
+      const spawned: SessionView[] = [];
+      let groupId: string | undefined;
+      try {
+        this.logEvent("session.group.spawn.started", {
+          level: "info",
+          projectId: request.project,
+          message: `Spawning ${spawnMembers.length} grouped sessions for ${request.project}`,
+          details: {
+            agents: spawnMembers.map((member) => member.agent),
+          },
+        });
+        for (const member of spawnMembers) {
+          spawned.push(
+            await this.spawnSingleSession({
+              ...restRequest,
+              agent: member.agent,
+              ...(member.branch ? { branch: member.branch } : {}),
+            }),
+          );
+        }
+
+        const firstSpawned = spawned[0];
+        if (!firstSpawned) {
+          throw new Error("Grouped spawn produced no sessions");
+        }
+        groupId = `${firstSpawned.id}-group`;
+        const updatedSessions: SessionView[] = [];
+        for (const [index, spawnedSession] of spawned.entries()) {
+          const current = readSession(this.config.dataDir, spawnedSession.id);
+          if (!current) {
+            throw new Error(`Session not found after grouped spawn: ${spawnedSession.id}`);
+          }
+          const memberName = spawnMembers[index]?.name;
+          writeSession(this.config.dataDir, {
+            ...current,
+            group: {
+              id: groupId,
+              index,
+              total: spawned.length,
+              ...(memberName ? { name: memberName } : {}),
+            },
+            updatedAt: nowIso(),
+          });
+          updatedSessions.push(await this.get(spawnedSession.id));
+        }
+
+        const firstUpdatedSession = updatedSessions[0];
+        if (!firstUpdatedSession) {
+          throw new Error("Grouped spawn produced no persisted sessions");
+        }
+        const groupRecord: SessionGroupRecord = {
+          id: groupId,
+          project: request.project,
+          prompt,
+          ...(steps ? { steps } : {}),
+          planMode,
+          members: updatedSessions.map((session, index) => {
+            const memberName = spawnMembers[index]?.name;
+            return {
+              sessionId: session.id,
+              agent: session.agent,
+              branch: session.branch,
+              ...(memberName ? { name: memberName } : {}),
+            };
+          }),
+          createdAt: firstUpdatedSession.createdAt,
+          updatedAt: nowIso(),
+        };
+        writeSessionGroup(this.config.dataDir, groupRecord);
+        this.logEvent("session.group.spawn.completed", {
+          level: "info",
+          projectId: request.project,
+          message: `Spawned group ${groupId}`,
+          details: {
+            groupId,
+            sessionIds: updatedSessions.map((session) => session.id),
+          },
+        });
+        return {
+          ...firstUpdatedSession,
+          sessions: updatedSessions,
+          groupId,
+        };
+      } catch (error) {
+        if (groupId) {
+          deleteSessionGroup(this.config.dataDir, groupId);
+        }
+        for (const session of spawned) {
+          try {
+            await this.kill(session.id, { force: true });
+          } catch {
+            // Best effort rollback only.
+          }
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.group.spawn.failed", {
+          level: "error",
+          projectId: request.project,
+          message: `Failed grouped spawn for ${request.project}: ${message}`,
+          details: {
+            groupId: groupId ?? null,
+            rolledBackSessionIds: spawned.map((session) => session.id),
+          },
+        });
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Failed to spawn ")) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        projectId: request.project,
+        message: `Failed to spawn session: ${message}`,
+        details: {
+          requestedAgent: request.members[0]?.agent ?? null,
+        },
+      });
+      throw error;
+    }
+  }
+
   private resolveSpawnTarget(request: SpawnSessionRequest): {
     project: ProjectConfig;
     prompt: string;
@@ -4235,7 +4427,7 @@ export class SessionService {
     return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }
 
-  async spawn(
+  private async spawnSingleSession(
     request: SpawnSessionRequest,
     options?: { promptKind?: UserInputKind },
   ): Promise<SessionView> {
@@ -7708,7 +7900,7 @@ export class SessionService {
       },
     });
 
-    let spawned = await this.spawn(
+    let spawned: SessionView = await this.spawn(
       resolveHandoffSpawnRequest(sourceForSpawn, {
         prompt,
         agent,

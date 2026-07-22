@@ -1349,6 +1349,75 @@ describe("Dashboard", () => {
     });
   });
 
+  it("supports grouped member selection in spawn modal", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(
+          JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            members: [{ agent: "claude" }, { agent: "codex" }],
+          }),
+        );
+        return new Response(
+          JSON.stringify({
+            ...sessionsPayload().sessions[0],
+            groupId: "api-a1-group",
+            sessions: [
+              sessionsPayload().sessions[0],
+              { ...sessionsPayload().sessions[0], id: "api-b2", agent: "codex" },
+            ],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Member" }));
+
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toBeInTheDocument();
+    const secondMemberSelect = screen.getByLabelText("member 2 agent");
+    expect(secondMemberSelect).toBeInTheDocument();
+    fireEvent.change(secondMemberSelect, { target: { value: "codex" } });
+    expect(screen.getByRole("option", { name: "Shared" })).toBeDisabled();
+    expect(screen.getByText("grouped sessions use auto branches")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            members: [{ agent: "claude" }, { agent: "codex" }],
+          }),
+        }),
+      );
+    });
+  });
+
   it("sends self-destruct settings from the spawn modal and resets them after success", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

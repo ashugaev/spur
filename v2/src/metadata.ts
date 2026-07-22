@@ -16,6 +16,7 @@ import {
   type ReviewSignal,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
+  type SessionGroupRecord,
   type ServiceInstanceRecord,
   type ServiceSourceState,
   type SessionPipelineState,
@@ -30,6 +31,10 @@ import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.j
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
+}
+
+function sessionGroupFilePath(dataDir: string, groupId: string): string {
+  return join(dataDir, "session-groups", `${groupId}.json`);
 }
 
 function sessionIndexFilePath(dataDir: string): string {
@@ -519,6 +524,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     agent: normalizedSession.agent,
+    ...(normalizedSession.group ? { group: normalizedSession.group } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
@@ -569,6 +575,24 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   };
 }
 
+function normalizeSessionGroupRecord(group: SessionGroupRecord): SessionGroupRecord {
+  return {
+    id: group.id,
+    project: group.project,
+    prompt: group.prompt,
+    ...(group.steps ? { steps: group.steps } : {}),
+    planMode: group.planMode,
+    members: group.members.map((member) => ({
+      sessionId: member.sessionId,
+      agent: member.agent,
+      branch: member.branch,
+      ...(member.name ? { name: member.name } : {}),
+    })),
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+  };
+}
+
 function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): ServiceInstanceRecord {
   return {
     sessionId: service.sessionId,
@@ -613,6 +637,14 @@ export function listSessions(dataDir: string): SessionRecord[] {
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
   return path ? readSessionFile(path) : null;
+}
+
+export function writeSessionGroup(dataDir: string, group: SessionGroupRecord): void {
+  writeJsonFile(sessionGroupFilePath(dataDir, group.id), normalizeSessionGroupRecord(group));
+}
+
+export function deleteSessionGroup(dataDir: string, groupId: string): void {
+  rmSync(sessionGroupFilePath(dataDir, groupId), { force: true });
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {

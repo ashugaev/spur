@@ -97,6 +97,13 @@ export interface SessionSlots {
   tags?: string[];
 }
 
+export interface SessionGroupRef {
+  id: string;
+  index: number;
+  total: number;
+  name?: string;
+}
+
 export interface TagDefinition {
   name: string;
   description: string;
@@ -630,6 +637,7 @@ export interface SessionRecord {
   project: string;
   deskId?: string;
   agent: AgentName;
+  group?: SessionGroupRef;
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -664,6 +672,24 @@ export interface SessionRecord {
   rateLimitedAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+}
+
+export interface SessionGroupMemberRecord {
+  sessionId: string;
+  agent: AgentName;
+  branch: string;
+  name?: string;
+}
+
+export interface SessionGroupRecord {
+  id: string;
+  project: string;
+  prompt: string;
+  steps?: string[];
+  planMode: boolean;
+  members: SessionGroupMemberRecord[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ServiceInstanceRecord {
@@ -768,6 +794,7 @@ export interface SpawnSessionRequest {
   attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
+  members?: SpawnSessionMemberRequest[];
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -786,6 +813,17 @@ export interface SpawnSessionRequest {
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
+}
+
+export interface SpawnSessionMemberRequest {
+  agent: AgentName;
+  branch?: string;
+  name?: string;
+}
+
+export interface SpawnResult extends SessionView {
+  sessions: SessionView[];
+  groupId?: string;
 }
 
 export interface SendMessageAttachment {

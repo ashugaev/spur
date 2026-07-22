@@ -3,8 +3,9 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { SessionService } from "../../src/session-service.js";
 import { startServer } from "../../src/server.js";
-import type { AgentName } from "../../src/types.js";
+import type { AgentName, SpawnResult } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
@@ -20,6 +21,7 @@ const SMOKE_BASE_REF = await git(SMOKE_REPO_DIR, "rev-parse", "HEAD");
 const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
 const CODEX_BIN = await binaryPath("codex");
+const GROUP_SMOKE_TEST_TIMEOUT_MS = 480_000;
 const CURSOR_BIN = await binaryPath("agent");
 
 interface AuthStatus {
@@ -490,6 +492,77 @@ if (codexAuth.error) {
     });
   });
 }
+
+describe.skipIf(!claudeAuth.available || !codexAuth.available)(
+  "Spur real-agent smoke (grouped)",
+  () => {
+    it(
+      "launches grouped claude and codex sessions for one task",
+      async () => {
+        const rootDir = await createTempDir("spur-smoke-group-");
+        const port = await findFreePort();
+        const dataDir = join(rootDir, "data");
+        const worktreeDir = join(rootDir, "worktrees");
+        const sessionPrefix = `smoke-group-${port}`;
+        const tmuxSocketName = `spur-${port}`;
+
+        await syncTmuxEnvironment({
+          HOME: process.env.HOME,
+          PATH: process.env.PATH,
+          SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
+          SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
+          SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
+        });
+
+        const configPath = join(rootDir, "spur.yaml");
+        await writeFile(
+          configPath,
+          smokeConfig({
+            port,
+            dataDir,
+            worktreeDir,
+            repoDir: SMOKE_REPO_DIR,
+            baseRef: SMOKE_BASE_REF,
+            sessionPrefix,
+            agent: "claude",
+          }),
+          "utf8",
+        );
+
+        await withPinnedAgentBinaries(async () => {
+          const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+          const spawned = (await service.spawn({
+            project: "api",
+            prompt:
+              "Create a file named smoke-group.txt containing exactly your agent name, then wait for more instructions.",
+            members: [{ agent: "claude" }, { agent: "codex" }],
+          })) as SpawnResult;
+
+          expect(spawned.groupId).toBeTruthy();
+          expect(spawned.sessions).toHaveLength(2);
+
+          for (const session of spawned.sessions) {
+            cleanupItems.push({
+              rootDir,
+              sessionPrefix,
+              branch: session.branch,
+              worktreePath: session.worktreePath,
+            });
+            const groupFile = join(session.worktreePath, "smoke-group.txt");
+            await pollUntil(async () => existsSync(groupFile), {
+              timeoutMs: session.agent === "codex" ? 240_000 : 180_000,
+              accept: Boolean,
+            });
+            expect((await readFile(groupFile, "utf8")).trim()).toBe(session.agent);
+            const killed = await service.kill(session.id, { force: true });
+            expect(killed.status).toBe("killed");
+          }
+        });
+      },
+      GROUP_SMOKE_TEST_TIMEOUT_MS,
+    );
+  },
+);
 
 if (cursorAuth.error) {
   describe("Spur real-agent smoke (cursor)", () => {

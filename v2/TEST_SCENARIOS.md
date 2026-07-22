@@ -47,6 +47,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
+- `spawn --member <agent>` repeats to create grouped sibling sessions for one task, persists one shared `group.id` on each session, and rolls back earlier siblings if a later member fails.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - `spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.
@@ -64,6 +65,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Worktree creation fetches `origin`, fast-forwards a clean checked-out local default branch that is purely behind, uses `origin/<defaultBranch>` as the new worktree base when that checked-out default branch is dirty and behind, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Worktree creation skips the `origin` fetch and resolves branches against the local repo when the project's git repo has no `origin` remote configured, so spawn/respawn still succeeds.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
+- Grouped spawn rejects shared workspace mode and top-level `branch`, so each sibling keeps its own worktree-backed branch lifecycle.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, retries invalid or occupied branch suggestions with feedback, and fails before reserving a session id when all preflight attempts fail.
 - `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
 - `SessionService.preflight()` returns null when worktree is disabled or the project has no preflight config.
@@ -176,6 +178,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
 - `spawn --json --agent codex` writes the spawned worktree path into the session-local `CODEX_HOME/config.toml` as `trusted`, so worktree launches stay non-interactive.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
+- `spawn --json --member claude --member codex` creates grouped sibling sessions through the built CLI, returns them in one response, and each session carries the same `groupId`.
 - `spawn --json` without `[prompt...]` creates a blank session, does not deliver an initial message, and does not apply default pipeline steps.
 - `spawn --json --plan` ignores manual and configured spawn steps and sends only the planning prompt derived from the task to the agent.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.

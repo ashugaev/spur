@@ -50,6 +50,13 @@ interface ProjectControl {
   options: { id: string; label: string }[];
 }
 
+export interface SpawnMembersControl {
+  items: { id: number; agent: AgentName }[];
+  onAdd: () => void;
+  onUpdate: (id: number, agent: AgentName) => void;
+  onRemove: (id: number) => void;
+}
+
 export type SpawnModalMode =
   | {
       kind: "spawn";
@@ -60,6 +67,7 @@ export type SpawnModalMode =
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
+      members: SpawnMembersControl;
       branchNotesSlot?: ReactNode;
       selfDestructSlot?: ReactNode;
       baseBranchSlot?: ReactNode;
@@ -181,16 +189,49 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
+          <button
+            className="whitespace-nowrap border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+            onClick={mode.members.onAdd}
+            type="button"
+          >
+            + Member
+          </button>
         </div>
+        {mode.members.items.length > 0 ? (
+          <div className="max-h-32 space-y-2 overflow-y-auto">
+            {mode.members.items.map((member, index) => (
+              <div className="flex gap-2" key={member.id}>
+                <AgentSelect
+                  ariaLabel={`member ${index + 2} agent`}
+                  onChange={(next) => mode.members.onUpdate(member.id, next)}
+                  value={member.agent}
+                />
+                <button
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                  onClick={() => mode.members.onRemove(member.id)}
+                  type="button"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
-          <input
-            aria-label="branch name"
-            className={`min-w-40 flex-1 ${INPUT_CLASS}`}
-            onBlur={mode.branch.onBlur}
-            onChange={(event) => mode.branch.onChange(event.target.value)}
-            placeholder="Branch name"
-            value={mode.branch.value}
-          />
+          {mode.members.items.length === 0 ? (
+            <input
+              aria-label="branch name"
+              className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+              onBlur={mode.branch.onBlur}
+              onChange={(event) => mode.branch.onChange(event.target.value)}
+              placeholder="Branch name"
+              value={mode.branch.value}
+            />
+          ) : (
+            <div className="min-w-40 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)]">
+              grouped sessions use auto branches
+            </div>
+          )}
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
@@ -201,7 +242,9 @@ function ModeFields({
           >
             <option value="default">Default</option>
             <option value="worktree">Worktree</option>
-            <option value="shared">Shared</option>
+            <option disabled={mode.members.items.length > 0} value="shared">
+              Shared
+            </option>
           </select>
           <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
             <input

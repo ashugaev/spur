@@ -3170,10 +3170,26 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button",
+    "scenario": "Modal has: project select, agent select, members list, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "`+ Member` adds another agent row; each row has its own claude/codex/cursor select and remove button",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "When 2+ members are present: branch input is replaced by grouped-session helper text and Shared workspace is disabled",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -5398,6 +5414,14 @@
     "ciJob": "quality"
   },
   {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "`spawn --json --member claude --member codex` creates grouped sibling sessions through the built CLI, returns them in one response, and each session carries the same `groupId`.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
     "scenario": "If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take",
@@ -5540,6 +5564,22 @@
     "scenario": "The filter has no color dot: the closed trigger stands out with an accent border only when tags are selected and shows one selected tag name, both names when two are selected, or `N tags` beyond that (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot) with a checkmark on selected rows",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`spawn --member <agent>` repeats to create grouped sibling sessions for one task, persists one shared `group.id` on each session, and rolls back earlier siblings if a later member fails.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Grouped spawn rejects shared workspace mode and top-level `branch`, so each sibling keeps its own worktree-backed branch lifecycle.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {

@@ -914,7 +914,7 @@ export async function createRuntimeTestContext(
   const useFakeTools = options?.useFakeTools ?? true;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
-  await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
+  await writeFile(join(rootDir, ".zshrc"), "# Spur runtime test shell\n", "utf8");
   if (useFakeTools) {
     await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
     await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));

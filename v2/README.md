@@ -50,12 +50,13 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 `doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor | --member claude|codex|cursor ...] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
+- `--agent` starts one session; repeat `--member` to start several sibling sessions for the same task.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and appends a planning-only instruction to the task prompt. Claude startup adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `--model <id>` applies to the resolved agent (from `--agent`, else the project/instance default agent) on fresh launch. Without `--model` the runtime uses its own default. Model ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
@@ -63,12 +64,15 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [-
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
+- Grouped spawn keeps one shared task prompt but creates one session per listed member agent.
+- Grouped spawn uses owned worktrees only; `--shared` stays single-session only.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps` and `spawn.selfDestruct`, or a flat `spawn` array for fan-out.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
 spur spawn backend-api "Fix the flaky auth test" --step research --step test
 spur spawn backend-api
+spur spawn backend-api "Compare two approaches" --member claude --member codex
 ```
 
 ```bash

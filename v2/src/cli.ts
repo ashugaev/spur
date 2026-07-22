@@ -51,6 +51,7 @@ import {
   renderRuntimeInfo,
   renderSessionCard,
   renderInteractiveSessionList,
+  renderSpawnResult,
   renderWaitingInputAlert,
   withSpinner,
 } from "./cli-view.js";
@@ -84,6 +85,7 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SpawnResult,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
@@ -1695,6 +1697,11 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
+      "--member <name>",
+      "Add one grouped member agent: claude, codex, or cursor",
+      appendOptionValue,
+    )
+    .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
     )
@@ -1733,17 +1740,22 @@ export function createProgram(cliEntrypoint: string): Command {
       const overrides = resolveCliSpawnOverrides(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
+      const members = options.member as string[] | undefined;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
       if (!availableProjects.some((entry) => entry.id === project)) {
         throw new Error(
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      if (options.agent && members?.length) {
+        throw new Error("--agent cannot be combined with --member");
+      }
 
       let branch: string | undefined = options.branch;
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
-      const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
+      const interactive =
+        !options.json && !branch && !members?.length && process.stdin.isTTY && process.stdout.isTTY;
       if (interactive && prompt) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
@@ -1771,8 +1783,16 @@ export function createProgram(cliEntrypoint: string): Command {
         project,
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
-        agent: options.agent,
-        ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(members?.length
+          ? {
+              members: members.map((member) => ({
+                agent: member as "claude" | "codex" | "cursor",
+              })),
+            }
+          : {
+              agent: options.agent,
+              ...(options.model !== undefined ? { model: options.model as string } : {}),
+            }),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
@@ -1781,8 +1801,8 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "starting session",
-        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
-        render: renderSessionCard,
+        action: () => postJson<SpawnResult>(cliEntrypoint, "/sessions", payload, configPath),
+        render: renderSpawnResult,
       });
     });
 

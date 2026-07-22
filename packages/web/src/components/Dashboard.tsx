@@ -924,6 +924,9 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  const [spawnExtraMembers, setSpawnExtraMembers] = useState<{ id: number; agent: AgentName }[]>(
+    [],
+  );
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -1356,14 +1359,28 @@ export function Dashboard() {
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
+  const addMember = () =>
+    setSpawnExtraMembers((prev) => [...prev, { id: Date.now(), agent: "claude" }]);
+  const removeMember = (id: number) =>
+    setSpawnExtraMembers((prev) => prev.filter((member) => member.id !== id));
+  const updateMember = (id: number, agent: AgentName) =>
+    setSpawnExtraMembers((prev) =>
+      prev.map((member) => (member.id === id ? { ...member, agent } : member)),
+    );
   const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
 
   useEffect(() => {
+    if (spawnExtraMembers.length > 0 && spawnWorkspaceMode === "shared") {
+      setSpawnWorkspaceMode("default");
+    }
+  }, [spawnExtraMembers.length, spawnWorkspaceMode]);
+
+  useEffect(() => {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
-    if (!project || !prompt) return;
+    if (!project || !prompt || spawnExtraMembers.length > 0) return;
 
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -1387,7 +1404,14 @@ export function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
+  }, [
+    spawnExtraMembers.length,
+    spawnAgent,
+    spawnProjectId,
+    spawnPrompt,
+    spawnWorkspaceMode,
+    spawnDefaultBranch,
+  ]);
 
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 
@@ -1433,13 +1457,20 @@ export function Dashboard() {
       const payload: Record<string, unknown> = {
         projectId: nextProjectId,
         prompt: nextPrompt,
-        agent: spawnAgent,
       };
-      if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      const normalizedBranch = normalizeBranchName(spawnBranch);
-      if (normalizedBranch) payload.branch = normalizedBranch;
+      if (spawnExtraMembers.length > 0) {
+        payload.members = [
+          { agent: spawnAgent },
+          ...spawnExtraMembers.map((member) => ({ agent: member.agent })),
+        ];
+      } else {
+        payload.agent = spawnAgent;
+        if (spawnModel !== null) payload.model = spawnModel;
+        const normalizedBranch = normalizeBranchName(spawnBranch);
+        if (normalizedBranch) payload.branch = normalizedBranch;
+      }
       if (spawnPlanMode) payload.planMode = true;
       if (spawnSelfDestruct) {
         const conditions = spawnSelfDestructConditions.trim();
@@ -1458,18 +1489,23 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
-      const session = (await response.json()) as SpurSessionView;
+      const spawnResult = (await response.json()) as SpurSessionView & {
+        sessions?: SpurSessionView[];
+      };
+      const newSessions = spawnResult.sessions ?? [spawnResult];
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const newSessionIds = new Set(newSessions.map((newSession) => newSession.id));
         const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
+          (existingSession) => !newSessionIds.has(existingSession.id),
         );
         return {
           ...(current ?? {}),
-          sessions: [session, ...currentSessions],
+          sessions: [...newSessions, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
       setSpawnPrompt("");
+      setSpawnExtraMembers([]);
       setSpawnModel(null);
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -1883,6 +1919,7 @@ export function Dashboard() {
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnExtraMembers([]);
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
@@ -2239,6 +2276,12 @@ export function Dashboard() {
                 onUpdate: updateStep,
                 onAdd: addStep,
                 onRemove: removeStep,
+              },
+              members: {
+                items: spawnExtraMembers,
+                onAdd: addMember,
+                onUpdate: updateMember,
+                onRemove: removeMember,
               },
               branchNotesSlot: (
                 <>

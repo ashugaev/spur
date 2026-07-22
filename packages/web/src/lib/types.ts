@@ -50,6 +50,13 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export interface SpurSessionGroupRef {
+  id: string;
+  index: number;
+  total: number;
+  name?: string;
+}
+
 export interface SpurTagDefinition {
   name: string;
   description: string;
@@ -239,6 +246,7 @@ export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
+  group?: SpurSessionGroupRef;
   model?: string;
   prompt: string;
   originalTaskPrompt?: string;
@@ -342,6 +350,11 @@ export interface AgentSuggestionsResponse {
   agents: AgentSuggestionEntry[];
 }
 
+export interface SpurSpawnResult extends SpurSessionView {
+  sessions: SpurSessionView[];
+  groupId?: string;
+}
+
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
@@ -410,6 +423,7 @@ export interface DashboardSession {
   projectId: string;
   projectName: string;
   agent: AgentName;
+  group?: SpurSessionGroupRef;
   model?: string;
   title: string | null;
   prompt: string;
@@ -478,6 +492,7 @@ export function toDashboardSession(
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.group ? { group: session.group } : {}),
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,

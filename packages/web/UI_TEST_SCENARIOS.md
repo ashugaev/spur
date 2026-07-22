@@ -189,7 +189,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
-- Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
+- Modal has: project select, agent select, members list, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
+- `+ Member` adds another agent row; each row has its own claude/codex/cursor select and remove button
+- When 2+ members are present: branch input is replaced by grouped-session helper text and Shared workspace is disabled
 - Branch input: placeholder "Branch name", optional
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "Base branch"

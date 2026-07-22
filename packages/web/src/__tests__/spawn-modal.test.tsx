@@ -38,6 +38,7 @@ const spawnMode: SpawnModalMode = {
   planMode: { value: false, onChange: vi.fn() },
   selfDestruct: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
+  members: { items: [], onAdd: vi.fn(), onUpdate: vi.fn(), onRemove: vi.fn() },
 };
 
 const respawnMode: SpawnModalMode = {

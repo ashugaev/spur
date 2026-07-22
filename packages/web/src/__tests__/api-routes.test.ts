@@ -360,6 +360,56 @@ describe("Spur web API routes", () => {
     });
   });
 
+  it("POST /api/spawn accepts grouped members", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      ...sessionFixture(),
+      groupId: "api-a1-group",
+      sessions: [
+        sessionFixture(),
+        sessionFixture({ id: "api-b2", agent: "codex", tmuxSession: "api-b2" }),
+      ],
+    });
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Fix auth",
+          members: [{ agent: "claude" }, { agent: "codex" }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions",
+      expect.objectContaining({
+        body: JSON.stringify({
+          project: "api",
+          prompt: "Fix auth",
+          members: [{ agent: "claude" }, { agent: "codex" }],
+        }),
+      }),
+    );
+  });
+
+  it("POST /api/spawn rejects invalid members", async () => {
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Fix auth",
+          members: [{ agent: "bad-agent" }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
   it("POST /api/spawn filters out blank steps", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
