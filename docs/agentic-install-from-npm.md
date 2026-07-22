@@ -93,18 +93,20 @@ cd <your-repo> && ~/.local/bin/spur connect --config spur.yaml
 
 ## Troubleshooting
 
-| Symptom                             | Cause                                                      | Fix                                                        |
-| ----------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------- |
-| Nothing listens after `npm install` | expected — npm does not start systemd                      | run `spur init`                                            |
-| Units stop after SSH logout         | linger off                                                 | `loginctl enable-linger $USER`                             |
-| `spur --version` runs wrong binary  | `PATH` picks another install                               | `~/.local/bin/spur`                                        |
-| systemd `status=203/EXEC`           | npm prefix not `~/.local`                                  | reset prefix, reinstall                                    |
-| stale system `codex` in sessions    | `/usr/bin` before `~/.local/bin`                           | npm-install codex; check unit PATH                         |
-| Two daemons on `:4310`              | manual daemon + systemd                                    | kill manual; `systemctl --user restart spur-daemon`        |
-| Web terminal `/ws` won't connect    | `spur-web.service` not running (in-process WS)             | `spur init` or `systemctl --user restart spur-web`         |
-| Terminal connects then closes       | `node-pty` not built on Linux                              | restart `spur-web.service` (`ExecStartPre` builds it)      |
-| Web UI not reachable over Tailscale | tailnet not up yet                                         | `sudo tailscale up`, authenticate, then re-run `spur init` |
-| `spur init` skipped Tailscale       | ran with `--no-tailscale`, or `--expose-web` superseded it | re-run without `--no-tailscale`/`--expose-web`             |
+| Symptom                                                                  | Cause                                                                                                                                   | Fix                                                                   |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Nothing listens after `npm install`                                      | expected — npm does not start systemd                                                                                                   | run `spur init`                                                       |
+| Units stop after SSH logout                                              | linger off                                                                                                                              | `loginctl enable-linger $USER`                                        |
+| `spur --version` runs wrong binary                                       | `PATH` picks another install                                                                                                            | `~/.local/bin/spur`                                                   |
+| systemd `status=203/EXEC`                                                | npm prefix not `~/.local`                                                                                                               | reset prefix, reinstall                                               |
+| stale system `codex` in sessions                                         | `/usr/bin` before `~/.local/bin`                                                                                                        | npm-install codex; check unit PATH                                    |
+| Two daemons on `:4310`                                                   | manual daemon + systemd                                                                                                                 | kill manual; `systemctl --user restart spur-daemon`                   |
+| Web terminal `/ws` won't connect                                         | `spur-web.service` not running (in-process WS)                                                                                          | `spur init` or `systemctl --user restart spur-web`                    |
+| Terminal `/ws` closes immediately                                        | `pty.node` prebuild missing for this host (non-glibc/non-x64)                                                                           | UI unaffected, terminal disabled — file an issue with `uname -m`/libc |
+| Web UI not reachable over Tailscale                                      | tailnet not up yet                                                                                                                      | `sudo tailscale up`, authenticate, then re-run `spur init`            |
+| `spur init` skipped Tailscale                                            | ran with `--no-tailscale`, or `--expose-web` superseded it                                                                              | re-run without `--no-tailscale`/`--expose-web`                        |
+| `spur update` fails preflight for `terminal`                             | old updater (pre-#573) probes the removed terminal unit                                                                                 | run `spur update --force`                                             |
+| Web down after a UI version switch (`/deploy/switch`) on a pre-#573 host | deploy/switch restarts only; a stale pre-#573 `spur-web.service` keeps its `ExecStartPre` node-pty build, which fails with no toolchain | run `spur init` (or `spur update`) once to refresh the unit           |
 
 ## Reference
 

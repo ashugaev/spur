@@ -120,6 +120,17 @@ grep -qi "spur-direct-terminal\|14801" "$UNIT_DIR"/*.service &&
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
   fail "--no-tailscale must leave WEB_HOST on loopback only"
 
+# The installed web unit must not gate boot on building node-pty (the
+# ExecStartPre that compiled it from source on first start took the whole
+# unit down on hosts without a C/C++ toolchain) — it must still run
+# web-server.js directly.
+grep -q '^ExecStartPre=' "$UNIT_DIR/spur-web.service" &&
+  fail "spur-web.service must not have an ExecStartPre (no on-host node-pty build)"
+grep -qi 'node-pty\|npm run install' "$UNIT_DIR/spur-web.service" &&
+  fail "spur-web.service must not reference building node-pty on the host"
+grep -q '^ExecStart=/usr/bin/node .*web/dist-server/web-server\.js$' "$UNIT_DIR/spur-web.service" ||
+  fail "spur-web.service must still run web/dist-server/web-server.js"
+
 echo "npm-init.test.sh: base scenario OK"
 
 # --- Scenario 2: tailscale resolves a valid IPv4 ----------------------------
