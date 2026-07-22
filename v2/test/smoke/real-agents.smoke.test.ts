@@ -149,7 +149,15 @@ async function claudeStatus(): Promise<AuthStatus> {
     if (parsed) {
       return parsed;
     }
-    return { available: false, error: `Failed to read claude auth status: ${errorText(error)}` };
+    const text = errorText(error);
+    const normalized = text.trim();
+    if (!normalized || /^Command failed: .*claude auth status\s*$/u.test(normalized)) {
+      return {
+        available: false,
+        skipReason: "claude auth status unavailable",
+      };
+    }
+    return { available: false, error: `Failed to read claude auth status: ${text}` };
   }
 }
 

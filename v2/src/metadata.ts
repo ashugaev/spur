@@ -21,6 +21,7 @@ import {
   type SessionPipelineState,
   type SessionRecord,
   type SessionStateSubscription,
+  type SessionTodoState,
   type TelegramBinding,
   type TelegramReplyTarget,
   type WorkItemLifecycleRecord,
@@ -481,6 +482,24 @@ function normalizeQueuedMessagesState(
   };
 }
 
+function normalizeTodoState(todo: SessionTodoState): SessionTodoState {
+  const legacyTodo = todo as Partial<SessionTodoState>;
+  return {
+    status: todo.status,
+    total: todo.total,
+    done: todo.done,
+    skipped: legacyTodo.skipped ?? 0,
+    failed: legacyTodo.failed ?? 0,
+    items: (legacyTodo.items ?? []).map((item) => ({
+      id: item.id,
+      text: item.text,
+      status: item.status,
+      ...(item.summary !== undefined ? { summary: item.summary } : {}),
+    })),
+    ...(todo.lastNudgeAt !== undefined ? { lastNudgeAt: todo.lastNudgeAt } : {}),
+  };
+}
+
 function normalizeStateSubscriptions(
   subscriptions: SessionStateSubscription[] | undefined,
 ): SessionStateSubscription[] | undefined {
@@ -554,6 +573,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
       : {}),
+    ...(normalizedSession.todo ? { todo: normalizeTodoState(normalizedSession.todo) } : {}),
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),

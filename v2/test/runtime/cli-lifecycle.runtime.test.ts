@@ -3211,6 +3211,74 @@ projects:
     expect(log).toContain("ship the task");
   });
 
+  it("spawns a todo session through the built CLI and sends todo instructions", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-todo-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("todo.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--todo",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    expect(spawned.prompt).toBe("ship the task");
+    expect(spawned.pipeline).toBeUndefined();
+    expect(spawned.todo).toMatchObject({
+      status: "running",
+      total: 0,
+      done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    });
+
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => {
+        const flattened = value.replace(/\n/g, "");
+        return (
+          flattened.includes("[Spur todo]") &&
+          flattened.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
+          flattened.includes("[s]") &&
+          flattened.includes("[f]") &&
+          flattened.includes("ship the task")
+        );
+      },
+    });
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) =>
+        value.includes("[Spur todo]") &&
+        value.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
+        value.includes("[s]") &&
+        value.includes("[f]") &&
+        value.includes("ship the task"),
+    });
+
+    const flattenedPane = pane.replace(/\n/g, "");
+    expect(flattenedPane).toContain("[Spur todo]");
+    expect(log).toContain("[Spur todo]");
+    expect(log).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
+  });
+
   it("spawns a session through the built CLI without sending an initial prompt", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

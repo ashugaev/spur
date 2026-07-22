@@ -66,7 +66,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), optional todo progress circle, time, trailing action button
 - Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
 - When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
@@ -294,7 +294,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Title uppercase bold
 - Subtitle (prompt) below
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
-- Activity dot + branch badge + status badges
+- Activity dot + branch badge + status badges + optional todo progress circle
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
 - Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - White bottom border (2px) under header
@@ -358,6 +358,18 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Long unbroken queued tokens hard-wrap inside the row on mobile instead of widening the section
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
+
+### S2d: Todo state
+
+- Visible when the session payload includes `todo`
+- Header shows compact todo progress as an icon-only circle
+- Completed todo progress uses ready green; partial progress uses attention yellow
+- Section header is `TODO`
+- Compact summary row shows the same progress circle plus `<resolved>/<total>`
+- Each todo item renders as a flat checklist row with a single-color status checkbox, `#ID`, and task text
+- Hovering, focusing, or tapping a todo checkbox shows the item status tooltip
+- Terminal items show the agent-provided summary/reason text when present
+- When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `$SPUR_SESSION_TOOL_DIR/todo.md`
 
 ### S3: Message section
 

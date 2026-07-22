@@ -32,6 +32,8 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
+import { TerminalOpenIcon } from "@/components/TerminalOpenIcon";
+import { getTodoResolvedCount, TodoProgress } from "@/components/TodoProgress";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
@@ -79,6 +81,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type SpurTodoItemStatus,
   type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
@@ -161,6 +164,59 @@ function WakeIcon({ recurring }: { recurring: boolean }) {
       <path d="M12 8v5l3 2" />
       {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
+  );
+}
+
+function todoSummaryLabel(status: SpurTodoItemStatus): string {
+  return status === "done" ? "Summary" : "Reason";
+}
+
+function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
+  const title = `Todo item ${status}`;
+  const className =
+    "group relative mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] outline-none focus-visible:border-[var(--color-accent)]";
+  if (status === "done") {
+    return (
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path d="m3.5 8.5 3 3 6-7" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+        </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
+      </span>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path d="M4 8h8" strokeLinecap="round" strokeWidth="2" />
+        </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path d="m5 5 6 6M11 5l-6 6" strokeLinecap="round" strokeWidth="2" />
+        </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
+      </span>
+    );
+  }
+  return (
+    <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
+      <TodoStatusTooltip>{status}</TodoStatusTooltip>
+    </span>
+  );
+}
+
+function TodoStatusTooltip({ children }: { children: SpurTodoItemStatus }) {
+  return (
+    <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1 hidden -translate-x-1/2 whitespace-nowrap border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)] group-hover:block group-focus:block">
+      {children}
+    </span>
   );
 }
 
@@ -2235,6 +2291,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
+  const todoResolvedCount = session?.todo ? getTodoResolvedCount(session.todo) : 0;
 
   const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
   const deskMembers = useMemo(() => {
@@ -2502,6 +2559,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     service issue
                   </span>
                 ) : null}
+                {session.todo ? <TodoProgress todo={session.todo} /> : null}
                 <TagEditor session={session} variant="chips" />
               </div>
             </TagsContext.Provider>
@@ -2512,10 +2570,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             {canAttach ? (
               <button
                 type="button"
-                className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+                className="inline-flex items-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
                 onClick={() => syncTerminalFilter(session.id)}
               >
-                Terminal
+                <TerminalOpenIcon />
+                <span>Terminal</span>
               </button>
             ) : null}
             {session ? (
@@ -2706,6 +2765,60 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       Awaiting agent prompt — queued messages will send automatically.
                     </p>
                   ) : null}
+                </section>
+              ) : null}
+
+              {session.todo ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Todo
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border-subtle)] px-2.5 py-2 text-[var(--color-text-secondary)]">
+                      <TodoProgress todo={session.todo} />
+                      <span className="font-mono text-[var(--color-text-primary)]">
+                        {`${todoResolvedCount}/${session.todo.total}`}
+                      </span>
+                    </div>
+                    {session.todo.items.length > 0 ? (
+                      <ol
+                        aria-label="Todo list"
+                        className="divide-y divide-[var(--color-border-subtle)]"
+                      >
+                        {session.todo.items.map((item) => (
+                          <li
+                            key={`${session.id}:todo:${item.id}`}
+                            className="flex items-start gap-2 px-2.5 py-2"
+                          >
+                            <TodoStatusIcon status={item.status} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                <span className="font-mono text-[var(--color-text-tertiary)]">
+                                  #{item.id}
+                                </span>
+                                <span className="whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
+                                  {item.text}
+                                </span>
+                              </div>
+                              {item.summary ? (
+                                <div className="mt-1 whitespace-pre-wrap break-words text-[var(--color-text-secondary)]">
+                                  <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                                    {todoSummaryLabel(item.status)}
+                                  </span>
+                                  {`: ${item.summary}`}
+                                </div>
+                              ) : null}
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="px-2.5 py-2 text-[var(--color-text-secondary)]">
+                        Waiting for the agent to create <code>$SPUR_SESSION_TOOL_DIR/todo.md</code>.
+                      </p>
+                    )}
+                  </div>
                 </section>
               ) : null}
 

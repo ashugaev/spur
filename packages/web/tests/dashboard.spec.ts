@@ -615,6 +615,46 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(page.locator(".data-row").first()).toBeVisible();
   });
 
+  test("todo progress renders colored compact circles in dashboard rows", async ({ page }) => {
+    const completeSession = makeWorkingSession({
+      id: "row-todo-complete",
+      prompt: "Todo complete session",
+      todo: {
+        status: "completed",
+        total: 3,
+        done: 3,
+        skipped: 0,
+        failed: 0,
+        items: [],
+      },
+    });
+    const partialSession = makeWorkingSession({
+      id: "row-todo-partial-demo",
+      agent: "cursor",
+      prompt: "Partial todo demo agent",
+      todo: {
+        status: "running",
+        total: 4,
+        done: 1,
+        skipped: 1,
+        failed: 0,
+        items: [],
+      },
+    });
+    await mockSessions(page, [completeSession, partialSession]);
+    await page.goto("/");
+
+    const completeProgress = page.getByLabel("Todo progress 3 of 3");
+    await expect(completeProgress).toBeVisible();
+    await expect(completeProgress).toHaveClass(/text-\[var\(--color-status-ready\)\]/);
+    const partialProgress = page.getByLabel("Todo progress 2 of 4");
+    await expect(partialProgress).toBeVisible();
+    await expect(partialProgress).toHaveClass(/text-\[var\(--color-status-attention\)\]/);
+    await expect(page.getByText("Partial todo demo agent")).toBeVisible();
+    await expect(page.getByText("cursor")).toBeVisible();
+    await expect(page.getByText("todo 2/3")).toHaveCount(0);
+  });
+
   test("wake markers open timer details from the session row", async ({ page }) => {
     const dueAt = new Date(Date.now() + 300_000).toISOString();
     const session = makeWorkingSession({

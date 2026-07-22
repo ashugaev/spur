@@ -90,6 +90,8 @@ export interface SessionMemoryRecordResponse {
 }
 
 export type SessionPipelineStatus = "running" | "completed" | "errored";
+export type SessionTodoStatus = "running" | "completed" | "failed";
+export type TodoItemStatus = "pending" | "done" | "skipped" | "failed";
 
 export interface SessionSlots {
   title?: string;
@@ -361,6 +363,7 @@ export interface WorkspaceAccessConfig {
 
 export interface ProjectSpawnConfig {
   steps?: string[];
+  todo?: boolean;
 }
 
 export interface SelfDestructConfig {
@@ -371,6 +374,7 @@ export interface SelfDestructConfig {
 export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
+  todo?: boolean;
   agent?: AgentName;
   model?: string;
   branch?: string;
@@ -576,6 +580,23 @@ export interface SessionPipelineState {
   error?: string;
 }
 
+export interface SessionTodoItem {
+  id: number;
+  text: string;
+  status: TodoItemStatus;
+  summary?: string;
+}
+
+export interface SessionTodoState {
+  status: SessionTodoStatus;
+  total: number;
+  done: number;
+  skipped: number;
+  failed: number;
+  items: SessionTodoItem[];
+  lastNudgeAt?: string;
+}
+
 export interface SessionQueuedMessagesState {
   messages: string[];
   awaitingPrompt: boolean;
@@ -657,6 +678,7 @@ export interface SessionRecord {
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
+  todo?: SessionTodoState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
@@ -767,6 +789,7 @@ export interface SpawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
   steps?: string[];
+  todo?: boolean;
   agent?: AgentName;
   model?: string;
   planMode?: boolean;

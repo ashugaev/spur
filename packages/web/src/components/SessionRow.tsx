@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
+import { TodoProgress } from "@/components/TodoProgress";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -313,6 +314,8 @@ export function SessionRow({
       >
         {session.branch}
       </span>
+
+      {session.todo ? <TodoProgress todo={session.todo} /> : null}
 
       <span className="w-[4rem] shrink-0 text-right text-[var(--color-text-tertiary)]">
         {formatRelativeTime(session.lastActivityAt)}

@@ -265,6 +265,7 @@ async function runSpawnTrigger(
           project: projectId,
           prompt: renderedPrompt,
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
+          ...(block.todo !== undefined ? { todo: block.todo } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),

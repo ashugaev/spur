@@ -258,6 +258,7 @@ function parseTriggerSpawnBlock(
   }
   const prompt = asString(raw["prompt"], `${label}.prompt`);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const todo = asOptionalBoolean(raw["todo"], `${label}.todo`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const model = asOptionalString(raw["model"], `${label}.model`);
   if (model !== undefined && agent === undefined) {
@@ -276,6 +277,7 @@ function parseTriggerSpawnBlock(
   return {
     prompt,
     ...(steps !== undefined ? { steps } : {}),
+    ...(todo !== undefined ? { todo } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(branch !== undefined ? { branch } : {}),
@@ -1132,7 +1134,11 @@ function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfi
   const label = `projects.${projectId}.spawn`;
   const raw = asObject(value, label);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
-  return steps !== undefined ? { steps } : {};
+  const todo = asOptionalBoolean(raw["todo"], `${label}.todo`);
+  const result: ProjectSpawnConfig = {};
+  if (steps !== undefined) result.steps = steps;
+  if (todo !== undefined) result.todo = todo;
+  return result;
 }
 
 function parseWorkspaceAccess(

@@ -190,10 +190,12 @@ describe("session slots", () => {
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
+    const sessionWrapper = readFileSync(join(toolDir, "spur-session"), "utf8");
     expect(wrapper).toContain("--config '/tmp/spur.yaml'");
     expect(wrapper).toContain('"$@"');
+    expect(sessionWrapper).toContain("--config '/tmp/spur.yaml'");
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
-      'exec "$SCRIPT_DIR/spur" slots --session \'api-1\' "$@"',
+      'exec "$SCRIPT_DIR/spur-session" slots --session \'api-1\' "$@"',
     );
     expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
       "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
@@ -298,6 +300,14 @@ exit 42
     const captureFile = join(dataDir, "captured-args.txt");
     writeFileSync(
       join(toolDir, "spur"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 7
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, "spur-session"),
       `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" > ${JSON.stringify(captureFile)}

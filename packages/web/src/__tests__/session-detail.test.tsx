@@ -2138,6 +2138,128 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("renders todo progress, terminal statuses, and per-item summaries", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              todo: {
+                status: "failed",
+                total: 4,
+                done: 1,
+                skipped: 1,
+                failed: 1,
+                items: [
+                  {
+                    id: 1,
+                    text: "Research the codebase",
+                    status: "done",
+                    summary: "Mapped the session flow",
+                  },
+                  {
+                    id: 2,
+                    text: "Optional cleanup",
+                    status: "skipped",
+                    summary: "Not needed after the merge",
+                  },
+                  {
+                    id: 3,
+                    text: "Backfill migration path",
+                    status: "failed",
+                    summary: "Blocked by stale upstream contract",
+                  },
+                  { id: 4, text: "Update the dashboard", status: "pending" },
+                ],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /todo/i })).toBeInTheDocument();
+    });
+
+    expect(screen.getAllByLabelText("Todo progress 3 of 4")).toHaveLength(2);
+    expect(screen.queryByText("todo 3/4")).not.toBeInTheDocument();
+    expect(screen.getByText("3/4")).toBeInTheDocument();
+    expect(screen.queryByText("1 done")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 skipped")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
+    expect(screen.getByText(/Mapped the session flow/)).toBeInTheDocument();
+    expect(screen.getByText(/Not needed after the merge/)).toBeInTheDocument();
+    expect(screen.getByText(/Blocked by stale upstream contract/)).toBeInTheDocument();
+    expect(screen.getByText("Update the dashboard")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item failed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item skipped")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item done")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item pending")).toBeInTheDocument();
+  });
+
+  it("renders running todo status while items are still pending", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              todo: {
+                status: "running",
+                total: 2,
+                done: 1,
+                skipped: 0,
+                failed: 0,
+                items: [
+                  {
+                    id: 1,
+                    text: "Research the codebase",
+                    status: "done",
+                    summary: "Mapped the flow",
+                  },
+                  { id: 2, text: "Update the dashboard", status: "pending" },
+                ],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getAllByLabelText("Todo progress 1 of 2")).toHaveLength(2);
+    });
+
+    expect(screen.queryByText("todo 1/2")).not.toBeInTheDocument();
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.queryByText("1 done")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
+  });
+
   it("renders the full queued stack in FIFO order", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

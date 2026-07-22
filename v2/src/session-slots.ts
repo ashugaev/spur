@@ -24,6 +24,7 @@ export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
+const SPUR_SESSION_WRAPPER_NAME = "spur-session";
 const GIT_WRAPPER_NAME = "git";
 const BRANCH_TOOL_NAME = "spur-branch";
 
@@ -243,7 +244,7 @@ Session metadata:
 - Log Spur-operation friction with \`spur agent-issue log "..."\` (examples: a sidecar won't start, it's unclear how to test, branch preflight rejected a commit). This is for Spur tooling only — not task-domain or product bugs.${renderTagInstructions(tags)}`;
 }
 
-function slotToolDir(dataDir: string, sessionId: string): string {
+export function sessionToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
 
@@ -262,7 +263,7 @@ export function ensureSessionSlotTool(args: {
   branchNamingRegex?: string;
   agent?: AgentName;
 }): string {
-  const toolDir = slotToolDir(args.dataDir, args.sessionId);
+  const toolDir = sessionToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
   mkdirSync(toolDir, { recursive: true });
   writeFileSync(
@@ -274,11 +275,19 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     { encoding: "utf8", mode: 0o755 },
   );
   writeFileSync(
+    join(toolDir, SPUR_SESSION_WRAPPER_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
+exec "$SCRIPT_DIR/${SPUR_SESSION_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -528,5 +537,5 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
 }
 
 export function removeSessionSlotTool(dataDir: string, sessionId: string): void {
-  rmSync(slotToolDir(dataDir, sessionId), { recursive: true, force: true });
+  rmSync(sessionToolDir(dataDir, sessionId), { recursive: true, force: true });
 }

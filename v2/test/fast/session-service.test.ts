@@ -426,6 +426,7 @@ vi.mock("../../src/session-slots.js", () => ({
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
+  sessionToolDir: (dataDir: string, sessionId: string) => join(dataDir, "session-tools", sessionId),
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
 
@@ -2382,6 +2383,34 @@ describe("SessionService", () => {
     );
   });
 
+  it("spawns a todo session that injects todo instructions", async () => {
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+      todo: true,
+    });
+
+    expect(result.prompt).toBe("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("outside the repo worktree");
+
+    expect(sessions.get("api-1")?.todo).toMatchObject({
+      status: "running",
+      total: 0,
+      done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    });
+    expect(sessions.get("api-1")?.pipeline).toBeUndefined();
+  });
+
   it("disables request spawn steps in plan mode and sends the planning prompt", async () => {
     const { SessionService } = await loadSessionServiceModule();
     createSessionStore();
@@ -2436,7 +2465,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
   });
 
-  it("allows spawn without a prompt and skips default steps and the initial send", async () => {
+  it("allows spawn without a prompt and skips preflight, default steps, and the initial send", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -2471,6 +2500,184 @@ describe("SessionService", () => {
         .map(([, entry]) => entry.event)
         .filter((e) => e !== "session.state.classified"),
     ).not.toContain("session.spawn.initial_prompt_sent");
+  });
+
+  it("uses project default spawn.todo when the request does not provide it", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          spawn: {
+            todo: true,
+          },
+        },
+      },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    createSessionStore();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+    });
+
+    expect(result.todo).toMatchObject({
+      status: "running",
+      total: 0,
+      done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    });
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
+  });
+
+  it("sends todo nudges through the agent-aware tmux path", async () => {
+    const sessions = createSessionStore();
+    const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-codex-"));
+    mkdirSync(join(worktreePath, ".spur"), { recursive: true });
+    writeFileSync(
+      join(worktreePath, ".spur", "todo.md"),
+      "- [x] #1 wrong source :: ignored\n",
+      "utf8",
+    );
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-todo-datadir-"));
+    loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+    const todoDir = join(dataDir, "session-tools", "api-1");
+    mkdirSync(todoDir, { recursive: true });
+    writeFileSync(join(todoDir, "todo.md"), "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath,
+      tmuxSession: "api-1",
+      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      todo: {
+        status: "running",
+        total: 0,
+        done: 0,
+        skipped: 0,
+        failed: 0,
+        items: [],
+      },
+    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "Stop",
+        fileMtimeMs: 1_000,
+      })
+      .mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        hookEvent: "UserPromptSubmit",
+        fileMtimeMs: 1_001,
+      });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+
+    try {
+      await (
+        service as unknown as {
+          checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void>;
+        }
+      ).checkTodoProgress("api-1", sessions.get("api-1") as SessionRecord);
+    } finally {
+      service.dispose();
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(todoDir, { recursive: true, force: true });
+    }
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("[Spur todo] 1/2 tasks resolved (1 done)."),
+      {
+        agent: "codex",
+      },
+    );
+    expect(sessions.get("api-1")?.todo?.lastNudgeAt).toBe("2026-03-18T10:05:00.000Z");
+  });
+
+  it("marks todo failed when every item is terminal and one item failed", async () => {
+    const sessions = createSessionStore();
+    const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-failed-"));
+    const todoDir = join(TEST_DATA_DIR, "session-tools", "api-1");
+    mkdirSync(todoDir, { recursive: true });
+    writeFileSync(
+      join(todoDir, "todo.md"),
+      "- [x] #1 Ship API :: Added the endpoint\n- [f] #2 Deploy to staging :: Missing credentials\n",
+      "utf8",
+    );
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath,
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      todo: {
+        status: "running",
+        total: 0,
+        done: 0,
+        skipped: 0,
+        failed: 0,
+        items: [],
+      },
+    });
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await (
+        service as unknown as {
+          checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void>;
+        }
+      ).checkTodoProgress("api-1", sessions.get("api-1") as SessionRecord);
+    } finally {
+      service.dispose();
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(todoDir, { recursive: true, force: true });
+    }
+
+    expect(sessions.get("api-1")?.todo).toMatchObject({
+      status: "failed",
+      total: 2,
+      done: 1,
+      skipped: 0,
+      failed: 1,
+      items: [
+        { id: 1, status: "done", summary: "Added the endpoint" },
+        { id: 2, status: "failed", summary: "Missing credentials" },
+      ],
+    });
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.todo.failed",
+        sessionId: "api-1",
+      }),
+    );
   });
 
   it("resumes an unfinished pipeline into a cooldown before the next auto-step", async () => {

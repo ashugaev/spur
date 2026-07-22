@@ -1891,6 +1891,43 @@ test.describe("S3 mobile voice", () => {
   });
 });
 
+// S2d: Todo state
+test.describe("S2d: Todo state", () => {
+  test("shows circle progress and checkbox tooltips without inline status labels", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-todo-progress",
+      todo: {
+        status: "running",
+        total: 3,
+        done: 1,
+        skipped: 1,
+        failed: 0,
+        items: [
+          { id: 1, text: "Read code", status: "done", summary: "Found todo renderer" },
+          { id: 2, text: "Skip extra state", status: "skipped", summary: "Not needed" },
+          { id: 3, text: "Patch UI", status: "pending" },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /todo/i })).toBeVisible();
+    await expect(page.getByLabel("Todo progress 2 of 3")).toHaveCount(2);
+    await expect(page.getByText("2/3")).toBeVisible();
+    await expect(page.getByText("todo 2/3")).toHaveCount(0);
+    await expect(page.getByText("1 done")).toHaveCount(0);
+    await expect(page.getByText("1 skipped")).toHaveCount(0);
+    await expect(page.getByText("1 pending")).toHaveCount(0);
+
+    const doneMark = page.getByLabel("Todo item done");
+    await doneMark.hover();
+    await expect(page.getByText("done")).toBeVisible();
+  });
+});
+
 // S3b: Queued messages section
 test.describe("S3b: Queued messages section", () => {
   test("shows the full queued stack in FIFO order", async ({ page }) => {

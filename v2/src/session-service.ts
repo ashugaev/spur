@@ -153,6 +153,13 @@ import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  formatTodoNudgeMessage,
+  formatTodoSpawnMessage,
+  readTodoSnapshot,
+  shouldNudge,
+  todoStateFromSnapshot,
+} from "./todo.js";
+import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
@@ -178,6 +185,7 @@ import {
   ensureSessionSlotTool,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  sessionToolDir,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -285,6 +293,7 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type SessionTodoState,
   type TakeBacklogItemRequest,
   type TakeBacklogItemResponse,
   type TagDefinition,
@@ -666,12 +675,18 @@ function tryRealpath(path: string): string {
   }
 }
 
+interface SpawnRequestDefaults {
+  steps?: string[];
+  todo?: boolean;
+}
+
 function normalizeSpawnRequest(
   request: SpawnSessionRequest,
-  defaultSteps?: string[],
+  defaults?: SpawnRequestDefaults,
 ): {
   prompt: string;
   steps?: string[];
+  todo: boolean;
   planMode: boolean;
   restrictWrites: boolean;
   allowedTriggers?: string[];
@@ -679,7 +694,7 @@ function normalizeSpawnRequest(
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
   const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
-  const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaults?.steps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -687,6 +702,7 @@ function normalizeSpawnRequest(
   });
   const normalized = {
     prompt,
+    todo: prompt ? (request.todo ?? defaults?.todo) === true : false,
     planMode: request.planMode === true,
     restrictWrites: request.restrictWrites === true,
     ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
@@ -4178,6 +4194,7 @@ export class SessionService {
     project: ProjectConfig;
     prompt: string;
     steps?: string[];
+    todo: boolean;
     planMode: boolean;
     restrictWrites: boolean;
     allowedTriggers?: string[];
@@ -4198,13 +4215,13 @@ export class SessionService {
             }),
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
-          project.spawn?.steps,
+          project.spawn,
         ),
       };
     }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
-      return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
+      return { project, ...normalizeSpawnRequest(request, project.spawn) };
     }
     const entry = this.listUnconfiguredProjects().find(
       (existing) => existing.id === request.project,
@@ -4252,6 +4269,7 @@ export class SessionService {
     let resolvedModel: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
+    let todo: boolean;
     let planMode: boolean;
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
@@ -4262,7 +4280,7 @@ export class SessionService {
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+      ({ project, prompt, steps, todo, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
@@ -4508,7 +4526,9 @@ export class SessionService {
       const initialMessage =
         steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
-          : taskPrompt;
+          : todo
+            ? formatTodoSpawnMessage(taskPrompt)
+            : taskPrompt;
       const inputKind = options?.promptKind ?? "spawn_prompt";
       const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
@@ -4584,6 +4604,10 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
+      const todoState: SessionTodoState | undefined =
+        todo && !steps
+          ? { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] }
+          : undefined;
       const runningRecord: SessionRecord = {
         ...sessionForPlaywright,
         planMode,
@@ -4602,6 +4626,7 @@ export class SessionService {
             }
           : {}),
         ...(pipeline ? { pipeline } : {}),
+        ...(todoState ? { todo: todoState } : {}),
         originalTaskPrompt,
       };
 
@@ -7782,7 +7807,8 @@ export class SessionService {
     return (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
-      session.pipeline?.status === "running"
+      session.pipeline?.status === "running" ||
+      session.todo?.status === "running"
     );
   }
 
@@ -7980,6 +8006,12 @@ export class SessionService {
             await sleep(PIPELINE_POLL_INTERVAL_MS);
             continue;
           }
+          await sleep(PIPELINE_POLL_INTERVAL_MS);
+          continue;
+        }
+
+        if (session.todo?.status === "running") {
+          await this.checkTodoProgress(sessionId, session);
           await sleep(PIPELINE_POLL_INTERVAL_MS);
           continue;
         }
@@ -8221,6 +8253,79 @@ export class SessionService {
         awaitingStepIndex: session.pipeline.awaitingStepIndex ?? null,
       },
     });
+  }
+
+  private async checkTodoProgress(sessionId: string, session: SessionRecord): Promise<void> {
+    if (!session.todo || session.todo.status !== "running") {
+      return;
+    }
+    const snapshot = readTodoSnapshot(sessionToolDir(this.config.dataDir, sessionId));
+    const newState = todoStateFromSnapshot(snapshot);
+    const todoChanged =
+      newState.status !== session.todo.status ||
+      newState.total !== session.todo.total ||
+      newState.done !== session.todo.done ||
+      newState.skipped !== session.todo.skipped ||
+      newState.failed !== session.todo.failed ||
+      JSON.stringify(newState.items) !== JSON.stringify(session.todo.items);
+
+    if (todoChanged) {
+      writeSession(this.config.dataDir, {
+        ...session,
+        updatedAt: nowIso(),
+        todo: { ...session.todo, ...newState },
+      });
+    }
+
+    if (snapshot?.allResolved) {
+      const terminalStatus = newState.status;
+      writeSession(this.config.dataDir, {
+        ...(readSession(this.config.dataDir, sessionId) ?? session),
+        updatedAt: nowIso(),
+        todo: { ...session.todo, ...newState, status: terminalStatus },
+      });
+      this.logEvent(
+        terminalStatus === "failed" ? "session.todo.failed" : "session.todo.completed",
+        {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message:
+            terminalStatus === "failed"
+              ? `Todo list finished with failures for ${sessionId} (${newState.done} done, ${newState.skipped} skipped, ${newState.failed} failed)`
+              : `Todo list completed for ${sessionId} (${newState.done} done, ${newState.skipped} skipped)`,
+        },
+      );
+      return;
+    }
+
+    const agentState = await this.classifySessionState(session);
+    if (agentState !== "waiting") {
+      return;
+    }
+
+    if (!shouldNudge(session.todo, snapshot)) {
+      return;
+    }
+
+    if (snapshot) {
+      await this.sendAgentMessage(session, formatTodoNudgeMessage(snapshot));
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      writeSession(this.config.dataDir, {
+        ...latest,
+        updatedAt: nowIso(),
+        todo: {
+          ...(latest.todo ?? session.todo),
+          lastNudgeAt: nowIso(),
+        },
+      });
+      this.logEvent("session.todo.nudge", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Nudged ${sessionId}: ${newState.done} done, ${newState.skipped} skipped, ${newState.failed} failed, ${snapshot.pending} pending`,
+      });
+    }
   }
 
   private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
