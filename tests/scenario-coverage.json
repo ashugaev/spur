@@ -717,7 +717,10 @@
     "section": "Fast",
     "scenario": "Claude server-error reactivation: a transcript record carrying `error: \"server_error\"` (with or without `apiErrorStatus`) as the last meaningful record — trailing `system`/`file-history-snapshot`/`progress` records skipped — classifies a running Claude session as `error` (never `rate_limited`, which keeps priority), persists `serverErrorAt`, clears it once a newer meaningful record appears, and re-sends `Claude hit a temporary server error earlier. Please try to continue the task now.` via `send({ queue: false })` (typed into the pane, not queued) at most once every 30 minutes while the live state stays `error`.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/claude-jsonl-state.test.ts", "v2/test/fast/session-service.test.ts"],
+    "testFiles": [
+      "v2/test/fast/claude-jsonl-state.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
