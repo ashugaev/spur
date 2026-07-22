@@ -331,7 +331,14 @@ async function refExists(repoPath: string, ref: string): Promise<boolean> {
   return (await gitExitCode(repoPath, "show-ref", "--verify", "--quiet", ref)) === 0;
 }
 
+async function hasOriginRemote(repoPath: string): Promise<boolean> {
+  return (await gitExitCode(repoPath, "remote", "get-url", "origin")) === 0;
+}
+
 async function fetchOrigin(repoPath: string): Promise<void> {
+  if (!(await hasOriginRemote(repoPath))) {
+    return;
+  }
   try {
     await git(repoPath, "fetch", "origin", "--quiet");
   } catch (error) {

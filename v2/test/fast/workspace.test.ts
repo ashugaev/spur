@@ -150,6 +150,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
+    mockGitSuccess();
     mockGitFailure("missing local main");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
@@ -157,6 +158,9 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
+    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], {
+      cwd: "/repo/api",
+    });
     expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
       cwd: "/repo/api",
     });
@@ -169,6 +173,7 @@ describe("createWorktree", () => {
 
   it("uses origin/defaultBranch as base when checked-out default branch is dirty and behind", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -202,6 +207,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
+    mockGitSuccess();
     mockGitFailure("remote not behind local");
     mockGitSuccess("main");
     mockGitSuccess();
@@ -227,6 +233,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
+    mockGitSuccess();
     mockGitFailure("missing local main");
     mockGitFailure("missing local release");
     mockGitSuccess();
@@ -247,6 +254,7 @@ describe("createWorktree", () => {
 
   it("fast-forwards an existing local branch from origin before adding the worktree", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -286,6 +294,7 @@ describe("createWorktree", () => {
   it("fails fast when origin cannot be fetched", async () => {
     mockWorkspaceLockResolution();
     mockGitSuccess();
+    mockGitSuccess();
     mockGitFailure("network down");
 
     await expect(createWorktree(baseInput)).rejects.toThrow("Failed to fetch origin: network down");
@@ -299,6 +308,30 @@ describe("createWorktree", () => {
           call[1][1] === "add",
       ),
     ).toBe(false);
+  });
+
+  it("skips the origin fetch and resolves the local branch when the repo has no origin remote", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess(); // worktree prune
+    mockGitFailure("no such remote 'origin'", 2); // remote get-url origin
+    mockGitFailure("missing remote main"); // refExists origin/main
+    mockGitFailure("missing local branch"); // refExists heads/api-1
+    mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitSuccess(); // worktree add
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], {
+      cwd: "/repo/api",
+    });
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
+      cwd: "/repo/api",
+    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
+      { cwd: "/repo/api" },
+    );
   });
 
   it("waits for a valid metadata lock holder longer than five seconds", async () => {
