@@ -82,7 +82,7 @@ npm_config_prefix="$HOME/.local" npm install -g @shugaev/spur@<version>
 sudo systemctl restart spur-daemon.service spur-web.service
 ```
 
-Do not run `spur reinit` on a system-unit host: it writes user units (`systemctl --user`) and leaves the system units untouched. Restart the system units directly.
+Do not run `spur reinit` or `spur update` on a system-unit host: both take the user-scope path (`npm-init.sh` + `systemctl --user`), which writes user units and starts a second daemon on `:4310` conflicting with the system one. On system units, update via the UI (`POST /deploy/switch`) or the manual commands above, and restart the system units directly.
 
 Verify:
 
@@ -92,7 +92,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions  # 200
 ls /usr/lib/node_modules/@shugaev 2>/dev/null && echo LEAKED || echo clean # clean
 ```
 
-Once the host runs 0.24.3 or later, `POST /deploy/switch` and `spur update` pin `--prefix` from the install location themselves; no further manual step is needed.
+Once the host runs 0.24.3 or later the prefix bug is gone: `install-and-restart.sh` (UI deploy/switch) and `spur update` both pin `--prefix` from the install location, so no `EACCES` on future installs. See [System-wide units](#system-wide-units-advanced) for the two remaining system-scope caveats (which update command to use, and refreshing unit files).
 
 ## Security
 
@@ -119,7 +119,12 @@ cd <your-repo> && ~/.local/bin/spur connect --config spur.yaml
 
 ## System-wide units (advanced)
 
-`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`, `/etc/spur/daemon.env`), adapt the templates in `deploy/*.npm.service` manually. For UI version switch on system units, set `SYSTEMCTL="sudo systemctl"` in the daemon env.
+`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`, `/etc/spur/daemon.env`), adapt the templates in `deploy/spur-daemon.service` and `deploy/spur-web.service` manually. For UI version switch on system units, set `SYSTEMCTL="sudo systemctl"` in the daemon env — then `install-and-restart.sh` skips the user-scope `spur reinit` and runs `sudo systemctl restart` instead.
+
+Updating a system-unit host:
+
+- Use the UI version switch (`POST /deploy/switch`) or a manual pinned install (see [Recovering a stuck host](#recovering-a-stuck-host-manual-migration)). Never `spur update` / `spur reinit` — they are user-scope and will spin up a conflicting `:4310` daemon.
+- Neither path rewrites unit files. When a Spur version changes the unit contract (`ExecStart`, a newly required `Environment=`, a removed unit), the system units go stale and a plain restart runs the new code against the old unit. Re-copy the changed `deploy/spur-*.service` template into `/etc/systemd/system/`, keep your host's `User=`/`WEB_HOST`/`PORT`/`EnvironmentFile`, then `sudo systemctl daemon-reload && sudo systemctl restart spur-daemon.service spur-web.service`. (This is what the `/ws` topology change — `server.js` → `web-server.js`, dropped `spur-direct-terminal.service` — required.)
 
 ## Troubleshooting
 
