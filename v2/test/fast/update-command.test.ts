@@ -49,7 +49,7 @@ vi.mock("node:child_process", async () => {
   };
 });
 
-import { createRealUpdateDeps, runUpdate, type UpdateDeps } from "../../src/update.js";
+import { createRealUpdateDeps, reinitUnits, runUpdate, type UpdateDeps } from "../../src/update.js";
 import type { ProbeResult, ProbeTarget } from "../../src/update-health.js";
 import type { RollbackState } from "../../src/update-state.js";
 
@@ -265,7 +265,7 @@ describe("createRealUpdateDeps launch", () => {
   });
 });
 
-describe("createRealUpdateDeps reinit", () => {
+describe("reinitUnits", () => {
   const originalHome = process.env["HOME"];
 
   beforeEach(() => {
@@ -293,8 +293,7 @@ describe("createRealUpdateDeps reinit", () => {
     );
     process.env["HOME"] = home;
 
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
-    deps.reinit();
+    reinitUnits("/tmp/cli.js");
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "6200",
@@ -319,8 +318,7 @@ describe("createRealUpdateDeps reinit", () => {
     );
     process.env["HOME"] = home;
 
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
-    deps.reinit();
+    reinitUnits("/tmp/cli.js");
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
@@ -345,13 +343,52 @@ describe("createRealUpdateDeps reinit", () => {
     );
     process.env["HOME"] = home;
 
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
-    deps.reinit();
+    reinitUnits("/tmp/cli.js");
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
       exposeWeb: false,
       tailscale: true,
+    });
+  });
+});
+
+describe("createRealUpdateDeps reinit delegation", () => {
+  const originalHome = process.env["HOME"];
+
+  beforeEach(() => {
+    runNpmInitMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+  });
+
+  it("routes the reinit dep through the shared reinitUnits function", async () => {
+    const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(
+      join(unitDir, "spur-daemon.service"),
+      "[Service]\nExecStart=/usr/bin/node cli.js\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(unitDir, "spur-web.service"),
+      "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=0.0.0.0\n",
+      "utf-8",
+    );
+    process.env["HOME"] = home;
+
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    deps.reinit();
+
+    expect(runNpmInitMock).toHaveBeenCalledOnce();
+    expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      webPort: "6200",
+      exposeWeb: true,
+      tailscale: false,
     });
   });
 });
