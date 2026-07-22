@@ -95,4 +95,52 @@ if [ "$rc" -eq 0 ]; then
   exit 1
 fi
 
+# Case 6: default user scope (SYSTEMCTL unset) with a resolvable spur binary
+# converges on `spur reinit` instead of the bare systemctl restart.
+STUB_BIN_DIR="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR"' EXIT
+cat >"$STUB_BIN_DIR/spur" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+EOF
+chmod +x "$STUB_BIN_DIR/spur"
+
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo PATH="$STUB_BIN_DIR:$PATH" \
+  env -u SYSTEMCTL bash "$HELPER" 1.2.3
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: expected exit 0 from the stub spur reinit, got $rc" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -q "spur reinit rc=0" "$LOG_FILE"; then
+  echo "FAIL: log missing spur reinit rc=0 line" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
+  echo "FAIL: default user scope must not fall through to bare systemctl restart" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+# Case 7: a non-default SYSTEMCTL override is an escape hatch that wins even
+# when a spur binary is resolvable — bare restart, not reinit.
+rm -f "$LOG_FILE"
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo PATH="$STUB_BIN_DIR:$PATH" SYSTEMCTL=echo \
+  bash "$HELPER" 1.2.3
+if ! grep -q "restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
+  echo "FAIL: log missing systemctl restart argv for the SYSTEMCTL escape hatch" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "spur reinit" "$LOG_FILE"; then
+  echo "FAIL: SYSTEMCTL override must bypass spur reinit" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
 echo "install-and-restart.test.sh: OK"

@@ -158,6 +158,17 @@ function resolveDaemonPort(): number {
   }
 }
 
+// Reinstall the user systemd units, preserving the live web port / external
+// exposure / Tailscale bind the operator deployed instead of resetting the
+// units to loopback:4311. Shared by `spur update`'s reinit dep and the
+// `spur reinit` CLI command so every migration path (CLI update, UI/deploy
+// switch, install-and-restart.sh) converges on the same unit-reinstall logic.
+export function reinitUnits(cliEntrypoint: string): void {
+  const scope = resolveSystemdScope(homedir());
+  const { webPort, exposeWeb, tailscale } = readWebUnitOptions(scope);
+  runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb, tailscale });
+}
+
 export function createRealUpdateDeps(
   cliEntrypoint: string,
   statePath: string = defaultRollbackStatePath(),
@@ -171,12 +182,7 @@ export function createRealUpdateDeps(
     installVersion: (target) => {
       execFileSync("npm", ["install", "-g", `${PACKAGE_SPEC}@${target}`], { stdio: "inherit" });
     },
-    reinit: () => {
-      // Preserve the live web port / external exposure / Tailscale bind the
-      // operator deployed instead of resetting the units to loopback:4311.
-      const { webPort, exposeWeb, tailscale } = readWebUnitOptions(scope);
-      runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb, tailscale });
-    },
+    reinit: () => reinitUnits(cliEntrypoint),
     currentVersion: version,
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),
