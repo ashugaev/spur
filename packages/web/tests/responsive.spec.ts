@@ -24,9 +24,22 @@ test.describe("R1: Mobile viewport", () => {
     const footer = page.getByRole("contentinfo");
     await expect(footer).toBeVisible();
     const className = await footer.getAttribute("class");
-    expect(className).toContain("pb-[max(0.25rem,env(safe-area-inset-bottom))]");
-    expect(className).toContain("pl-[max(0.5rem,env(safe-area-inset-left))]");
-    expect(className).toContain("pr-[max(0.5rem,env(safe-area-inset-right))]");
+    expect(className).not.toContain("env(safe-area-inset-bottom)");
+
+    // env() resolves to 0 in a normal browser, so the max() falls back to the
+    // base padding. A non-zero value proves the arbitrary-value calc() is valid
+    // CSS and the declaration was not silently dropped.
+    const padding = await footer.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return {
+        left: parseFloat(style.paddingLeft),
+        right: parseFloat(style.paddingRight),
+        bottom: parseFloat(style.paddingBottom),
+      };
+    });
+    expect(padding.left).toBeGreaterThanOrEqual(8);
+    expect(padding.right).toBeGreaterThanOrEqual(8);
+    expect(padding.bottom).toBe(4);
   });
 
   test("no horizontal scroll on mobile", async ({ page }) => {

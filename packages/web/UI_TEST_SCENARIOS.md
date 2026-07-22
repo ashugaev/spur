@@ -146,7 +146,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D6b: Footer
 
 - Footer is visible after page load
-- Footer edge padding uses safe-area insets (`env(safe-area-inset-*)`) so content clears rounded corners and the home indicator on notched devices
+- Footer side padding uses horizontal safe-area insets plus 2px of breathing room (`max(base, calc(env(safe-area-inset-left/right) + 2px))`) so content clears rounded corners; no bottom inset is applied, so the bar keeps its compact height with no gap underneath
 - Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable
 - Footer left side shows Online status when daemon is reachable
 - Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
