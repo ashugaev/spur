@@ -298,11 +298,13 @@ function notRunningCheck(id: ServiceId, unit: string, port: number): HostInstall
   };
 }
 
-// F6: distinguishes "not started yet" (warn) from "systemd says active but HTTP
-// is dead" or "something else is squatting the port" (error). Reuses the
-// already-computed `daemonActive`/`webActive` booleans instead of re-querying
-// systemd a second time. Exported so fast tests can drive daemon/web
-// active-vs-inactive scenarios directly, without simulating systemctl.
+// F6: on an initialized host (systemd units installed), "not running" is
+// always an error — "the daemon is dead" is the most common reason a user
+// runs `doctor` at all, so it must be exit-code-affecting even for a
+// deliberate `systemctl stop`. Reuses the already-computed
+// `daemonActive`/`webActive` booleans instead of re-querying systemd a second
+// time. Exported so fast tests can drive daemon/web active-vs-inactive
+// scenarios directly, without simulating systemctl.
 //
 // The daemon's liveness probe hits `/info`, not `/sessions` — `/sessions`
 // resolves to the heavy `view=full` enrichment path (`server.ts`), so under
@@ -312,11 +314,12 @@ function notRunningCheck(id: ServiceId, unit: string, port: number): HostInstall
 // round trip, not two.
 //
 // `systemdReportsActivity` is true exactly when the caller already pushed a
-// `spur-daemon`/`spur-web` "active"/"not active" check from systemd state —
-// in that case the plain "not running, port free" fact here would just
-// repeat the same condition at a second severity, so it is suppressed; the
-// error-grade branches (active-but-unreachable, port-conflict) still surface
-// because they carry information systemd alone does not have.
+// `spur-daemon`/`spur-web` "active"/"not active" `error`-severity check from
+// systemd state — in that case the plain "not running, port free" fact here
+// would just repeat the same condition at a second severity, so it is
+// suppressed (single owner: the systemd-derived check). The other branches
+// (active-but-unreachable, port-conflict) still surface regardless, because
+// they carry information systemd alone does not have.
 export async function checkServiceHealth(
   scope: SystemdScope,
   daemonActive: boolean,
@@ -459,20 +462,19 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
       ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
     systemdReportsActivity = unitsInstalled && systemdAvailable;
     if (systemdReportsActivity) {
-      // "not active" alone is a `warn`, not an `error`: it is the normal
-      // transient state right after `spur init` before the unit reaches
-      // active, and right after a deliberate stop. The error-grade signal for
-      // a genuinely broken daemon/web (active-but-unreachable, or something
-      // else squatting the expected port) lives solely in `checkServiceHealth`
-      // below — `daemon-reachable`/`web-reachable`'s plain "not running" case
-      // is suppressed there when this block already reported the same fact,
-      // so the condition has exactly one severity owner (see F6/F8 module
-      // doc).
+      // Once units are installed, "not active" is a genuine failure — error =
+      // something is BROKEN (a fresh, never-`init`'d host is a different
+      // case: `systemd-units` above stays `warn` and this block never runs).
+      // "The daemon is dead" is the single most common reason a user runs
+      // `doctor`, so it must be exit-code-affecting on an initialized host,
+      // including a deliberate `systemctl stop`. `checkServiceHealth` below
+      // suppresses its own plain "not running" check when this block already
+      // owns the fact, so it is reported at exactly one severity, not two.
       daemonActive = isActive(scope.ctl, "spur-daemon.service");
       checks.push({
         id: "spur-daemon",
         ok: daemonActive,
-        severity: "warn",
+        severity: "error",
         detail: daemonActive ? "spur-daemon.service active" : "spur-daemon.service not active",
         fix: `${scope.restartCmd} spur-daemon.service`,
       });
@@ -481,7 +483,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
       checks.push({
         id: "spur-web",
         ok: webActive,
-        severity: "warn",
+        severity: "error",
         detail: webActive ? "spur-web.service active" : "spur-web.service not active",
         fix: `${scope.restartCmd} spur-web.service`,
       });

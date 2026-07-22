@@ -98,7 +98,15 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "`doctor` probes the daemon's `/info` endpoint (never the heavier `GET /sessions` view) for liveness and reuses that same response for the version-drift check; reports a service `*-reachable` failure as `error` only when systemd already reports the unit active but HTTP is unreachable; reports a `*-port-conflict` as `error` only after confirming the busy port does not itself answer `/info` as a Spur daemon; and reports the plain not-yet-started state as `warn` exactly once, without duplicating the systemd `spur-daemon`/`spur-web` \"not active\" fact at a second severity.",
+    "scenario": "`doctor` probes the daemon's `/info` endpoint (never the heavier `GET /sessions` view) for liveness and reuses that same response for the version-drift check; reports a service `*-reachable` failure as `error` only when systemd already reports the unit active but HTTP is unreachable; reports a `*-port-conflict` as `error` only after confirming the busy port does not itself answer `/info` as a Spur daemon; and reports the plain not-yet-started state as `warn` only when systemd itself has not already reported the same inactive fact as `error` (single owner, never duplicated at two severities).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "On an initialized host (systemd units installed), `doctor` reports `spur-daemon`/`spur-web` \"not active\" as `severity:error` (static, regardless of `ok`) so a dead daemon is exit-code-affecting even after a deliberate `systemctl stop`; on a never-initialized host (units not installed), those checks are never emitted and `doctor` still exits 0 on `systemd-units`/`linger`'s `warn`-only failures.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/host-install.test.ts"],
     "ciJob": "quality"

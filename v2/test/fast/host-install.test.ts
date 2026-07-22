@@ -175,7 +175,7 @@ describe("collectHostInstallChecks", () => {
     expect(hasErrorSeverity(checks)).toBe(false);
   });
 
-  it("marks spur-daemon/spur-web severity as warn regardless of active state", async () => {
+  it("marks spur-daemon/spur-web severity as error regardless of active state (static, not a pass/fail flip)", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-units-"));
     const unitDir = join(fakeHome, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -186,7 +186,7 @@ describe("collectHostInstallChecks", () => {
     execState.webActiveState = "active";
     // Keep the HTTP-health layer fully healthy so this test isolates the
     // systemd-derived severity, independent of `checkServiceHealth`'s own
-    // (correctly error-grade) active-but-unreachable/port-conflict branches.
+    // active-but-unreachable/port-conflict branches.
     probeMock.mockResolvedValue({ ok: true });
     probeInfoMock.mockResolvedValue({ version });
 
@@ -194,10 +194,23 @@ describe("collectHostInstallChecks", () => {
 
     expect(checks.find((check) => check.id === "spur-daemon")).toMatchObject({
       ok: false,
-      severity: "warn",
+      severity: "error",
     });
     expect(checks.find((check) => check.id === "spur-web")).toMatchObject({
       ok: true,
+      severity: "error",
+    });
+    // A dead daemon on an initialized host is the single most common reason
+    // a user runs `doctor` at all — it must be exit-code-affecting.
+    expect(hasErrorSeverity(checks)).toBe(true);
+  });
+
+  it("exits 0 on a never-initialized host (units not installed) even though systemd-units/linger are ok:false", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-never-init");
+    expect(checks.find((check) => check.id === "spur-daemon")).toBeUndefined();
+    expect(checks.find((check) => check.id === "spur-web")).toBeUndefined();
+    expect(checks.find((check) => check.id === "systemd-units")).toMatchObject({
+      ok: false,
       severity: "warn",
     });
     expect(hasErrorSeverity(checks)).toBe(false);
@@ -213,17 +226,24 @@ describe("collectHostInstallChecks", () => {
     execState.daemonActiveState = "inactive";
     execState.webActiveState = "inactive";
     // Both unreachable, both ports free: the only fact here is "not active",
-    // and `spur-daemon`/`spur-web` already own that fact.
+    // and `spur-daemon`/`spur-web` already own that fact — at error severity.
     probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     probeInfoMock.mockResolvedValue(undefined);
     isHostPortFreeMock.mockResolvedValue(true);
 
     const checks = await collectHostInstallChecks(fakeHome);
 
-    expect(checks.find((check) => check.id === "spur-daemon")).toMatchObject({ ok: false });
-    expect(checks.find((check) => check.id === "spur-web")).toMatchObject({ ok: false });
+    expect(checks.find((check) => check.id === "spur-daemon")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+    expect(checks.find((check) => check.id === "spur-web")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
     expect(checks.find((check) => check.id === "daemon-reachable")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-reachable")).toBeUndefined();
+    expect(hasErrorSeverity(checks)).toBe(true);
   });
 });
 
