@@ -5,6 +5,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -397,6 +398,7 @@ export function SpawnModal({
               onClick={onSubmit}
               type="button"
             >
+              {submitting ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
               <span>{submitting ? submitBusyLabel : submitLabel}</span>
               {!submitting ? (
                 <span
