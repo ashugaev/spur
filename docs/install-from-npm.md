@@ -52,7 +52,12 @@ npm install -g @openai/codex && codex login    # or Claude Code: install it, run
 
 `spur init` sets up private web access over your tailnet — your devices only, never public. Opt out with `--no-tailscale`.
 
-Auth is yours: run `sudo tailscale up`, sign in, then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
+Auth is yours — two ways to bring the tailnet up:
+
+- Human: `sudo tailscale up`, sign in at the printed URL.
+- Unattended (agent / scripted): `sudo tailscale up --authkey <tskey-...>` — no browser. Mint a key at `https://login.tailscale.com/admin/settings/keys`. This login is the only step that otherwise blocks a hands-off install; an agent handed a key does the whole thing end to end.
+
+Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
 
 ## Verify
 
