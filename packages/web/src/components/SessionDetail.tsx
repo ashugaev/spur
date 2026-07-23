@@ -1549,6 +1549,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
+  const coreLoadRequestIdRef = useRef(0);
+  const loadSessionCore = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = coreLoadRequestIdRef.current + 1;
+    coreLoadRequestIdRef.current = requestId;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}/core`, {
+        cache: "no-store",
+      });
+      if (
+        requestId !== coreLoadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId ||
+        sessionRef.current?.id === requestedSessionId
+      ) {
+        return;
+      }
+      if (!response.ok) return;
+      const core = (await response.json()) as SpurSessionView;
+      if (
+        requestId !== coreLoadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId ||
+        sessionRef.current?.id === requestedSessionId
+      ) {
+        return;
+      }
+      setSession(toDashboardSession(core));
+    } catch {
+      return;
+    }
+  }, [sessionId]);
+
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
     async (targetSessionId: string, change: TagChange) => {
@@ -1574,12 +1605,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
 
   useEffect(() => {
+    void loadSessionCore();
     void loadSession();
     const timer = setInterval(() => {
       void loadSession();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [loadSession]);
+  }, [loadSession, loadSessionCore]);
 
   useEffect(() => {
     if (!session) return;

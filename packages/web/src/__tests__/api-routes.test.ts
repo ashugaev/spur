@@ -87,6 +87,7 @@ import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
+import { GET as getSessionCore } from "@/app/api/sessions/[id]/core/route";
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
@@ -1299,6 +1300,56 @@ describe("Spur web API routes", () => {
 
     const response = await getSessionConversation(
       new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("daemon down");
+  });
+
+  // ── GET /api/sessions/:id/core ─────────────────────────────────────────
+
+  it("GET /api/sessions/:id/core returns the cheap core payload from daemon", async () => {
+    const core = sessionFixture();
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => core,
+      text: async () => JSON.stringify(core),
+    } as unknown as Response);
+
+    const response = await getSessionCore(
+      new Request("http://localhost:3000/api/sessions/api-a1/core"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual(core);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/core");
+  });
+
+  it("GET /api/sessions/:id/core passes non-ok daemon status through", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+    } as unknown as Response);
+
+    const response = await getSessionCore(
+      new Request("http://localhost:3000/api/sessions/missing/core"),
+      { params: Promise.resolve({ id: "missing" }) },
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("GET /api/sessions/:id/core returns 502 on network error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("daemon down"));
+
+    const response = await getSessionCore(
+      new Request("http://localhost:3000/api/sessions/api-a1/core"),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
     const payload = (await response.json()) as { error: string };

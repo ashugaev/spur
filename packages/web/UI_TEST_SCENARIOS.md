@@ -300,6 +300,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - Long unbroken tokens hard-wrap in the title heading and the Task summary paragraph instead of widening the page
 - White bottom border (2px) under header
+- The page paints title, prompt, state pill, and action buttons from the cheap `/api/sessions/[id]/core` payload before the full enrich request resolves
+- A running session with `runtimeAlive=true` from the core payload shows Pause and Send now, not Restore, and the full-payload merge that follows does not flip those buttons
 
 ### S2: Actions bar
 
@@ -548,6 +550,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ## API
 
 - `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
+- `GET /api/sessions/[id]/core` proxies the daemon cheap-core request, returns the core payload on success, passes non-ok status through, and returns 502 on network error.
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
 - `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.

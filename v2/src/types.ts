@@ -726,6 +726,13 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
+export interface SessionCoreView extends SessionRecord {
+  runtimeAlive: boolean;
+  workspaceExists: boolean;
+  state: SessionState;
+  lastActivityAt: string;
+}
+
 export type SessionListView = SessionView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
