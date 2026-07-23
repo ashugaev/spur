@@ -21,7 +21,9 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
 npm config set prefix ~/.local
+# put ~/.local/bin on PATH for this shell, and persist it for new logins
 export PATH="$HOME/.local/bin:$PATH"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.profile || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
 
 npm install -g @shugaev/spur@latest   # or pin a specific version: @shugaev/spur@<version>
 spur init
@@ -30,6 +32,8 @@ spur init
 npm install -g @openai/codex@latest
 codex login   # or install Claude Code and run `claude` to sign in
 ```
+
+After a fresh login you invoke the orchestrator as plain `spur` (the persisted PATH puts `~/.local/bin` on your shell). In non-interactive shells that do not source `~/.profile` — one-shot `ssh host 'spur …'`, cron, scripts — call it by full path: `~/.local/bin/spur`.
 
 Flags:
 
