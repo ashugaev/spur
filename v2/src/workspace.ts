@@ -561,6 +561,11 @@ export async function checkProjectWorkspace(
     return checks;
   }
 
+  // `isGitWorktree`/`branchRefsExist` route every git failure through an exit
+  // code (never a throw), so the only way `withTimeout` rejects is the timeout
+  // itself. A timeout is "could not determine within the budget" (slow disk /
+  // heavy I/O), not a proven failure — surface it as a `warn` rather than a
+  // hard `error` that would exit non-zero on an otherwise-healthy repo.
   let isRepo: boolean;
   try {
     isRepo = await withTimeout(
@@ -568,8 +573,14 @@ export async function checkProjectWorkspace(
       PROJECT_GIT_CHECK_TIMEOUT_MS,
       `git rev-parse --git-dir timed out for ${path}`,
     );
-  } catch {
-    isRepo = false;
+  } catch (error) {
+    checks.push({
+      id: `project-path-is-git-repo:${projectId}`,
+      ok: false,
+      severity: "warn",
+      detail: `could not determine whether ${path} is a git repository: ${errorMessage(error)}`,
+    });
+    return checks;
   }
   checks.push({
     id: `project-path-is-git-repo:${projectId}`,
@@ -591,8 +602,14 @@ export async function checkProjectWorkspace(
       PROJECT_GIT_CHECK_TIMEOUT_MS,
       `branch lookup timed out for ${path}`,
     );
-  } catch {
-    status = { exists: false, remote: false };
+  } catch (error) {
+    checks.push({
+      id: `project-default-branch-resolves:${projectId}`,
+      ok: false,
+      severity: "warn",
+      detail: `could not determine whether defaultBranch "${defaultBranch}" resolves in ${path}: ${errorMessage(error)}`,
+    });
+    return checks;
   }
   // A branch that only exists as a local ref (never pushed) or only as
   // `origin/<branch>` (never checked out) are both legitimately resolvable at

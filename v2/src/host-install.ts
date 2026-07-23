@@ -585,7 +585,15 @@ export async function checkServiceHealth(
 ): Promise<ServiceHealthResult> {
   const daemonPort = resolveDaemonPortReadOnly();
   const webPort = readWebPort(scope);
-  const daemonInfoUrl = `http://${daemonHost}:${daemonPort}/info`;
+  // `server.host` is a *listen* address; a bind-all value (`0.0.0.0` / `::`)
+  // is not a valid *connect* target on every platform (`http://0.0.0.0:port`
+  // routes to loopback on Linux but not on macOS/Windows). Probe loopback in
+  // that case so a healthy bind-all daemon is never mis-reported as
+  // connection-refused. A concrete non-loopback bind (Tailscale/LAN IP) is
+  // still probed as configured.
+  const daemonProbeHost =
+    daemonHost === "0.0.0.0" || daemonHost === "::" ? "127.0.0.1" : daemonHost;
+  const daemonInfoUrl = `http://${daemonProbeHost}:${daemonPort}/info`;
 
   const checks: HostInstallCheck[] = [];
   let daemonReachable = false;

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -413,6 +414,32 @@ describe("satisfiesNodeEngineRange", () => {
     expect(satisfiesNodeEngineRange(range, "v22.12.0")).toBe(false);
     expect(satisfiesNodeEngineRange(range, "v26.0.0")).toBe(true);
   });
+
+  // Drift guard: `satisfiesClause` only understands `^X.Y.Z` and `>=X` (it
+  // returns false for any other operator — `~`, `<`, hyphen ranges — which
+  // would silently degrade `node-version` into a false error). Pin the real
+  // `engines.node` from this package's package.json so adding an unsupported
+  // clause form fails here, forcing `satisfiesClause` to be extended in the
+  // same change.
+  it("only uses clause forms satisfiesClause supports in the real engines.node", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { engines?: { node?: string } };
+    const range = pkg.engines?.node;
+    expect(
+      range,
+      "engines.node must be present so node-version never silently no-ops",
+    ).toBeTruthy();
+    const supported = /^\^\d+\.\d+\.\d+$|^>=\d+(?:\.\d+){0,2}$/;
+    for (const clause of range!.split("||").map((c) => c.trim())) {
+      expect(
+        clause,
+        `unsupported engines.node clause "${clause}" — extend satisfiesClause`,
+      ).toMatch(supported);
+    }
+    // And the pinned range must actually admit a version inside it.
+    expect(satisfiesNodeEngineRange(range!, "v20.19.0")).toBe(true);
+  });
 });
 
 describe("checkSpurOnPath", () => {
@@ -469,6 +496,25 @@ describe("checkServiceHealth", () => {
     await checkServiceHealth(scope, false, false, false);
     expect(probeInfoMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: "daemon", url: expect.stringContaining("/info") }),
+    );
+  });
+
+  // E1: a bind-all `server.host` (`0.0.0.0` / `::`) is a listen address, not a
+  // connect target on every platform — the probe must rewrite it to loopback
+  // so a healthy bind-all daemon is not mis-reported as connection-refused.
+  it.each(["0.0.0.0", "::"])("probes loopback when server.host is bind-all %s", async (host) => {
+    probeInfoMock.mockResolvedValue({ ok: true, version });
+    await checkServiceHealth(scope, false, false, false, host);
+    expect(probeInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ url: expect.stringContaining("http://127.0.0.1:") }),
+    );
+  });
+
+  it("probes a concrete non-loopback server.host as configured (no rewrite)", async () => {
+    probeInfoMock.mockResolvedValue({ ok: true, version });
+    await checkServiceHealth(scope, false, false, false, "100.80.107.19");
+    expect(probeInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ url: expect.stringContaining("http://100.80.107.19:") }),
     );
   });
 

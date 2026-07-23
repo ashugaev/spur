@@ -707,6 +707,48 @@ describe("checkProjectWorkspace", () => {
     );
     expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
+
+  // A git call that never settles (slow disk / heavy I/O) trips the 5s
+  // `withTimeout`. That is "could not determine", not a proven failure — it
+  // must warn, never a hard error that would exit non-zero on a healthy repo.
+  it("D2: reports warn (not error) when the git-repo check times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // isGitWorktree hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-path-is-git-repo:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      // The branch check must never run once the repo check is unresolved.
+      expect(
+        checks.find((check) => check.id === "project-default-branch-resolves:api"),
+      ).toBeUndefined();
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D3: reports warn (not error) when the branch lookup times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // branchRefsExist hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("readDoctorBranchHint", () => {

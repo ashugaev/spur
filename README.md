@@ -31,9 +31,11 @@ spur spawn <project> "Fix the flaky auth test"
 ```
 
 `spur doctor` is read-only by default: it checks host install, config validity, and daemon/web
-health without writing anything, and exits non-zero when it finds a broken (not merely
-un-initialized) host. Pass `--scaffold` to write a minimal local `spur.yaml` at the git repo root
-when none exists yet. It does not call `connect`, does not start the daemon, and does not create
+health, and exits non-zero when it finds a broken (not merely un-initialized) host. It writes no
+Spur config or state — the only filesystem writes are a transient `.spur-doctor-probe-*` file that
+the `worktreeDir`/`dataDir` writability check creates and removes immediately (present only on an
+installed host). Pass `--scaffold` to write a minimal local `spur.yaml` at the git repo root when
+none exists yet. It does not call `connect`, does not start the daemon, and does not create
 `~/.spur/config.yaml`. The first normal Spur command still auto-initializes that global instance
 config, and `spur list` / `spur spawn` auto-connect the local project config through the existing
 config path.
