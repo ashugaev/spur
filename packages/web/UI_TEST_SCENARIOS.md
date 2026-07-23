@@ -346,6 +346,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Large transcript: dialog renders only last ~300 messages; older not shown.
+- Capped transcript: the dialog header shows a subtle `showing last N of total` count hint; the hint is hidden when the full transcript fits.
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Long unbroken tokens still hard-wrap when rendered through markdown-specific elements (inline code spans, GFM-autolinked URLs)
 - Long unbroken tokens hard-wrap without widening the dialog on desktop viewports too, not just mobile

@@ -70,8 +70,9 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
-  readClaudeConversation,
+  readClaudeConversationTail,
   readClaudeJsonlState,
+  type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
@@ -1626,6 +1627,11 @@ export class SessionService {
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
+  private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Serializes conversation tail reads per session. getConversation is polled
+  // every 4s and a slow read can overlap the next poll; chaining keeps the one
+  // shared reader's offset monotonic instead of racing read-modify-write.
+  private readonly conversationReadChain = new Map<string, Promise<void>>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
@@ -3829,8 +3835,40 @@ export class SessionService {
       state: statusFallbackState(session),
     };
     if (session.agent !== "claude") return fallback;
-    const result = await readClaudeConversation(session.worktreePath);
-    return result ? { ...result, durationMs } : fallback;
+    const conversation = await this.readConversationSerialized(session);
+    return conversation ? { ...conversation, durationMs } : fallback;
+  }
+
+  /**
+   * Run one conversation tail read per session at a time. Overlapping polls
+   * would otherwise both snapshot the same cached reader and the later write
+   * would clobber the earlier, regressing the offset and double-counting.
+   * Chaining on the prior read serializes them so the offset advances
+   * monotonically.
+   */
+  private readConversationSerialized(
+    session: SessionRecord,
+  ): Promise<Omit<ConversationResponse, "durationMs"> | null> {
+    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        this.conversationReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) return null;
+      const { reader, ...conversation } = result;
+      this.conversationReaders.set(session.id, reader);
+      return conversation;
+    });
+    this.conversationReadChain.set(
+      session.id,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   async getProjectSuggestions(
@@ -6573,6 +6611,12 @@ export class SessionService {
       deleteSessionArtifactsDir(this.config.dataDir, sessionId);
     }
     removeSessionSlotTool(this.config.dataDir, sessionId);
+    // Evict per-session in-memory reader caches so they do not grow unbounded
+    // for the life of the daemon as sessions are created and discarded.
+    this.conversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+    this.claudeJsonlReaders.delete(sessionId);
+    this.cursorJsonlReaders.delete(sessionId);
   }
 
   private async applyManualStatus(
