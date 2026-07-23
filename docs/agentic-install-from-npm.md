@@ -2,6 +2,8 @@
 
 Official guide to run Spur on a fresh Linux server. The npm package ships the web UI prebuilt, so there is no on-box build. Maintainers doing source/dev deploys: see [ubuntu-vm-deploy.md](ubuntu-vm-deploy.md).
 
+Tested on Ubuntu 24.04 LTS (Noble), down to the smallest e2-micro-class VM (~1GB RAM, no swap) — the prebuilt web bundle means no on-box build is needed. Other distros and versions may work but are unverified; use them at your own risk.
+
 ## What spur init sets up
 
 `npm install -g` only unpacks the package into your npm prefix (default `~/.local`). It does not register systemd units, enable linger, start anything, or survive reboot. `spur init` installs two systemd user units:
@@ -21,7 +23,7 @@ sudo apt-get install -y nodejs
 npm config set prefix ~/.local
 export PATH="$HOME/.local/bin:$PATH"
 
-npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.22.0
+npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.24.3
 spur init
 
 # an agent CLI, authenticated ON THIS HOST (required to spawn sessions)
@@ -58,7 +60,7 @@ The web UI opens the terminal over `/ws` on the same port — no separate port o
 ## Upgrade
 
 ```bash
-npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.22.0
+npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.24.3
 spur init   # refresh units, then restart
 ```
 
