@@ -36,6 +36,7 @@ import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
+import { BG_BASE_HEX } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -87,6 +88,7 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+import { resolveActivityStatus } from "@/lib/terminal-status";
 
 function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
   const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
@@ -375,6 +377,19 @@ const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message"
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
+
+// Mirrors the glyph geometry in `src/app/icon.tsx` so the tab favicon stays on-brand.
+const STATUS_FAVICON_GLYPH_PATH =
+  "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
+
+function buildStatusFaviconHref(hex: string): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" fill="${BG_BASE_HEX}"/>` +
+    `<path d="${STATUS_FAVICON_GLYPH_PATH}" transform="translate(5 5)" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
 
 interface LogEntry {
   timestamp: string;
@@ -2077,6 +2092,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+
+  const hasSession = Boolean(session);
+  const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
+
+  useEffect(() => {
+    if (!hasSession) return undefined;
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/svg+xml";
+    document.head.appendChild(link);
+    faviconLinkRef.current = link;
+    return () => {
+      link.remove();
+      faviconLinkRef.current = null;
+    };
+  }, [hasSession]);
+
+  useEffect(() => {
+    const link = faviconLinkRef.current;
+    if (!link || displayState === undefined) return;
+    const { colorVar } = resolveActivityStatus(displayState);
+    const varName = colorVar.slice(4, -1);
+    const hex = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    link.href = buildStatusFaviconHref(hex || "#ffffff");
+  }, [displayState]);
+
   const wakeSummary = session ? getWakeSummary(session) : null;
   const wakeDueAt = wakeSummary?.dueAt;
   const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
