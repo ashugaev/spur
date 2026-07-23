@@ -352,7 +352,14 @@ export async function branchRefsExist(
   return { exists, remote };
 }
 
+async function hasOriginRemote(repoPath: string): Promise<boolean> {
+  return (await gitExitCode(repoPath, "remote", "get-url", "origin")) === 0;
+}
+
 async function fetchOrigin(repoPath: string): Promise<void> {
+  if (!(await hasOriginRemote(repoPath))) {
+    return;
+  }
   try {
     await git(repoPath, "fetch", "origin", "--quiet");
   } catch (error) {

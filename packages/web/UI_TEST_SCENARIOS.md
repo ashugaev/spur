@@ -219,6 +219,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
 - Spawn button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
+- While the submit request is in flight, the submit button shows a spinning loader icon next to the busy-state label (spawn/respawn/desk-agent modals share this footer)
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled only when project is empty
@@ -297,6 +298,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
 - Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
+- Long unbroken tokens hard-wrap in the title heading and the Task summary paragraph instead of widening the page
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -345,6 +347,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
+- Long unbroken tokens still hard-wrap when rendered through markdown-specific elements (inline code spans, GFM-autolinked URLs)
+- Long unbroken tokens hard-wrap without widening the dialog on desktop viewports too, not just mobile
+- Wide markdown images are constrained to the bubble width instead of being clipped by the dialog's overflow-x containment
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
@@ -460,6 +465,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Cmd+. toggles popup voice recording on/off
 - While recording inside the popup, the mic slot switches to cancel and shows a vertical stop button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- While a `Queue` or `Insert` send is in flight (single shared busy flag), both `Queue` and `Insert` show a spinning loader icon next to their own busy-state label (`Queueing...` / `Inserting...`) at the same time, and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves
 - Recording cancel inside the confirmation popup stops only the active recording and keeps the popup draft open; closing the popup remains the full close/reset path
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls

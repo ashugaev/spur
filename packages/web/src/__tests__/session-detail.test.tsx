@@ -1782,6 +1782,70 @@ describe("SessionDetail voice input", () => {
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });
 
+  it("hard-wraps long tokens rendered through markdown-specific elements (inline code, autolinked URL)", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+    const codeText = `code with \`${longToken}\` inline`;
+    const linkToken = `https://${longToken}.example.com`;
+    const imageAlt = "wide diagram";
+    const imageText = `![${imageAlt}](https://example.com/wide-diagram.png)`;
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages: [
+                { role: "assistant", text: codeText, timestampMs: 1 },
+                { role: "assistant", text: linkToken, timestampMs: 2 },
+                { role: "assistant", text: imageText, timestampMs: 3 },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
+    expect(dialogSection).not.toBeNull();
+
+    const dialogScrollContainer = (dialogSection as HTMLElement).querySelector(
+      ".overflow-x-hidden",
+    );
+    expect(dialogScrollContainer).not.toBeNull();
+    expect(dialogScrollContainer).toHaveClass("overflow-y-auto");
+
+    const codeElement = within(dialogSection as HTMLElement).getByText(longToken, {
+      selector: "code",
+    });
+    expect(codeElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(codeElement.closest("div")).toHaveClass("min-w-0");
+    expect(codeElement.closest("div")).toHaveClass("break-words");
+
+    const linkElement = within(dialogSection as HTMLElement).getByRole("link", {
+      name: linkToken,
+    });
+    expect(linkElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(linkElement.closest("div")).toHaveClass("min-w-0");
+    expect(linkElement.closest("div")).toHaveClass("break-words");
+
+    const imageElement = within(dialogSection as HTMLElement).getByRole("img", {
+      name: imageAlt,
+    });
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:max-w-full");
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:h-auto");
+  });
+
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
     const intervalCallbacks: Array<() => void | Promise<void>> = [];
     const setIntervalSpy = vi
@@ -4113,5 +4177,50 @@ describe("SessionDetail GitHub PR check unavailable", () => {
     });
 
     expect(completeBodies).toEqual([{}, { skipPrCheck: true }]);
+  });
+});
+
+describe("SessionDetail header wrap", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("hard-wraps a long unbroken token in the title heading and the task summary", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ title: longToken, prompt: longToken })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const heading = await screen.findByRole("heading", { name: longToken });
+    expect(heading.tagName).toBe("H1");
+    expect(heading).toHaveClass("[overflow-wrap:anywhere]");
+
+    const taskLabel = await screen.findByText("Task");
+    const taskSection = taskLabel.parentElement?.parentElement as HTMLElement;
+    const taskParagraph = within(taskSection).getByText(longToken, { selector: "p" });
+    expect(taskParagraph).toHaveClass("min-w-0");
+    expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
+    expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
   });
 });

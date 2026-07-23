@@ -507,6 +507,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Worktree creation skips the `origin` fetch and resolves branches against the local repo when the project's git repo has no `origin` remote configured, so spawn/respawn still succeeds.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/workspace.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
@@ -3546,6 +3554,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
+    "scenario": "While the submit request is in flight, the submit button shows a spinning loader icon next to the busy-state label (spawn/respawn/desk-agent modals share this footer)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/spawn-modal.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
     "scenario": "Click outside modal (backdrop) closes it",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -3869,6 +3885,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
+    "scenario": "Long unbroken tokens hard-wrap in the title heading and the Task summary paragraph instead of widening the page",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
     "scenario": "White bottom border (2px) under header",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -4153,6 +4177,30 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Long unbroken tokens still hard-wrap when rendered through markdown-specific elements (inline code spans, GFM-autolinked URLs)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Long unbroken tokens hard-wrap without widening the dialog on desktop viewports too, not just mobile",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Wide markdown images are constrained to the bubble width instead of being clipped by the dialog's overflow-x containment",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -4888,6 +4936,17 @@
     "scenario": "While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "While a `Queue` or `Insert` send is in flight (single shared busy flag), both `Queue` and `Insert` show a spinning loader icon next to their own busy-state label (`Queueing...` / `Inserting...`) at the same time, and `Cancel`/`Queue`/`Insert` are all disabled until the send resolves",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/voice-input.test.tsx",
+      "packages/web/src/__tests__/use-voice-input.test.tsx"
+    ],
     "ciJob": "quality"
   },
   {

@@ -4,9 +4,16 @@
 # POST /deploy/switch endpoint. Logs are appended to a single log file so the
 # operator can inspect them after the daemon has restarted.
 #
-# Default restart uses `systemctl --user` (user units from spur init).
-# System-wide units: set SYSTEMCTL in ~/.spur/daemon.env or the service
-# EnvironmentFile, e.g. SYSTEMCTL="sudo systemctl".
+# Default user scope (SYSTEMCTL unset or explicitly "systemctl --user")
+# converges on `spur reinit`: it reinstalls the user systemd units (fixes a
+# stale unit file left by an older npm-init.sh) preserving the live web
+# port/exposure/Tailscale bind, then restarts and health-checks the services
+# — the same path `spur update` uses. This keeps the UI/deploy-switch
+# migration path and the CLI update path on one unit-reinstall implementation.
+#
+# Non-default SYSTEMCTL (e.g. SYSTEMCTL="sudo systemctl" for system-wide
+# units) keeps the bare `systemctl restart` fallback below, since
+# npm-init.sh only supports user-scope units.
 #
 # Usage: install-and-restart.sh <version>
 # Env overrides:
@@ -27,10 +34,36 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 2
 fi
 
-echo "$(date -u +%FT%TZ) install-and-restart $VERSION"
+# Derive the npm prefix from where this script (shipped inside the package at
+# <prefix>/lib/node_modules/@shugaev/spur/scripts/) already lives, so the install
+# lands in the SAME place regardless of npm's configured/default prefix. On prod
+# the daemon's npm prefix resolves to /usr (unwritable -> EACCES); pinning the
+# derived prefix keeps the update in-place. Empty for a non-install layout
+# (repo/dev), where the bare install below is correct.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+INSTALL_PREFIX=""
+case "$SCRIPT_DIR" in
+  */lib/node_modules/$PACKAGE/scripts)
+    INSTALL_PREFIX="${SCRIPT_DIR%/lib/node_modules/$PACKAGE/scripts}"
+    ;;
+esac
+
+# Pin the npm prefix for this whole run so both the install below and the
+# `spur reinit` chain (npm-init.sh requires `npm config get prefix == ~/.local`)
+# resolve the existing install location, not the daemon env's default /usr.
+if [ -n "$INSTALL_PREFIX" ]; then
+  export npm_config_prefix="$INSTALL_PREFIX"
+fi
+
+echo "$(date -u +%FT%TZ) install-and-restart $VERSION${INSTALL_PREFIX:+ prefix=$INSTALL_PREFIX}"
 
 NPM="${NPM:-npm}"
-"$NPM" install -g "$PACKAGE@$VERSION"
+npm_install_args=(install -g)
+if [ -n "$INSTALL_PREFIX" ]; then
+  npm_install_args+=(--prefix "$INSTALL_PREFIX")
+fi
+npm_install_args+=("$PACKAGE@$VERSION")
+"$NPM" "${npm_install_args[@]}"
 install_rc=$?
 if [ "$install_rc" -ne 0 ]; then
   echo "$(date -u +%FT%TZ) install-and-restart npm install failed rc=$install_rc"
@@ -42,7 +75,27 @@ fi
 # on-host build is needed. If a prebuild is genuinely unavailable for this
 # host, web-server.ts degrades gracefully (UI stays up, /ws terminal
 # disabled) — do not gate this restart on building node-pty.
+SYSTEMCTL_RAW="${SYSTEMCTL:-}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl --user}"
+
+# Prefer the binary we just installed under the derived prefix; `npm config get
+# prefix` yields the wrong /usr on prod and would resolve a stale/absent binary.
+if [ -n "$INSTALL_PREFIX" ] && [ -x "$INSTALL_PREFIX/bin/spur" ]; then
+  spur_bin="$INSTALL_PREFIX/bin/spur"
+else
+  spur_bin="$("$NPM" config get prefix 2>/dev/null)/bin/spur"
+  if [ ! -x "$spur_bin" ]; then
+    spur_bin="$(command -v spur 2>/dev/null || true)"
+  fi
+fi
+
+if { [ -z "$SYSTEMCTL_RAW" ] || [ "$SYSTEMCTL_RAW" = "systemctl --user" ]; } && [ -n "$spur_bin" ] && [ -x "$spur_bin" ]; then
+  "$spur_bin" reinit
+  reinit_rc=$?
+  echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$reinit_rc"
+  exit "$reinit_rc"
+fi
+
 read -r -a systemctl_cmd <<<"$SYSTEMCTL"
 if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
   "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
