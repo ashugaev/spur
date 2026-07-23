@@ -379,8 +379,7 @@ const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 // Mirrors the glyph geometry in `src/app/icon.tsx` so the tab favicon stays on-brand.
-const STATUS_FAVICON_GLYPH_PATH =
-  "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
+const STATUS_FAVICON_GLYPH_PATH = "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
 
 function buildStatusFaviconHref(hex: string): string {
   const svg =
