@@ -6,7 +6,7 @@ Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (
 
 ## Requirements
 
-- Lower bar 1–2 GB RAM, 1–2 cores — daemon, web UI, and one light agent session.
+- Lower bar 2 GB RAM, 2 cores — daemon, web UI, and a few parallel agent sessions.
 - Scale by concurrent agents: each session is an agent process plus whatever it runs (dev servers, builds, test suites). Size RAM/cores to how many agents you keep working at once and how heavy their per-session environment is — Spur's own footprint is small.
 
 ## Setup
