@@ -34,8 +34,9 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 2. Implement one logical chunk.
 3. Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
 4. Tests: add or update tests for externally observable behavior in the same chunk (the spec change map lists them). Run them. Fix failures inline. Move on once green. Create test data fixtures next to the test file when a manual check needs them.
-5. Commit: `git add <files> && git commit -m "<type>(<scope>): <description>"` — `fix` for bugs/regressions, `feat` for new behavior; see `AGENTS.md` commit rules.
-6. Repeat until the spec is complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
+5. Docs: when the chunk adds or changes user-facing functionality — a command, flag, config field, source type, provider, event, or install/deploy/CLI behavior — document it in the same chunk. New surface expands the reference (`README.md` `## Commands`/`## Config`); changed behavior updates the owning doc under `docs/`. Never ship new functionality undocumented. Link, do not restate. Load the `docs-management` skill.
+6. Commit: `git add <files> && git commit -m "<type>(<scope>): <description>"` — `fix` for bugs/regressions, `feat` for new behavior; see `AGENTS.md` commit rules.
+7. Repeat until the spec is complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
 
 On review feedback: fix MUST FIX items, rerun checks, commit.
 
@@ -58,6 +59,7 @@ Files changed:
 - `packages/...` — <what>
 
 Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
+Docs: updated `<doc>` | not user-facing
 
 Commits:
 - <hash> <message>

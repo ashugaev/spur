@@ -63,6 +63,12 @@ Hunt for: incorrect architecture assumptions, missing error/loading states, brok
 - `once()` for one-time event handlers
 - `const` preferred, no `var`
 
+### Docs (high)
+- New user-facing functionality (command, flag, config field, source type, provider, event) is documented in the same change — reference expanded (`README.md` `## Commands`/`## Config`), not shipped undocumented
+- Changed install, deploy, config, or CLI behavior updates its single owning doc under `docs/`
+- No topic restated across docs where a link would do
+- No dead relative links after a rename or move; published docs reachable from `README.md` `## Docs`
+
 ### Edge cases (medium)
 - Null/undefined handled (optional chaining, type guards)
 - Error states covered

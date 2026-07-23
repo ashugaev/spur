@@ -42,6 +42,7 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 | [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                               |
 | [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                   |
 | [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                            |
+| [`docs-management`](.claude/skills/docs-management/SKILL.md)       | Task touches published docs under `docs/` or the root doc files               |
 | [`clean-install-test`](.claude/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
 
 ## Response style
@@ -77,3 +78,4 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
 - Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
+- User-facing docs are single-source. Root `README.md` is the canonical reference and hub (`## Docs` links every published doc); install and deploy how-tos live one-per-topic under `docs/`. Adding or changing user-facing functionality — a command, flag, config field, source type, provider, event, or install/deploy/CLI behavior — documents it in the same change: new surface expands the reference (`README.md` `## Commands`/`## Config`), changed behavior updates the owning doc under `docs/`. Never ship new functionality undocumented. Link, do not restate. Keep internal and planning notes gitignored, out of the published tree. Load the `docs-management` skill when editing published docs.
