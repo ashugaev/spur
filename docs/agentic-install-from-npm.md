@@ -23,7 +23,7 @@ sudo apt-get install -y nodejs
 npm config set prefix ~/.local
 export PATH="$HOME/.local/bin:$PATH"
 
-npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.24.4
+npm install -g @shugaev/spur@latest   # or pin a specific version: @shugaev/spur@<version>
 spur init
 
 # an agent CLI, authenticated ON THIS HOST (required to spawn sessions)
@@ -60,7 +60,7 @@ The web UI opens the terminal over `/ws` on the same port — no separate port o
 ## Upgrade
 
 ```bash
-npm install -g @shugaev/spur@latest   # or pin a version: @shugaev/spur@0.24.4
+npm install -g @shugaev/spur@latest   # or pin a specific version: @shugaev/spur@<version>
 spur init   # refresh units, then restart
 ```
 
