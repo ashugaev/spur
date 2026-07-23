@@ -27,4 +27,8 @@ regexes = [
   "your-api-key-here",
   "your-token-here",
   "example\\.com",
+
+  # RFC 6455 example WebSocket handshake key (base64 of "the sample nonce"),
+  # documented in clean-install-test/SKILL.md history — not a real secret.
+  "dGhlIHNhbXBsZSBub25jZQ==",
 ]
