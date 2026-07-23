@@ -645,42 +645,34 @@ describe("checkProjectWorkspace", () => {
     expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
 
-  it("D3: reports a remote-only default branch as resolvable", async () => {
+  it("D3: reports a remote-only default branch as resolvable, without touching the workspace lock or worktree prune", async () => {
     mockStatSync.mockReturnValue({ isDirectory: () => true });
     mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
-    mockGitFailure("missing local"); // branchStatus: refs/heads/main
-    mockGitSuccess(); // branchStatus: refs/remotes/origin/main
-    mockWorkspaceLockResolution(); // findWorktreePathForBranch: lock path resolution
-    mockGitSuccess(); // findWorktreePathForBranch: prune
-    mockGitSuccess(`worktree /repo/api
-HEAD 1111111
-branch refs/heads/main
-`); // findWorktreePathForBranch: worktree list
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitSuccess(); // branchRefsExist: refs/remotes/origin/main
 
     const checks = await checkProjectWorkspace(baseProjectInput);
 
     expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
       expect.objectContaining({ ok: true, severity: "error" }),
     );
+    // D3 must be lock-free and read-only: exactly the 3 calls above (no
+    // workspace-lock resolution, no `git worktree prune`, no `worktree list`).
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
-  it("D3: reports a default branch resolvable neither locally nor remotely as an error", async () => {
+  it("D3: reports a default branch resolvable neither locally nor remotely as an error, without touching the workspace lock or worktree prune", async () => {
     mockStatSync.mockReturnValue({ isDirectory: () => true });
     mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
-    mockGitFailure("missing local"); // branchStatus: refs/heads/main
-    mockGitFailure("missing remote"); // branchStatus: refs/remotes/origin/main
-    mockWorkspaceLockResolution(); // findWorktreePathForBranch: lock path resolution
-    mockGitSuccess(); // findWorktreePathForBranch: prune
-    mockGitSuccess(`worktree /repo/api
-HEAD 1111111
-branch refs/heads/main
-`); // findWorktreePathForBranch: worktree list
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitFailure("missing remote"); // branchRefsExist: refs/remotes/origin/main
 
     const checks = await checkProjectWorkspace(baseProjectInput);
 
     expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
       expect.objectContaining({ ok: false, severity: "error" }),
     );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 });
 

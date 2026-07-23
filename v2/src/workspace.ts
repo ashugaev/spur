@@ -337,6 +337,21 @@ async function refExists(repoPath: string, ref: string): Promise<boolean> {
   return (await gitExitCode(repoPath, "show-ref", "--verify", "--quiet", ref)) === 0;
 }
 
+// Lock-free counterpart to `branchStatus`'s two ref checks, deliberately
+// without `checkedOutAt` (which routes through `findWorktreePathForBranch` ->
+// `withWorkspaceGitLock` -> a real lock-file write plus `git worktree prune`
+// under `.git`). `checkProjectWorkspace` (D3) only ever needs
+// exists/remote — a read-only doctor check must never write to the repo's
+// `.git`, and must never contend with a live spawn's workspace lock.
+export async function branchRefsExist(
+  repoPath: string,
+  branch: string,
+): Promise<{ exists: boolean; remote: boolean }> {
+  const exists = await refExists(repoPath, `refs/heads/${branch}`);
+  const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
+  return { exists, remote };
+}
+
 async function fetchOrigin(repoPath: string): Promise<void> {
   try {
     await git(repoPath, "fetch", "origin", "--quiet");
@@ -513,11 +528,13 @@ export interface ProjectWorkspaceCheckInput {
 }
 
 // D1-D3: doctor's per-project path/git/branch validation, composed from the
-// already-exported `probeWorkspace`/`isGitWorktree`/`branchStatus` primitives
-// production spawn logic already relies on — no new git/fs logic here. D2/D3
-// are only attempted once the prior check in the chain passed (matching
-// `isGitWorktree`'s own internal `workspaceExists` guard), and are skipped
-// entirely when `worktree` is off (a non-worktree project never needs a git
+// already-exported `probeWorkspace`/`isGitWorktree` primitives plus the
+// lock-free `branchRefsExist` (D3 deliberately does NOT use `branchStatus`
+// production spawn logic uses — that routes through a real `.git` lock-file
+// write and `git worktree prune`, which a read-only doctor check must never
+// do). D2/D3 are only attempted once the prior check in the chain passed
+// (matching `isGitWorktree`'s own internal `workspaceExists` guard), and are
+// skipped entirely when `worktree` is off (a non-worktree project never needs a git
 // repo at `path` or a resolvable `defaultBranch`).
 export async function checkProjectWorkspace(
   input: ProjectWorkspaceCheckInput,
@@ -563,7 +580,7 @@ export async function checkProjectWorkspace(
   let status: { exists: boolean; remote: boolean };
   try {
     status = await withTimeout(
-      branchStatus(path, defaultBranch),
+      branchRefsExist(path, defaultBranch),
       PROJECT_GIT_CHECK_TIMEOUT_MS,
       `branch lookup timed out for ${path}`,
     );

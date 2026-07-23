@@ -436,7 +436,7 @@ function checkNodePtyLoads(webUnitContents: string, home: string): HostInstallCh
   }
 }
 
-async function checkDirWritable(id: string, dir: string): Promise<HostInstallCheck> {
+function checkDirWritable(id: string, dir: string): HostInstallCheck {
   if (!existsSync(dir)) {
     return {
       id,
@@ -484,7 +484,7 @@ function parseDfField(output: string | undefined, fieldIndex: number): number | 
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-async function checkDiskSpace(id: string, dir: string): Promise<HostInstallCheck> {
+function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   const kbOutput = tryExec("df", ["-Pk", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
   const iOutput = tryExec("df", ["-Pi", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
   const availKb = parseDfField(kbOutput, 3);
@@ -828,9 +828,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   // initialized host (systemd units present) makes a missing/unwritable dir
   // or a port mismatch an actual fact worth reporting.
   if (instanceConfig.status === "ok" && unitsInstalled) {
-    checks.push(await checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
-    checks.push(await checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
-    checks.push(await checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+    checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
+    checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
+    checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
 
     const actualWebPort = readWebPort(scope);
     const configuredWebPort = instanceConfig.config.ui.port;
