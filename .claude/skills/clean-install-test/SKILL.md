@@ -61,7 +61,7 @@ curl -sf -o /dev/null -w 'web %{http_code}\n'    http://127.0.0.1:4311/         
 # terminal WebSocket served in-process on /ws (no separate :14801 unit):
 curl -s -o /dev/null -w 'ws %{http_code}\n' --max-time 5 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" -H 'Sec-WebSocket-Version: 13' \
   'http://127.0.0.1:4311/ws?session=none'                                 # 101
 ss -ltn | grep 14801 || echo 'no :14801 (good)'
 command -v tailscale && tailscale version | head -1 || echo 'tailscale absent'
@@ -76,6 +76,9 @@ Only when checking the agent flow; otherwise stop and tell the user to authentic
 ```bash
 npm install -g @openai/codex
 printf '%s' "$AGENT_API_KEY" | codex login --with-api-key      # pipe the key over stdin, never echo it
+# throwaway project (a clean box has none): create + connect before spawning
+mkdir -p ~/projects/demo && (cd ~/projects/demo && git init -q && git commit -qm init --allow-empty)
+printf 'projects:\n  demo:\n    path: ~/projects/demo\n    defaultBranch: main\n    sessionPrefix: demo\n    worktree: false\n' > ~/projects/demo/spur.yaml
 spur connect ~/projects/demo/spur.yaml
 spur spawn demo --agent codex 'Reply with exactly the word PONG and nothing else.'
 ```
