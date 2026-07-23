@@ -3841,6 +3841,74 @@ describe("SessionDetail favicon", () => {
     });
   });
 
+  it("uses the tertiary color when the session is killed", async () => {
+    stubFetch({ status: "killed", state: "killed" }, "killed");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#555558"');
+    });
+  });
+
+  it("uses the attention color when the session is waiting", async () => {
+    stubFetch({ status: "running", state: "waiting" }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ffd700"');
+    });
+  });
+
+  it("uses the attention color when the session is rate_limited", async () => {
+    stubFetch({ status: "running", state: "rate_limited" }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ffd700"');
+    });
+  });
+
+  it("updates the favicon color when the session transitions from working to error", async () => {
+    let state: "running" | "errored" = "running";
+    let sessionStatus: "working" | "error" = "working";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ status: state, state: sessionStatus })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ state: "working" })), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    // Fake timers must be active before the component mounts so the polling
+    // `setInterval` it registers is one we can advance deterministically.
+    vi.useFakeTimers();
+    try {
+      render(<SessionDetail sessionId="api-a1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(faviconMarkup()).toContain('stroke="#58a6ff"');
+
+      state = "errored";
+      sessionStatus = "error";
+      // Matches SessionDetail's internal POLL_INTERVAL_MS for the session refetch.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(faviconMarkup()).toContain('stroke="#ff4d4d"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("removes the favicon link on unmount", async () => {
     stubFetch({ status: "running", state: "working" }, "working");
     const { unmount } = render(<SessionDetail sessionId="api-a1" />);

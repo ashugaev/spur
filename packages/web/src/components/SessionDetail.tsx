@@ -36,7 +36,7 @@ import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
-import { BG_BASE_HEX } from "@/design/colors";
+import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -378,14 +378,16 @@ const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-pro
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
-// Mirrors the glyph geometry in `src/app/icon.tsx` so the tab favicon stays on-brand.
-const STATUS_FAVICON_GLYPH_PATH = "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
-
+// Reuses the shared `SPARK_GLYPH_PATH`, scaled and centered the same way as
+// `src/app/icon.tsx` (22px glyph, 5px margin, in a 32x32 tile) so the tab
+// favicon is pixel-identical to the static app icon apart from stroke color.
 function buildStatusFaviconHref(hex: string): string {
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
     `<rect width="32" height="32" fill="${BG_BASE_HEX}"/>` +
-    `<path d="${STATUS_FAVICON_GLYPH_PATH}" transform="translate(5 5)" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `<svg x="5" y="5" width="22" height="22" viewBox="0 0 24 24">` +
+    `<path d="${SPARK_GLYPH_PATH}" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `</svg>` +
     `</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
