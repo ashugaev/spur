@@ -228,7 +228,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   return request;
 }
 
-function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -240,10 +240,11 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
+    ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
   };
 }
 
-function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -255,6 +256,9 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   const prAction = parseOpenPrAction(raw["prAction"]);
   if (prAction) {
     request.prAction = prAction;
+  }
+  if (raw["skipPrCheck"] === true) {
+    request.skipPrCheck = true;
   }
   return request;
 }
@@ -703,12 +707,17 @@ export async function startServer(
 
       if (method === "POST" && path === "/projects") {
         const body = await readJsonBody<CreateProjectRequest>(request);
-        for (const field of ["displayName", "prefix", "path"] as const) {
+        for (const field of ["displayName", "prefix"] as const) {
           const value = body[field];
           if (typeof value !== "string" || !value.trim()) {
             sendError(response, 400, `${field} must be a non-empty string`);
             return;
           }
+        }
+        const rawPath = body.path;
+        if (rawPath !== undefined && (typeof rawPath !== "string" || !rawPath.trim())) {
+          sendError(response, 400, "path must be a non-empty string when provided");
+          return;
         }
         try {
           const result = service.createUnconfiguredProject(body);
@@ -1068,6 +1077,12 @@ export async function startServer(
       const cancelWakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/)?.[1];
       if (method === "POST" && cancelWakeSessionId) {
         sendJson(response, 200, await service.cancelWake(cancelWakeSessionId));
+        return;
+      }
+
+      const openedSessionId = path.match(/^\/sessions\/([^/]+)\/opened$/)?.[1];
+      if (method === "POST" && openedSessionId) {
+        sendJson(response, 200, await service.markOpened(decodeURIComponent(openedSessionId)));
         return;
       }
 

@@ -1515,6 +1515,37 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("passes --draft=true when the source config opts into draft polling", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce("[]");
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+        draft: true,
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    expect(searchCall).toBeDefined();
+    const argv = (searchCall ?? []).map(String);
+    expect(argv).toContain("--draft=true");
+    expect(argv).not.toContain("--draft=false");
+
+    handle.stop();
+  });
+
   it("splits a multi-qualifier query with a quoted label into separate gh args", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);

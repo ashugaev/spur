@@ -332,9 +332,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText(/^Message to the running agent\.\.\./),
-      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
@@ -749,12 +747,10 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(
-        screen.getByPlaceholderText(/^Message to the running agent\.\.\./),
-      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByPlaceholderText(/^Message to the running agent\.\.\./), {
+    fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
       target: { value: "Save this follow-up" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
@@ -870,10 +866,10 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(respawnButton);
     expect(screen.getByDisplayValue("Fix auth")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Edit the initial message..."), {
+    fireEvent.change(screen.getByPlaceholderText("Initial message..."), {
       target: { value: "Re-run with screenshot" },
     });
-    fireEvent.paste(screen.getByPlaceholderText("Edit the initial message..."), {
+    fireEvent.paste(screen.getByPlaceholderText("Initial message..."), {
       clipboardData: {
         files: [new File(["png"], "edited.png", { type: "image/png" })],
       },
@@ -1070,7 +1066,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    fireEvent.change(screen.getByPlaceholderText(/^Edit the initial message\.\.\./), {
+    fireEvent.change(screen.getByPlaceholderText(/^Initial message\.\.\./), {
       target: { value: "Retry with new plan" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
@@ -1786,6 +1782,70 @@ describe("SessionDetail voice input", () => {
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });
 
+  it("hard-wraps long tokens rendered through markdown-specific elements (inline code, autolinked URL)", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+    const codeText = `code with \`${longToken}\` inline`;
+    const linkToken = `https://${longToken}.example.com`;
+    const imageAlt = "wide diagram";
+    const imageText = `![${imageAlt}](https://example.com/wide-diagram.png)`;
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages: [
+                { role: "assistant", text: codeText, timestampMs: 1 },
+                { role: "assistant", text: linkToken, timestampMs: 2 },
+                { role: "assistant", text: imageText, timestampMs: 3 },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
+    expect(dialogSection).not.toBeNull();
+
+    const dialogScrollContainer = (dialogSection as HTMLElement).querySelector(
+      ".overflow-x-hidden",
+    );
+    expect(dialogScrollContainer).not.toBeNull();
+    expect(dialogScrollContainer).toHaveClass("overflow-y-auto");
+
+    const codeElement = within(dialogSection as HTMLElement).getByText(longToken, {
+      selector: "code",
+    });
+    expect(codeElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(codeElement.closest("div")).toHaveClass("min-w-0");
+    expect(codeElement.closest("div")).toHaveClass("break-words");
+
+    const linkElement = within(dialogSection as HTMLElement).getByRole("link", {
+      name: linkToken,
+    });
+    expect(linkElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
+    expect(linkElement.closest("div")).toHaveClass("min-w-0");
+    expect(linkElement.closest("div")).toHaveClass("break-words");
+
+    const imageElement = within(dialogSection as HTMLElement).getByRole("img", {
+      name: imageAlt,
+    });
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:max-w-full");
+    expect(imageElement.closest("div")).toHaveClass("[&_img]:h-auto");
+  });
+
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
     const intervalCallbacks: Array<() => void | Promise<void>> = [];
     const setIntervalSpy = vi
@@ -1935,7 +1995,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
     fireEvent.change(textarea, { target: { value: "Queued follow up" } });
     fireEvent.click(screen.getByRole("button", { name: "Queue" }));
 
@@ -1947,7 +2007,7 @@ describe("SessionDetail voice input", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("");
     });
   });
 
@@ -1968,7 +2028,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
     fireEvent.change(textarea, { target: { value: "Draft to clear" } });
     fireEvent.click(screen.getByRole("button", { name: "Clear message" }));
 
@@ -1993,7 +2053,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    await screen.findByPlaceholderText(/^Message\.\.\./);
     expect(screen.getByRole("button", { name: /^send now$/i })).toHaveTextContent("⌘ + ⏎");
     expect(screen.getByRole("button", { name: /^queue$/i })).not.toHaveTextContent("⌘ + ⏎");
     expect(screen.queryByText("⌘/Ctrl + Enter")).not.toBeInTheDocument();
@@ -2019,7 +2079,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
     fireEvent.change(textarea, { target: { value: "Immediate hotkey send" } });
     fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
 
@@ -2059,9 +2119,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(
-      "Message to the running agent... Voice ⌘ + .",
-    );
+    const textarea = await screen.findByPlaceholderText("Message... Voice ⌘ + .");
 
     fireEvent.keyDown(textarea, { key: ".", metaKey: true });
     await waitFor(() => {
@@ -2096,14 +2154,12 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
     fireEvent.change(textarea, { target: { value: "First line" } });
     fireEvent.keyDown(textarea, { key: "Enter" });
 
     expect(sendCalls).toBe(0);
-    expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue(
-      "First line",
-    );
+    expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("First line");
   });
 
   it("sends immediately without queue when clicking Send now", async () => {
@@ -2126,7 +2182,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
     fireEvent.change(textarea, { target: { value: "Send immediately" } });
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
 
@@ -2142,7 +2198,7 @@ describe("SessionDetail voice input", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("");
     });
   });
 
@@ -2216,9 +2272,7 @@ describe("SessionDetail voice input", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /queued messages/i })).toBeInTheDocument();
     });
-    expect(
-      screen.getByText(/queued messages will send automatically when the agent is ready/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/queued messages will send automatically/i)).toBeInTheDocument();
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   });
 
@@ -2335,8 +2389,7 @@ describe("SessionDetail logs", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
 
-    expect(await screen.findByText("Status transition")).toBeInTheDocument();
-    expect(screen.getByText("waiting")).toBeInTheDocument();
+    expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.getByText("needs input")).toBeInTheDocument();
     expect(screen.getByText("source jsonl")).toBeInTheDocument();
     expect(screen.getByText("User input")).toBeInTheDocument();
@@ -2423,7 +2476,7 @@ describe("SessionDetail logs", () => {
     fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
     fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
 
-    expect(await screen.findByText("Status transition")).toBeInTheDocument();
+    expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
       "href",
       "/api/sessions/api-a1/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
@@ -2508,7 +2561,7 @@ describe("SessionDetail logs", () => {
     fireEvent.click(screen.getByRole("button", { name: "Attached (1)" }));
     fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
 
-    expect(await screen.findByText("Status transition")).toBeInTheDocument();
+    expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /history snapshot/i })).not.toBeInTheDocument();
   });
 });
@@ -4052,7 +4105,7 @@ describe("SessionDetail links", () => {
 
     await waitFor(() => {
       expect(killed).toBe(true);
-      expect(screen.getByPlaceholderText("Edit the initial message...")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Initial message...")).toBeInTheDocument();
     });
   });
 });
@@ -4124,5 +4177,50 @@ describe("SessionDetail GitHub PR check unavailable", () => {
     });
 
     expect(completeBodies).toEqual([{}, { skipPrCheck: true }]);
+  });
+});
+
+describe("SessionDetail header wrap", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("hard-wraps a long unbroken token in the title heading and the task summary", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ title: longToken, prompt: longToken })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const heading = await screen.findByRole("heading", { name: longToken });
+    expect(heading.tagName).toBe("H1");
+    expect(heading).toHaveClass("[overflow-wrap:anywhere]");
+
+    const taskLabel = await screen.findByText("Task");
+    const taskSection = taskLabel.parentElement?.parentElement as HTMLElement;
+    const taskParagraph = within(taskSection).getByText(longToken, { selector: "p" });
+    expect(taskParagraph).toHaveClass("min-w-0");
+    expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
+    expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
   });
 });

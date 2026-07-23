@@ -95,7 +95,7 @@ async function fillSpawnForm(
   }
 
   if (prompt !== undefined) {
-    await page.getByPlaceholder("Prompt for the new session...").fill(prompt);
+    await page.getByPlaceholder("Prompt...").fill(prompt);
   }
 }
 
@@ -321,7 +321,7 @@ test.describe("D1: Header renders correctly", () => {
 
     await page.goto("/");
 
-    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByPlaceholder("Filter... Voice ⌘ + .")).toBeVisible();
     await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
   });
 
@@ -585,7 +585,7 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await page.getByRole("button", { name: /needs input/i }).click();
 
-    await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
+    await expect(page.getByText("No matching sessions.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
 
     await page.getByRole("button", { name: "Reset Filters" }).click();
@@ -602,6 +602,7 @@ test.describe("D3: Session rows render with correct columns", () => {
     await page.goto("/");
     const link = page.getByRole("link", { name: "Row test session" });
     await expect(link).toBeVisible();
+    await expect(link).toHaveCSS("opacity", "1");
     const href = await link.getAttribute("href");
     expect(href).toContain("row-test-1");
   });
@@ -731,6 +732,24 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel).toHaveCount(0);
     await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
     await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
+  });
+
+  test("attention row text dims when terminal opens", async ({ page }) => {
+    const session = makeNeedsInputSession({
+      id: "unopened-needs-input-1",
+      prompt: "Needs input for review",
+      hasUnseenAttention: true,
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const titleLink = page.getByRole("link", { name: "Needs input for review" });
+    await expect(titleLink).toHaveCSS("opacity", "1");
+    await page
+      .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })
+      .click();
+
+    await expect(titleLink).toHaveCSS("opacity", "0.7");
   });
 });
 
@@ -1464,6 +1483,61 @@ test.describe("D6a: Backlog zone", () => {
 
     await expect(page.getByText("Backlog")).toHaveCount(0);
   });
+
+  test("disables only the taken row, leaving neighbors clickable", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    // Hold the take request open so the pending state stays observable.
+    let releaseTake: (() => void) | null = null;
+    const takeGate = new Promise<void>((resolve) => {
+      releaseTake = resolve;
+    });
+    await page.route("/api/backlog/take", async (route) => {
+      await takeGate;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          item: { projectId: "my-project", backlogId: "features", externalId: "10001" },
+          session: makeWorkingSession(),
+        }),
+      });
+    });
+
+    await page.goto("/");
+
+    const takeButtons = page.getByRole("button", { name: "Take task" });
+    await expect(takeButtons).toHaveCount(2);
+
+    await takeButtons.first().click();
+
+    // Only the clicked row disables; the neighbor stays clickable.
+    await expect(takeButtons.first()).toBeDisabled();
+    await expect(takeButtons.nth(1)).toBeEnabled();
+
+    releaseTake?.();
+  });
 });
 
 // D6b: Footer
@@ -1736,6 +1810,10 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(trigger).toBeVisible();
     await expect(versionMenu).toBeVisible();
 
+    // Trigger renders an accounts icon (not the old plain-text label).
+    await expect(trigger.locator("svg")).toBeVisible();
+    await expect(trigger.getByText("Claude accounts", { exact: true })).toHaveCount(0);
+
     // Trigger sits in the same right-aligned footer group as the version menu.
     const rightGroup = footer.locator("div.ml-auto");
     await expect(rightGroup.getByRole("button", { name: "Manage Claude accounts" })).toBeVisible();
@@ -1743,10 +1821,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       rightGroup.getByRole("button", { name: "Show Spur version information" }),
     ).toBeVisible();
 
-    // Count reflects only authenticated accounts (1 of 2) once the list loads.
+    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
     await trigger.click();
     await expect(page.getByText("1 ready")).toBeVisible();
-    await expect(trigger).toContainText("1");
   });
 
   test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
@@ -1769,9 +1846,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     await page.getByRole("button", { name: "Manage Claude accounts" }).click();
 
-    // Labelled account renders its label with the "ready" badge and a Remove action.
+    // Labelled account renders its label with the "ready" badge, a disabled Use
+    // action, and a Remove action.
     const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
     await expect(labelledRow).toContainText("ready");
+    await expect(labelledRow.getByTestId("use-account-acc-labelled-01")).toBeDisabled();
     await expect(
       labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
     ).toBeVisible();
@@ -1779,6 +1858,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
     const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
     await expect(shortIdRow).toContainText("not logged in");
+    await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
     await expect(
       shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
     ).toBeVisible();
@@ -1876,7 +1956,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
   test("touch tap outside tooltip closes it", async ({ page }) => {
     await page.getByRole("button", { name: "Show aggregated system status" }).tap();
     await expect(page.getByText("System")).toBeVisible();
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
   });
 
@@ -1895,7 +1975,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("GitHub")).toBeVisible();
     await expect(page.getByText(/Last request:/)).toBeVisible();
 
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("GitHub")).not.toBeVisible();
   });
 
@@ -1914,7 +1994,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("GitLab")).toBeVisible();
     await expect(page.getByText(/Last request:/)).toBeVisible();
 
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("GitLab")).not.toBeVisible();
   });
 });
@@ -2001,9 +2081,7 @@ test.describe("D7: Spawn modal", () => {
 
     await expect(page.getByText("2026-04-17 12:34 UTC")).toBeVisible();
     await page.getByRole("button", { name: /re-run the flaky deploy/i }).click();
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
-      "Re-run the flaky deploy",
-    );
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Re-run the flaky deploy");
   });
 
   test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
@@ -2061,7 +2139,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByText("Commands")).toBeVisible();
     await page.getByRole("menuitem", { name: /\/compact/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("/compact");
   });
 
   test("Spawn button disabled when project field is empty", async ({ page }) => {
@@ -2138,7 +2216,7 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
-    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    const textarea = page.getByPlaceholder("Prompt...");
     await textarea.fill("Prompt to clear");
     await page.getByRole("button", { name: "Clear spawn prompt" }).click();
 
@@ -2216,7 +2294,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toBeVisible();
   });
 
   test("spawn ack failure keeps modal open and preserves prompt", async ({ page }) => {
@@ -2276,7 +2354,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
-    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    const textarea = page.getByPlaceholder("Prompt...");
     await textarea.fill("Prompt with image");
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
@@ -2431,7 +2509,7 @@ test.describe("D7d: Branch name normalization", () => {
 
     await fillSpawnForm(page, { project: "my-project", prompt: "Spawn without branch" });
     await page.getByLabel("branch name").fill("!!!");
-    await page.getByPlaceholder("Prompt for the new session...").click();
+    await page.getByPlaceholder("Prompt...").click();
     await expect(page.getByLabel("branch name")).toHaveValue("");
 
     const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
@@ -2450,7 +2528,7 @@ test.describe("D7d: Branch name normalization", () => {
 
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     await page.getByLabel("branch name").fill("feature/X Y Z");
-    await page.getByPlaceholder("Prompt for the new session...").click();
+    await page.getByPlaceholder("Prompt...").click();
 
     await expect(page.getByLabel("branch name")).toHaveValue("feature/x-y-z");
   });
@@ -2651,7 +2729,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ]);
 
     await page.getByRole("button", { name: /spawn session/i }).click();
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("");
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
@@ -2968,7 +3046,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
 
     const spawnButton = page.getByRole("button", { name: /^spawn$/i });
-    const promptField = page.getByPlaceholder("Prompt for the new session...");
+    const promptField = page.getByPlaceholder("Prompt...");
 
     await spawnButton.click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -3003,7 +3081,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     });
 
     await page.goto("/");
-    await expect(page.getByText("Loading sessions...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Loading...")).not.toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
 
     // Delay any subsequent /api/sessions call so that, if the dashboard were to
@@ -3017,9 +3095,9 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await page.getByRole("link", { name: session.prompt }).first().click();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
-    await page.getByRole("link", { name: /back/i }).click();
+    await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
-    await expect(page.getByText("Loading sessions...")).toHaveCount(0);
+    await expect(page.getByText("Loading...")).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });

@@ -9,5 +9,6 @@ describe("collectHostInstallChecks", () => {
     expect(ids).toContain("systemd-units");
     expect(ids).toContain("linger");
     expect(checks.find((check) => check.id === "systemd-units")?.ok).toBe(false);
+    expect(ids).not.toContain("spur-direct-terminal");
   });
 });

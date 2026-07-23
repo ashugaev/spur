@@ -1,3 +1,6 @@
+# Base dir for projects created without an explicit path. Unset falls back to <dataDir>/projects.
+projectsRoot: ~/projects
+
 projects:
   sp:
     path: ~/projects/spur
@@ -24,10 +27,6 @@ projects:
     codexArgs:
       - -c
       - 'model_reasoning_effort="high"'
-      - -c
-      - 'service_tier="fast"'
-      - --enable
-      - fast_mode
     preflight: {}
     sidecars:
       isolated-daemon:

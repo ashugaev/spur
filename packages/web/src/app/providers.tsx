@@ -3,6 +3,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { VersionSwitchOverlay } from "@/components/VersionSwitchOverlay";
+import { useSuppressIOSAutoZoom } from "@/hooks/useSuppressIOSAutoZoom";
+import { ThemeProvider } from "@/lib/theme-context";
 import { useVersionSwitch, VersionSwitchProvider } from "@/lib/version-switch-context";
 
 // Marks the background app tree `inert` while the blocking overlay is shown,
@@ -18,6 +20,7 @@ function AppContent({ children }: { children: ReactNode }) {
 }
 
 export default function Providers({ children }: { children: ReactNode }) {
+  useSuppressIOSAutoZoom();
   const [client] = useState(
     () =>
       new QueryClient({
@@ -32,11 +35,13 @@ export default function Providers({ children }: { children: ReactNode }) {
       }),
   );
   return (
-    <QueryClientProvider client={client}>
-      <VersionSwitchProvider>
-        <AppContent>{children}</AppContent>
-        <VersionSwitchOverlay />
-      </VersionSwitchProvider>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={client}>
+        <VersionSwitchProvider>
+          <AppContent>{children}</AppContent>
+          <VersionSwitchOverlay />
+        </VersionSwitchProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }

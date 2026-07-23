@@ -38,7 +38,11 @@ import {
   sweepLeakedPlaywright,
   waitForPlaywrightReady,
 } from "./agents/playwright-mcp.js";
-import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import {
+  deleteAgentHookState,
+  readAgentHookState,
+  type AgentHookStateRecord,
+} from "./agent-hook-state.js";
 import {
   assertBranchNameMatches,
   matchesBranchNaming,
@@ -60,6 +64,7 @@ import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -319,6 +324,20 @@ const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+// Codex turns that hang after their tool calls complete (model inference dies between/after tools)
+// pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
+// signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
+// incrementally within a single response, so a hung inference produces no new records at all. tmux
+// activity is rejected as a corroborating signal because codex's TUI repaints a per-second
+// "Working (… • esc to interrupt)" timer, advancing #{session_activity} every second even while the
+// turn is genuinely hung — it would mask exactly this bug. Pending tool calls are excluded (a long
+// exec_command is legitimately silent), so this threshold only needs to exceed the longest plausible
+// single model inference between tool batches (large context + high reasoning, observed ~tens of
+// seconds). A false flip is low-cost but not free: the working->waiting edge lets a queued
+// interrupt:false message be typed in after a further idle gate, so we set the threshold well above
+// any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
+// still clearing an indefinite-"working" hang.
+const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 const RESTORE_WARMUP_MS = 30_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
@@ -340,6 +359,11 @@ const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
+// with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
+// showing the corrected needs_input state between live pane scans instead of
+// reverting to rate_limited every cycle.
+const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -609,6 +633,22 @@ function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
   }
 }
 
+function hasUnseenAttention(
+  session: Pick<SessionRecord, "lastOpenedAt">,
+  state: SessionState,
+  lastActivityAt: string,
+): boolean {
+  if (state !== "needs_input") {
+    return false;
+  }
+  if (!session.lastOpenedAt) {
+    return true;
+  }
+  const openedMs = Date.parse(session.lastOpenedAt);
+  const attentionMs = Date.parse(lastActivityAt);
+  return Number.isFinite(openedMs) && Number.isFinite(attentionMs) && openedMs < attentionMs;
+}
+
 function stateTransitionArtifactId(
   at: string,
   fromState: SessionState,
@@ -806,6 +846,16 @@ function shouldUseCodexRolloutState(
     return sameTurn || rolloutNewerThanHook;
   }
   return !hookState || sameTurn || hookState.state === "needs_input";
+}
+
+function codexToolExecuting(hookState: AgentHookStateRecord | null): boolean {
+  // A dangling/pending rollout function_call alone is NOT proof a tool is running:
+  // the rollout records the call line before the tool returns, and a turn can stall
+  // there indefinitely. The deterministic "tool currently running" signal is the
+  // PreToolUse hook, which codex registers and which stays PreToolUse until the tool
+  // returns (PostToolUse). This protects genuine long-running exec_commands while
+  // letting a stale dangling function_call under a non-PreToolUse hook age out.
+  return hookState?.hookEvent === "PreToolUse";
 }
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
@@ -1554,6 +1604,11 @@ export class SessionService {
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
+  // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
+  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
+  // scanPane:false dashboard tick apply the same needs_input demotion without
+  // forking a capture-pane (the tick's whole reason for existing).
+  private readonly codexMcpDialogOverrides = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -2115,22 +2170,12 @@ export class SessionService {
   createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
     const displayName = request.displayName.trim();
     const prefix = request.prefix.trim();
-    const rawPath = request.path.trim();
-    if (!displayName || !rawPath) {
-      throw new Error("displayName and path must be non-empty strings");
+    const rawPath = request.path?.trim() ?? "";
+    if (!displayName) {
+      throw new Error("displayName must be a non-empty string");
     }
     if (!PROJECT_ID_PATTERN.test(prefix)) {
       throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
-    }
-    const absolutePath = resolvePath(expandHome(rawPath));
-    if (!existsSync(absolutePath)) {
-      if (request.createMissing === true) {
-        mkdirSync(absolutePath, { recursive: true });
-      } else {
-        throw new Error(`path does not exist: ${absolutePath}`);
-      }
-    } else if (!statSync(absolutePath).isDirectory()) {
-      throw new Error(`path is not a directory: ${absolutePath}`);
     }
 
     const existingUnconfigured = this.listUnconfiguredProjects();
@@ -2153,6 +2198,26 @@ export class SessionService {
     while (usedIds.has(candidateId)) {
       candidateId = `${baseId}-${suffix}`;
       suffix += 1;
+    }
+
+    let absolutePath: string;
+    if (rawPath) {
+      absolutePath = resolvePath(expandHome(rawPath));
+      if (!existsSync(absolutePath)) {
+        if (request.createMissing === true) {
+          mkdirSync(absolutePath, { recursive: true });
+        } else {
+          throw new Error(`path does not exist: ${absolutePath}`);
+        }
+      } else if (!statSync(absolutePath).isDirectory()) {
+        throw new Error(`path is not a directory: ${absolutePath}`);
+      }
+    } else {
+      absolutePath = join(this.config.projectsRoot, candidateId);
+      if (existsSync(absolutePath)) {
+        throw new Error(`derived project folder already exists: ${absolutePath}`);
+      }
+      mkdirSync(absolutePath, { recursive: true });
     }
 
     addUnconfiguredProject(this.config.dataDir, {
@@ -2332,11 +2397,12 @@ export class SessionService {
   }
 
   private sessionAgentConfig(
-    session: Pick<SessionRecord, "agent" | "id">,
+    session: Pick<SessionRecord, "agent" | "id" | "restrictWrites">,
   ): ReturnType<typeof agentSessionConfig> {
     return agentSessionConfig(session.agent, {
       dataDir: this.config.dataDir,
       sessionId: session.id,
+      restrictWrites: resolveRestrictWrites(session),
     });
   }
 
@@ -2434,6 +2500,12 @@ export class SessionService {
       this.lastObservedRunStates.clear();
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
+      }
+      const liveIds = new Set(sessions.map((session) => session.id));
+      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+        if (!liveIds.has(sessionId)) {
+          this.codexMcpDialogOverrides.delete(sessionId);
+        }
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -3561,7 +3633,7 @@ export class SessionService {
         items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, backlogId));
       }
     }
-    return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+    return items;
   }
 
   async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
@@ -3711,6 +3783,28 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
     }
     return { record };
+  }
+
+  async markOpened(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+
+    await this.enrich(session);
+    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    const lastOpenedAt = nowIso();
+    const updated: SessionRecord = { ...latest, lastOpenedAt };
+    writeSession(this.config.dataDir, updated);
+    await this.refreshDashboardCacheEntry(updated);
+    this.logEvent("session.opened", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Marked ${sessionId} opened`,
+      details: { lastOpenedAt },
+    });
+    return this.enrich(updated);
   }
 
   getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
@@ -4455,6 +4549,7 @@ export class SessionService {
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
         id: sessionId,
+        restrictWrites,
       });
       const planOptions = withAgentModeOptions(
         withProjectAgentOptions(project, {
@@ -4777,7 +4872,28 @@ export class SessionService {
         });
         continue;
       }
-      const classified = await this.classifySessionRecord(member);
+      // Desk siblings reuse the dashboard-cache tick's last-completed
+      // classification instead of re-running a full classify per sibling per
+      // viewer — that N× re-classify was a major fork-storm contributor.
+      // That cached value is usually <=DASHBOARD_CACHE_INTERVAL_MS old, but
+      // not guaranteed under tick overlap (a slow tick can leave a slightly
+      // older value in place until the next one completes). A sibling
+      // missing from the cache (freshly created, or evicted) is rare, so it
+      // gets a live classify instead of a stale/derived guess: scanPane:false
+      // still skips the capture-pane fork, but jsonl/hook sources already
+      // surface needs_input/rate_limited/error, so this stays cheap.
+      const cached = this.dashboardCache.get(member.id);
+      if (cached) {
+        members.push({
+          id: member.id,
+          agent: member.agent,
+          status: member.status,
+          state: cached.state,
+          runtimeAlive: cached.runtimeAlive,
+        });
+        continue;
+      }
+      const classified = await this.classifySessionRecord(member, { scanPane: false });
       members.push({
         id: classified.session.id,
         agent: classified.session.agent,
@@ -6118,6 +6234,12 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    // "leave_open" never touches GitHub, so skip the gh calls entirely. This keeps
+    // session teardown working even when gh is unreachable (auth, rate limit, network).
+    if (action === "leave_open") {
+      return session;
+    }
+
     if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
       return session;
     }
@@ -6148,8 +6270,19 @@ export class SessionService {
         });
       }
 
-      if (action === "close") {
+      // action is "close" here (leave_open returned early, undefined threw above).
+      // A failed PR close must not strand the session — warn and continue teardown.
+      try {
         await closeSessionPr(session.worktreePath, binding);
+      } catch (error) {
+        this.logEvent("session.pr.close.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Failed to close pull request #${binding.number} for ${session.id}; continuing teardown: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
       }
       if (updatedSession) {
         writeSession(this.config.dataDir, updatedSession);
@@ -6862,10 +6995,15 @@ export class SessionService {
         undefined,
         { agent: session.agent },
       );
+      // fresh:true: this session's tmux pane was just created by
+      // createTmuxSession above and may postdate the last fleet-pane
+      // snapshot, which would otherwise wrongly see it as absent and abort a
+      // genuinely successful recovery.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
@@ -6911,10 +7049,13 @@ export class SessionService {
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
+      // fresh:true — same rationale as the resume-plan check above: this
+      // pane was just (re)created and may postdate the last fleet snapshot.
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
           agentProcessMatchers(session.agent, freshLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -7123,10 +7264,13 @@ export class SessionService {
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });
+      // fresh:true — this pane was just created by createTmuxSession above
+      // and may postdate the last fleet-pane snapshot.
       if (
         !(await isProcessRunningInTmux(
           current.tmuxSession,
           agentProcessMatchers(current.agent, restoreLaunchCommand),
+          { fresh: true },
         ))
       ) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
@@ -8035,9 +8179,15 @@ export class SessionService {
       }
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
+    // fresh:true forces an independent re-sample here — otherwise this retry
+    // would just re-read the same ~2s-TTL cached result as the first check
+    // above, making a single transient glitch look like two agreeing reads
+    // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
-    if (await tmuxSessionExists(session.tmuxSession)) {
-      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)));
+    if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+        fresh: true,
+      }));
     }
     return true;
   }
@@ -8131,6 +8281,17 @@ export class SessionService {
       source = "jsonl";
     }
 
+    if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
+      const lastActivityMs = Math.max(
+        rolloutState.timestampMs,
+        hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      );
+      if (Date.now() - lastActivityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
+        state = "waiting";
+        source = "codex_stale";
+      }
+    }
+
     return {
       state,
       source,
@@ -8140,15 +8301,25 @@ export class SessionService {
     };
   }
 
+  // `fresh` busts the fleet caches before each read so the whole snapshot is
+  // a genuinely independent re-sample, not a replay of whatever the last
+  // ~2s tick saw. Needed by reconcileUnexpectedStop's confirmation re-read —
+  // without it, a transient tmux blip cached on the first check would just
+  // be read again 1s later, agreeing with itself and marking a live session
+  // stopped.
   private async readRuntimeSnapshot(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession)) : false;
+    const fresh = options?.fresh ?? false;
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession, { fresh });
+    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession, { fresh })) : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
-        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+            fresh,
+          })
         : false;
     return {
       runtimeAlive,
@@ -8388,7 +8559,11 @@ export class SessionService {
         return { session, runtime };
       }
       await sleep(PIPELINE_POLL_INTERVAL_MS);
-      confirmedRuntime = await this.readRuntimeSnapshot(session);
+      // fresh:true — an independent re-sample, not a replay of the same
+      // ~2s-TTL cached snapshot the first check above just read. Otherwise a
+      // single transient tmux/list-sessions blip would agree with itself on
+      // both reads and mark a genuinely live session stopped.
+      confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
         confirmedRuntime.runtimeAlive &&
         confirmedRuntime.paneUsable &&
@@ -8562,7 +8737,11 @@ export class SessionService {
     return updated;
   }
 
-  private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
+  private async classifySessionRecord(
+    session: SessionRecord,
+    options?: { scanPane?: boolean },
+  ): Promise<SessionStateResult> {
+    const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
       this.isInRestoreWarmup(session.id)
@@ -8671,7 +8850,19 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
-        if (stateSource === "jsonl" && codexState.rolloutState) {
+        if (stateSource === "codex_stale" && codexState.rolloutState) {
+          historySourcePath = codexState.rolloutState.filePath;
+          const lastActivityMs = Math.max(
+            codexState.rolloutState.timestampMs,
+            codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: ${state} (codex stale, idle=${Date.now() - lastActivityMs}ms)`,
+          });
+        } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
@@ -8728,7 +8919,12 @@ export class SessionService {
       // didn't confirm a limit. For Claude, the interactive-menu check always runs
       // regardless, since the menu can show up even after jsonl already confirmed
       // the limit — that's the common case the Enter-confirm needs to catch.
-      if (strategy === "claude_jsonl") {
+      // The 2s dashboard-cache tick opts out (scanPane:false): capture-pane is the
+      // last per-session fork left in this path, and jsonl/hook sources already
+      // cover rate-limit detection for the dashboard. The 5s attention monitor and
+      // on-demand enrich of the viewed session keep scanning (through the cached
+      // captureTmuxPane, so it's still O(1) forks per session per TTL window).
+      if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const menuHit = detectClaudeUsageLimitMenu(paneText);
         if (!rateLimit?.limited) {
@@ -8740,7 +8936,45 @@ export class SessionService {
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
         }
-      } else if (!rateLimit?.limited) {
+      } else if (scanPane && strategy === "hook") {
+        // Codex-specific: a hard rate-limit banner always wins. Otherwise, a
+        // soft has_credits:false rollout signal can be a false positive when
+        // the session is actually parked on a live MCP tool-permission dialog
+        // (hook-independent — this can show up under any hookEvent, including
+        // PostToolUse) rather than genuinely rate limited.
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const hardHit = scanTmuxRateLimit(paneText);
+        if (hardHit?.limited) {
+          rateLimit = hardHit;
+          this.codexMcpDialogOverrides.delete(session.id);
+        } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
+          state = "needs_input";
+          rateLimit = null;
+          this.codexMcpDialogOverrides.set(
+            session.id,
+            Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: needs_input (codex MCP permission dialog, overrides soft rate limit)",
+          });
+        } else {
+          this.codexMcpDialogOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "hook" && rateLimit?.limited) {
+        // The scanPane:false dashboard tick can't afford its own capture-pane
+        // fork (see enrichDashboard), but it can still reuse the last live
+        // pane-scan's dialog confirmation while it's fresh, so the dashboard
+        // doesn't keep showing rate_limited for a session the 5s attention
+        // monitor already knows is parked on a live MCP permission dialog.
+        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
+        if (expiresAt !== undefined && expiresAt > Date.now()) {
+          state = "needs_input";
+          rateLimit = null;
+        }
+      } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
@@ -8769,7 +9003,11 @@ export class SessionService {
   }
 
   private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
-    const classified = await this.classifySessionRecord(session);
+    // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
+    // last un-batched fork): jsonl/hook-sourced rate limits still show up
+    // immediately, and the 5s attention monitor (full enrich) plus on-demand
+    // viewed-session enrich still run the tmux-banner/usage-menu scan.
+    const classified = await this.classifySessionRecord(session, { scanPane: false });
     session = classified.session;
     const {
       queuedMessages: _queuedMessages,
@@ -8804,6 +9042,7 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
+      hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
@@ -8870,6 +9109,7 @@ export class SessionService {
       workspaceExists: workspacePresent,
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
+      hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
       artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,

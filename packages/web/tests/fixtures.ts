@@ -211,6 +211,25 @@ export async function mockSessions(
     });
   });
 
+  await page.route(/\/api\/sessions\/([^/]+)\/opened$/, (route) => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2) ?? "");
+    const currentSessions = typeof sessions === "function" ? sessions() : sessions;
+    const openedSession = currentSessions.find((session) => session.id === id);
+    void route.fulfill({
+      status: openedSession ? 200 : 404,
+      contentType: "application/json",
+      body: JSON.stringify(
+        openedSession
+          ? {
+              ...openedSession,
+              hasUnseenAttention: false,
+              lastOpenedAt: new Date().toISOString(),
+            }
+          : { error: "Session not found" },
+      ),
+    });
+  });
+
   await page.route("/api/runtime/resources", (route) => {
     void route.fulfill({
       status: 200,
@@ -274,9 +293,9 @@ export async function gotoMocked(
 ): Promise<void> {
   await mockSessions(page, sessions, projects);
   await page.goto(path);
-  // Wait for the loading state to clear — the dashboard replaces "Loading
-  // sessions..." with actual content once the first mocked fetch resolves.
-  await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+  // Wait for the loading state to clear — the dashboard replaces "Loading..."
+  // with actual content once the first mocked fetch resolves.
+  await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
     timeout: 8000,
   });
 }

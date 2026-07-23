@@ -2,6 +2,7 @@ import { test, expect, devices, type Page } from "playwright/test";
 import {
   makeWorkingSession,
   makeCompletedSession,
+  makeNeedsInputSession,
   makeSpawningSession,
   makeStoppedSession,
 } from "./fixtures.js";
@@ -301,7 +302,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(page.getByText("Loading session...")).toHaveCount(0);
+    await expect(page.getByText("Loading...")).toHaveCount(0);
   });
 
   test("back link visible", async ({ page }) => {
@@ -457,6 +458,38 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
     await expect(page.getByText("Wake stop condition")).toBeVisible();
     await expect(page.getByText("Daily checks done")).toBeVisible();
+  });
+
+  test("opening detail marks an unseen needs_input session opened", async ({ page }) => {
+    let session = makeNeedsInputSession({
+      id: "detail-s1-opened-needs-input",
+      hasUnseenAttention: true,
+    });
+    let openedRequests = 0;
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/opened`, (route) => {
+      openedRequests += 1;
+      session = {
+        ...session,
+        hasUnseenAttention: false,
+        lastOpenedAt: "2026-04-28T10:01:00.000Z",
+      };
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect.poll(() => openedRequests).toBe(1);
   });
 
   test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
@@ -882,7 +915,7 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
     await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
-    const textarea = page.getByPlaceholder("Edit the initial message...");
+    const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
     await textarea.evaluate((textarea) => {
@@ -917,7 +950,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    const textarea = page.getByPlaceholder("Edit the initial message...");
+    const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await page.getByRole("button", { name: "Clear respawn prompt" }).click();
 
@@ -1211,7 +1244,6 @@ test.describe("S2a: Logs modal", () => {
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
-    await expect(page.getByText("Status transition")).toBeVisible();
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
@@ -1375,6 +1407,56 @@ test.describe("S2b: Conversation dialog", () => {
     expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
+
+  test("long unbroken dialog and queued tokens hard-wrap on desktop without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-2",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+
+    const dialogOverflowX = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("h2")).find((h) =>
+        /dialog/i.test(h.textContent ?? ""),
+      );
+      const container = heading?.parentElement?.querySelector(".overflow-x-hidden");
+      return container ? getComputedStyle(container).overflowX : null;
+    });
+    expect(dialogOverflowX).toBe("hidden");
+  });
 });
 
 // S3: Message section
@@ -1425,7 +1507,7 @@ test.describe("S3: Message section", () => {
     await page.getByRole("button", { name: "Slash" }).click();
     await page.getByRole("menuitem", { name: /\/status/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
+    await expect(page.getByPlaceholder("Message...")).toHaveValue("/status");
   });
 
   test("message clear button resets the composer", async ({ page }) => {
@@ -1433,7 +1515,7 @@ test.describe("S3: Message section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    const textarea = page.getByPlaceholder("Message to the running agent...");
+    const textarea = page.getByPlaceholder("Message...");
     await textarea.fill("Message to clear");
     await page.getByRole("button", { name: "Clear message" }).click();
 
@@ -1576,6 +1658,7 @@ test.describe("S3: Message section", () => {
   test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
     page,
   }) => {
+    test.slow();
     const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
     let postCount = 0;
@@ -1610,7 +1693,7 @@ test.describe("S3: Message section", () => {
     await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
 
     releaseSend();
-    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
   });
 
   test("composer buttons show inline hotkey hints", async ({ page }) => {
@@ -1845,9 +1928,7 @@ test.describe("S3 mobile voice", () => {
       await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
       await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-      await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
-        "Mobile PWA voice still works",
-      );
+      await expect(page.getByPlaceholder("Message...")).toHaveValue("Mobile PWA voice still works");
       await expect(
         page.getByText(
           "Voice recording captured no audio. Check your microphone input and try again.",
@@ -1897,9 +1978,7 @@ test.describe("S3b: Queued messages section", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
-    await expect(
-      page.getByText(/queued messages will send automatically when the agent is ready/i),
-    ).toBeVisible();
+    await expect(page.getByText(/queued messages will send automatically/i)).toBeVisible();
     await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
   });
 });

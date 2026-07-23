@@ -156,6 +156,40 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it("reads waiting when a trailing user message follows task_complete (intelas-e8f8 bug shape)", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: { type: "token_count" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.327Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "019f0d77-0a2a-77a0-ac7c-d71c20ef3b76",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:04:49.801Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text" }] },
+        }),
+      ].join("\n"),
+      "rollout-trailing-message.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019f0d77-0a2a-77a0-ac7c-d71c20ef3b76",
+    });
+  });
+
   it("reads waiting from a real interrupted turn_aborted tail", async () => {
     const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-interrupted.jsonl");

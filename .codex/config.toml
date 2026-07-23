@@ -14,6 +14,10 @@ config_file = "agents/architect.toml"
 description = "Evaluate researcher's implementation options. Verify claims, challenge assumptions, score each, select the best. Use after researcher, before architect."
 config_file = "agents/critic.toml"
 
+[agents.curator]
+description = "Maintain the task's append-only structured memory and refresh the compact handoff between gates. Use on longer multi-cycle Tier 2/3 tasks. Appends facts and reflection; never re-summarizes."
+config_file = "agents/curator.toml"
+
 [agents.designer]
 description = "UI review gate. Verify layout, visual consistency, and UI states for frontend changes. Use after UI implementation. Skip backend-only changes."
 config_file = "agents/designer.toml"

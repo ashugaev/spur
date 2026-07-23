@@ -60,7 +60,7 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
-import { runUpdate, runUpdateMonitor } from "./update.js";
+import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import {
@@ -1612,11 +1612,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
     .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
+        tailscale: Boolean(options.tailscale),
       });
     });
 
@@ -1637,6 +1639,15 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Internal post-update health monitor and rollback executor.")
     .action(async () => {
       await runUpdateMonitor(cliEntrypoint);
+    });
+
+  program
+    .command("reinit", { hidden: true })
+    .description(
+      "Reinstall user systemd units preserving the live web port/exposure/Tailscale bind, then restart and health-check.",
+    )
+    .action(() => {
+      reinitUnits(cliEntrypoint);
     });
 
   program

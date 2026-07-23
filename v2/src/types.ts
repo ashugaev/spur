@@ -24,7 +24,7 @@ export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
 
-export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
+export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -160,6 +160,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
+  position: number;
 }
 
 export interface TakeBacklogItemRequest {
@@ -214,6 +215,8 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   intervalMs: number;
   emitExisting: boolean;
   query?: string;
+  // Applies only to the query-based work-item poll: restricts results to draft PRs; default (unset) excludes drafts.
+  draft?: boolean;
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
@@ -507,6 +510,7 @@ export interface AppConfig {
   };
   dataDir: string;
   worktreeDir: string;
+  projectsRoot: string;
   defaultAgent: AgentName;
   tmux: {
     socketName: string;
@@ -646,6 +650,7 @@ export interface SessionRecord {
   stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
   selfDestruct?: SelfDestructConfig;
@@ -698,6 +703,7 @@ export interface SessionView extends SessionRecord {
   workspaceExists: boolean;
   state: SessionState;
   stateHistory?: SessionStateTransition[];
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
@@ -712,6 +718,7 @@ export interface DashboardSessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
@@ -918,7 +925,7 @@ export interface ProjectListEntry {
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 

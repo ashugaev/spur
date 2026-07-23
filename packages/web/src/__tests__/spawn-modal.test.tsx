@@ -159,6 +159,13 @@ describe("SpawnModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a spinner and busy label on the submit button while submitting", () => {
+    renderModal(deskMode, { submitting: true, submitDisabled: true });
+    const submitButton = screen.getByRole("button", { name: "Going..." });
+    expect(submitButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(submitButton).toBeDisabled();
+  });
+
   it("panel is full-screen on small mobile with tall prompt textarea", () => {
     renderModal(spawnMode, {
       promptAriaLabel: "Prompt input",

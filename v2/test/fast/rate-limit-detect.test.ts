@@ -8,6 +8,7 @@ import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeRateLimit,
   detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   detectCodexRateLimit,
   detectCursorRateLimit,
   scanTmuxRateLimit,
@@ -31,6 +32,16 @@ const CODEX_HEALTHY = {
   primary: { used_percent: 61, window_minutes: 300 },
   secondary: { used_percent: 12, window_minutes: 10080 },
   credits: { has_credits: true, unlimited: false, balance: null },
+  plan_type: "team",
+  rate_limit_reached_type: null,
+};
+// Real ass-22bf false-positive payload: a team/window-metered account reports
+// has_credits:false as a benign soft signal alongside a live 0%-used window.
+const CODEX_TEAM_SOFT_CREDITS = {
+  limit_id: "codex",
+  primary: { used_percent: 0.0, window_minutes: 10080 },
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: null },
   plan_type: "team",
   rate_limit_reached_type: null,
 };
@@ -105,6 +116,36 @@ describe("detectCodexRateLimit", () => {
 
   it("returns not-limited when usable data shows headroom", () => {
     expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when a live usage window is present (team/enterprise soft signal)", () => {
+    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: null,
+        secondary: { used_percent: 3, window_minutes: 10080 },
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: false, reason: "" });
+  });
+
+  it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: { used_percent: 100, window_minutes: 300 },
+        secondary: null,
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
   });
 
   it("returns null when no usable rate_limits data is present", () => {
@@ -354,6 +395,54 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
       false,
     );
+  });
+});
+
+describe("detectCodexMcpPermissionDialog", () => {
+  // Real captured render (session-artifacts/shp-a4bc, intelas-f45c): codex mid
+  // tool call, hit the interactive MCP permission gate for playwright.
+  const DIALOG_TEXT = [
+    "  Field 1/1",
+    '  Allow the playwright MCP server to run tool "browser_navigate"?',
+    "",
+    "  url: https://github.com/intelas/intelas-web/pull/3905/files",
+    "",
+    "  › 1. Allow                   Run the tool and continue.",
+    "    2. Allow for this session  Run the tool and remember this choice for this session.",
+    "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+    "    4. Cancel                  Cancel this tool call",
+    "  enter to submit | esc to cancel",
+  ].join("\n");
+
+  it("returns true for the real captured MCP permission dialog render", () => {
+    expect(detectCodexMcpPermissionDialog(DIALOG_TEXT)).toBe(true);
+  });
+
+  it("returns false for prose that merely mentions similar wording", () => {
+    const paneText = [
+      "I noticed you could allow the mcp server later if needed.",
+      "For now let's keep working on the diff.",
+    ].join("\n");
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false once the dialog has scrolled out of the pane's recent tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `  line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${DIALOG_TEXT}\n${subsequentOutput}`;
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
   });
 });
 

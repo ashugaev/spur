@@ -73,6 +73,7 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -187,6 +188,7 @@ describe("Spur web API routes", () => {
           title: "Fix checkout",
           url: "https://jira.example.com/browse/WEB-17",
           fetchedAt: "2026-06-16T12:00:00.000Z",
+          position: 0,
         },
       ]);
 
@@ -535,6 +537,7 @@ describe("Spur web API routes", () => {
     });
 
     const routes = [
+      [markOpened, "opened"],
       [pauseSession, "pause"],
       [completeSession, "complete"],
       [killSession, "kill"],
@@ -549,6 +552,10 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
     }
 
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/opened",
+      expect.objectContaining({ method: "POST" }),
+    );
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/api-a1/pause",
       expect.objectContaining({ method: "POST" }),

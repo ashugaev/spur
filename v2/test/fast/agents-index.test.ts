@@ -138,9 +138,11 @@ describe("setupAgentHooks", () => {
     });
     const [path, contents] = writeFileMock.mock.calls[0] ?? [];
     expect(path).toBe("/tmp/spur-data/session-tools/api-1/mcp-config.json");
+    // Client-facing URL must use "localhost", not the bare IP: @playwright/mcp's
+    // DNS-rebinding protection rejects "127.0.0.1:<port>" with HTTP 403.
     expect(JSON.parse(contents as string)).toEqual({
       mcpServers: {
-        playwright: { type: "http", url: "http://127.0.0.1:8742/mcp" },
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
       },
     });
   });
@@ -181,10 +183,10 @@ describe("setupAgentHooks", () => {
 });
 
 describe("buildAgentLaunchPlan", () => {
-  it("omits --force for cursor when restrictWrites is enabled", () => {
+  it("keeps --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent --model 'auto'");
-    expect(plan.launchCommand).not.toContain("--force");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
+    expect(plan.launchCommand).toContain("--force");
     expect(plan.launchCommand).not.toContain("--plan");
   });
 });

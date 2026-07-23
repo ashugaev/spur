@@ -401,6 +401,94 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("dims attention text after the session has been opened", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    const { rerender } = render(
+      <SessionRow
+        session={makeSession({ hasUnseenAttention: true })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).not.toHaveClass("opacity-70");
+
+    rerender(
+      <SessionRow
+        session={makeSession({ hasUnseenAttention: false })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(titleLink).toHaveClass("opacity-70");
+  });
+
+  it("does not dim row text for non-needs_input states even when unseen", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    for (const state of ["working", "waiting", "stopped", "error"] as const) {
+      const { unmount } = render(
+        <SessionRow
+          session={makeSession({ state, hasUnseenAttention: false })}
+          onCompleteSession={onCompleteSession}
+          onRestoreSession={onRestoreSession}
+        />,
+      );
+
+      const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+      expect(titleLink).not.toHaveClass("opacity-70");
+      expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]");
+      unmount();
+    }
+  });
+
+  it("keeps a needs_input row bright when the viewed marker is absent", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).not.toHaveClass("opacity-70");
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",

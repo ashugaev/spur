@@ -153,12 +153,12 @@ function StatItem({
 function BacklogZone({
   items,
   projectNameMap,
-  takingKey,
+  takingKeys,
   onTake,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
-  takingKey: string | null;
+  takingKeys: ReadonlySet<string>;
   onTake: (item: AvailableBacklogItem) => Promise<void>;
 }) {
   if (items.length === 0) return null;
@@ -192,11 +192,11 @@ function BacklogZone({
             </span>
             <RowIconButton
               activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              disabled={takingKey !== null}
+              disabled={takingKeys.has(itemKey)}
               label="Take task"
               onClick={() => void onTake(item)}
             >
-              <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
+              <span className={takingKeys.has(itemKey) ? "animate-pulse" : undefined}>
                 <IconTake />
               </span>
             </RowIconButton>
@@ -659,12 +659,12 @@ function NewProjectModal({
           />
         </label>
         <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Project path</span>
+          <span className="text-[var(--color-text-secondary)]">Project path (optional)</span>
           <input
             aria-label="Project path"
             className={INPUT_CLASS}
             onChange={(event) => onPathChange(event.target.value)}
-            placeholder="/absolute/path/to/repo"
+            placeholder="/absolute/path/to/repo (optional)"
             value={path}
           />
         </label>
@@ -842,9 +842,7 @@ function EditProjectModal({
             role="alert"
           >
             <span>
-              {project.configured
-                ? `Disconnect ${project.name}? Spur will stop tracking its spur.yaml.`
-                : `Delete ${project.name}?`}
+              {project.configured ? `Disconnect ${project.name}?` : `Delete ${project.name}?`}
             </span>
             <div className="flex flex-wrap gap-2">
               <button
@@ -939,7 +937,7 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
+  const [takingBacklogKeys, setTakingBacklogKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -1053,7 +1051,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions"] as const;
+  const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const {
     data,
     isPending,
@@ -1241,9 +1239,9 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
   const emptyStateMessage = hasActiveFilters
-    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    ? `No matching sessions${projectId ? ` in ${activeProjectName}` : ""}.`
     : grouped.done.length > 0
-      ? "No current sessions are visible."
+      ? "No active sessions."
       : undefined;
 
   const configuredProjectOptions = useMemo(
@@ -1333,6 +1331,27 @@ export function Dashboard() {
     );
     setLocationSearch(window.location.search);
   };
+
+  const markSessionOpened = useCallback(
+    async (sessionId: string) => {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`opened ${response.status}`);
+      const openedSession = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) =>
+            session.id === openedSession.id ? openedSession : session,
+          ),
+        };
+      });
+    },
+    [queryClient, sessionsQueryKey],
+  );
 
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
@@ -1473,8 +1492,8 @@ export function Dashboard() {
 
   const handleTakeBacklog = async (item: AvailableBacklogItem) => {
     const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
-    if (takingBacklogKey) return;
-    setTakingBacklogKey(itemKey);
+    if (takingBacklogKeys.has(itemKey)) return;
+    setTakingBacklogKeys((prev) => new Set(prev).add(itemKey));
     try {
       const response = await fetch("/api/backlog/take", {
         method: "POST",
@@ -1510,7 +1529,11 @@ export function Dashboard() {
     } catch (takeError) {
       showErrorToast(errorMessage(takeError, "Failed to take backlog item"));
     } finally {
-      setTakingBacklogKey(null);
+      setTakingBacklogKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(itemKey);
+        return next;
+      });
     }
   };
 
@@ -1557,17 +1580,13 @@ export function Dashboard() {
       setNewProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
       return;
     }
-    if (!path) {
-      setNewProjectError("Path is required");
-      return;
-    }
     setNewProjectSubmitting(true);
     setNewProjectError(null);
     if (createMissing) setNewProjectMissingPath(null);
     try {
-      const body: CreateProjectRequest = createMissing
-        ? { displayName, prefix, path, createMissing: true }
-        : { displayName, prefix, path };
+      const body: CreateProjectRequest = { displayName, prefix };
+      if (path) body.path = path;
+      if (createMissing) body.createMissing = true;
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1899,6 +1918,11 @@ export function Dashboard() {
   }, [allSessions, requestedTerminalSessionId]);
 
   useEffect(() => {
+    if (!terminalSession) return;
+    void markSessionOpened(terminalSession.id).catch(() => {});
+  }, [markSessionOpened, terminalSession?.id]);
+
+  useEffect(() => {
     if (
       loading ||
       !requestedTerminalSessionId ||
@@ -2062,7 +2086,7 @@ export function Dashboard() {
                       searchVoice.toggleRecording();
                     }
                   }}
-                  placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+                  placeholder={voicePlaceholder("Filter...", searchVoice)}
                   ref={searchInputRef}
                   value={searchQuery}
                 />
@@ -2274,9 +2298,9 @@ export function Dashboard() {
             }
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
-            promptAriaLabel="Prompt for the new session..."
+            promptAriaLabel="Prompt..."
             promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
-            promptPlaceholder="Prompt for the new session..."
+            promptPlaceholder="Prompt..."
             promptRef={spawnPromptRef}
             showCancel={false}
             slashEndpoint={
@@ -2294,7 +2318,7 @@ export function Dashboard() {
         ) : null}
 
         {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
         ) : null}
 
         {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
@@ -2325,7 +2349,7 @@ export function Dashboard() {
               <BacklogZone
                 items={visibleBacklog}
                 projectNameMap={projectNameMap}
-                takingKey={takingBacklogKey}
+                takingKeys={takingBacklogKeys}
                 onTake={handleTakeBacklog}
               />
             ) : null}
