@@ -199,7 +199,9 @@ export async function probeInfoWith(
     const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     if (!response.ok) return { ok: false, reason: "http-error" };
     const body: unknown = await response.json();
-    return isVersionBody(body) ? { ok: true, version: body.version } : { ok: false, reason: "unknown" };
+    return isVersionBody(body)
+      ? { ok: true, version: body.version }
+      : { ok: false, reason: "unknown" };
   } catch (error) {
     return { ok: false, reason: classifyTransportError(error) };
   }
