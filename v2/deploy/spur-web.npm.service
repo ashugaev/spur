@@ -21,7 +21,6 @@ Environment=PORT=4311
 Environment=WEB_HOST=127.0.0.1
 Environment=NODE_ENV=production
 EnvironmentFile=-%h/.spur/daemon.env
-ExecStartPre=/usr/bin/bash -c 'PTY=%h/.local/lib/node_modules/@shugaev/spur/web/node_modules/node-pty; test -f "$PTY/build/Release/pty.node" || (cd "$PTY" && npm run install)'
 ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/dist-server/web-server.js
 Restart=always
 RestartSec=3

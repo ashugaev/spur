@@ -35,6 +35,16 @@ const CODEX_HEALTHY = {
   plan_type: "team",
   rate_limit_reached_type: null,
 };
+// Real ass-22bf false-positive payload: a team/window-metered account reports
+// has_credits:false as a benign soft signal alongside a live 0%-used window.
+const CODEX_TEAM_SOFT_CREDITS = {
+  limit_id: "codex",
+  primary: { used_percent: 0.0, window_minutes: 10080 },
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: null },
+  plan_type: "team",
+  rate_limit_reached_type: null,
+};
 
 // Real claude synthetic rate-limit transcript record.
 const CLAUDE_RATE_LIMIT_LINE = JSON.stringify({
@@ -106,6 +116,36 @@ describe("detectCodexRateLimit", () => {
 
   it("returns not-limited when usable data shows headroom", () => {
     expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when a live usage window is present (team/enterprise soft signal)", () => {
+    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: null,
+        secondary: { used_percent: 3, window_minutes: 10080 },
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: false, reason: "" });
+  });
+
+  it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: { used_percent: 100, window_minutes: 300 },
+        secondary: null,
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
   });
 
   it("returns null when no usable rate_limits data is present", () => {

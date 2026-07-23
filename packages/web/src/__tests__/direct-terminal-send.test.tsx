@@ -43,6 +43,7 @@ const mockTerminal = {
     registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
     registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
   },
+  options: {},
 };
 
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
