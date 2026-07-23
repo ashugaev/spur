@@ -13,9 +13,9 @@ export const DEFAULT_DAEMON_PORT = 4_310;
 
 export type ServiceId = "daemon" | "web";
 
-export type ProbeResult =
-  | { ok: true }
-  | { ok: false; reason: "connection-refused" | "http-error" | "timeout" | "unknown" };
+export type ProbeReason = "connection-refused" | "http-error" | "timeout" | "unknown";
+
+export type ProbeResult = { ok: true } | { ok: false; reason: ProbeReason };
 
 export type UnitState = "active" | "activating" | "failed" | "inactive" | "unknown";
 
@@ -139,24 +139,29 @@ function errorCode(error: unknown): string | undefined {
 
 export type FetchLike = (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean }>;
 
-// Real probe seam: an HTTP GET with a hard timeout. A refused connection maps
-// to `connection-refused` so the decision machine can count it toward the
-// hard-failure threshold; an abort maps to `timeout`; any 5xx/4xx to
-// `http-error`.
+// Shared transport-error classifier for both `probeWith` and `probeInfoWith`:
+// a refused connection maps to `connection-refused` so the decision machine
+// can count it toward the hard-failure threshold; an abort maps to `timeout`;
+// any other/unknown transport error stays in a neutral bucket that resets the
+// healthy streak but must not feed the connection-refused rollback signal.
+function classifyTransportError(error: unknown): ProbeReason {
+  const code = errorCode(error);
+  if (code === "ECONNREFUSED") return "connection-refused";
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return "timeout";
+  }
+  if (code === "ETIMEDOUT") return "timeout";
+  return "unknown";
+}
+
+// Real probe seam: an HTTP GET with a hard timeout. Any 5xx/4xx maps to
+// `http-error`; transport failures are classified by `classifyTransportError`.
 export async function probeWith(fetchLike: FetchLike, target: ProbeTarget): Promise<ProbeResult> {
   try {
     const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     return response.ok ? { ok: true } : { ok: false, reason: "http-error" };
   } catch (error) {
-    const code = errorCode(error);
-    if (code === "ECONNREFUSED") return { ok: false, reason: "connection-refused" };
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      return { ok: false, reason: "timeout" };
-    }
-    if (code === "ETIMEDOUT") return { ok: false, reason: "timeout" };
-    // Any other/unknown transport error stays in a neutral bucket: it resets the
-    // healthy streak but must not feed the connection-refused rollback signal.
-    return { ok: false, reason: "unknown" };
+    return { ok: false, reason: classifyTransportError(error) };
   }
 }
 
@@ -179,27 +184,30 @@ function isVersionBody(value: unknown): value is { version: string } {
   );
 }
 
+export type ProbeInfoResult = { ok: true; version: string } | { ok: false; reason: ProbeReason };
+
 // F8 version-drift probe: fetches a target's JSON body (daemon `/info`) with
-// the same hard timeout as `probeWith`. Any transport/parse failure resolves
-// to `undefined` rather than throwing, so a doctor version-drift check can
-// stay silent instead of false-flagging on a slow or malformed response.
+// the same hard timeout as `probeWith`, and the same discriminated
+// `ok`/`reason` shape — so a caller (`checkServiceHealth`) can tell a
+// definitive failure (`connection-refused`) apart from a bare `timeout`
+// (may just be slow/under load) without a second round trip.
 export async function probeInfoWith(
   fetchLike: JsonFetchLike,
   target: ProbeTarget,
-): Promise<{ version: string } | undefined> {
+): Promise<ProbeInfoResult> {
   try {
     const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    if (!response.ok) return undefined;
+    if (!response.ok) return { ok: false, reason: "http-error" };
     const body: unknown = await response.json();
-    return isVersionBody(body) ? { version: body.version } : undefined;
-  } catch {
-    return undefined;
+    return isVersionBody(body) ? { ok: true, version: body.version } : { ok: false, reason: "unknown" };
+  } catch (error) {
+    return { ok: false, reason: classifyTransportError(error) };
   }
 }
 
 const realJsonFetch: JsonFetchLike = (url, init) => fetch(url, init);
 
-export function probeInfo(target: ProbeTarget): Promise<{ version: string } | undefined> {
+export function probeInfo(target: ProbeTarget): Promise<ProbeInfoResult> {
   return probeInfoWith(realJsonFetch, target);
 }
 

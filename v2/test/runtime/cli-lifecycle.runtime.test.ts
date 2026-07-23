@@ -790,7 +790,14 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       stdout = execError.stdout ?? "";
     }
 
-    const doctor = JSON.parse(stdout) as DoctorResult;
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${stdout}`, {
+        cause: error,
+      });
+    }
     expect(doctor.configPath).toBeUndefined();
     expect(doctor.existingProjectConfigPath).toBeUndefined();
     expect(existsSync(join(context.repoDir, "spur.yaml"))).toBe(false);

@@ -30,9 +30,13 @@ afterEach(async () => {
 
 // Regression guard for the doctor read-only invariant: `spur doctor` must
 // never bootstrap `~/.spur/config.yaml` (or any pinned instance config) on a
-// host that has never run any Spur command before. Swapping
-// `resolveDaemonPortReadOnly` for `resolveDaemonPort` in `host-install.ts`
-// must turn this test red — verified manually while implementing this fix.
+// host that has never run any Spur command before. This file never imports
+// `host-install.ts`, so it cannot catch a regression there — the real guard
+// for that invariant is the runtime test "doctor --json without --scaffold
+// never creates spur.yaml or the global/pinned instance config on a
+// never-initialized host" in `cli-lifecycle.runtime.test.ts`. This describe
+// block only pins `resolveDaemonPortReadOnly`/`resolveDaemonPort`'s own
+// bootstrap-vs-no-bootstrap behavior in isolation.
 describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)", () => {
   it("resolveDaemonPortReadOnly never creates the pinned instance config, and falls back to the default port", async () => {
     const dir = await createTempDir("spur-daemon-port-readonly-");
@@ -197,36 +201,36 @@ describe("probeInfoWith", () => {
       ok: true,
       json: async () => ({ version: "1.2.3" }),
     });
-    expect(await probeInfoWith(fetchLike, target)).toEqual({ version: "1.2.3" });
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ ok: true, version: "1.2.3" });
   });
 
-  it("returns undefined for a non-2xx response", async () => {
+  it("reports http-error for a non-2xx response", async () => {
     const fetchLike: JsonFetchLike = async () => ({
       ok: false,
       json: async () => ({ version: "1.2.3" }),
     });
-    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ ok: false, reason: "http-error" });
   });
 
-  it("returns undefined when the body is missing a string version field", async () => {
+  it("reports the neutral unknown reason when the body is missing a string version field", async () => {
     const fetchLike: JsonFetchLike = async () => ({ ok: true, json: async () => ({}) });
-    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ ok: false, reason: "unknown" });
   });
 
-  it("returns undefined when the body fails to parse as JSON", async () => {
+  it("reports the neutral unknown reason when the body fails to parse as JSON", async () => {
     const fetchLike: JsonFetchLike = async () => ({
       ok: true,
       json: () => Promise.reject(new SyntaxError("Unexpected token")),
     });
-    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ ok: false, reason: "unknown" });
   });
 
-  it("returns undefined on a timeout/abort", async () => {
+  it("reports timeout on a timeout/abort", async () => {
     const fetchLike: JsonFetchLike = () => {
       const error = new Error("The operation was aborted");
       error.name = "TimeoutError";
       return Promise.reject(error);
     };
-    expect(await probeInfoWith(fetchLike, target)).toBeUndefined();
+    expect(await probeInfoWith(fetchLike, target)).toEqual({ ok: false, reason: "timeout" });
   });
 });

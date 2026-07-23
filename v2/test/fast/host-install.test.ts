@@ -63,6 +63,11 @@ interface ExecState {
   systemctlAvailable: boolean;
   daemonActiveState: string;
   webActiveState: string;
+  // MainPID systemd reports for each unit ("0" when systemd has no tracked
+  // process for it, matching `systemctl show -p MainPID --value` on an
+  // inactive unit).
+  daemonMainPid: string;
+  webMainPid: string;
 }
 
 let execState: ExecState;
@@ -75,6 +80,8 @@ beforeEach(() => {
     systemctlAvailable: false,
     daemonActiveState: "inactive",
     webActiveState: "inactive",
+    daemonMainPid: "0",
+    webMainPid: "0",
   };
   execFileSyncMock.mockReset();
   execFileSyncMock.mockImplementation((file: string, args: string[]) => {
@@ -99,6 +106,13 @@ beforeEach(() => {
         if (unit === "spur-web.service") return execState.webActiveState;
         return "inactive";
       }
+      const showIndex = args.indexOf("show");
+      if (showIndex !== -1 && args.includes("MainPID")) {
+        const unit = args[showIndex + 1];
+        if (unit === "spur-daemon.service") return execState.daemonMainPid;
+        if (unit === "spur-web.service") return execState.webMainPid;
+        return "0";
+      }
       return "";
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -110,7 +124,7 @@ beforeEach(() => {
   probeMock.mockReset();
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
   probeInfoMock.mockReset();
-  probeInfoMock.mockResolvedValue(undefined);
+  probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
   isHostPortFreeMock.mockReset();
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
@@ -188,7 +202,7 @@ describe("collectHostInstallChecks", () => {
     // systemd-derived severity, independent of `checkServiceHealth`'s own
     // active-but-unreachable/port-conflict branches.
     probeMock.mockResolvedValue({ ok: true });
-    probeInfoMock.mockResolvedValue({ version });
+    probeInfoMock.mockResolvedValue({ ok: true, version });
 
     const checks = await collectHostInstallChecks(fakeHome);
 
@@ -228,7 +242,7 @@ describe("collectHostInstallChecks", () => {
     // Both unreachable, both ports free: the only fact here is "not active",
     // and `spur-daemon`/`spur-web` already own that fact — at error severity.
     probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
-    probeInfoMock.mockResolvedValue(undefined);
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     isHostPortFreeMock.mockResolvedValue(true);
 
     const checks = await collectHostInstallChecks(fakeHome);
@@ -331,15 +345,15 @@ describe("checkServiceHealth", () => {
   };
 
   it("probes the daemon's /info endpoint for liveness, not /sessions (F6 must not hit the heavy view=full path)", async () => {
-    probeInfoMock.mockResolvedValue({ version });
+    probeInfoMock.mockResolvedValue({ ok: true, version });
     await checkServiceHealth(scope, false, false, false);
     expect(probeInfoMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: "daemon", url: expect.stringContaining("/info") }),
     );
   });
 
-  it("reports error severity when the service is active but the HTTP probe is unreachable", async () => {
-    probeInfoMock.mockResolvedValue(undefined);
+  it("reports error severity when the service is active but the probe is definitively refused", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     const result = await checkServiceHealth(scope, true, true, false);
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
@@ -353,8 +367,23 @@ describe("checkServiceHealth", () => {
     expect(result.daemonReachable).toBe(false);
   });
 
+  // MUST FIX 2: a bare timeout on an active unit does not by itself mean the
+  // service is broken (measured at 3.5-6.7s on a loaded production host) — it
+  // must warn, not error, and must never fail the exit code.
+  it("reports warn severity (not error) when an active service's probe merely times out", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "timeout" });
+    probeMock.mockResolvedValue({ ok: false, reason: "timeout" });
+    const result = await checkServiceHealth(scope, true, true, false);
+    const daemon = result.checks.find((check) => check.id === "daemon-reachable");
+    const web = result.checks.find((check) => check.id === "web-reachable");
+    expect(daemon).toMatchObject({ ok: false, severity: "warn" });
+    expect(daemon?.detail).toContain("may be under load");
+    expect(web).toMatchObject({ ok: false, severity: "warn" });
+    expect(hasErrorSeverity(result.checks)).toBe(false);
+  });
+
   it("reports a port-conflict check whose detail includes the foreign PID", async () => {
-    probeInfoMock.mockResolvedValue(undefined);
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     isHostPortFreeMock.mockResolvedValue(false);
     findListenerPidsMock.mockResolvedValue([4242]);
     const result = await checkServiceHealth(scope, false, false, false);
@@ -365,23 +394,41 @@ describe("checkServiceHealth", () => {
     expect(conflict?.detail).toContain("4242");
   });
 
-  it("does not blame Spur's own daemon for a busy port (probes /info there before declaring a conflict)", async () => {
-    // First call is the primary daemon liveness probe (unreachable); second
-    // is the daemon port's foreign-vs-Spur recheck once it's found busy. Only
-    // the daemon's own port (4310, the default with no instance config) is
-    // busy here, so the web side never enters its own conflict branch.
-    probeInfoMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ version });
+  // MUST FIX 1: the identity check is now driven by systemd's own `MainPID`
+  // for the unit, compared against the port's real listener PIDs — not by a
+  // second, identical `/info` request (which can never succeed here, since
+  // this branch is only reached after the first `/info` request already
+  // failed). Only the daemon's own port (4310, the default with no instance
+  // config) is busy here, so the web side never enters its own conflict
+  // branch.
+  it("does not blame Spur's own daemon for a busy port when the listener PID matches the unit's systemd MainPID", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "timeout" });
+    execState.systemctlAvailable = true;
+    execState.daemonMainPid = "4242";
     isHostPortFreeMock.mockImplementation(async (port: number) => port !== 4310);
+    findListenerPidsMock.mockResolvedValue([4242]);
     const result = await checkServiceHealth(scope, false, false, false);
     expect(result.checks.find((check) => check.id === "daemon-port-conflict")).toBeUndefined();
-    expect(findListenerPidsMock).not.toHaveBeenCalled();
+    expect(findListenerPidsMock).toHaveBeenCalledWith(4310);
     const reachable = result.checks.find((check) => check.id === "daemon-reachable");
     expect(reachable).toMatchObject({ ok: false, severity: "warn" });
-    expect(reachable?.detail).toContain("already held by a Spur daemon");
+    expect(reachable?.detail).toContain("its own process (pid 4242)");
+  });
+
+  it("still reports a port-conflict when the unit's own MainPID does not match the port's listener", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    execState.systemctlAvailable = true;
+    execState.daemonMainPid = "4242";
+    isHostPortFreeMock.mockImplementation(async (port: number) => port !== 4310);
+    findListenerPidsMock.mockResolvedValue([9999]);
+    const result = await checkServiceHealth(scope, false, false, false);
+    const conflict = result.checks.find((check) => check.id === "daemon-port-conflict");
+    expect(conflict).toMatchObject({ ok: false, severity: "error" });
+    expect(conflict?.detail).toContain("9999");
   });
 
   it("reports warn severity when the service simply has not started yet", async () => {
-    probeInfoMock.mockResolvedValue(undefined);
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     isHostPortFreeMock.mockResolvedValue(true);
     const result = await checkServiceHealth(scope, false, false, false);
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
@@ -391,7 +438,7 @@ describe("checkServiceHealth", () => {
   });
 
   it("suppresses the plain not-running check once systemd already reported the same inactive fact", async () => {
-    probeInfoMock.mockResolvedValue(undefined);
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     isHostPortFreeMock.mockResolvedValue(true);
     const result = await checkServiceHealth(scope, false, false, true);
@@ -400,7 +447,7 @@ describe("checkServiceHealth", () => {
   });
 
   it("marks the daemon reachable when the probe succeeds", async () => {
-    probeInfoMock.mockResolvedValue({ version });
+    probeInfoMock.mockResolvedValue({ ok: true, version });
     const result = await checkServiceHealth(scope, false, false, false);
     expect(result.daemonReachable).toBe(true);
     expect(result.daemonVersion).toBe(version);

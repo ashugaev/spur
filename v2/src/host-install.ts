@@ -9,6 +9,7 @@ import {
   probeInfo,
   readWebPort,
   resolveDaemonPortReadOnly,
+  type ProbeReason,
   type ServiceId,
 } from "./update-health.js";
 import { version } from "./version.js";
@@ -242,45 +243,74 @@ export interface ServiceHealthResult {
   daemonVersion?: string;
 }
 
+// `timeout` on an active unit is deliberately downgraded to `warn`: the
+// daemon's `/info` has been measured at 3.5-6.7s on a loaded production host
+// (fork-storm profile), so a bare 2s timeout does not by itself mean the
+// service is broken — it must not fail the exit code. `connection-refused` on
+// an active unit means nothing is actually listening despite systemd's
+// bookkeeping — definitively broken, `error`. `http-error` (the process
+// answered, but with a non-2xx status) and the neutral `unknown` bucket stay
+// `error` too: unlike a timeout, both mean the transport round-tripped and
+// came back with something other than success, which is not explained by
+// load alone.
 function activeButUnreachableCheck(
   id: ServiceId,
   unit: string,
   url: string,
-  reason: string | undefined,
+  reason: ProbeReason,
   restartCmd: string,
 ): HostInstallCheck {
-  return {
-    id: `${id}-reachable`,
-    ok: false,
-    severity: "error",
-    detail: reason
-      ? `${unit} is active but unreachable at ${url} (${reason})`
-      : `${unit} is active but unreachable at ${url}`,
-    fix: `${restartCmd} ${unit}`,
-  };
-}
-
-// Before blaming a busy port on a foreign process, ask the candidate whether
-// it IS a Spur daemon (its `/info` responds with a version body). `daemon`
-// and `web` are both host-global fallback ports (the daemon defaults to 4310
-// with no instance config, the web unit to 4311 with no unit file), so a
-// live-but-unmanaged Spur daemon bound there must not be reported as a
-// foreign port conflict.
-async function portConflictCheck(
-  id: ServiceId,
-  unit: string,
-  port: number,
-): Promise<HostInstallCheck> {
-  const heldBySpur = (await probeInfo({ id, url: `http://127.0.0.1:${port}/info` })) !== undefined;
-  if (heldBySpur) {
+  if (reason === "timeout") {
     return {
       id: `${id}-reachable`,
       ok: false,
       severity: "warn",
-      detail: `${unit} is not running, but port ${port} is already held by a Spur daemon`,
+      detail: `${unit} is active but did not respond at ${url} within 2s (may be under load)`,
     };
   }
+  return {
+    id: `${id}-reachable`,
+    ok: false,
+    severity: "error",
+    detail: `${unit} is active but unreachable at ${url} (${reason})`,
+    fix: `${restartCmd} ${unit}`,
+  };
+}
+
+// Before blaming a busy port on a foreign process, ask systemd whether the
+// unit's own `MainPID` is the process actually holding the port — not by
+// re-probing `/info` a second time (identical to, and only reached after, the
+// request that already failed above; a slow-but-live Spur daemon would fail
+// that second request exactly the same way as the first). `daemon` and `web`
+// are both host-global fallback ports (the daemon defaults to 4310 with no
+// instance config, the web unit to 4311 with no unit file), so the unit's own
+// process bound there — even before systemd reports it fully "active" — must
+// not be reported as a foreign port conflict.
+function getUnitMainPid(ctl: string[], unit: string): number | undefined {
+  const [bin, ...args] = ctl;
+  if (!bin) return undefined;
+  const raw = tryExec(bin, [...args, "show", unit, "-p", "MainPID", "--value"]);
+  if (raw === undefined) return undefined;
+  const pid = Number.parseInt(raw, 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+async function portConflictCheck(
+  id: ServiceId,
+  unit: string,
+  port: number,
+  ctl: string[],
+): Promise<HostInstallCheck> {
+  const ownPid = getUnitMainPid(ctl, unit);
   const pids = await findListenerPids(port);
+  if (ownPid !== undefined && pids.includes(ownPid)) {
+    return {
+      id: `${id}-reachable`,
+      ok: false,
+      severity: "warn",
+      detail: `${unit} is not yet reported active by systemd, but port ${port} is already held by its own process (pid ${ownPid})`,
+    };
+  }
   return {
     id: `${id}-port-conflict`,
     ok: false,
@@ -335,7 +365,7 @@ export async function checkServiceHealth(
   let daemonVersion: string | undefined;
 
   const daemonInfo = await probeInfo({ id: "daemon", url: daemonInfoUrl });
-  if (daemonInfo) {
+  if (daemonInfo.ok) {
     daemonReachable = true;
     daemonVersion = daemonInfo.version;
     checks.push({
@@ -346,10 +376,16 @@ export async function checkServiceHealth(
     });
   } else if (daemonActive) {
     checks.push(
-      activeButUnreachableCheck("daemon", "spur-daemon.service", daemonInfoUrl, undefined, scope.restartCmd),
+      activeButUnreachableCheck(
+        "daemon",
+        "spur-daemon.service",
+        daemonInfoUrl,
+        daemonInfo.reason,
+        scope.restartCmd,
+      ),
     );
   } else if (!(await isHostPortFree(daemonPort))) {
-    checks.push(await portConflictCheck("daemon", "spur-daemon.service", daemonPort));
+    checks.push(await portConflictCheck("daemon", "spur-daemon.service", daemonPort, scope.ctl));
   } else if (!systemdReportsActivity) {
     checks.push(notRunningCheck("daemon", "spur-daemon.service", daemonPort));
   }
@@ -368,7 +404,7 @@ export async function checkServiceHealth(
       activeButUnreachableCheck("web", "spur-web.service", webUrl, webResult.reason, scope.restartCmd),
     );
   } else if (!(await isHostPortFree(webPort))) {
-    checks.push(await portConflictCheck("web", "spur-web.service", webPort));
+    checks.push(await portConflictCheck("web", "spur-web.service", webPort, scope.ctl));
   } else if (!systemdReportsActivity) {
     checks.push(notRunningCheck("web", "spur-web.service", webPort));
   }
