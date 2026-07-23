@@ -13,6 +13,7 @@ import type {
 } from "./types.js";
 
 export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+const PLACEHOLDER_URL_SEGMENT = /(?:^|\/)\.\.\.(?:$|[/?#])/;
 const SLOT_TOOL_DIR = "session-tools";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");
@@ -79,6 +80,9 @@ function normalizeSlotUrl(url: string): string {
   const trimmed = url.trim();
   if (!trimmed) {
     throw new Error("slot link URLs must be non-empty strings");
+  }
+  if (PLACEHOLDER_URL_SEGMENT.test(trimmed)) {
+    throw new Error(`Slot link URL looks like a placeholder, use a real link: ${trimmed}`);
   }
   try {
     return new URL(trimmed).toString();
