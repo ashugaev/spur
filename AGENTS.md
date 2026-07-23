@@ -42,7 +42,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 | [`self-verify`](.agents/skills/self-verify/SKILL.md)               | Final close-out gate validation                                               |
 | [`telegram`](.agents/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                   |
 | [`pr-comments-fix`](.agents/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                            |
-| [`docs-management`](.agents/skills/docs-management/SKILL.md)       | Task touches published docs under `docs/` or the root doc files               |
+| [`docs`](.agents/skills/docs/SKILL.md)                             | Task touches published docs under `docs/` or the root doc files               |
 | [`clean-install-test`](.agents/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
 
 ## Response style
@@ -82,4 +82,4 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
 - Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
-- Document user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) in the same change; never ship it undocumented. Any published-doc edit loads the `docs-management` skill and follows it — the skill owns the doc standards (single source, granular, link don't restate).
+- Document user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) in the same change; never ship it undocumented. Any published-doc edit loads the `docs` skill and follows it — the skill owns the doc standards (single source, granular, link don't restate).

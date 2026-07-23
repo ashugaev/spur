@@ -34,7 +34,7 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 2. Implement one logical chunk.
 3. Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
 4. Tests: add or update tests for externally observable behavior in the same chunk (the spec change map lists them). Run them. Fix failures inline. Move on once green. Create test data fixtures next to the test file when a manual check needs them.
-5. Docs: when the chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), document it in the same chunk — load the `docs-management` skill and follow it. Never ship new functionality undocumented.
+5. Docs: when the chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), document it in the same chunk — load the `docs` skill and follow it. Never ship new functionality undocumented.
 6. Commit: `git add <files> && git commit -m "<type>(<scope>): <description>"` — `fix` for bugs/regressions, `feat` for new behavior; see `AGENTS.md` commit rules.
 7. Repeat until the spec is complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
 
