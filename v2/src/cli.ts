@@ -94,7 +94,7 @@ import {
   type HandoffSessionRequest,
 } from "./types.js";
 import { version } from "./version.js";
-import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -1669,7 +1669,7 @@ export function createProgram(cliEntrypoint: string): Command {
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
             try {
-              loadProjectConfig(existingProjectConfigPath);
+              const projectConfig = loadProjectConfig(existingProjectConfigPath);
               // Severity is the check's static importance if it fails (an
               // invalid spur.yaml blocks connect/spawn — always "error"), not
               // a flag that flips with the outcome; the renderer only
@@ -1680,6 +1680,21 @@ export function createProgram(cliEntrypoint: string): Command {
                 severity: "error",
                 detail: "spur.yaml parses and validates",
               });
+              // D1-D3: per-project path/git/branch validation — only ever
+              // runs against the project(s) this repo's spur.yaml actually
+              // defines, config-conditional by construction (never fires on a
+              // bare host with no project config, since this whole branch is
+              // already gated on `existingProjectConfigPath`).
+              for (const [projectId, project] of Object.entries(projectConfig.projects)) {
+                hostChecks.push(
+                  ...(await checkProjectWorkspace({
+                    projectId,
+                    path: project.path,
+                    defaultBranch: project.defaultBranch,
+                    worktree: project.worktree,
+                  })),
+                );
+              }
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               hostChecks.push({

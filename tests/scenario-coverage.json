@@ -146,6 +146,78 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`doctor` reports `daemon-dist-integrity`/`web-dist-integrity` errors when an installed unit's `ExecStart` `.js` target file is missing, and pushes no `web-dist-integrity` check at all when `ExecStart` has no resolvable `.js` target (system-scope `pnpm ui:start`).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` runs `node -e \"require('node-pty')\"` out-of-process against the web unit's resolved bundle directory and reports `web-native-module-load` error on failure, but pushes no check at all when neither candidate bundle directory has `node-pty` installed.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` enriches the `spur-daemon`/`spur-web` detail with the unit's `ActiveState`/`SubState`/`NRestarts`/`ExecMainStatus` when systemd reports it inactive, naming a crash-loop instead of suggesting a bare restart, and keeps today's plain \"not active\" wording for a clean stop.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` write-probes `worktreeDir` and `dataDir` and reports an error when unwritable, checks `dataDir`'s free disk space/inodes via `df` and reports an error only near-zero (skipping as `info` when `df` is unavailable or non-numeric), and skips all three checks entirely on a never-initialized host (no readable instance config) or before the daemon has ever created those directories (systemd units not installed).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` probes the daemon at its configured `server.host` (not a hardcoded loopback) so a daemon correctly bound to a non-loopback address is not falsely reported unreachable.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor` reports `web-ui-port-drift` as `warn` (never exit-code-affecting) when the configured `ui.port` differs from the web unit's actual listen port, once both the instance config and the web unit are installed.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`loadInstanceConfigReadOnly` never bootstrap-writes the pinned instance config file, distinguishing an absent file from a real parse failure; `doctor` surfaces the latter as an `instance-config-corrupt` error without throwing, while `resolveDaemonPortReadOnly`'s own best-effort fallback keeps working from the same corrupt file in the same run, and no other instance-config-derived check cascades a second error from it.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`checkProjectWorkspace` validates a configured project's `path` existence, then (only in worktree mode) whether it is a git repository, then whether `defaultBranch` resolves locally or at `origin`, skipping later checks once an earlier one in the chain fails or worktree mode is off, and accepting a remote-only or local-only branch as resolvable.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/workspace.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`doctor`'s `node-version` check actually reads `engines.node` from this package's own installed `package.json` (mirroring `version.ts`'s resolution) and reports a real pass/fail, rather than silently degrading to a permanent \"skipped\" no-op.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/host-install.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
@@ -1187,6 +1259,14 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "`doctor` reports `project-config-valid` as `ok:true` for an existing, valid `spur.yaml`, and as `ok:false, severity:error` with a non-zero exit for a malformed one, without throwing.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "`doctor` reports a configured project whose `path` does not exist as a distinct `project-path-exists:<id>` error with a non-zero exit, without throwing.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"

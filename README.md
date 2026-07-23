@@ -22,7 +22,7 @@ bash scripts/setup.sh
 pnpm dev
 ```
 
-`spur doctor` writes a local `spur.yaml` in the current repo. The first normal Spur command still auto-initializes `~/.spur/config.yaml`, and `spur list` / `spur spawn` auto-connect the local project config when present.
+`spur doctor` is read-only by default (checks host install, config, and daemon/web health without writing anything); pass `--scaffold` to write a minimal local `spur.yaml` in the current repo when none exists yet. The first normal Spur command still auto-initializes `~/.spur/config.yaml`, and `spur list` / `spur spawn` auto-connect the local project config when present.
 
 Full runtime reference lives in [v2/README.md](v2/README.md).
 

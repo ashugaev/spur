@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
+import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
   probe,
@@ -13,6 +15,14 @@ import {
   type ServiceId,
 } from "./update-health.js";
 import { version } from "./version.js";
+
+// C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
+// an error — deliberately low so a normal dev/CI host's disk is never flagged.
+const DISK_SPACE_MIN_FREE_KB = 5_120;
+const DISK_SPACE_PROBE_TIMEOUT_MS = 2_000;
+// A2: `node -e "require('node-pty')"` must never hang doctor on a wedged
+// child process.
+const NODE_PTY_PROBE_TIMEOUT_MS = 5_000;
 
 export interface HostInstallCheck {
   id: string;
@@ -29,11 +39,16 @@ export interface SystemdScope {
   restartCmd: string;
 }
 
-function tryExec(command: string, args: string[]): string | undefined {
+function tryExec(
+  command: string,
+  args: string[],
+  options?: { timeoutMs?: number },
+): string | undefined {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
     }).trim();
   } catch {
     return undefined;
@@ -73,7 +88,11 @@ export function resolveSystemdScope(home: string): SystemdScope {
   } catch {
     accountHome = undefined;
   }
-  if (accountHome !== undefined && home === accountHome && existsSync("/etc/systemd/system/spur-daemon.service")) {
+  if (
+    accountHome !== undefined &&
+    home === accountHome &&
+    existsSync("/etc/systemd/system/spur-daemon.service")
+  ) {
     return {
       kind: "system",
       unitDir: "/etc/systemd/system",
@@ -295,6 +314,210 @@ function getUnitMainPid(ctl: string[], unit: string): number | undefined {
   return Number.isInteger(pid) && pid > 0 ? pid : undefined;
 }
 
+// B1: a plain `isActive(...) === false` collapses "cleanly stopped" and
+// "crash-looping" into the same generic detail — enrich it with the extra
+// systemd properties a crash-loop actually shows up in, so the fix a user is
+// given isn't just "restart" (which would crash-loop again). Falls back to
+// today's plain wording whenever the richer query fails or the unit is
+// genuinely just inactive.
+//
+// Deliberately omits `--value` and parses `Key=Value` lines instead of
+// relying on line position: a real systemd does NOT emit multi-property
+// `show -p A,B,C,D --value` output in the requested property order (verified
+// against a real crash-looping unit — it came back `NRestarts`,
+// `ExecMainStatus`, `ActiveState`, `SubState`, not the requested order), so a
+// positional `raw.split("\n")` destructure silently mis-attributes every
+// field.
+function describeInactiveUnit(ctl: string[], unit: string): string {
+  const fallback = `${unit} not active`;
+  const [bin, ...args] = ctl;
+  if (!bin) return fallback;
+  const raw = tryExec(bin, [
+    ...args,
+    "show",
+    unit,
+    "-p",
+    "ActiveState,SubState,NRestarts,ExecMainStatus",
+  ]);
+  if (raw === undefined) return fallback;
+  const props = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex === -1) continue;
+    props.set(line.slice(0, separatorIndex).trim(), line.slice(separatorIndex + 1).trim());
+  }
+  const activeState = props.get("ActiveState");
+  const subState = props.get("SubState");
+  const nRestarts = props.get("NRestarts");
+  const execMainStatus = props.get("ExecMainStatus");
+  if (activeState === "failed") {
+    return `${unit} failed (substate: ${subState || "unknown"}, restarts: ${nRestarts || "unknown"}, last exit status: ${execMainStatus || "unknown"}) — check \`journalctl --user -u ${unit}\` before restarting`;
+  }
+  if (activeState === "activating") {
+    return `${unit} is activating/auto-restarting (restarts: ${nRestarts || "unknown"}) — may be crash-looping; check \`journalctl --user -u ${unit}\` before restarting`;
+  }
+  return fallback;
+}
+
+// A1: `ExecStart=/usr/bin/node <path>.js ...` (both scopes' daemon unit, and
+// the npm-scope web unit) — the same line-scanning style `resolveWebPort`
+// uses for `Environment=PORT=`. `%h` is systemd's own runtime substitution
+// (never rewritten in the installed unit file on disk), so it must be
+// manually substituted here. Returns `undefined` when no `.js`-suffixed
+// token exists (the system-scope web unit's `ExecStart=/usr/bin/pnpm
+// ui:start` has no resolvable file argument at all).
+function extractExecStartJsTarget(contents: string, home: string): string | undefined {
+  let target: string | undefined;
+  for (const line of contents.split("\n")) {
+    const match = /^ExecStart=(.+)$/.exec(line.trim());
+    const token = match?.[1]?.split(/\s+/).find((part) => part.endsWith(".js"));
+    if (token) target = token;
+  }
+  return target?.replaceAll("%h", home);
+}
+
+function extractWorkingDirectory(contents: string): string | undefined {
+  let workingDir: string | undefined;
+  for (const line of contents.split("\n")) {
+    const match = /^WorkingDirectory=(.+)$/.exec(line.trim());
+    if (match?.[1]) workingDir = match[1];
+  }
+  return workingDir;
+}
+
+// A2: the npm-scope web unit's `WorkingDirectory` *is* the web bundle root
+// (node-pty lives at `<WorkingDirectory>/node_modules/node-pty`); the
+// system/source-checkout scope's `WorkingDirectory` is the repo root instead
+// (node-pty is pnpm-symlinked one level down, under `packages/web`). Tries
+// the npm-scope layout first, then the source-checkout layout.
+function resolveWebBundleCandidates(workingDir: string): string[] {
+  return [workingDir, join(workingDir, "packages", "web")];
+}
+
+// Runs `node -e "require('node-pty')"` out-of-process (never inside the real
+// server) against the first bundle candidate that actually has a node-pty
+// install, so a broken/ABI-mismatched native binding is caught without ever
+// crashing (or depending on) the real web server. Skips (returns
+// `undefined`, pushes nothing) when neither candidate has node-pty at all —
+// this is not a config that ships node-pty, so there is nothing to diagnose.
+function checkNodePtyLoads(webUnitContents: string, home: string): HostInstallCheck | undefined {
+  const workingDir = extractWorkingDirectory(webUnitContents)?.replaceAll("%h", home);
+  if (!workingDir) return undefined;
+  const candidate = resolveWebBundleCandidates(workingDir).find((dir) =>
+    existsSync(join(dir, "node_modules", "node-pty")),
+  );
+  if (!candidate) return undefined;
+  try {
+    execFileSync("node", ["-e", 'require("node-pty")'], {
+      cwd: candidate,
+      timeout: NODE_PTY_PROBE_TIMEOUT_MS,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return {
+      id: "web-native-module-load",
+      ok: true,
+      severity: "error",
+      detail: `node-pty loads in ${candidate}`,
+    };
+  } catch (error) {
+    const stderr =
+      error && typeof error === "object" && "stderr" in error
+        ? String(error.stderr).trim()
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return {
+      id: "web-native-module-load",
+      ok: false,
+      severity: "error",
+      detail: `node-pty failed to load in ${candidate}: ${stderr}`,
+      fix: "reinstall/rebuild node-pty for this host's Node ABI (spur update, or reinstall the npm package)",
+    };
+  }
+}
+
+async function checkDirWritable(id: string, dir: string): Promise<HostInstallCheck> {
+  if (!existsSync(dir)) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} does not exist`,
+      fix: `create ${dir}`,
+    };
+  }
+  const probePath = join(dir, `.spur-doctor-probe-${randomUUID()}`);
+  try {
+    writeFileSync(probePath, "", { flag: "wx" });
+    return { id, ok: true, severity: "error", detail: `${dir} is writable` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} is not writable (${message})`,
+      fix: `fix permissions on ${dir}`,
+    };
+  } finally {
+    try {
+      unlinkSync(probePath);
+    } catch {
+      // Best effort only — never leave the probe file behind, but a missing
+      // probe (write itself failed) is not itself a reportable condition.
+    }
+  }
+}
+
+// `df -Pk`/`df -Pi` second line, 4th field (Available / IFree respectively,
+// POSIX `-P` format). Any parse failure (missing `df`, a filesystem that
+// reports `-` for inodes, etc.) is not itself an error — it just means this
+// particular signal is unavailable on this host, not that the directory is
+// unhealthy.
+function parseDfField(output: string | undefined, fieldIndex: number): number | undefined {
+  if (!output) return undefined;
+  const dataLine = output.trim().split("\n")[1];
+  if (!dataLine) return undefined;
+  const raw = dataLine.trim().split(/\s+/)[fieldIndex];
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+async function checkDiskSpace(id: string, dir: string): Promise<HostInstallCheck> {
+  const kbOutput = tryExec("df", ["-Pk", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const iOutput = tryExec("df", ["-Pi", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const availKb = parseDfField(kbOutput, 3);
+  const freeInodes = parseDfField(iOutput, 3);
+  if (availKb === undefined && freeInodes === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — df unavailable or non-numeric on this filesystem",
+    };
+  }
+  if (availKb !== undefined && availKb < DISK_SPACE_MIN_FREE_KB) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} has only ${availKb}KB free (below the ${DISK_SPACE_MIN_FREE_KB}KB floor)`,
+      fix: `free up disk space on the filesystem containing ${dir}`,
+    };
+  }
+  if (freeInodes !== undefined && freeInodes === 0) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} has 0 free inodes`,
+      fix: `free up inodes on the filesystem containing ${dir}`,
+    };
+  }
+  return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
+}
+
 async function portConflictCheck(
   id: ServiceId,
   unit: string,
@@ -355,10 +578,14 @@ export async function checkServiceHealth(
   daemonActive: boolean,
   webActive: boolean,
   systemdReportsActivity: boolean,
+  // E1: the daemon's real bind address (`server.host`) is not always
+  // loopback (e.g. a Tailscale/LAN IP); defaulting keeps every existing
+  // direct call in this file's own tests unchanged.
+  daemonHost = "127.0.0.1",
 ): Promise<ServiceHealthResult> {
   const daemonPort = resolveDaemonPortReadOnly();
   const webPort = readWebPort(scope);
-  const daemonInfoUrl = `http://127.0.0.1:${daemonPort}/info`;
+  const daemonInfoUrl = `http://${daemonHost}:${daemonPort}/info`;
 
   const checks: HostInstallCheck[] = [];
   let daemonReachable = false;
@@ -401,7 +628,13 @@ export async function checkServiceHealth(
     });
   } else if (webActive) {
     checks.push(
-      activeButUnreachableCheck("web", "spur-web.service", webUrl, webResult.reason, scope.restartCmd),
+      activeButUnreachableCheck(
+        "web",
+        "spur-web.service",
+        webUrl,
+        webResult.reason,
+        scope.restartCmd,
+      ),
     );
   } else if (!(await isHostPortFree(webPort))) {
     checks.push(await portConflictCheck("web", "spur-web.service", webPort, scope.ctl));
@@ -445,9 +678,25 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     fix: "npm config set prefix ~/.local",
   });
 
+  // F1/C1/C2/E1/E2 share this single read-only, non-bootstrapping instance-
+  // config read (never triggers `ensureInstanceConfig`'s bootstrap write). A
+  // corrupt file is surfaced here, once, as its own fact — C1/C2/E2 below are
+  // skipped rather than cascading a second, derived error off of it.
+  const instanceConfig = loadInstanceConfigReadOnly();
+  if (instanceConfig.status === "invalid") {
+    checks.push({
+      id: "instance-config-corrupt",
+      ok: false,
+      severity: "error",
+      detail: instanceConfig.error,
+      fix: "fix or remove ~/.spur/config.yaml",
+    });
+  }
+
   let daemonActive = false;
   let webActive = false;
   let systemdReportsActivity = false;
+  let unitsInstalled = false;
 
   if (scope.kind === "missing" && platform() !== "linux") {
     checks.push({
@@ -459,8 +708,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   } else {
     const daemonUnit = join(scope.unitDir, "spur-daemon.service");
     const webUnit = join(scope.unitDir, "spur-web.service");
-    const unitsInstalled =
-      scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
+    unitsInstalled = scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
     checks.push({
       id: "systemd-units",
       ok: unitsInstalled,
@@ -472,6 +720,44 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
         : "spur-daemon.service or spur-web.service missing",
       ...(scope.kind === "system" ? {} : { fix: "spur init" }),
     });
+
+    // A1/A2: dist/native-module integrity, read straight from the already-
+    // installed unit files — only meaningful once those files actually exist.
+    if (unitsInstalled) {
+      const daemonUnitContents = readFileSync(daemonUnit, "utf8");
+      const webUnitContents = readFileSync(webUnit, "utf8");
+
+      const daemonTarget = extractExecStartJsTarget(daemonUnitContents, home);
+      if (daemonTarget) {
+        const targetExists = existsSync(daemonTarget);
+        checks.push({
+          id: "daemon-dist-integrity",
+          ok: targetExists,
+          severity: "error",
+          detail: targetExists ? `${daemonTarget} exists` : `${daemonTarget} is missing`,
+          ...(targetExists
+            ? {}
+            : { fix: "reinstall spur (npm install -g @shugaev/spur, or spur update)" }),
+        });
+      }
+
+      const webTarget = extractExecStartJsTarget(webUnitContents, home);
+      if (webTarget) {
+        const targetExists = existsSync(webTarget);
+        checks.push({
+          id: "web-dist-integrity",
+          ok: targetExists,
+          severity: "error",
+          detail: targetExists ? `${webTarget} exists` : `${webTarget} is missing`,
+          ...(targetExists
+            ? {}
+            : { fix: "reinstall spur (npm install -g @shugaev/spur, or spur update)" }),
+        });
+      }
+
+      const nodePtyCheck = checkNodePtyLoads(webUnitContents, home);
+      if (nodePtyCheck) checks.push(nodePtyCheck);
+    }
 
     if (scope.kind === "system") {
       checks.push({
@@ -511,7 +797,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
         id: "spur-daemon",
         ok: daemonActive,
         severity: "error",
-        detail: daemonActive ? "spur-daemon.service active" : "spur-daemon.service not active",
+        detail: daemonActive
+          ? "spur-daemon.service active"
+          : describeInactiveUnit(scope.ctl, "spur-daemon.service"),
         fix: `${scope.restartCmd} spur-daemon.service`,
       });
 
@@ -520,7 +808,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
         id: "spur-web",
         ok: webActive,
         severity: "error",
-        detail: webActive ? "spur-web.service active" : "spur-web.service not active",
+        detail: webActive
+          ? "spur-web.service active"
+          : describeInactiveUnit(scope.ctl, "spur-web.service"),
         fix: `${scope.restartCmd} spur-web.service`,
       });
     }
@@ -531,7 +821,44 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
 
-  const health = await checkServiceHealth(scope, daemonActive, webActive, systemdReportsActivity);
+  // C1/C2/E2 additionally require `unitsInstalled` (not just a readable
+  // instance config) — an instance config can legitimately exist (e.g. a
+  // pinned `SPUR_CONFIG`) before the daemon has ever created `dataDir`/
+  // `worktreeDir` or before the web unit is installed; only a genuinely
+  // initialized host (systemd units present) makes a missing/unwritable dir
+  // or a port mismatch an actual fact worth reporting.
+  if (instanceConfig.status === "ok" && unitsInstalled) {
+    checks.push(await checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
+    checks.push(await checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
+    checks.push(await checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+
+    const actualWebPort = readWebPort(scope);
+    const configuredWebPort = instanceConfig.config.ui.port;
+    const portsDrifted = actualWebPort !== configuredWebPort;
+    checks.push({
+      id: "web-ui-port-drift",
+      ok: !portsDrifted,
+      severity: "warn",
+      detail: portsDrifted
+        ? `configured ui.port ${configuredWebPort} does not match the web unit's actual listen port ${actualWebPort}`
+        : `ui.port ${configuredWebPort} matches the web unit's actual listen port ${actualWebPort}`,
+      ...(portsDrifted
+        ? {
+            fix: `align ui.port in ~/.spur/config.yaml with the web unit's real PORT (${actualWebPort}), or reinit with --web-port ${configuredWebPort}`,
+          }
+        : {}),
+    });
+  }
+
+  const daemonHost =
+    instanceConfig.status === "ok" ? instanceConfig.config.server.host : "127.0.0.1";
+  const health = await checkServiceHealth(
+    scope,
+    daemonActive,
+    webActive,
+    systemdReportsActivity,
+    daemonHost,
+  );
   checks.push(...health.checks);
   const drift = checkVersionDrift(health.daemonVersion);
   if (drift) checks.push(drift);

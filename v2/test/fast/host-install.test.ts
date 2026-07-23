@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
+import type * as FsModule from "node:fs";
 import type * as OsModule from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as PortProbe from "../../src/port-probe.js";
@@ -14,6 +15,7 @@ const {
   probeInfoMock,
   isHostPortFreeMock,
   findListenerPidsMock,
+  writeFileSyncMock,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
@@ -21,6 +23,7 @@ const {
   probeInfoMock: vi.fn(),
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
 }));
 
 vi.mock("node:child_process", async () => {
@@ -31,6 +34,16 @@ vi.mock("node:child_process", async () => {
 vi.mock("node:os", async () => {
   const actual = await vi.importActual<typeof OsModule>("node:os");
   return { ...actual, platform: platformMock };
+});
+
+// C1: `checkDirWritable`'s write-probe uses the real `writeFileSync` by
+// default (a real mkdtemp'd dir round-trips fine); only the dedicated
+// "not writable" test overrides this (via `mockImplementationOnce`) to
+// simulate `EACCES` deterministically, independent of this sandbox's actual
+// uid/permission behavior.
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof FsModule>("node:fs");
+  return { ...actual, writeFileSync: writeFileSyncMock };
 });
 
 vi.mock("../../src/update-health.js", async () => {
@@ -56,6 +69,12 @@ import {
 } from "../../src/host-install.js";
 import { version } from "../../src/version.js";
 
+// Resolved once, up front — used as `writeFileSyncMock`'s default
+// passthrough implementation every test, independent of whether
+// `vi.restoreAllMocks()` (called in `afterEach`) affects a plain `vi.fn()`'s
+// prior implementation.
+const actualFs = await vi.importActual<typeof FsModule>("node:fs");
+
 interface ExecState {
   tmuxOk: boolean;
   gitOk: boolean;
@@ -68,11 +87,38 @@ interface ExecState {
   // inactive unit).
   daemonMainPid: string;
   webMainPid: string;
+  // B1: the extra `show -p ActiveState,SubState,NRestarts,ExecMainStatus`
+  // properties `describeInactiveUnit` queries — `daemonActiveState`/
+  // `webActiveState` above double as this query's own `ActiveState` line, so
+  // a real systemd's "failed"/"activating" substates are exercised through
+  // the same single field `isActive` already reads.
+  daemonSubState: string;
+  daemonNRestarts: string;
+  daemonExecMainStatus: string;
+  webSubState: string;
+  webNRestarts: string;
+  webExecMainStatus: string;
+  // C2/A2 seams.
+  dfAvailable: boolean;
+  dfKbLine: string;
+  dfILine: string;
+  nodePtyOk: boolean;
 }
 
 let execState: ExecState;
+const initialSpurConfig = process.env["SPUR_CONFIG"];
 
 beforeEach(() => {
+  // `collectHostInstallChecks`'s new instance-config-derived checks (F1/C1/
+  // C2/E1/E2) read `loadInstanceConfigReadOnly()`, which resolves via
+  // `SPUR_CONFIG`/the real `homedir()` — decoupled from this file's `home`
+  // parameter used for systemd-scope tests. Default every test to a
+  // definitely-nonexistent instance config so none of them ever read (or
+  // write-probe against) this machine's real `~/.spur/config.yaml`/`dataDir`/
+  // `worktreeDir`; tests that specifically exercise those checks override
+  // `SPUR_CONFIG` to a controlled temp path.
+  process.env["SPUR_CONFIG"] = "/nonexistent/spur-host-install-test-instance-config.yaml";
+
   execState = {
     tmuxOk: true,
     gitOk: true,
@@ -82,6 +128,16 @@ beforeEach(() => {
     webActiveState: "inactive",
     daemonMainPid: "0",
     webMainPid: "0",
+    daemonSubState: "dead",
+    daemonNRestarts: "0",
+    daemonExecMainStatus: "0",
+    webSubState: "dead",
+    webNRestarts: "0",
+    webExecMainStatus: "0",
+    dfAvailable: true,
+    dfKbLine: "/dev/sda1 100000000 5000000 90000000 10% /",
+    dfILine: "/dev/sda1 1000000 200000 800000 20% /",
+    nodePtyOk: true,
   };
   execFileSyncMock.mockReset();
   execFileSyncMock.mockImplementation((file: string, args: string[]) => {
@@ -98,6 +154,20 @@ beforeEach(() => {
       if (!execState.lingerOk) throw new Error("linger unknown");
       return "Linger=yes";
     }
+    if (file === "df") {
+      if (!execState.dfAvailable) throw new Error("df not found");
+      if (args.includes("-Pk")) {
+        return `Filesystem 1024-blocks Used Available Capacity Mounted\n${execState.dfKbLine}`;
+      }
+      if (args.includes("-Pi")) {
+        return `Filesystem Inodes IUsed IFree IUse% Mounted\n${execState.dfILine}`;
+      }
+      throw new Error(`unexpected df args: ${args.join(" ")}`);
+    }
+    if (file === "node") {
+      if (!execState.nodePtyOk) throw new Error('Failed to load native module "node-pty"');
+      return "";
+    }
     if (file === "systemctl") {
       if (!execState.systemctlAvailable) throw new Error("systemctl not available");
       if (args.includes("is-active")) {
@@ -113,10 +183,40 @@ beforeEach(() => {
         if (unit === "spur-web.service") return execState.webMainPid;
         return "0";
       }
+      if (showIndex !== -1 && args.includes("ActiveState,SubState,NRestarts,ExecMainStatus")) {
+        const unit = args[showIndex + 1];
+        // Deliberately NOT in the requested property order — a real systemd
+        // (verified against a real crash-looping unit) emits multi-property
+        // `show -p A,B,C,D` output in its own internal order, not the
+        // requested one; this fixture reproduces that to guard against a
+        // positional-destructure regression in `describeInactiveUnit`.
+        if (unit === "spur-daemon.service") {
+          return [
+            `NRestarts=${execState.daemonNRestarts}`,
+            `ExecMainStatus=${execState.daemonExecMainStatus}`,
+            `ActiveState=${execState.daemonActiveState}`,
+            `SubState=${execState.daemonSubState}`,
+          ].join("\n");
+        }
+        if (unit === "spur-web.service") {
+          return [
+            `NRestarts=${execState.webNRestarts}`,
+            `ExecMainStatus=${execState.webExecMainStatus}`,
+            `ActiveState=${execState.webActiveState}`,
+            `SubState=${execState.webSubState}`,
+          ].join("\n");
+        }
+        return "";
+      }
       return "";
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
   });
+
+  writeFileSyncMock.mockReset();
+  writeFileSyncMock.mockImplementation((...args: Parameters<typeof actualFs.writeFileSync>) =>
+    actualFs.writeFileSync(...args),
+  );
 
   platformMock.mockReset();
   platformMock.mockReturnValue("linux");
@@ -133,6 +233,11 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (initialSpurConfig === undefined) {
+    delete process.env["SPUR_CONFIG"];
+  } else {
+    process.env["SPUR_CONFIG"] = initialSpurConfig;
+  }
 });
 
 describe("collectHostInstallChecks", () => {
@@ -175,6 +280,21 @@ describe("collectHostInstallChecks", () => {
       ok: true,
       severity: "error",
     });
+  });
+
+  // Folded-in regression guard: a genuine npm install resolves `engines.node`
+  // from `dist/../package.json` (this package's own installed root, mirroring
+  // `version.ts`'s own resolution) — on a real npm-published package lacking
+  // an `engines` field, or a broken read path, this check silently degrades
+  // to a permanent no-op "skipped" `ok:true`, indistinguishable from a real
+  // pass by `ok`/`severity` alone. Assert on `detail` too, so a regression to
+  // that no-op-skip path fails this test even though `ok`/`severity` would
+  // stay unchanged.
+  it("actually evaluates engines.node (does not silently no-op-skip) on this branch's real package.json", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
+    const nodeVersion = checks.find((check) => check.id === "node-version");
+    expect(nodeVersion?.detail).toMatch(/satisfies/);
+    expect(nodeVersion?.detail).not.toMatch(/skipped/);
   });
 
   it("reports systemd-not-applicable info instead of the systemd block on a non-Linux host (F7)", async () => {
@@ -455,6 +575,293 @@ describe("checkServiceHealth", () => {
       ok: true,
       severity: "info",
     });
+  });
+
+  // E1 regression check: today's hardcoded `127.0.0.1` probe would falsely
+  // report this daemon unreachable even though it is fully healthy and
+  // correctly bound to its configured (non-loopback) `server.host`.
+  it("E1: probes the daemon at its configured non-loopback host instead of a hardcoded loopback", async () => {
+    probeInfoMock.mockImplementation(async (target: { url: string }) =>
+      target.url.startsWith("http://10.128.0.3:")
+        ? { ok: true, version }
+        : { ok: false, reason: "connection-refused" },
+    );
+    const result = await checkServiceHealth(scope, true, true, false, "10.128.0.3");
+    expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+});
+
+async function writeFakeUnits(daemonBody: string, webBody: string): Promise<string> {
+  const fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-groups-"));
+  const unitDir = join(fakeHome, ".config", "systemd", "user");
+  await mkdir(unitDir, { recursive: true });
+  await writeFile(join(unitDir, "spur-daemon.service"), daemonBody, "utf8");
+  await writeFile(join(unitDir, "spur-web.service"), webBody, "utf8");
+  return fakeHome;
+}
+
+async function pinInstanceConfig(content: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "spur-host-install-instance-"));
+  const configPath = join(dir, "config.yaml");
+  await writeFile(configPath, content, "utf8");
+  process.env["SPUR_CONFIG"] = configPath;
+  return configPath;
+}
+
+const MINIMAL_UNIT_BODY = "[Service]\n";
+
+describe("collectHostInstallChecks: A1 dist integrity", () => {
+  it("reports daemon-dist-integrity error when the ExecStart .js target is missing", async () => {
+    const fakeHome = await writeFakeUnits(
+      "[Service]\nExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/dist/cli.js daemon start\n",
+      MINIMAL_UNIT_BODY,
+    );
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "daemon-dist-integrity")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+  });
+
+  it("reports web-dist-integrity ok:true when the ExecStart .js target exists", async () => {
+    const fakeHome = await writeFakeUnits(
+      MINIMAL_UNIT_BODY,
+      `[Service]\nExecStart=/usr/bin/node ${join(tmpdir(), "definitely-does-not-exist.js")}\n`,
+    );
+    // Point at a real file this time to exercise the ok:true branch.
+    const realTarget = join(fakeHome, "web-server.js");
+    await writeFile(realTarget, "// fake\n", "utf8");
+    await writeFile(
+      join(fakeHome, ".config", "systemd", "user", "spur-web.service"),
+      `[Service]\nExecStart=/usr/bin/node ${realTarget}\n`,
+      "utf8",
+    );
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-dist-integrity")).toMatchObject({
+      ok: true,
+      severity: "error",
+    });
+  });
+
+  it("pushes no web-dist-integrity check when ExecStart has no resolvable .js target (system-scope `pnpm ui:start`)", async () => {
+    const fakeHome = await writeFakeUnits(
+      MINIMAL_UNIT_BODY,
+      "[Service]\nExecStart=/usr/bin/pnpm ui:start\n",
+    );
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-dist-integrity")).toBeUndefined();
+  });
+});
+
+describe("collectHostInstallChecks: A2 node-pty native module load", () => {
+  it("reports web-native-module-load error when node-pty fails to load in the resolved bundle dir", async () => {
+    const bundleDir = await mkdtemp(join(tmpdir(), "spur-host-install-bundle-"));
+    await mkdir(join(bundleDir, "node_modules", "node-pty"), { recursive: true });
+    const fakeHome = await writeFakeUnits(
+      MINIMAL_UNIT_BODY,
+      `[Service]\nWorkingDirectory=${bundleDir}\n`,
+    );
+    execState.nodePtyOk = false;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-native-module-load")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      "node",
+      expect.arrayContaining(['require("node-pty")']),
+      expect.objectContaining({ timeout: 5_000, cwd: bundleDir }),
+    );
+  });
+
+  it("reports web-native-module-load ok:true when node-pty loads successfully", async () => {
+    const bundleDir = await mkdtemp(join(tmpdir(), "spur-host-install-bundle-"));
+    await mkdir(join(bundleDir, "node_modules", "node-pty"), { recursive: true });
+    const fakeHome = await writeFakeUnits(
+      MINIMAL_UNIT_BODY,
+      `[Service]\nWorkingDirectory=${bundleDir}\n`,
+    );
+    execState.nodePtyOk = true;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-native-module-load")).toMatchObject({
+      ok: true,
+      severity: "error",
+    });
+  });
+
+  it("pushes no web-native-module-load check when neither bundle candidate has node-pty installed", async () => {
+    const workingDir = await mkdtemp(join(tmpdir(), "spur-host-install-nopty-"));
+    const fakeHome = await writeFakeUnits(
+      MINIMAL_UNIT_BODY,
+      `[Service]\nWorkingDirectory=${workingDir}\n`,
+    );
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-native-module-load")).toBeUndefined();
+  });
+});
+
+describe("collectHostInstallChecks: B1 systemd failed-vs-inactive detail", () => {
+  it("enriches the spur-daemon detail with failed state, substate, and restart count instead of a bare restart hint", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "failed";
+    execState.daemonSubState = "failed";
+    execState.daemonNRestarts = "7";
+    execState.daemonExecMainStatus = "1";
+    const checks = await collectHostInstallChecks(fakeHome);
+    const daemonCheck = checks.find((check) => check.id === "spur-daemon");
+    expect(daemonCheck).toMatchObject({ ok: false, severity: "error" });
+    expect(daemonCheck?.detail).toContain("failed");
+    expect(daemonCheck?.detail).toContain("7");
+  });
+
+  it("keeps the plain 'not active' wording for a clean stop (inactive) — no false crash-loop alarm", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "inactive";
+    const checks = await collectHostInstallChecks(fakeHome);
+    const daemonCheck = checks.find((check) => check.id === "spur-daemon");
+    expect(daemonCheck).toMatchObject({ ok: false, severity: "error" });
+    expect(daemonCheck?.detail).toBe("spur-daemon.service not active");
+  });
+});
+
+describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk space", () => {
+  it("reports worktree-dir-writable error when the write probe fails (EACCES)", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    writeFileSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    });
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "worktree-dir-writable")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+    // The data-dir probe (the second `writeFileSync` call) is unaffected by
+    // the one-shot failure above.
+    expect(checks.find((check) => check.id === "data-dir-writable")).toMatchObject({ ok: true });
+  });
+
+  it("reports data-dir-disk-space error when df reports near-zero available KB", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.dfKbLine = "/dev/sda1 100000000 99999000 100 99% /";
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+  });
+
+  it("skips (info) data-dir-disk-space when df is unavailable", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.dfAvailable = false;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+
+  it("never pushes worktree/data-dir checks on a never-initialized host (no instance config)", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-never-init-c");
+    expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
+  it("warns when configured ui.port differs from the web unit's actual PORT", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");
+    await pinInstanceConfig(
+      ["server:", "  host: 127.0.0.1", "  port: 4310", "", "ui:", "  port: 5555", ""].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-ui-port-drift")).toMatchObject({
+      ok: false,
+      severity: "warn",
+    });
+  });
+
+  it("reports ok:true when configured ui.port matches the web unit's actual PORT", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");
+    await pinInstanceConfig(
+      ["server:", "  host: 127.0.0.1", "  port: 4310", "", "ui:", "  port: 4311", ""].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "web-ui-port-drift")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+  });
+});
+
+describe("collectHostInstallChecks: F1 corrupt instance config", () => {
+  it("surfaces instance-config-corrupt without throwing, while the daemon probe still falls back to the default port", async () => {
+    await pinInstanceConfig("server:\n  host: 127.0.0.1\nprojects: [unclosed\n");
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-f1");
+    expect(checks.find((check) => check.id === "instance-config-corrupt")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+    expect(hasErrorSeverity(checks)).toBe(true);
+    // Single-owner invariant: a corrupt config must not cascade a second,
+    // derived C1/C2/E2 error from garbage values.
+    expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
+    expect(probeInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ url: expect.stringContaining(":4310/info") }),
+    );
   });
 });
 

@@ -852,6 +852,64 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
   });
 
+  // Group D full-process crossing: the fast `workspace.test.ts` tests cover
+  // `checkProjectWorkspace`'s composition logic directly; this is the one
+  // real CLI invocation confirming `cli.ts` actually wires it up end-to-end
+  // (loop over `loadProjectConfig`'s previously-discarded return value)
+  // without the process throwing.
+  it("doctor reports a missing project path as a distinct error and a non-zero exit, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-project-path-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(
+      join(context.repoDir, "spur.yaml"),
+      ["projects:", "  gone:", "    path: /spur-doctor-runtime-test-gone-path", ""].join("\n"),
+      "utf8",
+    );
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    let stdout: string;
+    let exitCode: number | undefined;
+    try {
+      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      exitCode = 0;
+    } catch (error) {
+      const execError = error as { stdout?: string; code?: number };
+      stdout = execError.stdout ?? "";
+      exitCode = execError.code;
+    }
+
+    expect(exitCode).toBe(1);
+    const doctor = JSON.parse(stdout) as DoctorResult;
+    expect(
+      doctor.hostChecks.find((check) => check.id === "project-path-exists:gone"),
+    ).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+  });
+
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
