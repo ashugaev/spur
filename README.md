@@ -30,10 +30,9 @@ spur list
 spur spawn <project> "Fix the flaky auth test"
 ```
 
-`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
-does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
-first normal Spur command still auto-initializes that global instance config, and `spur list` /
-`spur spawn` auto-connect the local project config through the existing config path.
+`spur doctor` writes a minimal local `spur.yaml` at the repo root — it does not start the daemon or
+touch `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal
+command (see [Config](#config)).
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [SETUP.md](SETUP.md).
 
@@ -192,38 +191,12 @@ Unit templates live in `deploy/`. After editing, copy to
 ### Restore after host reboot
 
 `projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic
-restore of sessions and their `autoStart` sidecars that an abrupt host reboot killed.
-It never restores sessions that were stopped on purpose.
-
-How the daemon tells a host reboot apart from its own restart: the `tmux` server is a
-separate process from the daemon. A `systemctl restart` (or a daemon crash) leaves
-`tmux` and its agents running, so on boot `reconcileStoppedSessions` still finds those
-panes alive and keeps the sessions `running`. A host reboot kills the `tmux` server
-too, so the same boot reconcile finds every agent pane gone and drifts those
-`running`/`spawning` sessions to `stopped`. That drift set is exactly the set of
-sessions the reboot interrupted.
-
-Intentional stops never enter the candidate set: `pause`, `kill`, and `complete` move
-the session out of `running`/`spawning` before any reboot, and reconcile only scans
-those two live states. A session whose pane survived but whose agent process died is
-marked `errored`, not `stopped`, and is also excluded — only clean reboot drift
-(`stopped`) is restored.
-
-Boot sequence when the flag is on:
-
-1. `reconcileStoppedSessions` scans `running`/`spawning` sessions, drifts the ones with
-   no live `tmux` to `stopped`, and returns that drift set.
-2. The daemon marks itself ready, serves HTTP, then registers the `SIGINT`/`SIGTERM`
-   shutdown handlers.
-3. `restoreRebootedSessions` walks the drift set sequentially. For each session whose
-   project has `restoreAfterReboot: true` it runs the normal `restore()` (recreate
-   `tmux`, relaunch the agent) and then restarts that project's `autoStart` sidecars.
-   Each session is isolated, so one failed restore does not block the rest.
-
-Restore runs after the shutdown handlers register, so a mass post-reboot restore stays
-interruptible: a `Ctrl-C`/`SIGTERM` during the heavy restore shuts the daemon down
-gracefully instead of hitting Node's default terminate. Only `autoStart` sidecars come
-back; manually started sidecars are not tracked across a reboot.
+restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the
+daemon restores only sessions the reboot interrupted (those whose `tmux` panes are gone) —
+never intentional `pause`/`kill`/`complete` stops, and never `errored` sessions whose pane
+survived but whose agent died. Only `autoStart` sidecars come back; manual ones are not
+tracked across a reboot. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore
+shuts the daemon down gracefully.
 
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
@@ -280,7 +253,7 @@ The `openai_compatible` provider talks to any vendor that exposes the OpenAI `PO
 | OpenAI     | `https://api.openai.com/v1`      | `OPENAI_API_KEY`     | `whisper-1`              |
 | OpenRouter | `https://openrouter.ai/api/v1`   | `OPENROUTER_API_KEY` | vendor-specific model id |
 
-### Config
+### Voice config
 
 In `~/.spur/config.yaml`:
 
@@ -345,13 +318,13 @@ When `query` is set, the same source also runs a second branch on the same `inte
 
 ## Config
 
-Spur now has two config layers:
+Spur has two config layers:
 
 - global instance config: `~/.spur/config.yaml` by default. This owns daemon host/port, data dirs, tmux socket, default agent, and UI port.
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, Azure credentials in `~/.spur/.env` for `azure_openai`, or `baseUrl`/`apiKey` plus a matching key in `~/.spur/.env` for `openai_compatible`). See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` stays disabled until its provider dependencies are installed. See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
