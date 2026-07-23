@@ -6,7 +6,6 @@ tools: Read, Grep, Glob, Bash
 ---
 
 Validate changed behavior. Prefer local checks. Claude browser MCP, fallback to Playwright MCP.
-Spur CLI scenarios: [v2/TEST_SCENARIOS.md](v2/TEST_SCENARIOS.md)
 
 ## Task memory
 
@@ -16,14 +15,14 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 
 ### 1. Scope
 - Classify the change: UI | Spur backend | mixed | other
-- Read `AGENTS.md`, `CLAUDE.md`, the spec's Verification block and Invariants, and `v2/TEST_SCENARIOS.md` when Spur code is touched
+- Read `AGENTS.md`, `CLAUDE.md`, and the spec's Verification block and Invariants when Spur code is touched
 
 ### 2. Run checks
 - Run each acceptance criterion's bound verification from the spec; confirm every listed invariant still holds
 - Run targeted tests for touched packages
 - Run the relevant build command for each touched package
 - For Spur backend changes, exercise the touched `spur` CLI commands through positive and negative paths
-- For Spur changes, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`
+- For Spur changes, rerun the impacted test tiers (fast / runtime / smoke)
 - When impacted scenarios include `real-agent smoke`, run `pnpm --dir v2 test:smoke` against this repo with real `claude` and `codex`. Do not substitute fake repos or fake agents.
 - Check logs from your runs and fail on unexpected service, sidecar, browser, or console errors.
 
@@ -47,7 +46,6 @@ If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the cu
 ### 5. Manual checks (UI tasks only)
 - Run the manual check list from the spec's Verification block in the browser.
 - Mark each `PASS` or `FAIL` with one-line evidence.
-- Update `v2/TEST_SCENARIOS.md` (Spur CLI) or `packages/web/UI_TEST_SCENARIOS.md` (web UI) when new behavior or degradation paths are not yet covered.
 
 ## Output
 ```
@@ -67,8 +65,6 @@ Screenshot self-analysis:
 
 Manual checks:
 - <scenario>: PASS|FAIL
-
-TEST_SCENARIOS updated: yes|no
 
 Evidence:
 - <command> — OK|FAIL

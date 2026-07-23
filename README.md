@@ -319,7 +319,6 @@ pnpm --dir v2 test:smoke      # real-agent smoke against this repo (skips if tmu
 
 Run `runtime integration` when touching CLI, daemon, transport, session lifecycle, worktree, or tmux.
 Run `real-agent smoke` when touching agent launch or prompt delivery.
-Scenarios: [`TEST_SCENARIOS.md`](v2/TEST_SCENARIOS.md)
 
 ## Automation
 

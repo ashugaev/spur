@@ -293,5 +293,4 @@ Three tiers; pick the cheapest that crosses the changed boundary:
 - Minimum per touched command: positive path, negative/error path, cleanup verification.
 - Daemon startup or client transport changes -> `runtime integration` must cover both direct daemon start and CLI auto-start.
 - Workspace or runtime behavior changes -> `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, teardown.
-- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change; rerun impacted ones. `tester` covers existing affected scenarios plus new ones.
 - `tester` also flags hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes in touched Spur code.
