@@ -6,7 +6,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
-  ensureClaudeRestrictWritesSettings,
+  ensureClaudeSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -199,11 +199,12 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async ({ sessionToolDir, playwrightPort, restrictWrites }) => {
-      const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {};
-      if (restrictWrites) {
-        result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
-      }
+    setup: async ({ sessionToolDir, restrictWrites, playwrightPort }) => {
+      const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {
+        claudeSettingsPath: await ensureClaudeSettings(sessionToolDir, {
+          ...(restrictWrites ? { restrictWrites: true } : {}),
+        }),
+      };
       if (playwrightPort !== undefined) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
         const mcpConfig = {

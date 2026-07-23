@@ -766,9 +766,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.",
+    "scenario": "Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) during spawn and recovery.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Claude sessions get a Claude `settings.json` on spawn, pipeline-spawn, recovery, and restore with a guarded Stop-hook close-out check (`[ -x .claude/hooks/auto-push.sh ] && .claude/hooks/auto-push.sh claude || exit 0`, a no-op on worktrees that don't ship that script) when `restrictWrites` is not set, or a `PreToolUse` write-deny block instead when `restrictWrites` is set; the two hooks are mutually exclusive so restrict-writes sessions are never forced into the git close-out gate.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/agents-claude.test.ts", "v2/test/fast/agents-index.test.ts"],
     "ciJob": "quality"
   },
   {

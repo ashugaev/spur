@@ -12,7 +12,15 @@ export function claudeCommand(): string {
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
-export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string): Promise<string> {
+// Guarded: not every Spur-managed project ships `.claude/hooks/auto-push.sh`, so
+// this no-ops instead of erroring when the target worktree doesn't have it.
+const AUTO_PUSH_STOP_COMMAND =
+  "[ -x .claude/hooks/auto-push.sh ] && .claude/hooks/auto-push.sh claude || exit 0";
+
+export async function ensureClaudeSettings(
+  sessionToolDir: string,
+  options?: { restrictWrites?: boolean },
+): Promise<string> {
   const settingsDir = join(sessionToolDir, "claude");
   const settingsPath = join(settingsDir, "settings.json");
   await mkdir(settingsDir, { recursive: true });
@@ -20,14 +28,22 @@ export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string)
     settingsPath,
     JSON.stringify(
       {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: "Write|Edit|MultiEdit|NotebookEdit",
-              hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+        hooks: options?.restrictWrites
+          ? {
+              PreToolUse: [
+                {
+                  matcher: "Write|Edit|MultiEdit|NotebookEdit",
+                  hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+                },
+              ],
+            }
+          : {
+              Stop: [
+                {
+                  hooks: [{ type: "command", command: AUTO_PUSH_STOP_COMMAND }],
+                },
+              ],
             },
-          ],
-        },
       },
       null,
       2,
