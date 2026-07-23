@@ -8,6 +8,8 @@ Local daemon + CLI orchestrator.
 
 ## Installation
 
+> The install docs are written agent-first — terse and command-dense so an AI agent can run them top to bottom. They stay human-followable where that costs the agent nothing.
+
 - npm (official): `npm install -g @shugaev/spur` then `spur init` — see [docs/install-from-npm.md](docs/install-from-npm.md).
 - from source (dev / maintainers): see [docs/install-from-source.md](docs/install-from-source.md).
 

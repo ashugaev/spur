@@ -1,5 +1,7 @@
 # Install from npm
 
+> Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
+
 Run Spur on a fresh Linux server. Package ships the web UI prebuilt — no on-box build. Dev/maintainer setup instead: [install-from-source.md](install-from-source.md).
 
 Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (Ubuntu's apt build is too old — use nodesource or nvm).
