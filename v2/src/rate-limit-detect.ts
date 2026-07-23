@@ -199,6 +199,23 @@ export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
     .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
 }
 
+// Claude Code's compaction spinner ("✳ Compacting conversation… (18s)"). This
+// never reaches Claude's persisted status file (it stays "idle" throughout,
+// which maps to waiting) and the transcript only gets a compact record after
+// completion — so the live tmux pane banner is the only signal available
+// while it's in progress. Line-anchored + start-anchored, mirroring
+// detectClaudeUsageLimitMenu/detectCodexMcpPermissionDialog's discipline, so
+// a quoted/mid-line prose mention of "compacting conversation" (like this
+// very comment) can't self-trigger.
+const CLAUDE_COMPACTING_LINE = /^[^0-9a-z]{0,1}\s*compacting conversation/i;
+
+export function detectClaudeCompacting(paneText: string): boolean {
+  return paneText
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => CLAUDE_COMPACTING_LINE.test(line));
+}
+
 // Codex's MCP tool-permission confirmation dialog (e.g. "Allow the playwright
 // MCP server to run tool "browser_navigate"?" with four numbered options). This
 // is a live needs_input prompt, not a rate limit — but the same turn can carry

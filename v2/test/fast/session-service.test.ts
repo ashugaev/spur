@@ -4582,6 +4582,64 @@ describe("SessionService", () => {
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
 
+  it("classifies working while the pane shows the compaction spinner despite an idle claude status", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("✳ Compacting conversation… (18s)");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // A live (scanPane:true) classify detects the spinner and records the
+    // compacting override, but stabilizeState's anti-flicker hold can still
+    // hold the very first attempt to the prior cached "waiting" for up to
+    // STATE_HOLD_MS. Advancing past that window lets the now-agreeing ticks
+    // (dashboard reusing the recorded override, live scans re-confirming the
+    // spinner) settle on working, mirroring real elapsed-time behavior.
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    service.dispose();
+  });
+
+  it("stays waiting when the claude status is idle and the pane shows no compaction spinner", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("Waiting for the next task.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    service.dispose();
+  });
+
+  it("keeps rate_limited when a rate-limit banner co-occurs with the compaction spinner", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      ["■ Usage limit reached ∙ resets 3pm", "✳ Compacting conversation… (18s)"].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+    service.dispose();
+  });
+
   it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
