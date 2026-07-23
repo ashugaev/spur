@@ -75,3 +75,7 @@ spur.*.local.yaml
 # Local-only planning docs (not shipped / not public)
 docs/workflow-technical-updates.md
 docs/context-engineering-backlog.md
+
+# v2/README.md is generated at release from the root README (single source of truth)
+v2/README.md
+v2/docs/

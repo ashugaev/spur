@@ -2,7 +2,7 @@
 
 Contributor bootstrap for this repo.
 
-For package install, first run, and runtime behavior, use [v2/README.md](v2/README.md). For deploy and operator flow, use [docs/install-from-source.md](docs/install-from-source.md).
+For package install, first run, and runtime behavior, use [README.md](README.md). For deploy and operator flow, use [docs/install-from-source.md](docs/install-from-source.md).
 
 ## Prerequisites
 

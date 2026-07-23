@@ -217,13 +217,13 @@ Reload: Quick Start step 9. No terminal-specific proxy or env to configure — f
 
 ## Voice Input (Optional)
 
-Optional. Requires extra host dependencies, `~/.spur/.env` credentials for some providers, and HTTPS (or localhost) for microphone access. Full setup: [v2/README.md — Voice Input](../v2/README.md#voice-input).
+Optional. Requires extra host dependencies, `~/.spur/.env` credentials for some providers, and HTTPS (or localhost) for microphone access. Full setup: [README.md — Voice Input](../README.md#voice-input).
 
 `openai_compatible` is the no-installation path: no whisper.cpp build, no faster-whisper venv, no Azure deployment. Configure `voice.baseUrl` and `voice.apiKey` and set the key in `~/.spur/.env`.
 
 ## Sidecars (Optional)
 
-Session-bound commands from `projects.<id>.sidecars` in worktrees. Each sidecar installs local `node_modules` on first start. Nesting limited to one level. See [v2/README.md](../v2/README.md).
+Session-bound commands from `projects.<id>.sidecars` in worktrees. Each sidecar installs local `node_modules` on first start. Nesting limited to one level. See [README.md](../README.md).
 
 ## Agent CLI Auth
 
@@ -708,7 +708,7 @@ Hand-off summary to the user:
 
 #### I15 — Optional: voice input
 
-Run only if intake (13) is `yes`. Follow [v2/README.md — Voice Input](../v2/README.md#voice-input). Validate per the provider section there. Microphone in the browser requires HTTPS or `localhost`.
+Run only if intake (13) is `yes`. Follow [README.md — Voice Input](../README.md#voice-input). Validate per the provider section there. Microphone in the browser requires HTTPS or `localhost`.
 
 #### I16 — Optional: hourly auto-deploy
 

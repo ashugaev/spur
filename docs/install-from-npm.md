@@ -148,4 +148,4 @@ Updating a system-unit host:
 
 ## Reference
 
-CLI details: [v2/README.md](../v2/README.md).
+CLI details: [README.md](../README.md).
