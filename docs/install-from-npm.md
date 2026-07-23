@@ -4,6 +4,8 @@ Official guide to run Spur on a fresh Linux server. The npm package ships the we
 
 Tested on Ubuntu 24.04 LTS (Noble), down to the smallest e2-micro-class VM (~1GB RAM, no swap). Other distros and versions may work but are unverified; use them at your own risk.
 
+Tested on Ubuntu 24.04 LTS (Noble), down to the smallest e2-micro-class VM (~1GB RAM, no swap). Other distros and versions may work but are unverified; use them at your own risk.
+
 ## What spur init sets up
 
 `npm install -g` only unpacks the package into your npm prefix (default `~/.local`). It does not register systemd units, enable linger, start anything, or survive reboot. `spur init` installs two systemd user units:
