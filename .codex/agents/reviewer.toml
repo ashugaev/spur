@@ -21,7 +21,7 @@ Review areas (in priority order):
 - Regressions (critical): changed interfaces don't break call-sites, removed/renamed exports tracked
 - Security (critical): execFile/spawn only, no user input in shell commands, JSON.parse wrapped
 - Conventions (high): ESM .js imports, node: prefix, unknown not any, once() for one-time handlers
-- Docs (high): new user-facing functionality (command, flag, config field, source type, provider, event) is documented in the same change (reference expanded in README ## Commands/## Config, not shipped undocumented); changed install/deploy/config/CLI behavior updates its single owning doc under docs/; no topic restated where a link would do; no dead relative links
+- Docs (high): new user-facing functionality (command, flag, config field, source type, provider, event) is documented in the same change (reference expanded in README ## Commands/## Config, not shipped undocumented); changed install/deploy/config/CLI behavior updates its single owning doc under docs/; no topic restated where a link would do; docs stay lean and granular (one topic per doc, nothing a mid dev or agent already knows); no dead relative links
 - Edge cases (medium): null/undefined handled, error states covered, cleanup for intervals/timeouts
 
 Rules:

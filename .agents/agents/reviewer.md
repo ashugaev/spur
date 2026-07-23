@@ -67,6 +67,7 @@ Hunt for: incorrect architecture assumptions, missing error/loading states, brok
 - New user-facing functionality (command, flag, config field, source type, provider, event) is documented in the same change — reference expanded (`README.md` `## Commands`/`## Config`), not shipped undocumented
 - Changed install, deploy, config, or CLI behavior updates its single owning doc under `docs/`
 - No topic restated across docs where a link would do
+- Docs stay lean and granular: one topic per doc, nothing a mid dev or agent already knows or can trivially find
 - No dead relative links after a rename or move; published docs reachable from `README.md` `## Docs`
 
 ### Edge cases (medium)
