@@ -1,6 +1,6 @@
-# Agentic install from npm
+# Install from npm
 
-Official guide to run Spur on a fresh Linux server. The npm package ships the web UI prebuilt, so there is no on-box build. Maintainers doing source/dev deploys: see [ubuntu-vm-deploy.md](ubuntu-vm-deploy.md).
+Official guide to run Spur on a fresh Linux server. The npm package ships the web UI prebuilt, so there is no on-box build. Installing from source instead (dev / maintainers): see [install-from-source.md](install-from-source.md).
 
 Tested on Ubuntu 24.04 LTS (Noble), down to the smallest e2-micro-class VM (~1GB RAM, no swap). Other distros and versions may work but are unverified; use them at your own risk.
 

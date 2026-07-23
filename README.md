@@ -4,7 +4,7 @@ Local daemon + CLI orchestrator. `v2/` ships the runtime. `packages/web/` is an 
 
 ## Installation
 
-- npm: `npm install -g @shugaev/spur` then `spur init` — see [docs/agentic-install-from-npm.md](docs/agentic-install-from-npm.md).
+- npm: `npm install -g @shugaev/spur` then `spur init` — see [docs/install-from-npm.md](docs/install-from-npm.md).
 
 ## Run From Source
 
@@ -42,7 +42,7 @@ Use [SETUP.md](SETUP.md) for repo bootstrap, local config, and web UI developmen
 - `packages/web/` — Next.js UI over the Spur daemon API
 - `scripts/setup.sh` — contributor bootstrap for local development and dogfooding
 - `tests/integration/` — onboarding smoke environment
-- `docs/ubuntu-vm-deploy.md` — deployment guide
+- `docs/install-from-source.md` — install from source (Ubuntu VM deploy)
 - `spur.yaml` — repo-local project config for this checkout
 
 ## Docs
@@ -50,7 +50,7 @@ Use [SETUP.md](SETUP.md) for repo bootstrap, local config, and web UI developmen
 - [v2/README.md](v2/README.md) — Spur commands, config, automation, validation
 - [SETUP.md](SETUP.md) — contributor bootstrap and local web UI development
 - [CONTRIBUTING.md](CONTRIBUTING.md) — PR scope and required checks
-- [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
+- [docs/install-from-source.md](docs/install-from-source.md) — install from source (Ubuntu VM deploy and release)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — short fixes for common local failures
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
 

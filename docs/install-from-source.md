@@ -1,4 +1,4 @@
-# Deploy Spur To An Ubuntu VM
+# Install from source
 
 Deploy from a GitHub checkout (not by copying the repo tree). VM needs SSH and GitHub SSH access. `v2/` is runtime source of truth. Expose the web UI through a reverse proxy for browser access beyond loopback.
 
@@ -770,7 +770,7 @@ Allowed to commit (changes flow through PR to `main`, then `pnpm main:deploy` pi
 
 - `deploy/spur-daemon.service`, `deploy/spur-web.service`, `deploy/spur-daemon.env.example`
 - `scripts/main-deploy.sh`
-- `docs/ubuntu-vm-deploy.md`
+- `docs/install-from-source.md`
 - Source code, tests, web UI, repo configs
 
 Never commit:

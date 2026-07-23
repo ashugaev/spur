@@ -1,11 +1,11 @@
 ---
 name: clean-install-test
-description: Clean-room test of the Spur server install on a throwaway cheap cloud VM. Use to prove the official npm install flow works end-to-end on a fresh server before a release — provision a disposable Ubuntu VM, install Spur by following docs/agentic-install-from-npm.md (not restated here), verify the services come up (daemon, web, /ws terminal, agent spawn), report, then delete that instance once the user confirms. Infra harness only; it carries no install steps of its own and does not test UI.
+description: Clean-room test of the Spur server install on a throwaway cheap cloud VM. Use to prove the official npm install flow works end-to-end on a fresh server before a release — provision a disposable Ubuntu VM, install Spur by following docs/install-from-npm.md (not restated here), verify the services come up (daemon, web, /ws terminal, agent spawn), report, then delete that instance once the user confirms. Infra harness only; it carries no install steps of its own and does not test UI.
 ---
 
 # Clean Install Test
 
-Reproduce a real user's first-time server setup for Spur on a disposable VM and confirm the services work, then destroy the box. This skill is the infrastructure wrapper around the install — the same thing a user does before handing an agent the guide. The actual install steps live in `docs/agentic-install-from-npm.md`; follow that doc, do not restate it here. No UI-flow testing — verify at the service level.
+Reproduce a real user's first-time server setup for Spur on a disposable VM and confirm the services work, then destroy the box. This skill is the infrastructure wrapper around the install — the same thing a user does before handing an agent the guide. The actual install steps live in `docs/install-from-npm.md`; follow that doc, do not restate it here. No UI-flow testing — verify at the service level.
 
 Goal: prove single-shot install on a clean Ubuntu server up to the agent-login gate, then delete the instance.
 
@@ -48,7 +48,7 @@ ssh -i <keypath> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <us
 
 ## 3. Install Spur — drive the doc, do not restate it
 
-Open `docs/agentic-install-from-npm.md` and run its steps on the VM exactly as a fresh user would (Node 20, npm prefix `~/.local` + PATH, `npm i -g @shugaev/spur`, `spur init` with Tailscale default-on / opt-out). The skill executes the doc; it does not carry a second copy of the steps. Any doc step that fails on a clean box is a release blocker — capture the command, output, and fix.
+Open `docs/install-from-npm.md` and run its steps on the VM exactly as a fresh user would (Node 20, npm prefix `~/.local` + PATH, `npm i -g @shugaev/spur`, `spur init` with Tailscale default-on / opt-out). The skill executes the doc; it does not carry a second copy of the steps. Any doc step that fails on a clean box is a release blocker — capture the command, output, and fix.
 
 ## 4. Verify services (infra level, not UI)
 
