@@ -74,16 +74,6 @@ jobs:
           # exercises the moved prebuild — fail the release if it can't load.
           (cd v2/web && node -e "require('node-pty')") \
             || { echo "bundled node-pty prebuild failed to load"; exit 1; }
-      - name: Bundle README + docs into v2
-        run: |
-          # Docs live only in the repo root (README.md, docs/); the repo v2/
-          # stays doc-free. The npm package ships copies so npmjs shows the full
-          # README and the tarball carries all docs. Root-relative links in the
-          # README resolve because docs/ ships alongside it. Only tracked docs
-          # are present in the CI checkout, so local-only planning docs never ship.
-          cp README.md v2/README.md
-          rm -rf v2/docs
-          cp -R docs v2/docs
       - name: Verify node-pty prebuild is packed
         run: |
           cd v2
