@@ -30,18 +30,19 @@ Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claud
 
 Capabilities loaded by description match. Source: [.claude/skills/](.claude/skills/).
 
-| Skill                                                              | Load when                                                        |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                       |
-| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface             |
-| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                      |
-| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
-| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
-| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
-| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius  |
-| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
-| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
-| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |
+| Skill                                                              | Load when                                                                     |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                                    |
+| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface                          |
+| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                                   |
+| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions              |
+| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                                            |
+| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                             |
+| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius               |
+| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                               |
+| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                   |
+| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                            |
+| [`clean-install-test`](.claude/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
 
 ## Response style
 
