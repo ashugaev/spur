@@ -13,7 +13,6 @@ export interface ConversationViewProps {
   isWorking: boolean;
 }
 
-const MAX_MESSAGE_CHARS = 500;
 const MAX_TOOL_CHARS = 240;
 const MAX_REASONING_CHARS = 400;
 
@@ -55,13 +54,13 @@ function messagesAsEntries(messages: ConversationMessage[]): TranscriptEntry[] {
 function MessageEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "message" }> }) {
   return (
     <div
-      className={`min-w-0 max-w-[85%] px-3 py-2 ${
+      className={`min-w-0 max-w-[85%] px-3 py-2 text-[var(--color-text-primary)] ${
         entry.role === "user"
-          ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
-          : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
+          ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10"
+          : "mr-auto border border-[var(--color-border-default)]"
       }`}
     >
-      <MarkdownMessage text={truncate(entry.text, MAX_MESSAGE_CHARS)} />
+      <MarkdownMessage text={entry.text} />
     </div>
   );
 }
@@ -73,10 +72,14 @@ function ToolEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "tool
     <div className="min-w-0 max-w-[95%] border border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)]/60 px-2 py-1 font-mono text-[10px] text-[var(--color-text-tertiary)]">
       <div className="uppercase tracking-[0.08em]">{entry.name}</div>
       {inputSummary ? (
-        <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS}`}>{truncate(inputSummary, MAX_TOOL_CHARS)}</div>
+        <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS}`}>
+          <span className="text-[10px] font-bold text-[var(--color-text-tertiary)]">in:</span>{" "}
+          {truncate(inputSummary, MAX_TOOL_CHARS)}
+        </div>
       ) : null}
       {output ? (
         <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS} opacity-80`}>
+          <span className="text-[10px] font-bold text-[var(--color-text-tertiary)]">out:</span>{" "}
           {truncate(output, MAX_TOOL_CHARS)}
         </div>
       ) : null}
@@ -96,7 +99,10 @@ function ReasoningEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: 
 
 function QuestionEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "question" }> }) {
   return (
-    <div className="min-w-0 border border-[var(--color-status-attention)]/50 bg-[var(--color-bg-elevated)] px-3 py-2">
+    <div
+      className="min-w-0 border border-[var(--color-status-attention)] bg-[var(--color-status-attention)]/10 px-3 py-2"
+      role="alert"
+    >
       <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]">
         {entry.header}
       </div>
@@ -104,7 +110,7 @@ function QuestionEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "
         {entry.prompt}
       </div>
       {entry.options && entry.options.length > 0 ? (
-        <ol className="mt-2 space-y-1">
+        <ol aria-label="Answer options" className="mt-2 space-y-1">
           {entry.options.map((option) => (
             <li key={option.index} className="text-[var(--color-text-secondary)]">
               <span className="font-mono text-[var(--color-text-tertiary)]">{option.index}.</span>{" "}
@@ -159,7 +165,7 @@ export function ConversationView({ entries, messages, durationMs, isWorking }: C
     el.scrollTop = el.scrollHeight;
   }, [items, isWorking]);
 
-  if (items.length === 0) {
+  if (items.length === 0 && !isWorking) {
     return null;
   }
 

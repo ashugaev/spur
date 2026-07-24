@@ -334,14 +334,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### S2b: Conversation dialog (all agents, `ConversationView`)
 
-- Visible for any agent (claude, codex, cursor) when the conversation has transcript entries or messages; hidden when both are empty
+- Visible for any agent (claude, codex, cursor) when the conversation has transcript entries or messages, or when the agent is actively working (pending row shows even with an empty transcript); hidden only when both are empty and the agent isn't working
 - Section header: "DIALOG" with duration (e.g., "2h 15m") on the right
 - Scrollable entry list (max-h-80) in bordered surface container, rendered in file-line order (never re-sorted)
-- `message` entries render as chat bubbles: user right-aligned with accent border/tint, assistant left-aligned with default border/secondary text
-- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables; truncated at 500 chars with "..."
-- `tool` entries render as a compact, de-emphasized monospace row (tool name + truncated input summary/output) — not a chat bubble
+- `message` entries render as chat bubbles: user right-aligned with accent border/tint, assistant left-aligned with default border; both roles use primary (not dimmed) text color, so accent border/tint plus alignment is the only role differentiator
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables; not truncated (the scrollable container handles overflow)
+- `tool` entries render as a compact, de-emphasized monospace row (tool name + truncated input summary/output, each prefixed with a muted `in:`/`out:` label to distinguish call from result) — not a chat bubble
 - `reasoning` entries render as a muted/italic secondary row, truncated
-- `question` entries render as a bordered block with header + prompt; when `options` are present they list as a static numbered list with a hint that replies go through the message box below (read-only in this phase — no click-to-answer wiring yet); when options are absent, only header/prompt show
+- `question` entries render as a full-opacity attention-bordered/tinted block (`role="alert"`) with header + prompt to make the item the user must act on visually prominent; when `options` are present they list as a static numbered list (`aria-label="Answer options"`) with a hint that replies go through the message box below (read-only in this phase — no click-to-answer wiring yet); when options are absent, only header/prompt show
 - When the derived working state is `working` (transcript-driven for claude, session-state-driven for other agents), append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the derived state is `working`, the page header status also shows `working`
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog

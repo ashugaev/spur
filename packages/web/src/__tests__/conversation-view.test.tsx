@@ -41,6 +41,23 @@ describe("ConversationView", () => {
     expect(screen.getByText("nothing to commit")).toBeInTheDocument();
   });
 
+  it("labels tool input and output with in:/out: prefixes", () => {
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "tool",
+        name: "Bash",
+        callId: "call-1",
+        inputSummary: "git status",
+        output: "nothing to commit",
+        timestampMs: 1,
+      },
+    ];
+    render(<ConversationView entries={entries} messages={[]} durationMs={0} isWorking={false} />);
+
+    expect(screen.getByText("in:")).toBeInTheDocument();
+    expect(screen.getByText("out:")).toBeInTheDocument();
+  });
+
   it("renders a reasoning entry as a muted row", () => {
     const entries: TranscriptEntry[] = [
       { kind: "reasoning", text: "Considering the best approach", timestampMs: 1 },
@@ -70,6 +87,8 @@ describe("ConversationView", () => {
     expect(screen.getByText("Yes")).toBeInTheDocument();
     expect(screen.getByText("No")).toBeInTheDocument();
     expect(screen.getByText(/reply from the message box/i)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByLabelText("Answer options")).toBeInTheDocument();
   });
 
   it("renders a question entry without options as header/prompt only", () => {
@@ -124,5 +143,21 @@ describe("ConversationView", () => {
     );
 
     expect(screen.queryByLabelText("Assistant is responding")).not.toBeInTheDocument();
+  });
+
+  it("still renders the pending row when isWorking is true and there are no entries", () => {
+    render(<ConversationView entries={[]} messages={[]} durationMs={0} isWorking />);
+
+    expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
+  });
+
+  it("renders a message entry without truncating long text", () => {
+    const longText = "a".repeat(600);
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "assistant", text: longText, timestampMs: 1 },
+    ];
+    render(<ConversationView entries={entries} messages={[]} durationMs={0} isWorking={false} />);
+
+    expect(screen.getByText(longText)).toBeInTheDocument();
   });
 });
