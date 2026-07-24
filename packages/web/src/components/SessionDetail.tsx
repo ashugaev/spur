@@ -11,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -2374,7 +2374,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
               <span>{session.projectName}</span>
               <span>•</span>
-              <span>{session.agent}</span>
+              <span>{getAgentDisplayName(session.agent)}</span>
               <span>•</span>
               <span className="font-mono">{session.id}</span>
               {session.model ? (
