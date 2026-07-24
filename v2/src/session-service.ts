@@ -8991,17 +8991,16 @@ export class SessionService {
           state = "working";
         }
       } else if (scanPane && strategy === "hook") {
-        // Codex-specific: a hard rate-limit banner always wins. Otherwise, a
-        // soft has_credits:false rollout signal can be a false positive when
-        // the session is actually parked on a live MCP tool-permission dialog
-        // (hook-independent — this can show up under any hookEvent, including
-        // PostToolUse) rather than genuinely rate limited.
+        // Codex-specific: a hard rate-limit banner always wins. Otherwise,
+        // whenever the pane shows a live MCP tool-permission dialog (whether or
+        // not a soft rate-limit signal is also present) the session is promoted
+        // to needs_input, unless state is already the more specific "error".
         const paneText = await captureTmuxPane(session.tmuxSession);
         const hardHit = scanTmuxRateLimit(paneText);
         if (hardHit?.limited) {
           rateLimit = hardHit;
           this.codexMcpDialogOverrides.delete(session.id);
-        } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
+        } else if (state !== "error" && detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
           this.codexMcpDialogOverrides.set(
@@ -9012,7 +9011,7 @@ export class SessionService {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: "State: needs_input (codex MCP permission dialog, overrides soft rate limit)",
+            message: "State: needs_input (codex MCP permission dialog)",
           });
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
