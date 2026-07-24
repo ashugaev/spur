@@ -28,7 +28,6 @@ regexes = [
   "your-token-here",
   "example\\.com",
 
-  # RFC 6455 example WebSocket handshake nonce (public by protocol, not a secret;
-  # appears in the clean-install-test skill's /ws probe across branch history)
+  # RFC 6455 example WebSocket handshake nonce (docs handshake sample, not a secret)
   "dGhlIHNhbXBsZSBub25jZQ==",
 ]
