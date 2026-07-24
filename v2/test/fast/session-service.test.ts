@@ -246,6 +246,7 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
 
 vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestClaudeSessionFileMock,
+  DEFAULT_CLAUDE_MODEL: "opus",
 }));
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
@@ -1039,6 +1040,7 @@ describe("SessionService", () => {
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
+      model: "opus",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -2026,6 +2028,7 @@ describe("SessionService", () => {
       expect.stringContaining("slot-instructions\nhello"),
       {
         planMode: true,
+        model: "opus",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
       },
     );
@@ -2072,6 +2075,7 @@ describe("SessionService", () => {
       expect.stringContaining("[Spur step 1/1: review]"),
       {
         restrictWrites: true,
+        model: "opus",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
       },
     );
@@ -2462,6 +2466,7 @@ describe("SessionService", () => {
     expect(result.prompt).toBe("");
     expect(result.pipeline).toBeUndefined();
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
+      model: "opus",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
     });
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
@@ -14498,7 +14503,7 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "claude",
         "slot-instructions\nfix the bug",
-        { agentSessionId: PINNED_CLAUDE_SESSION_ID },
+        { model: "opus", agentSessionId: PINNED_CLAUDE_SESSION_ID },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.respawn.started",
@@ -14907,7 +14912,7 @@ describe("SessionService", () => {
           "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
           "edited prompt",
         ].join("\n"),
-        { agentSessionId: PINNED_CLAUDE_SESSION_ID },
+        { model: "opus", agentSessionId: PINNED_CLAUDE_SESSION_ID },
       );
       expect(
         readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8"),

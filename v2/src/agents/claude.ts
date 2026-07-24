@@ -9,6 +9,10 @@ export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 
+// Spur's default model for the Claude agent, applied when a spawn resolves to
+// claude without an explicit or configured model.
+export const DEFAULT_CLAUDE_MODEL = "opus";
+
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 

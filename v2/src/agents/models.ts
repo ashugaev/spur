@@ -15,9 +15,10 @@ export interface AgentModel {
   isCurrent?: boolean;
 }
 
+// opus is Spur's default Claude model (see DEFAULT_CLAUDE_MODEL in claude.ts).
 const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
+  { id: "opus", label: "Opus", isDefault: true },
+  { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
   { id: "fable", label: "Fable" },
 ];
