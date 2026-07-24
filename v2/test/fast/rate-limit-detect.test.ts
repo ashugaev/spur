@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   claudeUsageMenuOptionOneSelected,
+  detectClaudeCompacting,
   detectClaudeRateLimit,
   detectClaudeUsageLimitMenu,
   detectCodexMcpPermissionDialog,
@@ -395,6 +396,36 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
       false,
     );
+  });
+});
+
+describe("detectClaudeCompacting", () => {
+  it("flags a live spinner line", () => {
+    const paneText = ["Some earlier output", "✳ Compacting conversation… (18s)", ""].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("flags a lowercased variant", () => {
+    const paneText = ["compacting conversation... (5s)"].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("returns false for a prose/quoted mid-line mention", () => {
+    const paneText = [
+      'Spur must derive session state "working" when the pane renders "Compacting',
+      'conversation… (Ns)" spinner.',
+    ].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for an idle pane", () => {
+    const paneText = ["Waiting for the next task."].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeCompacting(source)).toBe(false);
   });
 });
 

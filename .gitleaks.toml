@@ -28,8 +28,6 @@ regexes = [
   "your-token-here",
   "example\\.com",
 
-  # RFC 6455 WebSocket handshake sample nonce (base64 of "the sample nonce"),
-  # used in docs/skills to probe the /ws upgrade — a fixed public constant,
-  # never a secret.
+  # RFC 6455 example WebSocket handshake nonce (docs handshake sample, not a secret)
   "dGhlIHNhbXBsZSBub25jZQ==",
 ]
