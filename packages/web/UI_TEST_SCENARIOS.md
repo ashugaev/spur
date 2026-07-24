@@ -332,20 +332,21 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
-### S2b: Conversation dialog (Claude only)
+### S2b: Conversation dialog (all agents, `ConversationView`)
 
-- Visible only for `agent === "claude"` sessions with conversation messages
-- Hidden for codex sessions and when no messages exist
+- Visible for any agent (claude, codex, cursor) when the conversation has transcript entries or messages; hidden when both are empty
 - Section header: "DIALOG" with duration (e.g., "2h 15m") on the right
-- Scrollable message list (max-h-80) in bordered surface container
-- User messages: right-aligned, accent border/background tint
-- Assistant messages: left-aligned, default border, secondary text
-- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
-- While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
-- When the conversation state is `working`, the page header status also shows `working`
-- Messages truncated at 500 chars with "..."
+- Scrollable entry list (max-h-80) in bordered surface container, rendered in file-line order (never re-sorted)
+- `message` entries render as chat bubbles: user right-aligned with accent border/tint, assistant left-aligned with default border/secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables; truncated at 500 chars with "..."
+- `tool` entries render as a compact, de-emphasized monospace row (tool name + truncated input summary/output) — not a chat bubble
+- `reasoning` entries render as a muted/italic secondary row, truncated
+- `question` entries render as a bordered block with header + prompt; when `options` are present they list as a static numbered list with a hint that replies go through the message box below (read-only in this phase — no click-to-answer wiring yet); when options are absent, only header/prompt show
+- When the derived working state is `working` (transcript-driven for claude, session-state-driven for other agents), append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
+- When the derived state is `working`, the page header status also shows `working`
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
+- Falls back to rendering `messages` as chat bubbles when `entries` is empty (defensive compatibility path)
 - Polls at same interval as session (4s)
 
 ### S2c: Queued messages

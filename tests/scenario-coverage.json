@@ -3900,23 +3900,15 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Visible only for `agent === \"claude\"` sessions with conversation messages",
-    "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
-    "ciJob": "playwright"
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "Visible for any agent (claude, codex, cursor) when the conversation has transcript entries or messages; hidden when both are empty",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Hidden for codex sessions and when no messages exist",
-    "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
-    "ciJob": "playwright"
-  },
-  {
-    "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
     "scenario": "Section header: \"DIALOG\" with duration (e.g., \"2h 15m\") on the right",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3924,63 +3916,71 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Scrollable message list (max-h-80) in bordered surface container",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "Scrollable entry list (max-h-80) in bordered surface container, rendered in file-line order (never re-sorted)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "User messages: right-aligned, accent border/background tint",
-    "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
-    "ciJob": "playwright"
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "`message` entries render as chat bubbles: user right-aligned with accent border/tint, assistant left-aligned with default border/secondary text",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Assistant messages: left-aligned, default border, secondary text",
-    "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
-    "ciJob": "playwright"
-  },
-  {
-    "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables; truncated at 500 chars with \"...\"",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "`tool` entries render as a compact, de-emphasized monospace row (tool name + truncated input summary/output) — not a chat bubble",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "`reasoning` entries render as a muted/italic secondary row, truncated",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "`question` entries render as a bordered block with header + prompt; when `options` are present they list as a static numbered list with a hint that replies go through the message box below (read-only in this phase — no click-to-answer wiring yet); when options are absent, only header/prompt show",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "When the derived working state is `working` (transcript-driven for claude, session-state-driven for other agents), append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "When the conversation state is `working`, the page header status also shows `working`",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "When the derived state is `working`, the page header status also shows `working`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
-    "scenario": "Messages truncated at 500 chars with \"...\"",
-    "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
-    "ciJob": "playwright"
-  },
-  {
-    "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
     "scenario": "Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3988,7 +3988,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
     "scenario": "Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3996,7 +3996,15 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "S2b: Conversation dialog (Claude only)",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
+    "scenario": "Falls back to rendering `messages` as chat bubbles when `entries` is empty (defensive compatibility path)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
     "scenario": "Polls at same interval as session (4s)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],

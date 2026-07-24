@@ -30,12 +30,12 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
-import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
-import { INPUT_CLASS } from "@/design/classes";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -374,7 +374,6 @@ const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
-const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
   timestamp: string;
@@ -1105,13 +1104,6 @@ function ArtifactLightbox({
   );
 }
 
-interface DialogMessage {
-  key: string;
-  role: "user" | "assistant";
-  text: string;
-  pending?: boolean;
-}
-
 async function copyTextToClipboard(value: string): Promise<void> {
   if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
     await navigator.clipboard.writeText(value);
@@ -1326,15 +1318,6 @@ const LOG_LEVEL_COLORS: Record<string, string> = {
   error: "var(--color-status-error)",
 };
 
-function formatDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSec / 3600);
-  const minutes = Math.floor((totalSec % 3600) / 60);
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return "<1m";
-}
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1479,8 +1462,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   currentSessionIdRef.current = sessionId;
   const loadRequestIdRef = useRef(0);
   const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const openedMarkerRef = useRef<string | null>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
@@ -1611,7 +1592,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   ]);
 
   const loadConversation = useCallback(async () => {
-    if (!session || session.agent !== "claude") {
+    if (!session) {
       setConversation(null);
       return;
     }
@@ -1634,27 +1615,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadConversation]);
-
-  useEffect(() => {
-    const lastMessage = conversation?.messages.at(-1);
-    const nextDialogTail =
-      conversation?.state === "working"
-        ? `pending:${lastMessage?.timestampMs ?? "none"}:${lastMessage?.role ?? "none"}:${lastMessage?.text ?? ""}`
-        : lastMessage?.role === "assistant"
-          ? `assistant:${lastMessage.timestampMs}:${lastMessage.text}`
-          : null;
-    if (!nextDialogTail || nextDialogTail === lastDialogTailRef.current) {
-      return;
-    }
-    lastDialogTailRef.current = nextDialogTail;
-    const el = dialogRef.current;
-    if (!el) return;
-    if (typeof el.scrollTo === "function") {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-      return;
-    }
-    el.scrollTop = el.scrollHeight;
-  }, [conversation]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2089,29 +2049,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => window.clearInterval(timer);
   }, [wakeDueAt]);
   const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
-  const dialogMessages = useMemo<DialogMessage[]>(
-    () =>
-      conversation
-        ? [
-            ...conversation.messages.map((msg) => ({
-              key: `${msg.timestampMs}:${msg.role}:${msg.text}`,
-              role: msg.role,
-              text: msg.text,
-            })),
-            ...(conversation.state === "working"
-              ? [
-                  {
-                    key: "pending-assistant-response",
-                    role: "assistant" as const,
-                    text: "...",
-                    pending: true,
-                  },
-                ]
-              : []),
-          ]
-        : [],
-    [conversation],
-  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -2634,48 +2571,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Content */}
           <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
-              {/* Conversation dialog - Claude only */}
-              {session.agent === "claude" && conversation?.messages.length ? (
-                <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                    Dialog
-                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
-                    {conversation.durationMs > 0 ? (
-                      <span className="font-normal normal-case tracking-normal">
-                        {formatDuration(conversation.durationMs)}
-                      </span>
-                    ) : null}
-                  </h2>
-                  <div
-                    ref={dialogRef}
-                    className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
-                  >
-                    {dialogMessages.map((msg) => (
-                      <div
-                        key={msg.key}
-                        aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
-                          msg.role === "user"
-                            ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
-                            : msg.pending
-                              ? "mr-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)]"
-                              : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
-                        }`}
-                      >
-                        {msg.pending ? (
-                          <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>
-                            {msg.text}
-                          </div>
-                        ) : (
-                          <MarkdownMessage
-                            text={msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text}
-                          />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              ) : null}
+              {/* Conversation dialog - all agents */}
+              <ConversationView
+                entries={conversation?.entries ?? []}
+                messages={conversation?.messages ?? []}
+                durationMs={conversation?.durationMs ?? 0}
+                isWorking={displayState === "working"}
+              />
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
