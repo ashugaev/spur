@@ -908,7 +908,13 @@ export function Dashboard() {
   // Initialized empty rather than read from `window.location.search` at render
   // time: the server always renders "", so a non-empty client-side first
   // render would be a hydration text mismatch. The layout effect below is the
-  // only path that populates these, restoring both together pre-paint.
+  // only path that populates these, restoring both together pre-paint. This
+  // removes the mismatch these two states used to contribute — it is not a
+  // whole-component guarantee: `readCollapsedCategories` and the
+  // `activeTagFilters` initializer further below still read localStorage
+  // during render. Both are unreachable pre-paint today only because they're
+  // gated behind fetched-session state, not because render-time storage reads
+  // are safe in general.
   const [locationSearch, setLocationSearch] = useState("");
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
   const [projectId, setProjectId] = useState("");

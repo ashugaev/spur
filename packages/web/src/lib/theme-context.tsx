@@ -53,7 +53,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // directly (in a layout effect, so it runs pre-paint) keeps the theme
   // correct independent of that recovery re-render.
   useLayoutEffect(() => {
-    const next = normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY));
+    // `localStorage` access can throw `SecurityError` (e.g. site data
+    // blocked) — mirrors the pre-hydration <head> script's try/catch in
+    // layout.tsx, which leaves the theme dark on throw. Match that: treat a
+    // throw as "no stored value", which normalizeTheme(null) already
+    // resolves to dark.
+    let stored: string | null;
+    try {
+      stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    } catch {
+      stored = null;
+    }
+    const next = normalizeTheme(stored);
     setThemeState(next);
     applyTheme(next);
   }, []);
@@ -75,7 +86,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const toggleTheme = useCallback(() => {
     setThemeState((current) => {
       const next = current === "light" ? "dark" : "light";
-      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+      // React invokes this updater during the render phase (not inside the
+      // click handler's try/catch, if any), and this provider has no error
+      // boundary — a throw here would crash the whole tree, not just this
+      // click, the same failure mode as the mount read above. Persistence
+      // is best-effort; the theme still applies to this tab either way.
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch {
+        // Ignore: theme still applies below, just isn't persisted.
+      }
       applyTheme(next);
       return next;
     });

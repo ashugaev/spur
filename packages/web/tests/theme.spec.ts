@@ -1,5 +1,11 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions, gotoMocked, type ProjectInfo } from "./fixtures.js";
+import {
+  makeWorkingSession,
+  mockSessions,
+  mockTagCatalog,
+  gotoMocked,
+  type ProjectInfo,
+} from "./fixtures.js";
 
 const LIGHT_BG = "rgb(255, 255, 255)";
 const DARK_BG = "rgb(13, 13, 14)";
@@ -7,6 +13,7 @@ const DARK_BG = "rgb(13, 13, 14)";
 // T1: Theme persistence
 test.describe("T1: Theme persistence", () => {
   test("toggling to light persists across a reload", async ({ page }) => {
+    await mockTagCatalog(page);
     await mockSessions(page, []);
     await page.goto("/");
 
@@ -31,10 +38,10 @@ test.describe("T1: Theme persistence", () => {
       window.localStorage.setItem("spur:theme", "light");
     });
 
+    await mockTagCatalog(page);
     const projects: ProjectInfo[] = [{ id: "test-project", name: "test-project" }];
     await gotoMocked(page, "/?project=test-project", [makeWorkingSession()], projects);
 
-    expect(pageErrors).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     // The project restore must not get stuck on the SSR default: a single
     // synchronous layout effect derives locationSearch + projectId together
@@ -49,9 +56,15 @@ test.describe("T1: Theme persistence", () => {
     await expect(page.getByRole("button", { name: /^Project filter:/ })).toHaveAccessibleName(
       "Project filter: test-project",
     );
+
+    // Checked last, not right after navigation: `pageerror` events surface
+    // asynchronously, so asserting immediately after `gotoMocked` could pass
+    // before an error the run above would produce actually arrives.
+    expect(pageErrors).toEqual([]);
   });
 
   test("toggling back to dark persists across a reload", async ({ page }) => {
+    await mockTagCatalog(page);
     await mockSessions(page, []);
     await page.goto("/");
 

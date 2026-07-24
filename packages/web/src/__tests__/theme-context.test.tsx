@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { THEME_STORAGE_KEY, ThemeProvider, useTheme } from "@/lib/theme-context";
 
 function renderProvider() {
@@ -27,6 +27,27 @@ describe("ThemeProvider", () => {
     const { result } = renderProvider();
     expect(result.current.theme).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("resolves to dark, without throwing, when localStorage.getItem throws", () => {
+    // Mirrors the pre-hydration <head> script's try/catch in layout.tsx,
+    // which leaves the theme dark when `localStorage` access throws (e.g.
+    // SecurityError with site data blocked). ThemeProvider is the outermost
+    // provider with no error boundary, so an unguarded throw here would take
+    // down the whole tree before first paint.
+    const getItemSpy = vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    let hookResult: ReturnType<typeof renderProvider> | undefined;
+    expect(() => {
+      hookResult = renderProvider();
+    }).not.toThrow();
+
+    expect(hookResult?.result.current.theme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+
+    getItemSpy.mockRestore();
   });
 
   it("storage wins over a stale data-theme attribute", () => {
