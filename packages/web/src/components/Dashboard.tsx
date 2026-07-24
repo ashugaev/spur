@@ -1018,12 +1018,15 @@ export function Dashboard() {
 
   // Restore locationSearch + projectId from the URL in a layout effect, not a
   // passive effect: layout effects flush before the browser paints, so the
-  // project name is correct on the very first painted frame instead of
-  // flashing "All Projects" for a frame while a passive effect chain catches
-  // up. The render-time initial state stays "" (above) so the server's first
-  // render and the client's first render still agree — no hydration
-  // mismatch — and this effect only runs after that hydration has already
-  // committed successfully.
+  // project name is correct on the first paint AFTER hydration, instead of
+  // one extra frame of "All Projects" while a passive effect chain catches
+  // up. (The very first frame — the raw SSR HTML before hydration runs — is
+  // always "All Projects" regardless; that's an accepted, out-of-scope SSR
+  // characteristic, not something this effect can change.) The render-time
+  // initial state stays "" (above) so the server's first render and the
+  // client's first render still agree — no hydration mismatch — and this
+  // effect only runs after that hydration has already committed
+  // successfully.
   useLayoutEffect(() => {
     if (typeof window === "undefined") return;
     const syncFromLocation = () => {

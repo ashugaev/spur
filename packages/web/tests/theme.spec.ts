@@ -21,7 +21,9 @@ test.describe("T1: Theme persistence", () => {
     await expect(page.getByRole("button", { name: "Switch to dark theme" })).toBeVisible();
   });
 
-  test("light theme survives a hydration mismatch at /?project=<id>", async ({ page }) => {
+  test("light theme and the project filter both survive a reload at /?project=<id>", async ({
+    page,
+  }) => {
     const pageErrors: Error[] = [];
     page.on("pageerror", (error) => pageErrors.push(error));
 

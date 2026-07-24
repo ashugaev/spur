@@ -16,7 +16,7 @@ describe("ThemeProvider", () => {
     delete document.documentElement.dataset.theme;
   });
 
-  it("defaults to dark when the DOM has no data-theme attribute", () => {
+  it("defaults to dark when localStorage has no stored theme", () => {
     const { result } = renderProvider();
     expect(result.current.theme).toBe("dark");
     expect(document.documentElement.dataset.theme).toBeUndefined();
@@ -32,6 +32,11 @@ describe("ThemeProvider", () => {
   it("storage wins over a stale data-theme attribute", () => {
     // Simulates a hydration-recovery re-render that wiped `data-theme` from
     // the DOM (or left a stale value) while localStorage was never touched.
+    // This is the sole unit-level guard for hydration-mismatch resilience:
+    // it is the only test in this file that would fail if the provider went
+    // back to trusting the DOM attribute instead of localStorage. The e2e
+    // case at tests/theme.spec.ts ("... both survive a reload at
+    // /?project=<id>") exercises the same property against a real browser.
     document.documentElement.dataset.theme = "light";
     const { result } = renderProvider();
     expect(result.current.theme).toBe("dark");
@@ -59,7 +64,7 @@ describe("ThemeProvider", () => {
     expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 
-  it("useTheme outside a provider returns the safe dark default and no-op setters", () => {
+  it("useTheme outside a provider returns the safe dark default and a no-op toggle", () => {
     const { result } = renderHook(() => useTheme());
     expect(result.current.theme).toBe("dark");
     expect(() => result.current.toggleTheme()).not.toThrow();
