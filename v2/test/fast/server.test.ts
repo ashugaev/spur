@@ -8,7 +8,6 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
-  BacklogItemUnavailableError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
   SessionRateLimitedError,
@@ -773,7 +772,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes backlog list and take through the session service", async () => {
+  it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -797,7 +796,6 @@ describe("startServer", () => {
     );
 
     const listAvailableBacklog = SessionService.prototype.listAvailableBacklog;
-    const takeAvailableBacklog = SessionService.prototype.takeAvailableBacklog;
     SessionService.prototype.listAvailableBacklog = function mockListAvailableBacklog() {
       return [
         {
@@ -813,9 +811,6 @@ describe("startServer", () => {
         },
       ];
     };
-    SessionService.prototype.takeAvailableBacklog = async function mockTakeAvailableBacklog() {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
-    };
 
     const server = await startServer(configPath, {
       info: () => undefined,
@@ -826,23 +821,8 @@ describe("startServer", () => {
       const availableResponse = await fetch(`http://127.0.0.1:${port}/backlog/available`);
       expect(availableResponse.status).toBe(200);
       await expect(availableResponse.json()).resolves.toMatchObject([{ key: "WEB-17" }]);
-
-      const takeResponse = await fetch(`http://127.0.0.1:${port}/backlog/take`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: "demo",
-          backlogId: "features",
-          externalId: "10001",
-        }),
-      });
-      expect(takeResponse.status).toBe(409);
-      await expect(takeResponse.json()).resolves.toEqual({
-        error: "Backlog item is unavailable",
-      });
     } finally {
       SessionService.prototype.listAvailableBacklog = listAvailableBacklog;
-      SessionService.prototype.takeAvailableBacklog = takeAvailableBacklog;
       await server.stop();
     }
   });
