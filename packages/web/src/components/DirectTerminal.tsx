@@ -36,6 +36,7 @@ interface DirectTerminalProps {
   apiSessionId?: string;
   agentInputEnabled?: boolean;
   agent?: AgentName;
+  model?: string;
   activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
@@ -196,6 +197,7 @@ export function DirectTerminal({
   apiSessionId,
   agentInputEnabled = true,
   agent = "claude",
+  model,
   activity,
   title,
   onClose,
@@ -796,22 +798,28 @@ export function DirectTerminal({
         data-testid="direct-terminal-header"
       >
         <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
-        {title ? (
+        <div className="min-w-0 flex-1 overflow-hidden">
+          {title ? (
+            <div
+              className="overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+              data-testid="direct-terminal-header-title"
+              title={title}
+            >
+              {title}
+            </div>
+          ) : null}
           <div
-            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-            data-testid="direct-terminal-header-title"
-            title={title}
+            className="truncate text-[10px] leading-4 text-[var(--color-text-secondary)]"
+            data-testid="direct-terminal-header-agent"
           >
-            {title}
+            {getAgentDisplayName(agent)}
+            {model ? ` • ${model}` : null}
           </div>
-        ) : null}
+        </div>
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className={cn(
-              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
-              !title && "ml-auto",
-            )}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >

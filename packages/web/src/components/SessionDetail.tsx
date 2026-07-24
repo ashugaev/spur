@@ -2359,6 +2359,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span>{session.agent}</span>
               <span>•</span>
               <span className="font-mono">{session.id}</span>
+              {session.model ? (
+                <>
+                  <span>•</span>
+                  <span>{session.model}</span>
+                </>
+              ) : null}
             </div>
 
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
