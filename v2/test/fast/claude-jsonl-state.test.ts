@@ -7,8 +7,19 @@ import {
   classifyClaudeJsonlState,
   parseConversationLines,
   readClaudeJsonlState,
+  readClaudeTranscriptEntries,
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
+import type { TranscriptEntry } from "../../src/types.js";
+
+const { findLatestSessionFileMock, sessionFileForIdMock } = vi.hoisted(() => ({
+  findLatestSessionFileMock: vi.fn(),
+  sessionFileForIdMock: vi.fn(),
+}));
+vi.mock("../../src/agents/claude.js", () => ({
+  findLatestSessionFile: findLatestSessionFileMock,
+  sessionFileForId: sessionFileForIdMock,
+}));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = 1_700_000_000_000;
@@ -374,4 +385,82 @@ describe("readClaudeJsonlState rate limit detection", () => {
       }
     },
   );
+});
+
+describe("readClaudeTranscriptEntries", () => {
+  afterEach(() => {
+    findLatestSessionFileMock.mockReset();
+    sessionFileForIdMock.mockReset();
+  });
+
+  function isQuestion(
+    entry: TranscriptEntry,
+  ): entry is Extract<TranscriptEntry, { kind: "question" }> {
+    return entry.kind === "question";
+  }
+
+  function isTool(entry: TranscriptEntry): entry is Extract<TranscriptEntry, { kind: "tool" }> {
+    return entry.kind === "tool";
+  }
+
+  it("parses a question entry (with options) and a tool entry, in file-line order", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/needs-input-ask-user-spur-6e9a-tail.jsonl",
+    );
+    findLatestSessionFileMock.mockResolvedValue(fixturePath);
+
+    const entries = await readClaudeTranscriptEntries("/tmp/spur-worktrees/api/spur-6e9a");
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    expect(findLatestSessionFileMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/spur-6e9a");
+
+    const question = entries.find(isQuestion);
+    expect(question).toBeDefined();
+    if (!question) throw new Error("expected a question entry");
+    expect(question.options?.map((option) => option.label)).toEqual([
+      "TypeScript",
+      "Python",
+      "Go",
+      "Rust",
+    ]);
+    expect(question.options?.map((option) => option.index)).toEqual([0, 1, 2, 3]);
+
+    const tool = entries.find(isTool);
+    expect(tool).toBeDefined();
+    if (!tool) throw new Error("expected a tool entry");
+    expect(tool.name).toBe("ToolSearch");
+
+    // The ToolSearch tool_use record precedes the AskUserQuestion record in the fixture.
+    expect(entries.indexOf(tool)).toBeLessThan(entries.indexOf(question));
+  });
+
+  it("resolves the transcript by pinned agentSessionId when provided", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/needs-input-ask-user-spur-6e9a-tail.jsonl",
+    );
+    sessionFileForIdMock.mockResolvedValue(fixturePath);
+
+    const entries = await readClaudeTranscriptEntries(
+      "/tmp/spur-worktrees/api/spur-6e9a",
+      "pinned-session-id",
+    );
+
+    expect(sessionFileForIdMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/spur-6e9a",
+      "pinned-session-id",
+    );
+    expect(findLatestSessionFileMock).not.toHaveBeenCalled();
+    expect(entries).not.toBeNull();
+  });
+
+  it("returns null when no transcript file resolves", async () => {
+    findLatestSessionFileMock.mockResolvedValue(null);
+
+    const entries = await readClaudeTranscriptEntries("/tmp/spur-worktrees/api/missing");
+
+    expect(entries).toBeNull();
+  });
 });

@@ -1,7 +1,7 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SessionState } from "./types.js";
+import type { SessionState, TranscriptEntry } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
@@ -315,4 +315,69 @@ export async function readCursorJsonlState(
     reader: nextReader,
     rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+/**
+ * Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion
+ * prompts. Cursor tool_use blocks carry no id (unlike Claude), so tool entries omit
+ * callId. Cursor's AskUserQuestion input is always `{}`, so question entries carry
+ * an empty header/prompt and omit options.
+ */
+export async function readCursorTranscriptEntries(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  if (!filePath) return null;
+
+  let fileText: string;
+  try {
+    fileText = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of fileText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const role = parsed["role"];
+    if (role !== "user" && role !== "assistant") continue;
+
+    const message = parsed["message"];
+    if (typeof message !== "object" || message === null) continue;
+    const content = (message as Record<string, unknown>)["content"];
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const b = block as Record<string, unknown>;
+
+      if (b["type"] === "text" && typeof b["text"] === "string") {
+        const text = b["text"].trim();
+        if (text) {
+          entries.push({ kind: "message", role, text });
+        }
+        continue;
+      }
+
+      if (b["type"] === "tool_use") {
+        const name = typeof b["name"] === "string" ? b["name"] : "";
+        if (name === "AskUserQuestion") {
+          entries.push({ kind: "question", header: "", prompt: "" });
+          continue;
+        }
+        entries.push({ kind: "tool", name });
+      }
+    }
+  }
+
+  return entries;
 }

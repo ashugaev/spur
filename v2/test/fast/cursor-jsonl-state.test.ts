@@ -10,6 +10,7 @@ import {
   findLatestCursorTranscriptFile,
   parseCursorJsonlRecord,
   readCursorJsonlState,
+  readCursorTranscriptEntries,
   toCursorProjectPath,
   type CursorParsedRecord,
 } from "../../src/cursor-jsonl-state.js";
@@ -415,5 +416,65 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(alias, undefined, agentSessionId);
     expect(state?.state).toBe("waiting");
     expect(state?.reader.filePath).toBe(filePath);
+  });
+});
+
+describe("readCursorTranscriptEntries", () => {
+  const tempRoots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function seedTranscript(worktreePath: string, fixtureName: string): Promise<void> {
+    const content = await readFile(join(CURSOR_FIXTURES_DIR, fixtureName), "utf8");
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    const chatDir = join(transcriptsDir, "chat");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(join(chatDir, "chat.jsonl"), content);
+  }
+
+  it("parses a tool entry (no callId) from a tool_use transcript", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-tool-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    await seedTranscript(worktreePath, "working-tool-use.jsonl");
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    const tool = entries.find((entry) => entry.kind === "tool");
+    expect(tool).toEqual({ kind: "tool", name: "Grep" });
+    expect(entries.map((entry) => entry.kind)).toEqual(["message", "message", "tool"]);
+  });
+
+  it("parses a question entry with options omitted from an AskUserQuestion transcript", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-question-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    await seedTranscript(worktreePath, "needs-input-ask-user.jsonl");
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    expect(entries).toEqual([{ kind: "question", header: "", prompt: "" }]);
+    const question = entries[0];
+    expect(question && "options" in question).toBe(false);
+  });
+
+  it("returns null when no transcript resolves", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-missing-"));
+    tempRoots.push(worktreePath);
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).toBeNull();
   });
 });

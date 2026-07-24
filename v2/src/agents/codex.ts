@@ -17,6 +17,7 @@ import { playwrightMcpUrl } from "./playwright-mcp.js";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { TranscriptEntry } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -716,6 +717,38 @@ function extractUserTextFromLine(line: string): string | null {
   return null;
 }
 
+function extractAssistantTextFromLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "response_item") {
+    const p = payload as unknown as RolloutResponseItemPayload;
+    if (p.type === "message" && p.role === "assistant" && Array.isArray(p.content)) {
+      const texts = p.content
+        .filter(
+          (c): c is { type: string; text: string } =>
+            c.type === "output_text" && typeof c.text === "string",
+        )
+        .map((c) => c.text);
+      return texts.length > 0 ? texts.join("") : null;
+    }
+  }
+
+  return null;
+}
+
 export async function scanCodexRolloutForMessage(
   sessionsDir: string,
   messageText: string,
@@ -1012,4 +1045,174 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
     right.mtimeMs > left.mtimeMs ? right : left,
   );
   return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+/** Maps call_id → output text from every function_call_output/custom_tool_call_output line. */
+function buildToolOutputMap(lines: string[]): Map<string, string> {
+  const outputs = new Map<string, string>();
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "response_item") {
+      continue;
+    }
+    const payload = parsed["payload"];
+    if (!isRecord(payload)) {
+      continue;
+    }
+    const payloadType = payload["type"];
+    if (payloadType !== "function_call_output" && payloadType !== "custom_tool_call_output") {
+      continue;
+    }
+    const callId = readRolloutString(payload["call_id"]);
+    const output = readRolloutString(payload["output"]);
+    if (callId && output) {
+      outputs.set(callId, output);
+    }
+  }
+  return outputs;
+}
+
+interface CodexReasoningSummaryItem {
+  type?: string;
+  text?: string;
+}
+
+function extractCodexReasoningText(summary: unknown): string {
+  if (!Array.isArray(summary)) {
+    return "";
+  }
+  return summary
+    .filter(
+      (item): item is CodexReasoningSummaryItem =>
+        isRecord(item) && typeof item["text"] === "string" && item["text"].trim() !== "",
+    )
+    .map((item) => (item.text as string).trim())
+    .join("\n");
+}
+
+/** input_required questions carry the same `{header, question}` shape AskUserQuestion does. */
+function extractCodexQuestionText(payload: Record<string, unknown>): { header: string; prompt: string } {
+  const questionsValue = payload["questions"];
+  if (Array.isArray(questionsValue) && questionsValue.length > 0 && isRecord(questionsValue[0])) {
+    const first = questionsValue[0];
+    return {
+      header: typeof first["header"] === "string" ? first["header"] : "",
+      prompt: typeof first["question"] === "string" ? first["question"] : "",
+    };
+  }
+  return { header: "", prompt: "" };
+}
+
+/**
+ * Full transcript in file-line order: user/assistant messages, reasoning summaries,
+ * function_call tool invocations (paired with their output by call_id), and
+ * request_user_input/input_required prompts. Question option payload shape is
+ * unverified in production data, so options are always omitted here.
+ */
+export async function readCodexTranscriptEntries(sessionsDir: string): Promise<TranscriptEntry[] | null> {
+  const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
+  if (!filePath) {
+    return null;
+  }
+
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const toolOutputs = buildToolOutputMap(lines);
+
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
+
+    const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : undefined;
+    const parsedTimestampMs = timestamp ? Date.parse(timestamp) : NaN;
+    const ts: { timestampMs: number } | Record<string, never> = Number.isFinite(parsedTimestampMs)
+      ? { timestampMs: parsedTimestampMs }
+      : {};
+
+    const type = parsed["type"];
+
+    if (type === "response_item") {
+      const userText = extractUserTextFromLine(line);
+      if (userText !== null && userText.trim()) {
+        entries.push({ kind: "message", role: "user", text: userText, ...ts });
+        continue;
+      }
+
+      const assistantText = extractAssistantTextFromLine(line);
+      if (assistantText !== null && assistantText.trim()) {
+        entries.push({ kind: "message", role: "assistant", text: assistantText, ...ts });
+        continue;
+      }
+
+      const payload = parsed["payload"];
+      if (!isRecord(payload)) {
+        continue;
+      }
+      const payloadType = payload["type"];
+
+      if (payloadType === "reasoning") {
+        const text = extractCodexReasoningText(payload["summary"]);
+        if (text) {
+          entries.push({ kind: "reasoning", text, ...ts });
+        }
+        continue;
+      }
+
+      if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+        const name = typeof payload["name"] === "string" ? payload["name"] : "";
+        const callId = readRolloutString(payload["call_id"]);
+        if (name === "request_user_input") {
+          entries.push({ kind: "question", header: "", prompt: "", ...ts });
+          continue;
+        }
+        const inputSummary = readRolloutString(payload["arguments"]);
+        const output = callId ? toolOutputs.get(callId) : undefined;
+        entries.push({
+          kind: "tool",
+          name,
+          ...(callId ? { callId } : {}),
+          ...(inputSummary ? { inputSummary } : {}),
+          ...(output ? { output } : {}),
+          ...ts,
+        });
+      }
+      continue;
+    }
+
+    if (type === "event_msg") {
+      const payload = parsed["payload"];
+      if (!isRecord(payload) || payload["type"] !== "input_required") {
+        continue;
+      }
+      const { header, prompt } = extractCodexQuestionText(payload);
+      entries.push({ kind: "question", header, prompt, ...ts });
+    }
+  }
+
+  return entries;
 }

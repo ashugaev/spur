@@ -39,6 +39,7 @@ const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
 const findAgentSessionIdMock = vi.fn();
+const readAgentConversationMock = vi.fn();
 const agentProcessMatchersMock = vi.fn();
 const agentBusyQueuedSendAwaitsPromptMock = vi.fn();
 const agentQueuedSendPromptGraceMsMock = vi.fn();
@@ -262,6 +263,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentRestorePlan: buildAgentRestorePlanMock,
   buildAgentResumePlan: buildAgentResumePlanMock,
   findAgentSessionId: findAgentSessionIdMock,
+  readAgentConversation: readAgentConversationMock,
   agentProcessMatchers: agentProcessMatchersMock,
   agentBusyQueuedSendAwaitsPrompt: agentBusyQueuedSendAwaitsPromptMock,
   agentQueuedSendPromptGraceMs: agentQueuedSendPromptGraceMsMock,
@@ -800,6 +802,7 @@ describe("SessionService", () => {
         }),
       );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
+    readAgentConversationMock.mockReset().mockResolvedValue(null);
     agentProcessMatchersMock
       .mockReset()
       .mockImplementation((agent: string, launchCommand: string) => {
@@ -15347,6 +15350,54 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("waiting");
+    });
+
+    it("derives messages and entries from the codex transcript reader", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+      readAgentConversationMock.mockResolvedValue([
+        { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+        { kind: "tool", name: "exec_command", callId: "call_1" },
+        { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "codex",
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          codexSessionsDir: expect.stringContaining("api-1"),
+        }),
+      );
+      expect(result.messages).toEqual([
+        { role: "user", text: "hi", timestampMs: 1 },
+        { role: "assistant", text: "hello back", timestampMs: 2 },
+      ]);
+      expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "message"]);
+    });
+
+    it("derives messages and entries from the cursor transcript reader", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "cursor", status: "running" }));
+      readAgentConversationMock.mockResolvedValue([
+        { kind: "message", role: "user", text: "fix the bug" },
+        { kind: "tool", name: "Grep" },
+        { kind: "question", header: "", prompt: "" },
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "cursor",
+        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+      );
+      expect(result.messages).toEqual([{ role: "user", text: "fix the bug", timestampMs: 0 }]);
+      expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "question"]);
     });
   });
 
