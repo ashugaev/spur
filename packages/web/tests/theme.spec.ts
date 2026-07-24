@@ -34,6 +34,19 @@ test.describe("T1: Theme persistence", () => {
 
     expect(pageErrors).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    // The project restore must not get stuck on the SSR default: a single
+    // synchronous layout effect derives locationSearch + projectId together
+    // from the URL pre-paint (see Dashboard.tsx), so once the page settles
+    // the button must already read the requested project, not "All
+    // Projects". This doesn't prove zero visible frames of "All Projects" —
+    // that one frame is an accepted, out-of-scope SSR characteristic (this
+    // is a client component with no server-side query awareness) and
+    // Playwright has no reliable, non-flaky way to assert wall-clock paint
+    // timing — but it does catch a regression where the restore silently
+    // fails to apply.
+    await expect(page.getByRole("button", { name: /^Project filter:/ })).toHaveAccessibleName(
+      "Project filter: test-project",
+    );
   });
 
   test("toggling back to dark persists across a reload", async ({ page }) => {

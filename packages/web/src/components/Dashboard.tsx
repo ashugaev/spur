@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { DataRow, RowIconButton } from "@/components/DataRow";
@@ -907,8 +907,8 @@ function EditProjectModal({
 export function Dashboard() {
   // Initialized empty rather than read from `window.location.search` at render
   // time: the server always renders "", so a non-empty client-side first
-  // render would be a hydration text mismatch. The mount effect below and the
-  // `requestedProject` sync are the only path that populates these.
+  // render would be a hydration text mismatch. The layout effect below is the
+  // only path that populates these, restoring both together pre-paint.
   const [locationSearch, setLocationSearch] = useState("");
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
   const [projectId, setProjectId] = useState("");
@@ -1016,13 +1016,25 @@ export function Dashboard() {
   const [editProjectDeleting, setEditProjectDeleting] = useState(false);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Restore locationSearch + projectId from the URL in a layout effect, not a
+  // passive effect: layout effects flush before the browser paints, so the
+  // project name is correct on the very first painted frame instead of
+  // flashing "All Projects" for a frame while a passive effect chain catches
+  // up. The render-time initial state stays "" (above) so the server's first
+  // render and the client's first render still agree — no hydration
+  // mismatch — and this effect only runs after that hydration has already
+  // committed successfully.
+  useLayoutEffect(() => {
     if (typeof window === "undefined") return;
-    const syncSearch = () => setLocationSearch(readLocationSearch());
-    syncSearch();
-    window.addEventListener("popstate", syncSearch);
+    const syncFromLocation = () => {
+      const search = readLocationSearch();
+      setLocationSearch(search);
+      setProjectId(new URLSearchParams(search).get("project")?.trim() ?? "");
+    };
+    syncFromLocation();
+    window.addEventListener("popstate", syncFromLocation);
     return () => {
-      window.removeEventListener("popstate", syncSearch);
+      window.removeEventListener("popstate", syncFromLocation);
     };
   }, []);
 
@@ -1038,18 +1050,10 @@ export function Dashboard() {
     return () => window.removeEventListener("keydown", handler);
   }, [spawnOpen]);
 
-  const requestedProject = useMemo(
-    () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
-    [locationSearch],
-  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-
-  useEffect(() => {
-    setProjectId(requestedProject);
-  }, [requestedProject]);
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
