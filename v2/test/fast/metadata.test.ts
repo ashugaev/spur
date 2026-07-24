@@ -566,6 +566,31 @@ describe("session metadata PR migration", () => {
     );
   });
 
+  it("preserves model when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      model: "claude-opus-4-8",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ model: "claude-opus-4-8" }),
+    );
+  });
+
   it("preserves wake state when writing, reading, and listing session records", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
