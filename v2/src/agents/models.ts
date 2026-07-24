@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { DEFAULT_CLAUDE_MODEL } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import type { AgentName } from "../types.js";
 
@@ -15,13 +16,21 @@ export interface AgentModel {
   isCurrent?: boolean;
 }
 
-// opus is Spur's default Claude model (see DEFAULT_CLAUDE_MODEL in claude.ts).
 const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus", isDefault: true },
+  { id: "opus", label: "Opus" },
   { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
   { id: "fable", label: "Fable" },
 ];
+
+// Flag Spur's default Claude model at call time. Deriving it here (not in the
+// static list above) keeps the DEFAULT_CLAUDE_MODEL reference out of module-init
+// so it can't hit a circular-import TDZ between models.ts and claude.ts.
+function markClaudeDefault(models: AgentModel[]): AgentModel[] {
+  return models.map((model) =>
+    model.id === DEFAULT_CLAUDE_MODEL ? { ...model, isDefault: true } : model,
+  );
+}
 
 const CODEX_FALLBACK_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5", isDefault: true }];
 
@@ -173,7 +182,7 @@ export async function listAgentModels(
 ): Promise<AgentModel[]> {
   switch (agent) {
     case "claude":
-      return CLAUDE_MODELS;
+      return markClaudeDefault(CLAUDE_MODELS);
     case "codex":
       return listCodexModels(opts);
     case "cursor":
