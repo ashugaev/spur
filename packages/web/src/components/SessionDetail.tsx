@@ -36,6 +36,7 @@ import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
+import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -87,6 +88,7 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+import { resolveActivityStatus } from "@/lib/terminal-status";
 
 function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
   const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
@@ -375,6 +377,20 @@ const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message"
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
+
+// Reuses the shared `SPARK_GLYPH_PATH`, scaled and centered the same way as
+// `src/app/icon.tsx` (22px glyph, 5px margin, in a 32x32 tile) so the tab
+// favicon is pixel-identical to the static app icon apart from stroke color.
+function buildStatusFaviconHref(hex: string): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" fill="${BG_BASE_HEX}"/>` +
+    `<svg x="5" y="5" width="22" height="22" viewBox="0 0 24 24">` +
+    `<path d="${SPARK_GLYPH_PATH}" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `</svg>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
 
 interface LogEntry {
   timestamp: string;
@@ -2077,6 +2093,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+
+  const hasSession = Boolean(session);
+  const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
+
+  useEffect(() => {
+    if (!hasSession) return undefined;
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/svg+xml";
+    document.head.appendChild(link);
+    faviconLinkRef.current = link;
+    return () => {
+      link.remove();
+      faviconLinkRef.current = null;
+    };
+  }, [hasSession]);
+
+  useEffect(() => {
+    const link = faviconLinkRef.current;
+    if (!link || displayState === undefined) return;
+    const { colorVar } = resolveActivityStatus(displayState);
+    const varName = colorVar.slice(4, -1);
+    const hex = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    link.href = buildStatusFaviconHref(hex || "#ffffff");
+  }, [displayState]);
+
   const wakeSummary = session ? getWakeSummary(session) : null;
   const wakeDueAt = wakeSummary?.dueAt;
   const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
@@ -2337,7 +2379,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
             {promptView &&
@@ -2355,7 +2397,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onCopy={copyLabeledValue}
                       />
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                    <p
+                      className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                    >
                       {promptView.task}
                     </p>
                   </div>
@@ -2645,7 +2689,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </h2>
                   <div
                     ref={dialogRef}
-                    className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
+                    className="flex max-h-80 flex-col gap-2 overflow-y-auto overflow-x-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
                   >
                     {dialogMessages.map((msg) => (
                       <div

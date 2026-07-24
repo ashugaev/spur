@@ -30,18 +30,19 @@ Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claud
 
 Capabilities loaded by description match. Source: [.claude/skills/](.claude/skills/).
 
-| Skill                                                              | Load when                                                        |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                       |
-| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface             |
-| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                      |
-| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
-| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
-| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
-| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius  |
-| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
-| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
-| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |
+| Skill                                                              | Load when                                                                     |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                                    |
+| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface                          |
+| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                                   |
+| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions              |
+| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                                            |
+| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                             |
+| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius               |
+| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                               |
+| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                   |
+| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                            |
+| [`clean-install-test`](.claude/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
 
 ## Response style
 
@@ -75,4 +76,4 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.claude/skills/spur/SKILL.md` Agent Isolation for detail.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
-- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: v2/README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
+- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.

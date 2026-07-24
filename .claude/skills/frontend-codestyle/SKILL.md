@@ -110,7 +110,6 @@ description: Visual codestyle and design system rules for packages/web. Use when
 Playwright E2E covers 100% of UI surfaces. Every new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
 
 - Build must pass: `pnpm --dir packages/web build`.
-- Every visible-behavior change updates `packages/web/UI_TEST_SCENARIOS.md` in the same commit.
 - Run a manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually.
 - Use the official Playwright MCP agent (`playwright-test-generator`) for new E2E tests.
 - Capture screenshots for each touched state (idle, active, error, loading) and review them.

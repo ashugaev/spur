@@ -6,6 +6,15 @@
   },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashugaev/spur.git",
+    "directory": "v2"
+  },
+  "homepage": "https://github.com/ashugaev/spur#readme",
   "type": "module",
   "bin": {
     "spur": "dist/cli.js"
@@ -14,7 +23,6 @@
     "dist",
     "web",
     "deploy",
-    "README.md",
     "scripts/install-and-restart.sh",
     "scripts/npm-init.sh",
     "spur.yaml.example",

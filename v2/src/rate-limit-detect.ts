@@ -73,6 +73,12 @@ function usedPercentExhausted(window: unknown): boolean {
   return typeof used === "number" && used >= 100;
 }
 
+// True when `window` is a live usage-window object (has a numeric used_percent),
+// as opposed to null/absent.
+function usageWindowPresent(window: unknown): boolean {
+  return isRecord(window) && typeof window["used_percent"] === "number";
+}
+
 // Codex rollout `token_count.rate_limits`. Returns null when no usable data is
 // present (caller may then fall back to the tmux pane scan).
 export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | null {
@@ -84,7 +90,19 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
     return { limited: true, reason: `codex ${reachedType}` };
   }
   const credits = rateLimits["credits"];
-  if (isRecord(credits) && credits["has_credits"] === false && credits["unlimited"] !== true) {
+  // A window-metered account (e.g. team/enterprise, billed via Azure/API key)
+  // reports has_credits:false as a benign soft signal alongside a live usage
+  // window even at 0% used — it just means "not on the credits plan", not
+  // "out of credits". Only treat has_credits:false as a hard limit when no
+  // usage window is present at all (the genuine credit-metered-account case);
+  // otherwise fall through to the used_percent checks below.
+  if (
+    isRecord(credits) &&
+    credits["has_credits"] === false &&
+    credits["unlimited"] !== true &&
+    !usageWindowPresent(rateLimits["primary"]) &&
+    !usageWindowPresent(rateLimits["secondary"])
+  ) {
     return { limited: true, reason: "codex out of credits" };
   }
   if (usedPercentExhausted(rateLimits["primary"])) {
@@ -179,6 +197,23 @@ export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
     .split("\n")
     .map((line) => line.trim())
     .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
+}
+
+// Claude Code's compaction spinner ("✳ Compacting conversation… (18s)"). This
+// never reaches Claude's persisted status file (it stays "idle" throughout,
+// which maps to waiting) and the transcript only gets a compact record after
+// completion — so the live tmux pane banner is the only signal available
+// while it's in progress. Line-anchored + start-anchored, mirroring
+// detectClaudeUsageLimitMenu/detectCodexMcpPermissionDialog's discipline, so
+// a quoted/mid-line prose mention of "compacting conversation" (like this
+// very comment) can't self-trigger.
+const CLAUDE_COMPACTING_LINE = /^[^0-9a-z]{0,1}\s*compacting conversation/i;
+
+export function detectClaudeCompacting(paneText: string): boolean {
+  return paneText
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => CLAUDE_COMPACTING_LINE.test(line));
 }
 
 // Codex's MCP tool-permission confirmation dialog (e.g. "Allow the playwright

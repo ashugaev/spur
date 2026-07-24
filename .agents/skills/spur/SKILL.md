@@ -10,7 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `v2/README.md` Config and `docs/agentic-install-from-npm.md`.
+- `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `README.md` Config and `docs/install-from-npm.md`.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
@@ -277,7 +277,7 @@ Port map:
 - Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
 - Terminal WS shares the web server on path `/ws` (no separate port). Any reverse proxy that forwards `/` covers it; no `DIRECT_TERMINAL_*` env to keep in sync.
-- Full deploy doc: `docs/ubuntu-vm-deploy.md`
+- Full deploy doc: `docs/install-from-source.md`
 
 ## Validation
 
@@ -293,5 +293,4 @@ Three tiers; pick the cheapest that crosses the changed boundary:
 - Minimum per touched command: positive path, negative/error path, cleanup verification.
 - Daemon startup or client transport changes -> `runtime integration` must cover both direct daemon start and CLI auto-start.
 - Workspace or runtime behavior changes -> `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, teardown.
-- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change; rerun impacted ones. `tester` covers existing affected scenarios plus new ones.
 - `tester` also flags hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes in touched Spur code.

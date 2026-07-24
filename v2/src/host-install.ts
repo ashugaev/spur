@@ -1,12 +1,33 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, platform, userInfo } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
+import { loadInstanceConfigReadOnly } from "./config.js";
+import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import {
+  probe,
+  probeInfo,
+  readWebPort,
+  resolveDaemonPortReadOnly,
+  type ProbeReason,
+  type ServiceId,
+} from "./update-health.js";
+import { version } from "./version.js";
+
+// C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
+// an error — deliberately low so a normal dev/CI host's disk is never flagged.
+const DISK_SPACE_MIN_FREE_KB = 5_120;
+const DISK_SPACE_PROBE_TIMEOUT_MS = 2_000;
+// A2: `node -e "require('node-pty')"` must never hang doctor on a wedged
+// child process.
+const NODE_PTY_PROBE_TIMEOUT_MS = 5_000;
 
 export interface HostInstallCheck {
   id: string;
   ok: boolean;
+  severity: "error" | "warn" | "info";
   detail: string;
   fix?: string;
 }
@@ -18,11 +39,16 @@ export interface SystemdScope {
   restartCmd: string;
 }
 
-function tryExec(command: string, args: string[]): string | undefined {
+function tryExec(
+  command: string,
+  args: string[],
+  options?: { timeoutMs?: number },
+): string | undefined {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
     }).trim();
   } catch {
     return undefined;
@@ -45,7 +71,28 @@ export function resolveSystemdScope(home: string): SystemdScope {
       restartCmd: "systemctl --user restart",
     };
   }
-  if (home === homedir() && existsSync("/etc/systemd/system/spur-daemon.service")) {
+  // Compare against the unfakeable account home (`userInfo().homedir`, which
+  // ignores `$HOME`) rather than `homedir()` (which honors `$HOME`). System
+  // units are host-global, not namespaced per `$HOME`, so a caller running
+  // under a test's overridden `$HOME` — where `home` defaults to `homedir()`
+  // and would otherwise trivially equal itself — must not spuriously pick up
+  // a real system-wide install that belongs to a different invocation.
+  // `userInfo()` does a passwd lookup and throws when the current uid has no
+  // passwd entry (common in containers/CI); `resolveSystemdScope` is on the
+  // hot path of both `doctor` and `update`, so that must not crash either —
+  // fall back to `undefined`, which never matches `home` and therefore never
+  // reports a false "system" scope.
+  let accountHome: string | undefined;
+  try {
+    accountHome = userInfo().homedir;
+  } catch {
+    accountHome = undefined;
+  }
+  if (
+    accountHome !== undefined &&
+    home === accountHome &&
+    existsSync("/etc/systemd/system/spur-daemon.service")
+  ) {
     return {
       kind: "system",
       unitDir: "/etc/systemd/system",
@@ -61,7 +108,571 @@ export function resolveSystemdScope(home: string): SystemdScope {
   };
 }
 
-export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
+// F3: a real actionable PATH gap requires that this host actually npm-installed
+// spur under `npmPrefix` — otherwise every dev checkout / alternate package
+// manager host would false-flag as broken.
+export function checkSpurOnPath(npmPrefix: string | undefined): HostInstallCheck {
+  if (!npmPrefix) {
+    return {
+      id: "npm-bin-on-path",
+      ok: true,
+      severity: "info",
+      detail: "skipped — npm prefix unavailable",
+    };
+  }
+  const binDir = join(npmPrefix, "bin");
+  if (!existsSync(join(binDir, "spur"))) {
+    return {
+      id: "npm-bin-on-path",
+      ok: true,
+      severity: "info",
+      detail: `skipped — no npm-installed spur binary detected at ${binDir}`,
+    };
+  }
+  const onPath = (process.env["PATH"] ?? "").split(delimiter).includes(binDir);
+  // Severity is the check's static importance if it fails, not a flag that
+  // flips with the outcome — the renderer decides whether to surface it at
+  // all, based on `ok` (see `renderHostInstallChecks`).
+  return {
+    id: "npm-bin-on-path",
+    ok: onPath,
+    severity: "error",
+    detail: onPath ? `${binDir} is on PATH` : `${binDir} is not on PATH`,
+    ...(onPath ? {} : { fix: `add ${binDir} to PATH` }),
+  };
+}
+
+// F4: presence-only checks for the two external binaries every spawn depends on.
+function checkTmuxInstalled(): HostInstallCheck {
+  const detail = tryExec("tmux", ["-V"]);
+  return {
+    id: "tmux-installed",
+    ok: detail !== undefined,
+    severity: "error",
+    detail: detail ?? "tmux not found on PATH",
+    ...(detail === undefined ? { fix: "install tmux" } : {}),
+  };
+}
+
+function checkGitInstalled(): HostInstallCheck {
+  const detail = tryExec("git", ["--version"]);
+  return {
+    id: "git-installed",
+    ok: detail !== undefined,
+    severity: "error",
+    detail: detail ?? "git not found on PATH",
+    ...(detail === undefined ? { fix: "install git" } : {}),
+  };
+}
+
+interface EnginesField {
+  node?: string;
+}
+
+function readEnginesNodeRange(): string | undefined {
+  try {
+    const pkgUrl = new URL("../package.json", import.meta.url);
+    const parsed = JSON.parse(readFileSync(pkgUrl, "utf8")) as { engines?: EnginesField };
+    return typeof parsed.engines?.node === "string" ? parsed.engines.node : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseVersionTuple(value: string): [number, number, number] {
+  const parts = value.replace(/^v/, "").split(".");
+  const major = Number.parseInt(parts[0] ?? "0", 10);
+  const minor = Number.parseInt(parts[1] ?? "0", 10);
+  const patch = Number.parseInt(parts[2] ?? "0", 10);
+  return [
+    Number.isNaN(major) ? 0 : major,
+    Number.isNaN(minor) ? 0 : minor,
+    Number.isNaN(patch) ? 0 : patch,
+  ];
+}
+
+function compareTuples(a: [number, number, number], b: [number, number, number]): number {
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (a[index] ?? 0) - (b[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+// Scoped to the two range operators actually present in `engines.node` today
+// (`^X.Y.Z` and `>=X`) — not a general semver-range parser.
+function satisfiesClause(clause: string, current: [number, number, number]): boolean {
+  const trimmed = clause.trim();
+  const caret = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(trimmed);
+  if (caret) {
+    const major = Number.parseInt(caret[1] ?? "0", 10);
+    const min: [number, number, number] = [
+      major,
+      Number.parseInt(caret[2] ?? "0", 10),
+      Number.parseInt(caret[3] ?? "0", 10),
+    ];
+    const max: [number, number, number] = [major + 1, 0, 0];
+    return compareTuples(current, min) >= 0 && compareTuples(current, max) < 0;
+  }
+  const gte = /^>=(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(trimmed);
+  if (gte) {
+    const min: [number, number, number] = [
+      Number.parseInt(gte[1] ?? "0", 10),
+      Number.parseInt(gte[2] ?? "0", 10),
+      Number.parseInt(gte[3] ?? "0", 10),
+    ];
+    return compareTuples(current, min) >= 0;
+  }
+  return false;
+}
+
+export function satisfiesNodeEngineRange(range: string, currentVersion: string): boolean {
+  const current = parseVersionTuple(currentVersion);
+  return range.split("||").some((clause) => satisfiesClause(clause, current));
+}
+
+function checkNodeVersion(): HostInstallCheck {
+  const range = readEnginesNodeRange();
+  if (!range) {
+    return {
+      id: "node-version",
+      ok: true,
+      severity: "info",
+      detail: "skipped — could not read engines.node from package.json",
+    };
+  }
+  const satisfied = satisfiesNodeEngineRange(range, process.version);
+  // Static severity (see `checkSpurOnPath`): always "error" here — a passing
+  // check simply never renders it.
+  return {
+    id: "node-version",
+    ok: satisfied,
+    severity: "error",
+    detail: satisfied
+      ? `node ${process.version} satisfies ${range}`
+      : `node ${process.version} does not satisfy required range ${range}`,
+    ...(satisfied ? {} : { fix: `install a Node version matching ${range}` }),
+  };
+}
+
+export interface ServiceHealthResult {
+  checks: HostInstallCheck[];
+  daemonReachable: boolean;
+  daemonPort: number;
+  daemonVersion?: string;
+}
+
+// `timeout` on an active unit is deliberately downgraded to `warn`: the
+// daemon's `/info` has been measured at 3.5-6.7s on a loaded production host
+// (fork-storm profile), so a bare 2s timeout does not by itself mean the
+// service is broken — it must not fail the exit code. `connection-refused` on
+// an active unit means nothing is actually listening despite systemd's
+// bookkeeping — definitively broken, `error`. `http-error` (the process
+// answered, but with a non-2xx status) and the neutral `unknown` bucket stay
+// `error` too: unlike a timeout, both mean the transport round-tripped and
+// came back with something other than success, which is not explained by
+// load alone.
+function activeButUnreachableCheck(
+  id: ServiceId,
+  unit: string,
+  url: string,
+  reason: ProbeReason,
+  restartCmd: string,
+): HostInstallCheck {
+  if (reason === "timeout") {
+    return {
+      id: `${id}-reachable`,
+      ok: false,
+      severity: "warn",
+      detail: `${unit} is active but did not respond at ${url} within 2s (may be under load)`,
+    };
+  }
+  return {
+    id: `${id}-reachable`,
+    ok: false,
+    severity: "error",
+    detail: `${unit} is active but unreachable at ${url} (${reason})`,
+    fix: `${restartCmd} ${unit}`,
+  };
+}
+
+// Before blaming a busy port on a foreign process, ask systemd whether the
+// unit's own `MainPID` is the process actually holding the port — not by
+// re-probing `/info` a second time (identical to, and only reached after, the
+// request that already failed above; a slow-but-live Spur daemon would fail
+// that second request exactly the same way as the first). `daemon` and `web`
+// are both host-global fallback ports (the daemon defaults to 4310 with no
+// instance config, the web unit to 4311 with no unit file), so the unit's own
+// process bound there — even before systemd reports it fully "active" — must
+// not be reported as a foreign port conflict.
+function getUnitMainPid(ctl: string[], unit: string): number | undefined {
+  const [bin, ...args] = ctl;
+  if (!bin) return undefined;
+  const raw = tryExec(bin, [...args, "show", unit, "-p", "MainPID", "--value"]);
+  if (raw === undefined) return undefined;
+  const pid = Number.parseInt(raw, 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+// B1: a plain `isActive(...) === false` collapses "cleanly stopped" and
+// "crash-looping" into the same generic detail — enrich it with the extra
+// systemd properties a crash-loop actually shows up in, so the fix a user is
+// given isn't just "restart" (which would crash-loop again). Falls back to
+// today's plain wording whenever the richer query fails or the unit is
+// genuinely just inactive.
+//
+// Deliberately omits `--value` and parses `Key=Value` lines instead of
+// relying on line position: a real systemd does NOT emit multi-property
+// `show -p A,B,C,D --value` output in the requested property order (verified
+// against a real crash-looping unit — it came back `NRestarts`,
+// `ExecMainStatus`, `ActiveState`, `SubState`, not the requested order), so a
+// positional `raw.split("\n")` destructure silently mis-attributes every
+// field.
+function describeInactiveUnit(ctl: string[], unit: string): string {
+  const fallback = `${unit} not active`;
+  const [bin, ...args] = ctl;
+  if (!bin) return fallback;
+  const raw = tryExec(bin, [
+    ...args,
+    "show",
+    unit,
+    "-p",
+    "ActiveState,SubState,NRestarts,ExecMainStatus",
+  ]);
+  if (raw === undefined) return fallback;
+  const props = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex === -1) continue;
+    props.set(line.slice(0, separatorIndex).trim(), line.slice(separatorIndex + 1).trim());
+  }
+  const activeState = props.get("ActiveState");
+  const subState = props.get("SubState");
+  const nRestarts = props.get("NRestarts");
+  const execMainStatus = props.get("ExecMainStatus");
+  if (activeState === "failed") {
+    return `${unit} failed (substate: ${subState || "unknown"}, restarts: ${nRestarts || "unknown"}, last exit status: ${execMainStatus || "unknown"}) — check \`journalctl --user -u ${unit}\` before restarting`;
+  }
+  if (activeState === "activating") {
+    return `${unit} is activating/auto-restarting (restarts: ${nRestarts || "unknown"}) — may be crash-looping; check \`journalctl --user -u ${unit}\` before restarting`;
+  }
+  return fallback;
+}
+
+// A1: `ExecStart=/usr/bin/node <path>.js ...` (both scopes' daemon unit, and
+// the npm-scope web unit) — the same line-scanning style `resolveWebPort`
+// uses for `Environment=PORT=`. `%h` is systemd's own runtime substitution
+// (never rewritten in the installed unit file on disk), so it must be
+// manually substituted here. Returns `undefined` when no `.js`-suffixed
+// token exists (the system-scope web unit's `ExecStart=/usr/bin/pnpm
+// ui:start` has no resolvable file argument at all).
+function extractExecStartJsTarget(contents: string, home: string): string | undefined {
+  let target: string | undefined;
+  for (const line of contents.split("\n")) {
+    const match = /^ExecStart=(.+)$/.exec(line.trim());
+    const token = match?.[1]?.split(/\s+/).find((part) => part.endsWith(".js"));
+    if (token) target = token;
+  }
+  return target?.replaceAll("%h", home);
+}
+
+function extractWorkingDirectory(contents: string): string | undefined {
+  let workingDir: string | undefined;
+  for (const line of contents.split("\n")) {
+    const match = /^WorkingDirectory=(.+)$/.exec(line.trim());
+    if (match?.[1]) workingDir = match[1];
+  }
+  return workingDir;
+}
+
+// A2: the npm-scope web unit's `WorkingDirectory` *is* the web bundle root
+// (node-pty lives at `<WorkingDirectory>/node_modules/node-pty`); the
+// system/source-checkout scope's `WorkingDirectory` is the repo root instead
+// (node-pty is pnpm-symlinked one level down, under `packages/web`). Tries
+// the npm-scope layout first, then the source-checkout layout.
+function resolveWebBundleCandidates(workingDir: string): string[] {
+  return [workingDir, join(workingDir, "packages", "web")];
+}
+
+// Runs `node -e "require('node-pty')"` out-of-process (never inside the real
+// server) against the first bundle candidate that actually has a node-pty
+// install, so a broken/ABI-mismatched native binding is caught without ever
+// crashing (or depending on) the real web server. Skips (returns
+// `undefined`, pushes nothing) when neither candidate has node-pty at all —
+// this is not a config that ships node-pty, so there is nothing to diagnose.
+function checkNodePtyLoads(webUnitContents: string, home: string): HostInstallCheck | undefined {
+  const workingDir = extractWorkingDirectory(webUnitContents)?.replaceAll("%h", home);
+  if (!workingDir) return undefined;
+  const candidate = resolveWebBundleCandidates(workingDir).find((dir) =>
+    existsSync(join(dir, "node_modules", "node-pty")),
+  );
+  if (!candidate) return undefined;
+  try {
+    execFileSync("node", ["-e", 'require("node-pty")'], {
+      cwd: candidate,
+      timeout: NODE_PTY_PROBE_TIMEOUT_MS,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return {
+      id: "web-native-module-load",
+      ok: true,
+      severity: "error",
+      detail: `node-pty loads in ${candidate}`,
+    };
+  } catch (error) {
+    const stderr =
+      error && typeof error === "object" && "stderr" in error
+        ? String(error.stderr).trim()
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return {
+      id: "web-native-module-load",
+      ok: false,
+      severity: "error",
+      detail: `node-pty failed to load in ${candidate}: ${stderr}`,
+      fix: "reinstall/rebuild node-pty for this host's Node ABI (spur update, or reinstall the npm package)",
+    };
+  }
+}
+
+function checkDirWritable(id: string, dir: string): HostInstallCheck {
+  if (!existsSync(dir)) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} does not exist`,
+      fix: `create ${dir}`,
+    };
+  }
+  const probePath = join(dir, `.spur-doctor-probe-${randomUUID()}`);
+  try {
+    writeFileSync(probePath, "", { flag: "wx" });
+    return { id, ok: true, severity: "error", detail: `${dir} is writable` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} is not writable (${message})`,
+      fix: `fix permissions on ${dir}`,
+    };
+  } finally {
+    try {
+      unlinkSync(probePath);
+    } catch {
+      // Best effort only — never leave the probe file behind, but a missing
+      // probe (write itself failed) is not itself a reportable condition.
+    }
+  }
+}
+
+// `df -Pk`/`df -Pi` second line, 4th field (Available / IFree respectively,
+// POSIX `-P` format). Any parse failure (missing `df`, a filesystem that
+// reports `-` for inodes, etc.) is not itself an error — it just means this
+// particular signal is unavailable on this host, not that the directory is
+// unhealthy.
+function parseDfField(output: string | undefined, fieldIndex: number): number | undefined {
+  if (!output) return undefined;
+  const dataLine = output.trim().split("\n")[1];
+  if (!dataLine) return undefined;
+  const raw = dataLine.trim().split(/\s+/)[fieldIndex];
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function checkDiskSpace(id: string, dir: string): HostInstallCheck {
+  const kbOutput = tryExec("df", ["-Pk", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const iOutput = tryExec("df", ["-Pi", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const availKb = parseDfField(kbOutput, 3);
+  const freeInodes = parseDfField(iOutput, 3);
+  if (availKb === undefined && freeInodes === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — df unavailable or non-numeric on this filesystem",
+    };
+  }
+  if (availKb !== undefined && availKb < DISK_SPACE_MIN_FREE_KB) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} has only ${availKb}KB free (below the ${DISK_SPACE_MIN_FREE_KB}KB floor)`,
+      fix: `free up disk space on the filesystem containing ${dir}`,
+    };
+  }
+  if (freeInodes !== undefined && freeInodes === 0) {
+    return {
+      id,
+      ok: false,
+      severity: "error",
+      detail: `${dir} has 0 free inodes`,
+      fix: `free up inodes on the filesystem containing ${dir}`,
+    };
+  }
+  return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
+}
+
+async function portConflictCheck(
+  id: ServiceId,
+  unit: string,
+  port: number,
+  ctl: string[],
+): Promise<HostInstallCheck> {
+  const ownPid = getUnitMainPid(ctl, unit);
+  const pids = await findListenerPids(port);
+  if (ownPid !== undefined && pids.includes(ownPid)) {
+    return {
+      id: `${id}-reachable`,
+      ok: false,
+      severity: "warn",
+      detail: `${unit} is not yet reported active by systemd, but port ${port} is already held by its own process (pid ${ownPid})`,
+    };
+  }
+  return {
+    id: `${id}-port-conflict`,
+    ok: false,
+    severity: "error",
+    detail: `port ${port} expected for ${unit} is held by another process (pid ${pids.join(", ") || "unknown"})`,
+  };
+}
+
+function notRunningCheck(id: ServiceId, unit: string, port: number): HostInstallCheck {
+  return {
+    id: `${id}-reachable`,
+    ok: false,
+    severity: "warn",
+    detail: `${unit} is not running (port ${port} is free)`,
+  };
+}
+
+// F6: on an initialized host (systemd units installed), "not running" is
+// always an error — "the daemon is dead" is the most common reason a user
+// runs `doctor` at all, so it must be exit-code-affecting even for a
+// deliberate `systemctl stop`. Reuses the already-computed
+// `daemonActive`/`webActive` booleans instead of re-querying systemd a second
+// time. Exported so fast tests can drive daemon/web active-vs-inactive
+// scenarios directly, without simulating systemctl.
+//
+// The daemon's liveness probe hits `/info`, not `/sessions` — `/sessions`
+// resolves to the heavy `view=full` enrichment path (`server.ts`), so under
+// load a healthy-but-busy daemon could time out and get misreported as an
+// error. `/info` doubles as the F8 version-drift source, fetched at most once
+// here and threaded through `daemonVersion` so a reachable daemon costs one
+// round trip, not two.
+//
+// `systemdReportsActivity` is true exactly when the caller already pushed a
+// `spur-daemon`/`spur-web` "active"/"not active" `error`-severity check from
+// systemd state — in that case the plain "not running, port free" fact here
+// would just repeat the same condition at a second severity, so it is
+// suppressed (single owner: the systemd-derived check). The other branches
+// (active-but-unreachable, port-conflict) still surface regardless, because
+// they carry information systemd alone does not have.
+export async function checkServiceHealth(
+  scope: SystemdScope,
+  daemonActive: boolean,
+  webActive: boolean,
+  systemdReportsActivity: boolean,
+  // E1: the daemon's real bind address (`server.host`) is not always
+  // loopback (e.g. a Tailscale/LAN IP); defaulting keeps every existing
+  // direct call in this file's own tests unchanged.
+  daemonHost = "127.0.0.1",
+): Promise<ServiceHealthResult> {
+  const daemonPort = resolveDaemonPortReadOnly();
+  const webPort = readWebPort(scope);
+  // `server.host` is a *listen* address; a bind-all value (`0.0.0.0` / `::`)
+  // is not a valid *connect* target on every platform (`http://0.0.0.0:port`
+  // routes to loopback on Linux but not on macOS/Windows). Probe loopback in
+  // that case so a healthy bind-all daemon is never mis-reported as
+  // connection-refused. A concrete non-loopback bind (Tailscale/LAN IP) is
+  // still probed as configured.
+  const daemonProbeHost =
+    daemonHost === "0.0.0.0" || daemonHost === "::" ? "127.0.0.1" : daemonHost;
+  const daemonInfoUrl = `http://${daemonProbeHost}:${daemonPort}/info`;
+
+  const checks: HostInstallCheck[] = [];
+  let daemonReachable = false;
+  let daemonVersion: string | undefined;
+
+  const daemonInfo = await probeInfo({ id: "daemon", url: daemonInfoUrl });
+  if (daemonInfo.ok) {
+    daemonReachable = true;
+    daemonVersion = daemonInfo.version;
+    checks.push({
+      id: "daemon-reachable",
+      ok: true,
+      severity: "info",
+      detail: `spur-daemon.service responded at ${daemonInfoUrl}`,
+    });
+  } else if (daemonActive) {
+    checks.push(
+      activeButUnreachableCheck(
+        "daemon",
+        "spur-daemon.service",
+        daemonInfoUrl,
+        daemonInfo.reason,
+        scope.restartCmd,
+      ),
+    );
+  } else if (!(await isHostPortFree(daemonPort))) {
+    checks.push(await portConflictCheck("daemon", "spur-daemon.service", daemonPort, scope.ctl));
+  } else if (!systemdReportsActivity) {
+    checks.push(notRunningCheck("daemon", "spur-daemon.service", daemonPort));
+  }
+
+  const webUrl = `http://127.0.0.1:${webPort}/`;
+  const webResult = await probe({ id: "web", url: webUrl });
+  if (webResult.ok) {
+    checks.push({
+      id: "web-reachable",
+      ok: true,
+      severity: "info",
+      detail: `spur-web.service responded at ${webUrl}`,
+    });
+  } else if (webActive) {
+    checks.push(
+      activeButUnreachableCheck(
+        "web",
+        "spur-web.service",
+        webUrl,
+        webResult.reason,
+        scope.restartCmd,
+      ),
+    );
+  } else if (!(await isHostPortFree(webPort))) {
+    checks.push(await portConflictCheck("web", "spur-web.service", webPort, scope.ctl));
+  } else if (!systemdReportsActivity) {
+    checks.push(notRunningCheck("web", "spur-web.service", webPort));
+  }
+
+  return { checks, daemonReachable, daemonPort, ...(daemonVersion ? { daemonVersion } : {}) };
+}
+
+// F8: derived from the `/info` body `checkServiceHealth` already fetched for
+// liveness — never issues a second request, and stays silent when the daemon
+// was unreachable (no version to compare).
+export function checkVersionDrift(daemonVersion: string | undefined): HostInstallCheck | undefined {
+  if (!daemonVersion) return undefined;
+  const drifted = daemonVersion !== version;
+  // Static severity (see `checkSpurOnPath`): always "warn" — drift is never
+  // exit-code-affecting, whether or not it is currently present.
+  return {
+    id: "version-drift",
+    ok: !drifted,
+    severity: "warn",
+    detail: drifted
+      ? `daemon reports version ${daemonVersion}, installed package is ${version}`
+      : `daemon version ${daemonVersion} matches the installed package`,
+    ...(drifted ? { fix: "spur update" } : {}),
+  };
+}
+
+export async function collectHostInstallChecks(home = homedir()): Promise<HostInstallCheck[]> {
   const checks: HostInstallCheck[] = [];
   const scope = resolveSystemdScope(home);
   const expectedPrefix = join(home, ".local");
@@ -70,79 +681,209 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
   checks.push({
     id: "npm-prefix",
     ok: npmPrefix === expectedPrefix,
+    severity: "warn",
     detail: npmPrefix ? `npm prefix is ${npmPrefix}` : "npm prefix unavailable",
     fix: "npm config set prefix ~/.local",
   });
 
-  const daemonUnit = join(scope.unitDir, "spur-daemon.service");
-  const webUnit = join(scope.unitDir, "spur-web.service");
-  const unitsInstalled = scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
-  checks.push({
-    id: "systemd-units",
-    ok: unitsInstalled,
-    detail: unitsInstalled
-      ? scope.kind === "system"
-        ? "system systemd units installed"
-        : "user systemd units installed"
-      : "spur-daemon.service or spur-web.service missing",
-    ...(scope.kind === "system" ? {} : { fix: "spur init" }),
-  });
-
-  if (scope.kind === "user") {
-    const user = process.env["LOGNAME"] || process.env["USER"] || "";
-    const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
-    const lingerOk = linger === "Linger=yes";
+  // F1/C1/C2/E1/E2 share this single read-only, non-bootstrapping instance-
+  // config read (never triggers `ensureInstanceConfig`'s bootstrap write). A
+  // corrupt file is surfaced here, once, as its own fact — C1/C2/E2 below are
+  // skipped rather than cascading a second, derived error off of it.
+  const instanceConfig = loadInstanceConfigReadOnly();
+  if (instanceConfig.status === "invalid") {
     checks.push({
-      id: "linger",
-      ok: lingerOk,
-      detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
-      fix: "loginctl enable-linger $USER",
+      id: "instance-config-corrupt",
+      ok: false,
+      severity: "error",
+      detail: instanceConfig.error,
+      fix: "fix or remove ~/.spur/config.yaml",
     });
-  } else if (scope.kind === "system") {
+  }
+
+  let daemonActive = false;
+  let webActive = false;
+  let systemdReportsActivity = false;
+  let unitsInstalled = false;
+
+  if (scope.kind === "missing" && platform() !== "linux") {
     checks.push({
-      id: "linger",
+      id: "systemd-not-applicable",
       ok: true,
-      detail: "system units (linger not required)",
+      severity: "info",
+      detail: "systemd user units are Linux-only; verify install manually on this platform",
     });
   } else {
-    const user = process.env["LOGNAME"] || process.env["USER"] || "";
-    const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
-    const lingerOk = linger === "Linger=yes";
+    const daemonUnit = join(scope.unitDir, "spur-daemon.service");
+    const webUnit = join(scope.unitDir, "spur-web.service");
+    unitsInstalled = scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
     checks.push({
-      id: "linger",
-      ok: lingerOk,
-      detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
-      fix: "loginctl enable-linger $USER",
+      id: "systemd-units",
+      ok: unitsInstalled,
+      severity: "warn",
+      detail: unitsInstalled
+        ? scope.kind === "system"
+          ? "system systemd units installed"
+          : "user systemd units installed"
+        : "spur-daemon.service or spur-web.service missing",
+      ...(scope.kind === "system" ? {} : { fix: "spur init" }),
+    });
+
+    // A1/A2: dist/native-module integrity, read straight from the already-
+    // installed unit files — only meaningful once those files actually exist.
+    if (unitsInstalled) {
+      const daemonUnitContents = readFileSync(daemonUnit, "utf8");
+      const webUnitContents = readFileSync(webUnit, "utf8");
+
+      const daemonTarget = extractExecStartJsTarget(daemonUnitContents, home);
+      if (daemonTarget) {
+        const targetExists = existsSync(daemonTarget);
+        checks.push({
+          id: "daemon-dist-integrity",
+          ok: targetExists,
+          severity: "error",
+          detail: targetExists ? `${daemonTarget} exists` : `${daemonTarget} is missing`,
+          ...(targetExists
+            ? {}
+            : { fix: "reinstall spur (npm install -g @shugaev/spur, or spur update)" }),
+        });
+      }
+
+      const webTarget = extractExecStartJsTarget(webUnitContents, home);
+      if (webTarget) {
+        const targetExists = existsSync(webTarget);
+        checks.push({
+          id: "web-dist-integrity",
+          ok: targetExists,
+          severity: "error",
+          detail: targetExists ? `${webTarget} exists` : `${webTarget} is missing`,
+          ...(targetExists
+            ? {}
+            : { fix: "reinstall spur (npm install -g @shugaev/spur, or spur update)" }),
+        });
+      }
+
+      const nodePtyCheck = checkNodePtyLoads(webUnitContents, home);
+      if (nodePtyCheck) checks.push(nodePtyCheck);
+    }
+
+    if (scope.kind === "system") {
+      checks.push({
+        id: "linger",
+        ok: true,
+        severity: "warn",
+        detail: "system units (linger not required)",
+      });
+    } else {
+      const user = process.env["LOGNAME"] || process.env["USER"] || "";
+      const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
+      const lingerOk = linger === "Linger=yes";
+      checks.push({
+        id: "linger",
+        ok: lingerOk,
+        severity: "warn",
+        detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
+        fix: "loginctl enable-linger $USER",
+      });
+    }
+
+    const [ctlBin, ...ctlArgs] = scope.ctl;
+    const systemdAvailable =
+      ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
+    systemdReportsActivity = unitsInstalled && systemdAvailable;
+    if (systemdReportsActivity) {
+      // Once units are installed, "not active" is a genuine failure — error =
+      // something is BROKEN (a fresh, never-`init`'d host is a different
+      // case: `systemd-units` above stays `warn` and this block never runs).
+      // "The daemon is dead" is the single most common reason a user runs
+      // `doctor`, so it must be exit-code-affecting on an initialized host,
+      // including a deliberate `systemctl stop`. `checkServiceHealth` below
+      // suppresses its own plain "not running" check when this block already
+      // owns the fact, so it is reported at exactly one severity, not two.
+      daemonActive = isActive(scope.ctl, "spur-daemon.service");
+      checks.push({
+        id: "spur-daemon",
+        ok: daemonActive,
+        severity: "error",
+        detail: daemonActive
+          ? "spur-daemon.service active"
+          : describeInactiveUnit(scope.ctl, "spur-daemon.service"),
+        fix: `${scope.restartCmd} spur-daemon.service`,
+      });
+
+      webActive = isActive(scope.ctl, "spur-web.service");
+      checks.push({
+        id: "spur-web",
+        ok: webActive,
+        severity: "error",
+        detail: webActive
+          ? "spur-web.service active"
+          : describeInactiveUnit(scope.ctl, "spur-web.service"),
+        fix: `${scope.restartCmd} spur-web.service`,
+      });
+    }
+  }
+
+  checks.push(checkSpurOnPath(npmPrefix));
+  checks.push(checkTmuxInstalled());
+  checks.push(checkGitInstalled());
+  checks.push(checkNodeVersion());
+
+  // C1/C2/E2 additionally require `unitsInstalled` (not just a readable
+  // instance config) — an instance config can legitimately exist (e.g. a
+  // pinned `SPUR_CONFIG`) before the daemon has ever created `dataDir`/
+  // `worktreeDir` or before the web unit is installed; only a genuinely
+  // initialized host (systemd units present) makes a missing/unwritable dir
+  // or a port mismatch an actual fact worth reporting.
+  if (instanceConfig.status === "ok" && unitsInstalled) {
+    checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
+    checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
+    checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+
+    const actualWebPort = readWebPort(scope);
+    const configuredWebPort = instanceConfig.config.ui.port;
+    const portsDrifted = actualWebPort !== configuredWebPort;
+    checks.push({
+      id: "web-ui-port-drift",
+      ok: !portsDrifted,
+      severity: "warn",
+      detail: portsDrifted
+        ? `configured ui.port ${configuredWebPort} does not match the web unit's actual listen port ${actualWebPort}`
+        : `ui.port ${configuredWebPort} matches the web unit's actual listen port ${actualWebPort}`,
+      ...(portsDrifted
+        ? {
+            fix: `align ui.port in ~/.spur/config.yaml with the web unit's real PORT (${actualWebPort}), or reinit with --web-port ${configuredWebPort}`,
+          }
+        : {}),
     });
   }
 
-  const [ctlBin, ...ctlArgs] = scope.ctl;
-  const systemdAvailable =
-    ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
-  if (unitsInstalled && systemdAvailable) {
-    const daemonActive = isActive(scope.ctl, "spur-daemon.service");
-    checks.push({
-      id: "spur-daemon",
-      ok: daemonActive,
-      detail: daemonActive ? "spur-daemon.service active" : "spur-daemon.service not active",
-      fix: `${scope.restartCmd} spur-daemon.service`,
-    });
-
-    const webActive = isActive(scope.ctl, "spur-web.service");
-    checks.push({
-      id: "spur-web",
-      ok: webActive,
-      detail: webActive ? "spur-web.service active" : "spur-web.service not active",
-      fix: `${scope.restartCmd} spur-web.service`,
-    });
-  }
+  const daemonHost =
+    instanceConfig.status === "ok" ? instanceConfig.config.server.host : "127.0.0.1";
+  const health = await checkServiceHealth(
+    scope,
+    daemonActive,
+    webActive,
+    systemdReportsActivity,
+    daemonHost,
+  );
+  checks.push(...health.checks);
+  const drift = checkVersionDrift(health.daemonVersion);
+  if (drift) checks.push(drift);
 
   return checks;
 }
 
+export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
+  return checks.some((check) => !check.ok && check.severity === "error");
+}
+
 export function renderHostInstallChecks(checks: HostInstallCheck[]): string {
+  // Severity is a static per-check importance, not a pass/fail flag (see
+  // `checkSpurOnPath`) — only surface it once a check has actually failed, so
+  // a passing check is never rendered as `[error]`.
   const lines = checks.map((check) => {
-    const mark = check.ok ? "ok" : "missing";
+    const mark = check.ok ? "ok" : check.severity;
     const fix = check.ok || !check.fix ? "" : ` — fix: ${check.fix}`;
     return dimText(`[${mark}] ${check.detail}${fix}`);
   });

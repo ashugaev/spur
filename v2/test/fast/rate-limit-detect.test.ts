@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   claudeUsageMenuOptionOneSelected,
+  detectClaudeCompacting,
   detectClaudeRateLimit,
   detectClaudeUsageLimitMenu,
   detectCodexMcpPermissionDialog,
@@ -32,6 +33,16 @@ const CODEX_HEALTHY = {
   primary: { used_percent: 61, window_minutes: 300 },
   secondary: { used_percent: 12, window_minutes: 10080 },
   credits: { has_credits: true, unlimited: false, balance: null },
+  plan_type: "team",
+  rate_limit_reached_type: null,
+};
+// Real ass-22bf false-positive payload: a team/window-metered account reports
+// has_credits:false as a benign soft signal alongside a live 0%-used window.
+const CODEX_TEAM_SOFT_CREDITS = {
+  limit_id: "codex",
+  primary: { used_percent: 0.0, window_minutes: 10080 },
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: null },
   plan_type: "team",
   rate_limit_reached_type: null,
 };
@@ -106,6 +117,36 @@ describe("detectCodexRateLimit", () => {
 
   it("returns not-limited when usable data shows headroom", () => {
     expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when a live usage window is present (team/enterprise soft signal)", () => {
+    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: null,
+        secondary: { used_percent: 3, window_minutes: 10080 },
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: false, reason: "" });
+  });
+
+  it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: { used_percent: 100, window_minutes: 300 },
+        secondary: null,
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
   });
 
   it("returns null when no usable rate_limits data is present", () => {
@@ -355,6 +396,36 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
       false,
     );
+  });
+});
+
+describe("detectClaudeCompacting", () => {
+  it("flags a live spinner line", () => {
+    const paneText = ["Some earlier output", "✳ Compacting conversation… (18s)", ""].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("flags a lowercased variant", () => {
+    const paneText = ["compacting conversation... (5s)"].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("returns false for a prose/quoted mid-line mention", () => {
+    const paneText = [
+      'Spur must derive session state "working" when the pane renders "Compacting',
+      'conversation… (Ns)" spinner.',
+    ].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for an idle pane", () => {
+    const paneText = ["Waiting for the next task."].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeCompacting(source)).toBe(false);
   });
 });
 

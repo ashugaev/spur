@@ -1407,6 +1407,56 @@ test.describe("S2b: Conversation dialog", () => {
     expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
+
+  test("long unbroken dialog and queued tokens hard-wrap on desktop without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-2",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+
+    const dialogOverflowX = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("h2")).find((h) =>
+        /dialog/i.test(h.textContent ?? ""),
+      );
+      const container = heading?.parentElement?.querySelector(".overflow-x-hidden");
+      return container ? getComputedStyle(container).overflowX : null;
+    });
+    expect(dialogOverflowX).toBe("hidden");
+  });
 });
 
 // S3: Message section
@@ -2685,6 +2735,38 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     // URL should have terminal query param
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
+  });
+
+  test("terminal controls inset sideways for safe-area without extra vertical height", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-safe" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+
+    const controls = terminalDialog.getByTestId("direct-terminal-controls");
+    await expect(controls).toBeVisible();
+    const padding = await controls.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return {
+        left: parseFloat(style.paddingLeft),
+        right: parseFloat(style.paddingRight),
+        top: parseFloat(style.paddingTop),
+        bottom: parseFloat(style.paddingBottom),
+      };
+    });
+    // Side padding resolves to the 0.5rem base (env insets are 0 in headless);
+    // a dropped/invalid calc() would collapse this to 0.
+    expect(padding.left).toBeGreaterThanOrEqual(8);
+    expect(padding.right).toBeGreaterThanOrEqual(8);
+    // Vertical padding stays at py-1.5 (6px) — the inset adds no top/bottom height.
+    expect(padding.top).toBe(6);
+    expect(padding.bottom).toBe(6);
   });
 
   test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
