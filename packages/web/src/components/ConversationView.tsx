@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 import type { ConversationMessage, TranscriptEntry } from "@/lib/types";
@@ -11,6 +11,10 @@ export interface ConversationViewProps {
   durationMs: number;
   /** True when the agent is actively producing a response right now. */
   isWorking: boolean;
+  /** Agent runtime for this session; only "claude" supports interactive answering. */
+  agent: string;
+  /** Selects and submits a single-select AskUserQuestion option via a tmux keystroke. */
+  onAnswer: (optionIndex: number) => Promise<void> | void;
 }
 
 const MAX_TOOL_CHARS = 240;
@@ -97,7 +101,24 @@ function ReasoningEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: 
   );
 }
 
-function QuestionEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "question" }> }) {
+function questionEntryKey(entry: Extract<TranscriptEntry, { kind: "question" }>): string {
+  return `${entry.timestampMs ?? ""}:${entry.header}`;
+}
+
+function QuestionEntryRow({
+  entry,
+  agent,
+  isAnswered,
+  onSelectOption,
+}: {
+  entry: Extract<TranscriptEntry, { kind: "question" }>;
+  agent: string;
+  isAnswered: boolean;
+  onSelectOption: (optionIndex: number) => void;
+}) {
+  const canAnswerInline =
+    agent === "claude" && !entry.multiSelect && (entry.options?.length ?? 0) > 0;
+
   return (
     <div
       className="min-w-0 border border-[var(--color-status-attention)] bg-[var(--color-status-attention)]/10 px-3 py-2"
@@ -110,23 +131,63 @@ function QuestionEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "
         {entry.prompt}
       </div>
       {entry.options && entry.options.length > 0 ? (
-        <ol aria-label="Answer options" className="mt-2 space-y-1">
-          {entry.options.map((option) => (
-            <li key={option.index} className="text-[var(--color-text-secondary)]">
-              <span className="font-mono text-[var(--color-text-tertiary)]">{option.index}.</span>{" "}
-              {option.label}
-            </li>
-          ))}
-        </ol>
+        canAnswerInline ? (
+          <div aria-label="Answer options" className="mt-2 flex flex-col gap-1">
+            {entry.options.map((option) => (
+              <button
+                key={option.index}
+                type="button"
+                disabled={isAnswered}
+                onClick={() => onSelectOption(option.index)}
+                className="border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2 py-1 text-left text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="font-mono text-[var(--color-text-tertiary)]">
+                  {option.index}.
+                </span>{" "}
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <ol aria-label="Answer options" className="mt-2 space-y-1">
+            {entry.options.map((option) => (
+              <li key={option.index} className="text-[var(--color-text-secondary)]">
+                <span className="font-mono text-[var(--color-text-tertiary)]">
+                  {option.index}.
+                </span>{" "}
+                {option.label}
+              </li>
+            ))}
+          </ol>
+        )
       ) : null}
-      <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-        Reply from the message box below to answer
-      </div>
+      {canAnswerInline ? (
+        <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+          {isAnswered ? "Answering…" : "Click an option to answer"}
+        </div>
+      ) : (
+        <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+          Reply from the message box below to answer
+        </div>
+      )}
     </div>
   );
 }
 
-function ConversationEntryRow({ entry }: { entry: TranscriptEntry }) {
+function ConversationEntryRow({
+  entry,
+  agent,
+  isQuestionAnswered,
+  onSelectQuestionOption,
+}: {
+  entry: TranscriptEntry;
+  agent: string;
+  isQuestionAnswered: (entry: Extract<TranscriptEntry, { kind: "question" }>) => boolean;
+  onSelectQuestionOption: (
+    entry: Extract<TranscriptEntry, { kind: "question" }>,
+    optionIndex: number,
+  ) => void;
+}) {
   switch (entry.kind) {
     case "message":
       return <MessageEntryRow entry={entry} />;
@@ -135,15 +196,39 @@ function ConversationEntryRow({ entry }: { entry: TranscriptEntry }) {
     case "reasoning":
       return <ReasoningEntryRow entry={entry} />;
     case "question":
-      return <QuestionEntryRow entry={entry} />;
+      return (
+        <QuestionEntryRow
+          entry={entry}
+          agent={agent}
+          isAnswered={isQuestionAnswered(entry)}
+          onSelectOption={(optionIndex) => onSelectQuestionOption(entry, optionIndex)}
+        />
+      );
   }
 }
 
-export function ConversationView({ entries, messages, durationMs, isWorking }: ConversationViewProps) {
+export function ConversationView({
+  entries,
+  messages,
+  durationMs,
+  isWorking,
+  agent,
+  onAnswer,
+}: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastTailRef = useRef<string | null>(null);
+  const [answeredKeys, setAnsweredKeys] = useState<Set<string>>(new Set());
 
   const items = entries.length > 0 ? entries : messagesAsEntries(messages);
+
+  const handleSelectQuestionOption = (
+    entry: Extract<TranscriptEntry, { kind: "question" }>,
+    optionIndex: number,
+  ) => {
+    const key = questionEntryKey(entry);
+    setAnsweredKeys((prev) => new Set(prev).add(key));
+    void onAnswer(optionIndex);
+  };
 
   useEffect(() => {
     const last = items[items.length - 1];
@@ -185,7 +270,13 @@ export function ConversationView({ entries, messages, durationMs, isWorking }: C
         className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
       >
         {items.map((entry, index) => (
-          <ConversationEntryRow key={`${entry.kind}-${index}`} entry={entry} />
+          <ConversationEntryRow
+            key={`${entry.kind}-${index}`}
+            entry={entry}
+            agent={agent}
+            isQuestionAnswered={(questionEntry) => answeredKeys.has(questionEntryKey(questionEntry))}
+            onSelectQuestionOption={handleSelectQuestionOption}
+          />
         ))}
         {isWorking ? (
           <div

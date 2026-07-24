@@ -93,6 +93,7 @@ const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
+const sendMenuSelectionKeysMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const tmuxPaneDeadMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -399,6 +400,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: sendMessageToTmuxMock,
   sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
+  sendMenuSelectionKeys: sendMenuSelectionKeysMock,
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
@@ -932,6 +934,7 @@ describe("SessionService", () => {
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
     tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
@@ -3615,6 +3618,49 @@ describe("SessionService", () => {
     expect(readFileSync(pdfPath, "utf8")).toBe("pdf-bytes");
     expect(existsSync(txtPath)).toBe(true);
     expect(readFileSync(txtPath, "utf8")).toBe("hello");
+  });
+
+  it("answerQuestion sends the keystroke for a running claude session", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.answerQuestion("api-1", 2);
+
+    expect(sendMenuSelectionKeysMock).toHaveBeenCalledWith("api-1", 2);
+  });
+
+  it("answerQuestion rejects non-claude sessions", async () => {
+    readSessionMock.mockReturnValue(runningSession({ agent: "cursor" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(
+      "Interactive answering is only supported for claude sessions",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+  });
+
+  it("answerQuestion rejects a missing session", async () => {
+    readSessionMock.mockReturnValue(undefined);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("missing", 0)).rejects.toThrow(
+      "Session not found: missing",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+  });
+
+  it("answerQuestion rejects a non-running session", async () => {
+    readSessionMock.mockReturnValue(runningSession({ status: "killed" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(
+      "Session is not running: api-1",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
   });
 
   it("classifies working state from Claude session status before JSONL", async () => {

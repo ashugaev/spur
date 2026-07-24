@@ -1616,6 +1616,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadConversation]);
 
+  const handleAnswer = useCallback(
+    async (optionIndex: number) => {
+      try {
+        await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/answer`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ optionIndex }),
+        });
+      } finally {
+        void loadConversation();
+      }
+    },
+    [loadConversation, sessionId],
+  );
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const syncSearch = () => setLocationSearch(window.location.search);
@@ -2577,6 +2592,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 messages={conversation?.messages ?? []}
                 durationMs={conversation?.durationMs ?? 0}
                 isWorking={displayState === "working"}
+                agent={session.agent}
+                onAnswer={handleAnswer}
               />
 
               {/* Queued messages */}

@@ -106,6 +106,7 @@ When `steps` are present, Spur sends messages like "step 1/N: research" plus the
 `list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
 While the agent is busy, manual `send` requests queue per session and flush after the agent returns to a prompt. Queued manual sends run before the next auto-step in a pipelined session.
 When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
+`POST /sessions/:id/answer { optionIndex }` selects a claude AskUserQuestion single-select menu option by tmux keystroke (digit for the first nine options, arrow-key navigation beyond that) instead of typing text into the menu; claude only.
 Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
 The `list` log view combines those key session events with a live tail of the main agent tmux pane for the selected session.
 
