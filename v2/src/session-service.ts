@@ -8939,14 +8939,14 @@ export class SessionService {
       } else if (scanPane && strategy === "hook") {
         // Codex-specific: a hard rate-limit banner always wins. Otherwise,
         // whenever the pane shows a live MCP tool-permission dialog (whether or
-        // not a soft rate-limit signal is also present) the session is promoted
-        // to needs_input, unless state is already the more specific "error".
+        // not a soft rate-limit signal is also present) the session is
+        // promoted to needs_input.
         const paneText = await captureTmuxPane(session.tmuxSession);
         const hardHit = scanTmuxRateLimit(paneText);
         if (hardHit?.limited) {
           rateLimit = hardHit;
           this.codexMcpDialogOverrides.delete(session.id);
-        } else if (state !== "error" && detectCodexMcpPermissionDialog(paneText)) {
+        } else if (detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
           this.codexMcpDialogOverrides.set(
