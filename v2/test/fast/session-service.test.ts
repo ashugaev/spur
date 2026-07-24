@@ -4640,6 +4640,35 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("does not strand a working override on the next scanPane:false tick when a rate-limit banner wins over the compaction spinner", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      ["■ Usage limit reached ∙ resets 3pm", "✳ Compacting conversation… (18s)"].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // A live (scanPane:true) classify correctly settles on rate_limited. It
+    // must NOT also record a claudeCompactingOverrides entry for the
+    // compaction spinner — that entry would otherwise strand "working" on a
+    // later scanPane:false dashboard tick even after the banner and spinner
+    // are both gone.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // The banner clears and compaction finishes by the next tick.
+    captureTmuxPaneMock.mockResolvedValue("Waiting for the next task.");
+    await vi.advanceTimersByTimeAsync(4_001);
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "waiting" });
+    service.dispose();
+  });
+
   it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {

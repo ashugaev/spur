@@ -8956,11 +8956,15 @@ export class SessionService {
         // "idle" throughout, which jsonl/hook maps to waiting) and the
         // transcript only gets a compact record after completion — so the
         // live pane spinner is the only signal while it's in progress. The
-        // rate-limit override below still wins if a banner is also present.
-        // Recorded into claudeCompactingOverrides (TTL) so the scanPane:false
-        // dashboard tick's own idle re-read doesn't keep refreshing
-        // stabilizeState's hold window against this working transition.
-        if (detectClaudeCompacting(paneText)) {
+        // rate-limit override below still wins if a banner is also present —
+        // skip recording the override in that case so the scanPane:false
+        // dashboard tick doesn't strand a stale "working" once the rate
+        // limit expires (mirrors codexMcpDialogOverrides' hard-limit delete
+        // above). Recorded into claudeCompactingOverrides (TTL) so the
+        // scanPane:false dashboard tick's own idle re-read doesn't keep
+        // refreshing stabilizeState's hold window against this working
+        // transition.
+        if (detectClaudeCompacting(paneText) && !rateLimit?.limited) {
           state = "working";
           this.claudeCompactingOverrides.set(
             session.id,
