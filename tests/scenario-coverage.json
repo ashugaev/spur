@@ -3957,7 +3957,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2b: Conversation dialog (all agents, `ConversationView`)",
-    "scenario": "`question` entries render as a full-opacity attention-bordered/tinted block (`role=\"alert\"`) with header + prompt to make the item the user must act on visually prominent; when `options` are present they list as a static numbered list (`aria-label=\"Answer options\"`) with a hint that replies go through the message box below (read-only in this phase — no click-to-answer wiring yet); when options are absent, only header/prompt show",
+    "scenario": "`question` entries render as a full-opacity attention-bordered/tinted block (`role=\"alert\"`) with header + prompt to make the item the user must act on visually prominent; when `options` are present, claude single-select questions render clickable option buttons (`aria-label=\"Answer options\"`) that POST an answer and show pending/answered/error status text, while cursor/codex questions and claude multi-select questions render the same options as a static numbered list with a hint that replies go through the message box below; when options are absent, only header/prompt show",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/conversation-view.test.tsx"],
     "ciJob": "quality"
