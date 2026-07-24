@@ -410,10 +410,6 @@ describe("Spur web API routes", () => {
 
   // ── POST /api/diagnose-update ────────────────────────────────────────────
 
-  afterEach(() => {
-    delete process.env["SPUR_SELF_PROJECT_ID"];
-  });
-
   it("POST /api/diagnose-update returns 400 when target is missing", async () => {
     const response = await diagnoseUpdate(
       new NextRequest("http://localhost:3000/api/diagnose-update", {
@@ -438,8 +434,8 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
-  it("POST /api/diagnose-update forwards project/prompt/agent to /sessions/background", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "sp" }));
+  it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "spur-shepherd" }));
 
     const response = await diagnoseUpdate(
       new NextRequest("http://localhost:3000/api/diagnose-update", {
@@ -450,33 +446,16 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/background",
+      "/shepherd/spawn",
       expect.objectContaining({ method: "POST" }),
     );
     const body = JSON.parse(
       (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
     ) as Record<string, unknown>;
-    expect(body.project).toBe("sp");
-    expect(body.agent).toBe("claude");
+    expect(body.project).toBeUndefined();
+    expect(body.agent).toBeUndefined();
     expect(body.prompt).toContain("1.5.0");
     expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
-  });
-
-  it("POST /api/diagnose-update honors SPUR_SELF_PROJECT_ID override", async () => {
-    process.env["SPUR_SELF_PROJECT_ID"] = "custom-project";
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "custom-project" }));
-
-    await diagnoseUpdate(
-      new NextRequest("http://localhost:3000/api/diagnose-update", {
-        method: "POST",
-        body: JSON.stringify({ target: "1.5.0" }),
-      }),
-    );
-
-    const body = JSON.parse(
-      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
-    ) as Record<string, unknown>;
-    expect(body.project).toBe("custom-project");
   });
 
   it("POST /api/diagnose-update preserves daemon error status", async () => {
