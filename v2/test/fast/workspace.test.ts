@@ -83,6 +83,7 @@ import * as childProcess from "node:child_process";
 import { existsSync, linkSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import {
   branchStatus,
+  checkProjectWorkspace,
   createWorktree,
   findWorktreePathForBranch,
   readDoctorBranchHint,
@@ -633,6 +634,120 @@ branch refs/heads/main
       remote: true,
       checkedOutAt: null,
     });
+  });
+});
+
+describe("checkProjectWorkspace", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  const baseProjectInput = {
+    projectId: "api",
+    path: "/repo/api",
+    defaultBranch: "main",
+    worktree: true,
+  };
+
+  it("D1: reports a single failing check for a missing path and never touches git", async () => {
+    mockStatSync.mockImplementation(() => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks).toEqual([
+      expect.objectContaining({
+        id: "project-path-exists:api",
+        ok: false,
+        severity: "error",
+      }),
+    ]);
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it("D2: skips the git-repo check entirely when worktree mode is off", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+    const checks = await checkProjectWorkspace({ ...baseProjectInput, worktree: false });
+
+    expect(checks).toEqual([expect.objectContaining({ id: "project-path-exists:api", ok: true })]);
+    expect(checks.find((check) => check.id === "project-path-is-git-repo:api")).toBeUndefined();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it("D3: reports a remote-only default branch as resolvable, without touching the workspace lock or worktree prune", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+    mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitSuccess(); // branchRefsExist: refs/remotes/origin/main
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+      expect.objectContaining({ ok: true, severity: "error" }),
+    );
+    // D3 must be lock-free and read-only: exactly the 3 calls above (no
+    // workspace-lock resolution, no `git worktree prune`, no `worktree list`).
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
+  });
+
+  it("D3: reports a default branch resolvable neither locally nor remotely as an error, without touching the workspace lock or worktree prune", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+    mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitFailure("missing remote"); // branchRefsExist: refs/remotes/origin/main
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+      expect.objectContaining({ ok: false, severity: "error" }),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
+  });
+
+  // A git call that never settles (slow disk / heavy I/O) trips the 5s
+  // `withTimeout`. That is "could not determine", not a proven failure — it
+  // must warn, never a hard error that would exit non-zero on a healthy repo.
+  it("D2: reports warn (not error) when the git-repo check times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // isGitWorktree hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-path-is-git-repo:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      // The branch check must never run once the repo check is unresolved.
+      expect(
+        checks.find((check) => check.id === "project-default-branch-resolves:api"),
+      ).toBeUndefined();
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D3: reports warn (not error) when the branch lookup times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // branchRefsExist hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
