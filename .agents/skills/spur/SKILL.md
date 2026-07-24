@@ -51,6 +51,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
   never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
+- When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route resolves the project via env var `SPUR_SELF_PROJECT_ID` (default `sp`), builds a diagnostic prompt server-side, and spawns a `claude` agent through the same daemon `POST /sessions/background` path as `/api/spawn`.
 
 ## Current config shape
 

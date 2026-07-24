@@ -581,6 +581,10 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
 - `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 
+Environment variables:
+
+- `SPUR_SELF_PROJECT_ID`: optional process env var read by the web `POST /api/diagnose-update` route; the project id it spawns the update-diagnosis agent into when a self-update reaches the failed phase. Default `sp`.
+
 Event surface:
 
 - `cron` sources support only `cron:tick`.
