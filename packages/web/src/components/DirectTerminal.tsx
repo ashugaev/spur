@@ -842,7 +842,10 @@ export function DirectTerminal({
         </div>
       ) : null}
 
-      <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
+      <div
+        className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] py-1.5 pl-[max(0.5rem,env(safe-area-inset-left),env(safe-area-inset-bottom))] pr-[max(0.5rem,env(safe-area-inset-right),env(safe-area-inset-bottom))]"
+        data-testid="direct-terminal-controls"
+      >
         <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
           <div className="relative" ref={hotkeyMenuRef}>
             <button

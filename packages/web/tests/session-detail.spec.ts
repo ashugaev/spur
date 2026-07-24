@@ -2737,6 +2737,38 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("terminal controls inset sideways for safe-area without extra vertical height", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-safe" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+
+    const controls = terminalDialog.getByTestId("direct-terminal-controls");
+    await expect(controls).toBeVisible();
+    const padding = await controls.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return {
+        left: parseFloat(style.paddingLeft),
+        right: parseFloat(style.paddingRight),
+        top: parseFloat(style.paddingTop),
+        bottom: parseFloat(style.paddingBottom),
+      };
+    });
+    // Side padding resolves to the 0.5rem base (env insets are 0 in headless);
+    // a dropped/invalid calc() would collapse this to 0.
+    expect(padding.left).toBeGreaterThanOrEqual(8);
+    expect(padding.right).toBeGreaterThanOrEqual(8);
+    // Vertical padding stays at py-1.5 (6px) — the inset adds no top/bottom height.
+    expect(padding.top).toBe(6);
+    expect(padding.bottom).toBe(6);
+  });
+
   test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s6-title",
