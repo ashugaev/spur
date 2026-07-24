@@ -1619,11 +1619,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleAnswer = useCallback(
     async (optionIndex: number) => {
       try {
-        await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/answer`, {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/answer`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ optionIndex }),
         });
+        if (!response.ok) {
+          throw new Error(`Failed to submit answer: ${response.status}`);
+        }
       } finally {
         void loadConversation();
       }

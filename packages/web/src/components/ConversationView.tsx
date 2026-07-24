@@ -105,19 +105,33 @@ function questionEntryKey(entry: Extract<TranscriptEntry, { kind: "question" }>)
   return `${entry.timestampMs ?? ""}:${entry.header}`;
 }
 
+/** Per-question answer lifecycle. `optionLabel` is set once a choice is made (pending/answered/error). */
+type QuestionAnswerState =
+  | { status: "idle" }
+  | { status: "pending"; optionLabel: string }
+  | { status: "answered"; optionLabel: string }
+  | { status: "error"; optionLabel: string };
+
+const OPTION_BUTTON_CLASS =
+  "border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2 py-1 text-left text-[var(--color-text-secondary)] outline-none transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50";
+
 function QuestionEntryRow({
   entry,
   agent,
-  isAnswered,
+  answerState,
   onSelectOption,
 }: {
   entry: Extract<TranscriptEntry, { kind: "question" }>;
   agent: string;
-  isAnswered: boolean;
-  onSelectOption: (optionIndex: number) => void;
+  answerState: QuestionAnswerState;
+  onSelectOption: (optionIndex: number, optionLabel: string) => void;
 }) {
   const canAnswerInline =
     agent === "claude" && !entry.multiSelect && (entry.options?.length ?? 0) > 0;
+  const isPending = answerState.status === "pending";
+  const isAnswered = answerState.status === "answered";
+  const isError = answerState.status === "error";
+  const buttonsDisabled = isPending || isAnswered;
 
   return (
     <div
@@ -137,14 +151,14 @@ function QuestionEntryRow({
               <button
                 key={option.index}
                 type="button"
-                disabled={isAnswered}
-                onClick={() => onSelectOption(option.index)}
-                className="border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2 py-1 text-left text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={buttonsDisabled}
+                onClick={() => onSelectOption(option.index, option.label)}
+                className={OPTION_BUTTON_CLASS}
               >
                 <span className="font-mono text-[var(--color-text-tertiary)]">
                   {option.index}.
                 </span>{" "}
-                {option.label}
+                <span className={HARD_WRAP_TEXT_CLASS}>{option.label}</span>
               </button>
             ))}
           </div>
@@ -162,8 +176,22 @@ function QuestionEntryRow({
         )
       ) : null}
       {canAnswerInline ? (
-        <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-          {isAnswered ? "Answering…" : "Click an option to answer"}
+        <div
+          className={`mt-2 text-[10px] uppercase tracking-[0.08em] ${
+            isAnswered
+              ? "text-[var(--color-status-ready)]"
+              : isError
+                ? "text-[var(--color-status-error)]"
+                : "text-[var(--color-text-tertiary)]"
+          }`}
+        >
+          {isAnswered
+            ? `Answered: ${answerState.optionLabel}`
+            : isError
+              ? "Couldn't send — try again"
+              : isPending
+                ? "Answering…"
+                : "Click an option to answer"}
         </div>
       ) : (
         <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
@@ -177,15 +205,18 @@ function QuestionEntryRow({
 function ConversationEntryRow({
   entry,
   agent,
-  isQuestionAnswered,
+  getQuestionAnswerState,
   onSelectQuestionOption,
 }: {
   entry: TranscriptEntry;
   agent: string;
-  isQuestionAnswered: (entry: Extract<TranscriptEntry, { kind: "question" }>) => boolean;
+  getQuestionAnswerState: (
+    entry: Extract<TranscriptEntry, { kind: "question" }>,
+  ) => QuestionAnswerState;
   onSelectQuestionOption: (
     entry: Extract<TranscriptEntry, { kind: "question" }>,
     optionIndex: number,
+    optionLabel: string,
   ) => void;
 }) {
   switch (entry.kind) {
@@ -200,8 +231,10 @@ function ConversationEntryRow({
         <QuestionEntryRow
           entry={entry}
           agent={agent}
-          isAnswered={isQuestionAnswered(entry)}
-          onSelectOption={(optionIndex) => onSelectQuestionOption(entry, optionIndex)}
+          answerState={getQuestionAnswerState(entry)}
+          onSelectOption={(optionIndex, optionLabel) =>
+            onSelectQuestionOption(entry, optionIndex, optionLabel)
+          }
         />
       );
   }
@@ -217,17 +250,25 @@ export function ConversationView({
 }: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastTailRef = useRef<string | null>(null);
-  const [answeredKeys, setAnsweredKeys] = useState<Set<string>>(new Set());
+  const [answerStates, setAnswerStates] = useState<Record<string, QuestionAnswerState>>({});
 
   const items = entries.length > 0 ? entries : messagesAsEntries(messages);
 
   const handleSelectQuestionOption = (
     entry: Extract<TranscriptEntry, { kind: "question" }>,
     optionIndex: number,
+    optionLabel: string,
   ) => {
     const key = questionEntryKey(entry);
-    setAnsweredKeys((prev) => new Set(prev).add(key));
-    void onAnswer(optionIndex);
+    setAnswerStates((prev) => ({ ...prev, [key]: { status: "pending", optionLabel } }));
+    (async () => {
+      try {
+        await onAnswer(optionIndex);
+        setAnswerStates((prev) => ({ ...prev, [key]: { status: "answered", optionLabel } }));
+      } catch {
+        setAnswerStates((prev) => ({ ...prev, [key]: { status: "error", optionLabel } }));
+      }
+    })();
   };
 
   useEffect(() => {
@@ -274,7 +315,9 @@ export function ConversationView({
             key={`${entry.kind}-${index}`}
             entry={entry}
             agent={agent}
-            isQuestionAnswered={(questionEntry) => answeredKeys.has(questionEntryKey(questionEntry))}
+            getQuestionAnswerState={(questionEntry) =>
+              answerStates[questionEntryKey(questionEntry)] ?? { status: "idle" }
+            }
             onSelectQuestionOption={handleSelectQuestionOption}
           />
         ))}

@@ -166,7 +166,48 @@ describe("ConversationView", () => {
   });
 
   it("renders claude single-select options as clickable buttons and submits the chosen index", () => {
-    const onAnswer = vi.fn();
+    const onAnswer = vi.fn(() => new Promise<void>(() => {}));
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "question",
+        header: "Confirm action",
+        prompt: "Delete the branch?",
+        options: [
+          { label: "Yes", index: 1 },
+          { label: "No", index: 2 },
+        ],
+        timestampMs: 1,
+      },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        isWorking={false}
+        agent="claude"
+        onAnswer={onAnswer}
+      />,
+    );
+
+    const yesButton = screen.getByRole("button", { name: /yes/i });
+    const noButton = screen.getByRole("button", { name: /no/i });
+    fireEvent.click(yesButton);
+
+    expect(onAnswer).toHaveBeenCalledWith(1);
+    expect(yesButton).toBeDisabled();
+    expect(noButton).toBeDisabled();
+    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+  });
+
+  it("moves a question from pending to answered when onAnswer resolves, keeping buttons disabled", async () => {
+    let resolveAnswer: (() => void) | undefined;
+    const onAnswer = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAnswer = resolve;
+        }),
+    );
     const entries: TranscriptEntry[] = [
       {
         kind: "question",
@@ -192,10 +233,81 @@ describe("ConversationView", () => {
 
     const yesButton = screen.getByRole("button", { name: /yes/i });
     fireEvent.click(yesButton);
-
-    expect(onAnswer).toHaveBeenCalledWith(1);
-    expect(yesButton).toBeDisabled();
     expect(screen.getByText(/answering/i)).toBeInTheDocument();
+
+    resolveAnswer?.();
+    await screen.findByText("Answered: Yes");
+
+    expect(screen.getByRole("button", { name: /yes/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /no/i })).toBeDisabled();
+  });
+
+  it("moves a question from pending to error when onAnswer rejects, re-enabling buttons for retry", async () => {
+    const onAnswer = vi.fn().mockRejectedValue(new Error("network error"));
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "question",
+        header: "Confirm action",
+        prompt: "Delete the branch?",
+        options: [
+          { label: "Yes", index: 1 },
+          { label: "No", index: 2 },
+        ],
+        timestampMs: 1,
+      },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        isWorking={false}
+        agent="claude"
+        onAnswer={onAnswer}
+      />,
+    );
+
+    const yesButton = screen.getByRole("button", { name: /yes/i });
+    fireEvent.click(yesButton);
+    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+
+    await screen.findByText(/couldn't send/i);
+
+    expect(screen.getByRole("button", { name: /yes/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /no/i })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /yes/i }));
+    expect(onAnswer).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+
+    await screen.findByText(/couldn't send/i);
+  });
+
+  it("gives answer option buttons a focus-visible affordance and disabled opacity convention", () => {
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "question",
+        header: "Confirm action",
+        prompt: "Delete the branch?",
+        options: [{ label: "Yes", index: 1 }],
+        timestampMs: 1,
+      },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    const yesButton = screen.getByRole("button", { name: /yes/i });
+    expect(yesButton.className).toContain("focus-visible:border-[var(--color-accent)]");
+    expect(yesButton.className).toContain("focus-visible:text-[var(--color-text-primary)]");
+    expect(yesButton.className).toContain("disabled:opacity-50");
   });
 
   it("keeps the static list for a claude multi-select question", () => {
