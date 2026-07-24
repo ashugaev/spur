@@ -9016,12 +9016,18 @@ export class SessionService {
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
         }
-      } else if (!scanPane && strategy === "hook" && rateLimit?.limited) {
+      } else if (!scanPane && strategy === "hook") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
         // fork (see enrichDashboard), but it can still reuse the last live
         // pane-scan's dialog confirmation while it's fresh, so the dashboard
-        // doesn't keep showing rate_limited for a session the 5s attention
-        // monitor already knows is parked on a live MCP permission dialog.
+        // doesn't keep showing rate_limited (or working) for a session the 5s
+        // attention monitor already knows is parked on a live MCP permission
+        // dialog. The override can be live with no rate-limit signal at all
+        // (the pane-scan branch above sets it independent of rateLimit), so
+        // this reuse branch must not require rateLimit?.limited either, or it
+        // misses that case on 2s ticks. The override-presence + expiry check
+        // below is the real gate; this branch is just a cheap Map.get when
+        // there's nothing to reuse.
         const expiresAt = this.codexMcpDialogOverrides.get(session.id);
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "needs_input";
