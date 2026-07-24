@@ -45,9 +45,10 @@ describe("spur help", () => {
 
     const help = doctor.helpInformation();
 
-    expect(help).toContain("Check host install and scaffold a local Spur project config.");
+    expect(help).toContain("Check host install and project config health (read-only).");
     expect(help).toContain("--json");
-    expect(help).toContain("Checks npm/systemd host install");
+    expect(help).toContain("--scaffold");
+    expect(help).toContain("Read-only by default: checks npm/systemd host install");
     expect(help).toContain("Run `spur init` if host checks");
     expect(help).toContain("Run `spur list` or `spur spawn` next");
   });

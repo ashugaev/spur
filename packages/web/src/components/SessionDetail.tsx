@@ -36,6 +36,7 @@ import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
+import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -87,6 +88,7 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+import { resolveActivityStatus } from "@/lib/terminal-status";
 
 function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
   const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
@@ -374,6 +376,20 @@ const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
+
+// Reuses the shared `SPARK_GLYPH_PATH`, scaled and centered the same way as
+// `src/app/icon.tsx` (22px glyph, 5px margin, in a 32x32 tile) so the tab
+// favicon is pixel-identical to the static app icon apart from stroke color.
+function buildStatusFaviconHref(hex: string): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" fill="${BG_BASE_HEX}"/>` +
+    `<svg x="5" y="5" width="22" height="22" viewBox="0 0 24 24">` +
+    `<path d="${SPARK_GLYPH_PATH}" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `</svg>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
 
 interface LogEntry {
   timestamp: string;
@@ -1240,9 +1256,6 @@ function LogEntryRow({
 
       {isStateTransition ? (
         <div className="flex flex-wrap items-center gap-3 px-3 py-3">
-          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-            Status transition
-          </div>
           <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
             <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
               {formatStateLabel(fromState ?? "")}
@@ -1304,7 +1317,7 @@ function LogEntryRow({
               {entry.message}
             </pre>
           ) : (
-            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+            <div className="text-[var(--color-text-tertiary)]">No message.</div>
           )}
         </div>
       )}
@@ -2058,6 +2071,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+
+  const hasSession = Boolean(session);
+  const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
+
+  useEffect(() => {
+    if (!hasSession) return undefined;
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/svg+xml";
+    document.head.appendChild(link);
+    faviconLinkRef.current = link;
+    return () => {
+      link.remove();
+      faviconLinkRef.current = null;
+    };
+  }, [hasSession]);
+
+  useEffect(() => {
+    const link = faviconLinkRef.current;
+    if (!link || displayState === undefined) return;
+    const { colorVar } = resolveActivityStatus(displayState);
+    const varName = colorVar.slice(4, -1);
+    const hex = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    link.href = buildStatusFaviconHref(hex || "#ffffff");
+  }, [displayState]);
+
   const wakeSummary = session ? getWakeSummary(session) : null;
   const wakeDueAt = wakeSummary?.dueAt;
   const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
@@ -2295,7 +2334,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
             {promptView &&
@@ -2313,7 +2352,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onCopy={copyLabeledValue}
                       />
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                    <p
+                      className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                    >
                       {promptView.task}
                     </p>
                   </div>
@@ -2628,8 +2669,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
                     <p className="mt-2 text-[var(--color-text-secondary)]">
-                      Awaiting agent prompt. Queued messages will send automatically when the agent
-                      is ready.
+                      Awaiting agent prompt — queued messages will send automatically.
                     </p>
                   ) : null}
                 </section>
@@ -2665,7 +2705,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           current.filter((_, currentIndex) => currentIndex !== index),
                         )
                       }
-                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
+                      placeholder={voicePlaceholder("Message...", voice)}
                       textareaRef={messageRef}
                       value={message}
                       voice={voice}
@@ -2842,13 +2882,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       })}
                     </div>
                   ) : (
-                    <p className="py-2 text-[var(--color-text-secondary)]">
-                      {artifactCategory === "attached"
-                        ? "No attached artifacts yet."
-                        : artifactCategory === "system"
-                          ? "No system artifacts yet."
-                          : "No agent artifacts yet."}
-                    </p>
+                    <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}
                 </section>
               ) : null}
@@ -3087,9 +3121,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <div>
                   <div className="font-bold uppercase text-[var(--color-text-primary)]">
                     Logs {session.id}
-                  </div>
-                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Spur orchestrator events and runtime output
                   </div>
                 </div>
                 <button
@@ -3472,7 +3503,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
               promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
-              promptPlaceholder="Edit the initial message..."
+              promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
@@ -3573,7 +3604,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
+        <p className="mt-5 text-[var(--color-text-secondary)]">Loading...</p>
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>

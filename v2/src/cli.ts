@@ -2,6 +2,7 @@
 
 import {
   collectHostInstallChecks,
+  hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
   type HostInstallCheck,
@@ -60,7 +61,7 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
-import { runUpdate, runUpdateMonitor } from "./update.js";
+import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import {
@@ -93,7 +94,7 @@ import {
   type HandoffSessionRequest,
 } from "./types.js";
 import { version } from "./version.js";
-import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -800,8 +801,12 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText("Next: `spur list` to auto-connect this repo."),
       dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
     );
+    return lines.join("\n");
   }
-  const failed = result.hostChecks.filter((check) => !check.ok);
+  lines.push(
+    dimText("No project config found. Rerun with `spur doctor --scaffold` to create one."),
+  );
+  const failed = result.hostChecks.filter((check) => !check.ok && check.severity === "error");
   if (failed.length > 0) {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
@@ -935,9 +940,9 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "doctor") {
     return [
-      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
-      "Run `spur init` if host checks report missing units, linger, or inactive services.",
-      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Read-only by default: checks npm/systemd host install, PATH, core deps, project config, and daemon/web health.",
+      "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
+      "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
   }
@@ -1552,22 +1557,30 @@ async function runInteractiveSessionList(
   });
 }
 
-async function outputResult<T>(args: {
+// Exported so the exit-code wiring (the only externally observable effect
+// besides stdout) can be unit-tested directly, without driving the full
+// commander parse + host/config seams doctor's action depends on.
+export async function outputResult<T>(args: {
   json: boolean;
   label: string;
   action: () => Promise<T>;
   render: (value: T) => string;
   success?: (value: T) => string;
+  exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
-    return;
+  } else {
+    if (args.success) {
+      writeStdout(brandLine(args.success(value)));
+    }
+    writeStdout(args.render(value));
   }
-  if (args.success) {
-    writeStdout(brandLine(args.success(value)));
+  const code = args.exitCode?.(value);
+  if (code !== undefined) {
+    process.exitCode = code;
   }
-  writeStdout(args.render(value));
 }
 
 function resolveCliSpawnOverrides(options: {
@@ -1612,11 +1625,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
     .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
+        tailscale: Boolean(options.tailscale),
       });
     });
 
@@ -1640,19 +1655,69 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("reinit", { hidden: true })
+    .description(
+      "Reinstall user systemd units preserving the live web port/exposure/Tailscale bind, then restart and health-check.",
+    )
+    .action(() => {
+      reinitUnits(cliEntrypoint);
+    });
+
+  program
     .command("doctor")
-    .description("Check host install and scaffold a local Spur project config.")
+    .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
+    .option("--scaffold", "Write spur.yaml when no project config is found")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = collectHostInstallChecks();
+          const hostChecks = await collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
+            try {
+              const projectConfig = loadProjectConfig(existingProjectConfigPath);
+              // Severity is the check's static importance if it fails (an
+              // invalid spur.yaml blocks connect/spawn — always "error"), not
+              // a flag that flips with the outcome; the renderer only
+              // surfaces it once `ok` is false.
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: true,
+                severity: "error",
+                detail: "spur.yaml parses and validates",
+              });
+              // D1-D3: per-project path/git/branch validation — only ever
+              // runs against the project(s) this repo's spur.yaml actually
+              // defines, config-conditional by construction (never fires on a
+              // bare host with no project config, since this whole branch is
+              // already gated on `existingProjectConfigPath`).
+              for (const [projectId, project] of Object.entries(projectConfig.projects)) {
+                hostChecks.push(
+                  ...(await checkProjectWorkspace({
+                    projectId,
+                    path: project.path,
+                    defaultBranch: project.defaultBranch,
+                    worktree: project.worktree,
+                  })),
+                );
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: false,
+                severity: "error",
+                detail: message,
+                fix: "Fix the reported error in spur.yaml",
+              });
+            }
             return { hostChecks, existingProjectConfigPath };
+          }
+          if (!options.scaffold) {
+            return { hostChecks };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1672,8 +1737,9 @@ export function createProgram(cliEntrypoint: string): Command {
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
             : result.configPath
               ? `Created ${displayPathFromCwd(result.configPath)}.`
-              : "Created project config.",
+              : "Host and project checks complete.",
         render: renderDoctorResult,
+        exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
       });
     });
 

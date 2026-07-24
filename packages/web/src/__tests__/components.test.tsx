@@ -153,8 +153,8 @@ function sessionsPayload() {
   };
 }
 
-const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
-const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt for the new session... Voice ⌘ + .";
+const SPAWN_PROMPT_PLACEHOLDER = "Prompt...";
+const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt... Voice ⌘ + .";
 const MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 
 function setMobileViewport(matches: boolean) {
@@ -306,7 +306,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("disables every backlog take button while one take is pending", async () => {
+  it("disables only the pending backlog take button, leaving neighbors clickable", async () => {
     const backlogItems = [
       {
         provider: "jira",
@@ -331,7 +331,8 @@ describe("Dashboard", () => {
         position: 1,
       },
     ];
-    let resolveTake: ((response: Response) => void) | null = null;
+    const takeResolvers: ((response: Response) => void)[] = [];
+    let takeRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -339,8 +340,9 @@ describe("Dashboard", () => {
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/backlog/take") {
+        takeRequests += 1;
         return new Promise<Response>((resolve) => {
-          resolveTake = resolve;
+          takeResolvers.push(resolve);
         });
       }
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
@@ -355,20 +357,33 @@ describe("Dashboard", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
 
+    // Only the pending row disables; the neighbor stays enabled.
     await waitFor(() => {
       const takeButtons = screen.getAllByRole("button", { name: "Take task" });
       expect(takeButtons).toHaveLength(2);
-      for (const button of takeButtons) expect(button).toBeDisabled();
+      expect(takeButtons[0]).toBeDisabled();
+      expect(takeButtons[1]).toBeEnabled();
+    });
+    expect(takeRequests).toBe(1);
+
+    // Clicking the still-enabled neighbor while the first take is in flight fires
+    // its own request (per-item guard, not a global single-flight) — no dead click.
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
+    await waitFor(() => expect(takeRequests).toBe(2));
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons[0]).toBeDisabled();
+      expect(takeButtons[1]).toBeDisabled();
     });
 
-    resolveTake?.(
-      new Response(
-        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
-        {
-          status: 201,
-        },
-      ),
-    );
+    for (const [index, resolve] of takeResolvers.entries()) {
+      resolve(
+        new Response(
+          JSON.stringify({ item: backlogItems[index], session: sessionsPayload().sessions[0] }),
+          { status: 201 },
+        ),
+      );
+    }
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {
@@ -462,7 +477,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.queryByText("Loading sessions...")).not.toBeInTheDocument();
+      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
@@ -491,7 +506,7 @@ describe("Dashboard", () => {
     });
 
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("Message to the running agent")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Message...")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
@@ -800,11 +815,11 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+        screen.getByText("No matching sessions in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 
-    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    const searchInput = screen.getByPlaceholderText("Filter...");
     fireEvent.change(searchInput, { target: { value: "zzz" } });
     expect(searchInput).toHaveValue("zzz");
 
@@ -899,7 +914,7 @@ describe("Dashboard", () => {
     expect(searchInput).toHaveValue("Fix");
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Filter... Voice ⌘ + .")).toBeInTheDocument();
     });
 
     fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
@@ -2512,6 +2527,16 @@ describe("StatusBar", () => {
       </QueryClientProvider>,
     );
     expect(html).toContain("Show Spur version information");
+  });
+
+  it("insets the footer with safe-area padding for rounded/notched screens", () => {
+    renderStatusBar();
+    const footer = screen.getByRole("contentinfo");
+    expect(footer.className).not.toContain("env(safe-area-inset-bottom)");
+    expect(footer.className).toContain("pl-[max(0.5rem,calc(env(safe-area-inset-left)_+_2px))]");
+    expect(footer.className).toContain("pr-[max(0.5rem,calc(env(safe-area-inset-right)_+_2px))]");
+    expect(footer.className).toContain("sm:pl-[max(1rem,calc(env(safe-area-inset-left)_+_2px))]");
+    expect(footer.className).toContain("sm:pr-[max(1rem,calc(env(safe-area-inset-right)_+_2px))]");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {

@@ -615,12 +615,14 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
 ): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
+  const draft = asOptionalBoolean(raw["draft"], `${label}.draft`);
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
+    ...(draft !== undefined ? { draft } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -1736,6 +1738,28 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
   return { configPath, initialized: true };
+}
+
+export type InstanceConfigReadResult =
+  | { status: "absent" }
+  | { status: "invalid"; error: string }
+  | { status: "ok"; config: AppConfig };
+
+// Read-only counterpart to `loadConfig`/`ensureInstanceConfig`: never
+// bootstrap-writes `~/.spur/config.yaml` when it is missing (that write is a
+// deliberate `ensureInstanceConfig` side effect other callers rely on).
+// `doctor` needs to distinguish "never initialized" (not an error) from "a
+// real, corrupt instance config sitting on disk" (an error) without ever
+// creating the file as a side effect of merely checking it.
+export function loadInstanceConfigReadOnly(input?: string): InstanceConfigReadResult {
+  if (!instanceConfigExists(input)) {
+    return { status: "absent" };
+  }
+  try {
+    return { status: "ok", config: parseConfigFile(resolveInstanceConfigPath(input), "instance") };
+  } catch (error) {
+    return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function findProjectConfigPath(startDir = process.cwd()): string | undefined {

@@ -1,3 +1,4 @@
+import { IconCloseButton } from "@/components/IconCloseButton";
 import type { SessionNotRestorablePayload } from "@/lib/types";
 
 interface RecoverActionDialogProps {
@@ -33,15 +34,11 @@ export function RecoverActionDialog({
             </h2>
             <p className="mt-2 text-[var(--color-text-secondary)]">{payload.reason}</p>
           </div>
-          <button
-            aria-label="Dismiss recover session dialog"
-            className="border border-[var(--color-border-default)] px-2 py-1 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-            disabled={busy}
+          <IconCloseButton
+            label="Dismiss recover session dialog"
             onClick={onCancel}
-            type="button"
-          >
-            x
-          </button>
+            disabled={busy}
+          />
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
           {payload.availableActions.includes("respawn") ? (

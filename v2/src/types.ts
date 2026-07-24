@@ -215,6 +215,8 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   intervalMs: number;
   emitExisting: boolean;
   query?: string;
+  // Applies only to the query-based work-item poll: restricts results to draft PRs; default (unset) excludes drafts.
+  draft?: boolean;
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;

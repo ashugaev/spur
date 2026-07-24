@@ -15,12 +15,18 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import type { HostInstallCheck } from "./host-install.js";
+import { withTimeout } from "./promise-timeout.js";
 import type { BranchExistsResponse } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE_LOCK_RETRY_MS = 25;
 const WORKSPACE_LOCK_TIMEOUT_MS = 5 * 60_000;
 const WORKSPACE_LOCK_FILE = "spur-workspace.lock";
+// Doctor's per-project git probes (D2/D3) must never hang, unlike the much
+// longer worktree-creation lock timeout above — this bounds `isGitWorktree`/
+// `branchStatus` independently of that.
+const PROJECT_GIT_CHECK_TIMEOUT_MS = 5_000;
 
 interface CreateWorktreeInput {
   repoPath: string;
@@ -331,7 +337,29 @@ async function refExists(repoPath: string, ref: string): Promise<boolean> {
   return (await gitExitCode(repoPath, "show-ref", "--verify", "--quiet", ref)) === 0;
 }
 
+// Lock-free counterpart to `branchStatus`'s two ref checks, deliberately
+// without `checkedOutAt` (which routes through `findWorktreePathForBranch` ->
+// `withWorkspaceGitLock` -> a real lock-file write plus `git worktree prune`
+// under `.git`). `checkProjectWorkspace` (D3) only ever needs
+// exists/remote — a read-only doctor check must never write to the repo's
+// `.git`, and must never contend with a live spawn's workspace lock.
+export async function branchRefsExist(
+  repoPath: string,
+  branch: string,
+): Promise<{ exists: boolean; remote: boolean }> {
+  const exists = await refExists(repoPath, `refs/heads/${branch}`);
+  const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
+  return { exists, remote };
+}
+
+async function hasOriginRemote(repoPath: string): Promise<boolean> {
+  return (await gitExitCode(repoPath, "remote", "get-url", "origin")) === 0;
+}
+
 async function fetchOrigin(repoPath: string): Promise<void> {
+  if (!(await hasOriginRemote(repoPath))) {
+    return;
+  }
   try {
     await git(repoPath, "fetch", "origin", "--quiet");
   } catch (error) {
@@ -497,6 +525,108 @@ export async function isGitWorktree(worktreePath: string): Promise<boolean> {
     return false;
   }
   return (await gitExitCode(worktreePath, "rev-parse", "--git-dir")) === 0;
+}
+
+export interface ProjectWorkspaceCheckInput {
+  projectId: string;
+  path: string;
+  defaultBranch: string;
+  worktree: boolean;
+}
+
+// D1-D3: doctor's per-project path/git/branch validation, composed from the
+// already-exported `probeWorkspace`/`isGitWorktree` primitives plus the
+// lock-free `branchRefsExist` (D3 deliberately does NOT use `branchStatus`
+// production spawn logic uses — that routes through a real `.git` lock-file
+// write and `git worktree prune`, which a read-only doctor check must never
+// do). D2/D3 are only attempted once the prior check in the chain passed
+// (matching `isGitWorktree`'s own internal `workspaceExists` guard), and are
+// skipped entirely when `worktree` is off (a non-worktree project never needs a git
+// repo at `path` or a resolvable `defaultBranch`).
+export async function checkProjectWorkspace(
+  input: ProjectWorkspaceCheckInput,
+): Promise<HostInstallCheck[]> {
+  const { projectId, path, defaultBranch, worktree } = input;
+  const checks: HostInstallCheck[] = [];
+
+  const { exists } = probeWorkspace(path);
+  checks.push({
+    id: `project-path-exists:${projectId}`,
+    ok: exists,
+    severity: "error",
+    detail: exists ? `${path} exists` : `${path} does not exist`,
+    ...(exists ? {} : { fix: `create ${path} or fix projects.${projectId}.path in spur.yaml` }),
+  });
+  if (!exists || !worktree) {
+    return checks;
+  }
+
+  // `isGitWorktree`/`branchRefsExist` route every git failure through an exit
+  // code (never a throw), so the only way `withTimeout` rejects is the timeout
+  // itself. A timeout is "could not determine within the budget" (slow disk /
+  // heavy I/O), not a proven failure — surface it as a `warn` rather than a
+  // hard `error` that would exit non-zero on an otherwise-healthy repo.
+  let isRepo: boolean;
+  try {
+    isRepo = await withTimeout(
+      isGitWorktree(path),
+      PROJECT_GIT_CHECK_TIMEOUT_MS,
+      `git rev-parse --git-dir timed out for ${path}`,
+    );
+  } catch (error) {
+    checks.push({
+      id: `project-path-is-git-repo:${projectId}`,
+      ok: false,
+      severity: "warn",
+      detail: `could not determine whether ${path} is a git repository: ${errorMessage(error)}`,
+    });
+    return checks;
+  }
+  checks.push({
+    id: `project-path-is-git-repo:${projectId}`,
+    ok: isRepo,
+    severity: "error",
+    detail: isRepo ? `${path} is a git repository` : `${path} is not a git repository`,
+    ...(isRepo
+      ? {}
+      : { fix: `initialize a git repo at ${path} or fix projects.${projectId}.path in spur.yaml` }),
+  });
+  if (!isRepo) {
+    return checks;
+  }
+
+  let status: { exists: boolean; remote: boolean };
+  try {
+    status = await withTimeout(
+      branchRefsExist(path, defaultBranch),
+      PROJECT_GIT_CHECK_TIMEOUT_MS,
+      `branch lookup timed out for ${path}`,
+    );
+  } catch (error) {
+    checks.push({
+      id: `project-default-branch-resolves:${projectId}`,
+      ok: false,
+      severity: "warn",
+      detail: `could not determine whether defaultBranch "${defaultBranch}" resolves in ${path}: ${errorMessage(error)}`,
+    });
+    return checks;
+  }
+  // A branch that only exists as a local ref (never pushed) or only as
+  // `origin/<branch>` (never checked out) are both legitimately resolvable at
+  // spawn time — matches `resolveFreshBranchRef`'s own precedence.
+  const resolvable = status.exists || status.remote;
+  checks.push({
+    id: `project-default-branch-resolves:${projectId}`,
+    ok: resolvable,
+    severity: "error",
+    detail: resolvable
+      ? `defaultBranch "${defaultBranch}" resolves (local:${status.exists} remote:${status.remote})`
+      : `defaultBranch "${defaultBranch}" does not exist locally or at origin`,
+    ...(resolvable
+      ? {}
+      : { fix: `fix projects.${projectId}.defaultBranch or push/create the branch` }),
+  });
+  return checks;
 }
 
 export async function hasUncommittedChanges(

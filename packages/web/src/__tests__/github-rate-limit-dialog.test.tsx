@@ -96,6 +96,24 @@ describe("GithubRateLimitDialog", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("dismisses via the icon close button", () => {
+    const onCancel = vi.fn();
+
+    render(
+      <GithubRateLimitDialog
+        payload={payload()}
+        onSkip={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={onCancel}
+      />,
+    );
+
+    const dismiss = screen.getByRole("button", { name: "Dismiss GitHub PR check dialog" });
+    expect(dismiss.querySelector("svg")).toBeInTheDocument();
+    fireEvent.click(dismiss);
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("orders buttons neutral retry, danger skip, then cancel", () => {
     render(
       <GithubRateLimitDialog

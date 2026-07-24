@@ -64,7 +64,9 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
+  detectClaudeCompacting,
   detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -362,6 +364,14 @@ const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
+// with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
+// showing the corrected needs_input state between live pane scans instead of
+// reverting to rate_limited every cycle.
+const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+// for the claude compaction spinner override.
+const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1602,6 +1612,18 @@ export class SessionService {
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
+  // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
+  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
+  // scanPane:false dashboard tick apply the same needs_input demotion without
+  // forking a capture-pane (the tick's whole reason for existing).
+  private readonly codexMcpDialogOverrides = new Map<string, number>();
+  // Same pattern for an active claude compaction spinner. Compaction never
+  // reaches the persisted claude status (it stays idle throughout, which the
+  // scanPane:false dashboard tick maps to waiting), so without this the tick's
+  // own idle re-read would keep refreshing stabilizeState's hold window every
+  // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
+  // and the working override could never outlast the hold.
+  private readonly claudeCompactingOverrides = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -2493,6 +2515,17 @@ export class SessionService {
       this.lastObservedRunStates.clear();
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
+      }
+      const liveIds = new Set(sessions.map((session) => session.id));
+      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+        if (!liveIds.has(sessionId)) {
+          this.codexMcpDialogOverrides.delete(sessionId);
+        }
+      }
+      for (const sessionId of this.claudeCompactingOverrides.keys()) {
+        if (!liveIds.has(sessionId)) {
+          this.claudeCompactingOverrides.delete(sessionId);
+        }
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -6255,6 +6288,12 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    // "leave_open" never touches GitHub, so skip the gh calls entirely. This keeps
+    // session teardown working even when gh is unreachable (auth, rate limit, network).
+    if (action === "leave_open") {
+      return session;
+    }
+
     if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
       return session;
     }
@@ -6285,8 +6324,19 @@ export class SessionService {
         });
       }
 
-      if (action === "close") {
+      // action is "close" here (leave_open returned early, undefined threw above).
+      // A failed PR close must not strand the session — warn and continue teardown.
+      try {
         await closeSessionPr(session.worktreePath, binding);
+      } catch (error) {
+        this.logEvent("session.pr.close.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Failed to close pull request #${binding.number} for ${session.id}; continuing teardown: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
       }
       if (updatedSession) {
         writeSession(this.config.dataDir, updatedSession);
@@ -8939,6 +8989,87 @@ export class SessionService {
         }
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
+        }
+        // Compaction never reaches Claude's persisted status file (it stays
+        // "idle" throughout, which jsonl/hook maps to waiting) and the
+        // transcript only gets a compact record after completion — so the
+        // live pane spinner is the only signal while it's in progress. The
+        // rate-limit override below still wins if a banner is also present —
+        // skip recording the override in that case so the scanPane:false
+        // dashboard tick doesn't strand a stale "working" once the rate
+        // limit expires (mirrors codexMcpDialogOverrides' hard-limit delete
+        // above). Recorded into claudeCompactingOverrides (TTL) so the
+        // scanPane:false dashboard tick's own idle re-read doesn't keep
+        // refreshing stabilizeState's hold window against this working
+        // transition.
+        if (detectClaudeCompacting(paneText) && !rateLimit?.limited) {
+          state = "working";
+          this.claudeCompactingOverrides.set(
+            session.id,
+            Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: working (claude compacting)",
+          });
+        } else {
+          this.claudeCompactingOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "claude_jsonl") {
+        // The scanPane:false dashboard tick can't afford its own capture-pane
+        // fork, but it can still reuse the last live pane-scan's compaction
+        // confirmation while it's fresh, so the dashboard doesn't keep
+        // showing waiting for a session the 5s attention monitor (or
+        // on-demand enrich of the viewed session) already knows is
+        // mid-compaction.
+        const expiresAt = this.claudeCompactingOverrides.get(session.id);
+        if (expiresAt !== undefined && expiresAt > Date.now()) {
+          state = "working";
+        }
+      } else if (scanPane && strategy === "hook") {
+        // Codex-specific: a hard rate-limit banner always wins. Otherwise,
+        // whenever the pane shows a live MCP tool-permission dialog (whether or
+        // not a soft rate-limit signal is also present) the session is
+        // promoted to needs_input.
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const hardHit = scanTmuxRateLimit(paneText);
+        if (hardHit?.limited) {
+          rateLimit = hardHit;
+          this.codexMcpDialogOverrides.delete(session.id);
+        } else if (detectCodexMcpPermissionDialog(paneText)) {
+          state = "needs_input";
+          rateLimit = null;
+          this.codexMcpDialogOverrides.set(
+            session.id,
+            Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: needs_input (codex MCP permission dialog)",
+          });
+        } else {
+          this.codexMcpDialogOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "hook") {
+        // The scanPane:false dashboard tick can't afford its own capture-pane
+        // fork (see enrichDashboard), but it can still reuse the last live
+        // pane-scan's dialog confirmation while it's fresh, so the dashboard
+        // doesn't keep showing rate_limited (or working) for a session the 5s
+        // attention monitor already knows is parked on a live MCP permission
+        // dialog. The override can be live with no rate-limit signal at all
+        // (the pane-scan branch above sets it independent of rateLimit), so
+        // this reuse branch must not require rateLimit?.limited either, or it
+        // misses that case on 2s ticks. The override-presence + expiry check
+        // below is the real gate; this branch is just a cheap Map.get when
+        // there's nothing to reuse.
+        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
+        if (expiresAt !== undefined && expiresAt > Date.now()) {
+          state = "needs_input";
+          rateLimit = null;
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);

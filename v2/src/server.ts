@@ -228,7 +228,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   return request;
 }
 
-function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -240,10 +240,11 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
+    ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
   };
 }
 
-function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -255,6 +256,9 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   const prAction = parseOpenPrAction(raw["prAction"]);
   if (prAction) {
     request.prAction = prAction;
+  }
+  if (raw["skipPrCheck"] === true) {
+    request.skipPrCheck = true;
   }
   return request;
 }

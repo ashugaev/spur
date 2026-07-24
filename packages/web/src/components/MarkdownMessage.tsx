@@ -30,6 +30,8 @@ export function MarkdownMessage({ text }: MarkdownMessageProps) {
         "[&_h2]:mt-3 [&_h2]:mb-2 [&_h2]:text-sm [&_h2]:font-bold",
         "[&_h3]:mt-3 [&_h3]:mb-1 [&_h3]:font-bold",
         "[&_hr]:my-3 [&_hr]:border-[var(--color-border-default)]",
+        "[&_img]:max-w-full",
+        "[&_img]:h-auto",
         "[&_li+li]:mt-1",
         "[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5",
         "[&_p]:my-0 [&_p+p]:mt-2",

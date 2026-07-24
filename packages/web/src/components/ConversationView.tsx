@@ -308,7 +308,7 @@ export function ConversationView({
       </h2>
       <div
         ref={scrollRef}
-        className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
+        className="flex max-h-80 flex-col gap-2 overflow-y-auto overflow-x-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
       >
         {items.map((entry, index) => (
           <ConversationEntryRow
