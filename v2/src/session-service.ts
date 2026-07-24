@@ -9086,17 +9086,16 @@ export class SessionService {
           state = "working";
         }
       } else if (scanPane && strategy === "hook") {
-        // Codex-specific: a hard rate-limit banner always wins. Otherwise, a
-        // soft has_credits:false rollout signal can be a false positive when
-        // the session is actually parked on a live MCP tool-permission dialog
-        // (hook-independent — this can show up under any hookEvent, including
-        // PostToolUse) rather than genuinely rate limited.
+        // Codex-specific: a hard rate-limit banner always wins. Otherwise,
+        // whenever the pane shows a live MCP tool-permission dialog (whether or
+        // not a soft rate-limit signal is also present) the session is
+        // promoted to needs_input.
         const paneText = await captureTmuxPane(session.tmuxSession);
         const hardHit = scanTmuxRateLimit(paneText);
         if (hardHit?.limited) {
           rateLimit = hardHit;
           this.codexMcpDialogOverrides.delete(session.id);
-        } else if (rateLimit?.limited && detectCodexMcpPermissionDialog(paneText)) {
+        } else if (detectCodexMcpPermissionDialog(paneText)) {
           state = "needs_input";
           rateLimit = null;
           this.codexMcpDialogOverrides.set(
@@ -9107,17 +9106,23 @@ export class SessionService {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: "State: needs_input (codex MCP permission dialog, overrides soft rate limit)",
+            message: "State: needs_input (codex MCP permission dialog)",
           });
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
         }
-      } else if (!scanPane && strategy === "hook" && rateLimit?.limited) {
+      } else if (!scanPane && strategy === "hook") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
         // fork (see enrichDashboard), but it can still reuse the last live
         // pane-scan's dialog confirmation while it's fresh, so the dashboard
-        // doesn't keep showing rate_limited for a session the 5s attention
-        // monitor already knows is parked on a live MCP permission dialog.
+        // doesn't keep showing rate_limited (or working) for a session the 5s
+        // attention monitor already knows is parked on a live MCP permission
+        // dialog. The override can be live with no rate-limit signal at all
+        // (the pane-scan branch above sets it independent of rateLimit), so
+        // this reuse branch must not require rateLimit?.limited either, or it
+        // misses that case on 2s ticks. The override-presence + expiry check
+        // below is the real gate; this branch is just a cheap Map.get when
+        // there's nothing to reuse.
         const expiresAt = this.codexMcpDialogOverrides.get(session.id);
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "needs_input";
