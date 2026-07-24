@@ -63,6 +63,7 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
+  detectClaudeCompacting,
   detectClaudeUsageLimitMenu,
   detectCodexMcpPermissionDialog,
   scanTmuxRateLimit,
@@ -364,6 +365,9 @@ const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // showing the corrected needs_input state between live pane scans instead of
 // reverting to rate_limited every cycle.
 const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+// for the claude compaction spinner override.
+const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1609,6 +1613,13 @@ export class SessionService {
   // scanPane:false dashboard tick apply the same needs_input demotion without
   // forking a capture-pane (the tick's whole reason for existing).
   private readonly codexMcpDialogOverrides = new Map<string, number>();
+  // Same pattern for an active claude compaction spinner. Compaction never
+  // reaches the persisted claude status (it stays idle throughout, which the
+  // scanPane:false dashboard tick maps to waiting), so without this the tick's
+  // own idle re-read would keep refreshing stabilizeState's hold window every
+  // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
+  // and the working override could never outlast the hold.
+  private readonly claudeCompactingOverrides = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -2505,6 +2516,11 @@ export class SessionService {
       for (const sessionId of this.codexMcpDialogOverrides.keys()) {
         if (!liveIds.has(sessionId)) {
           this.codexMcpDialogOverrides.delete(sessionId);
+        }
+      }
+      for (const sessionId of this.claudeCompactingOverrides.keys()) {
+        if (!liveIds.has(sessionId)) {
+          this.claudeCompactingOverrides.delete(sessionId);
         }
       }
     } finally {
@@ -8935,6 +8951,44 @@ export class SessionService {
         }
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
+        }
+        // Compaction never reaches Claude's persisted status file (it stays
+        // "idle" throughout, which jsonl/hook maps to waiting) and the
+        // transcript only gets a compact record after completion — so the
+        // live pane spinner is the only signal while it's in progress. The
+        // rate-limit override below still wins if a banner is also present —
+        // skip recording the override in that case so the scanPane:false
+        // dashboard tick doesn't strand a stale "working" once the rate
+        // limit expires (mirrors codexMcpDialogOverrides' hard-limit delete
+        // above). Recorded into claudeCompactingOverrides (TTL) so the
+        // scanPane:false dashboard tick's own idle re-read doesn't keep
+        // refreshing stabilizeState's hold window against this working
+        // transition.
+        if (detectClaudeCompacting(paneText) && !rateLimit?.limited) {
+          state = "working";
+          this.claudeCompactingOverrides.set(
+            session.id,
+            Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
+          );
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: working (claude compacting)",
+          });
+        } else {
+          this.claudeCompactingOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "claude_jsonl") {
+        // The scanPane:false dashboard tick can't afford its own capture-pane
+        // fork, but it can still reuse the last live pane-scan's compaction
+        // confirmation while it's fresh, so the dashboard doesn't keep
+        // showing waiting for a session the 5s attention monitor (or
+        // on-demand enrich of the viewed session) already knows is
+        // mid-compaction.
+        const expiresAt = this.claudeCompactingOverrides.get(session.id);
+        if (expiresAt !== undefined && expiresAt > Date.now()) {
+          state = "working";
         }
       } else if (scanPane && strategy === "hook") {
         // Codex-specific: a hard rate-limit banner always wins. Otherwise, a
