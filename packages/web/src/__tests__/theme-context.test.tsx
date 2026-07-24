@@ -22,10 +22,20 @@ describe("ThemeProvider", () => {
     expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 
-  it("syncs state from a data-theme='light' already set by the pre-hydration script", () => {
-    document.documentElement.dataset.theme = "light";
+  it("restores state from localStorage on mount, even when data-theme is absent", () => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, "light");
     const { result } = renderProvider();
     expect(result.current.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("storage wins over a stale data-theme attribute", () => {
+    // Simulates a hydration-recovery re-render that wiped `data-theme` from
+    // the DOM (or left a stale value) while localStorage was never touched.
+    document.documentElement.dataset.theme = "light";
+    const { result } = renderProvider();
+    expect(result.current.theme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 
   it("toggleTheme flips theme, writes localStorage, and sets data-theme", () => {
@@ -47,18 +57,6 @@ describe("ThemeProvider", () => {
     expect(result.current.theme).toBe("dark");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
     expect(document.documentElement.dataset.theme).toBeUndefined();
-  });
-
-  it("setTheme sets an explicit theme", () => {
-    const { result } = renderProvider();
-
-    act(() => {
-      result.current.setTheme("light");
-    });
-
-    expect(result.current.theme).toBe("light");
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
-    expect(document.documentElement.dataset.theme).toBe("light");
   });
 
   it("useTheme outside a provider returns the safe dark default and no-op setters", () => {

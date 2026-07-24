@@ -905,12 +905,13 @@ function EditProjectModal({
 }
 
 export function Dashboard() {
-  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
+  // Initialized empty rather than read from `window.location.search` at render
+  // time: the server always renders "", so a non-empty client-side first
+  // render would be a hydration text mismatch. The mount effect below and the
+  // `requestedProject` sync are the only path that populates these.
+  const [locationSearch, setLocationSearch] = useState("");
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(readLocationSearch());
-    return params.get("project")?.trim() ?? "";
-  });
+  const [projectId, setProjectId] = useState("");
   const { toasts, showErrorToast, dismissToast } = useToasts();
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;

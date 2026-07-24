@@ -17,13 +17,11 @@ export const THEME_STORAGE_KEY = "spur:theme";
 
 interface ThemeContextValue {
   theme: Theme;
-  setTheme: (next: Theme) => void;
   toggleTheme: () => void;
 }
 
 const defaultValue: ThemeContextValue = {
   theme: "dark",
-  setTheme: () => {},
   toggleTheme: () => {},
 };
 
@@ -41,14 +39,23 @@ function applyTheme(next: Theme) {
   }
 }
 
+function normalizeTheme(value: string | null): Theme {
+  return value === "light" ? "light" : "dark";
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("dark");
 
-  // The pre-hydration <head> script already set `data-theme` from
-  // localStorage before React mounts; sync state to it here rather than
-  // re-reading localStorage, so state and DOM never disagree.
+  // `localStorage` is the single source of truth, not the `data-theme`
+  // attribute the pre-hydration <head> script set: a hydration mismatch
+  // elsewhere in the tree can make React wipe attributes it never rendered
+  // itself, silently resetting a light theme back to dark. Reading storage
+  // directly (in a layout effect, so it runs pre-paint) keeps the theme
+  // correct independent of that recovery re-render.
   useLayoutEffect(() => {
-    setThemeState(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+    const next = normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY));
+    setThemeState(next);
+    applyTheme(next);
   }, []);
 
   // Cross-tab sync: mirror theme changes made in other tabs. The `storage`
@@ -57,18 +64,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== THEME_STORAGE_KEY) return;
-      const next: Theme = event.newValue === "light" ? "light" : "dark";
+      const next = normalizeTheme(event.newValue);
       setThemeState(next);
       applyTheme(next);
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  const setTheme = useCallback((next: Theme) => {
-    setThemeState(next);
-    window.localStorage.setItem(THEME_STORAGE_KEY, next);
-    applyTheme(next);
   }, []);
 
   const toggleTheme = useCallback(() => {
@@ -81,8 +82,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
-      {children}
-    </ThemeContext.Provider>
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>{children}</ThemeContext.Provider>
   );
 }
