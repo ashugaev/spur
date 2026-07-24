@@ -31,11 +31,14 @@ Units installed:
 | `spur-daemon.service` | HTTP API `:4310`, tmux sessions                                                 |
 | `spur-web.service`    | Web UI `:4311`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
 
-Then install one agent CLI and authenticate it on this host (required to spawn sessions):
+Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
 
 ```bash
-npm install -g @openai/codex && codex login    # or Claude Code: install it, run `claude`, sign in
+command -v claude >/dev/null || npm install -g @anthropic-ai/claude-code
+command -v codex  >/dev/null || npm install -g @openai/codex
 ```
+
+Each still needs a login under your own account (`claude`, or `codex login`) before it can spawn sessions — interactive, not scriptable. A setup agent or unattended install can't log you in, so it leaves every login to the operator TODO below.
 
 `spur doctor` diagnoses host setup and points at what's missing.
 
@@ -52,7 +55,21 @@ npm install -g @openai/codex && codex login    # or Claude Code: install it, run
 
 `spur init` sets up private web access over your tailnet — your devices only, never public. Opt out with `--no-tailscale`.
 
-Auth is yours: run `sudo tailscale up`, sign in, then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
+Auth is yours — two ways to bring the tailnet up:
+
+- Human: `sudo tailscale up`, sign in at the printed URL.
+- Unattended (agent / scripted): `sudo tailscale up --authkey <tskey-...>` — no browser. Mint a key at `https://login.tailscale.com/admin/settings/keys`. This login is the only step that otherwise blocks a hands-off install; an agent handed a key does the whole thing end to end.
+
+Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
+
+## Identity steps (operator TODO)
+
+A few steps use your own accounts and each needs one interactive action — they can't be scripted, and a setup agent must not hack around them. Do everything else first, then hand the operator this list:
+
+- Log in an agent — `claude` (sign in) or `codex login`. At least one is required before Spur can spawn sessions.
+- Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
+
+Spur installs and its services start without these, but until they're done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
 
 ## Verify
 

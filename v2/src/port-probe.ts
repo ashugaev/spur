@@ -6,6 +6,9 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const CLEAR_PORT_TIMEOUT_MS = 2_000;
 const CLEAR_PORT_POLL_MS = 100;
+// Bounds `lsof`/`ss` so a hung listener-lookup process can never make the
+// "doctor never hangs" invariant depend on the OS tool completing.
+const LISTENER_LOOKUP_TIMEOUT_MS = 2_000;
 
 function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port > 0 && port <= 65_535;
@@ -29,7 +32,7 @@ function errorStdout(error: unknown): string {
 
 async function execFileOutput(file: string, args: string[]): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(file, args);
+    const { stdout } = await execFileAsync(file, args, { timeout: LISTENER_LOOKUP_TIMEOUT_MS });
     return stdout.toString();
   } catch (error) {
     if (errorCode(error) === "ENOENT") {

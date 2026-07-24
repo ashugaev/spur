@@ -30,15 +30,17 @@ spur list
 spur spawn <project> "Fix the flaky auth test"
 ```
 
-`spur doctor` writes a minimal local `spur.yaml` at the repo root — it does not start the daemon or
-touch `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal
-command (see [Config](#config)).
+`spur doctor` is read-only: it checks host install, config validity, and daemon/web health, and
+exits non-zero on a broken (not merely un-initialized) host. It writes no Spur config or state. Pass
+`--scaffold` to write a minimal local `spur.yaml` at the repo root when none exists; it still does
+not start the daemon or create `~/.spur/config.yaml`. The global config and local project
+auto-connect on the first normal command (see [Config](#config)).
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [SETUP.md](SETUP.md).
 
 ## Local Project Config
 
-`spur doctor` writes the same minimal shape shown below:
+`spur doctor --scaffold` writes the same minimal shape shown below:
 
 ```yaml
 projects:

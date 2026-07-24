@@ -3757,6 +3757,169 @@ describe("SessionDetail document title", () => {
   });
 });
 
+describe("SessionDetail favicon", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+    document.documentElement.style.setProperty("--color-status-working", "#58a6ff");
+    document.documentElement.style.setProperty("--color-status-attention", "#ffd700");
+    document.documentElement.style.setProperty("--color-status-error", "#ff4d4d");
+    document.documentElement.style.setProperty("--color-text-tertiary", "#555558");
+    for (const link of document.head.querySelectorAll('link[rel="icon"]')) link.remove();
+  });
+
+  function stubFetch(
+    sessionOverrides: Parameters<typeof sessionFixture>[0],
+    conversationState: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed",
+  ) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture(sessionOverrides)), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ state: conversationState })), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  function statusFaviconLink(): HTMLLinkElement | null {
+    return document.head.querySelector<HTMLLinkElement>('link[rel="icon"][type="image/svg+xml"]');
+  }
+
+  function faviconMarkup(): string {
+    const href = statusFaviconLink()?.getAttribute("href") ?? "";
+    return decodeURIComponent(href.replace(/^data:image\/svg\+xml,/, ""));
+  }
+
+  it("does not add a favicon link before the session has loaded", () => {
+    vi.spyOn(global, "fetch").mockImplementation(() => new Promise(() => {}));
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(statusFaviconLink()).toBeNull();
+  });
+
+  it("adds a favicon colored for the working status once the session loads", async () => {
+    stubFetch({ status: "running", state: "working" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(statusFaviconLink()).not.toBeNull();
+    });
+    expect(faviconMarkup()).toContain('stroke="#58a6ff"');
+  });
+
+  it("uses the error color when the session state is errored", async () => {
+    stubFetch({ status: "errored", state: "error" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ff4d4d"');
+    });
+  });
+
+  it("uses the error color for needs_input", async () => {
+    stubFetch({ status: "running", state: "needs_input" }, "needs_input");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ff4d4d"');
+    });
+  });
+
+  it("uses the tertiary color when the session is stopped", async () => {
+    stubFetch({ status: "stopped", state: "stopped" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#555558"');
+    });
+  });
+
+  it("uses the tertiary color when the session is killed", async () => {
+    stubFetch({ status: "killed", state: "killed" }, "killed");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#555558"');
+    });
+  });
+
+  it("uses the attention color when the session is waiting", async () => {
+    stubFetch({ status: "running", state: "waiting" }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ffd700"');
+    });
+  });
+
+  it("uses the attention color when the session is rate_limited", async () => {
+    stubFetch({ status: "running", state: "rate_limited" }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(faviconMarkup()).toContain('stroke="#ffd700"');
+    });
+  });
+
+  it("updates the favicon color when the session transitions from working to error", async () => {
+    let state: "running" | "errored" = "running";
+    let sessionStatus: "working" | "error" = "working";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ status: state, state: sessionStatus })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ state: "working" })), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    // Fake timers must be active before the component mounts so the polling
+    // `setInterval` it registers is one we can advance deterministically.
+    vi.useFakeTimers();
+    try {
+      render(<SessionDetail sessionId="api-a1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(faviconMarkup()).toContain('stroke="#58a6ff"');
+
+      state = "errored";
+      sessionStatus = "error";
+      // Matches SessionDetail's internal POLL_INTERVAL_MS for the session refetch.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(faviconMarkup()).toContain('stroke="#ff4d4d"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes the favicon link on unmount", async () => {
+    stubFetch({ status: "running", state: "working" }, "working");
+    const { unmount } = render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(statusFaviconLink()).not.toBeNull();
+    });
+    unmount();
+    expect(statusFaviconLink()).toBeNull();
+  });
+});
+
 describe("SessionDetail links", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

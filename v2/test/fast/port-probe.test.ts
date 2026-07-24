@@ -1,6 +1,15 @@
+import type * as ChildProcess from "node:child_process";
 import { createServer, type Server } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
-import { isHostPortFree } from "../../src/port-probe.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }));
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
+  return { ...actual, execFile: execFileMock };
+});
+
+const { findListenerPids, isHostPortFree } = await import("../../src/port-probe.js");
 
 const openServers: Server[] = [];
 
@@ -43,5 +52,31 @@ describe("isHostPortFree", () => {
     });
     openServers.push(probe);
     expect(await isHostPortFree(port)).toBe(false);
+  });
+});
+
+describe("findListenerPids", () => {
+  it("bounds the lsof/ss listener lookup with a timeout so a hung tool can never hang doctor", async () => {
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        _args: string[],
+        options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(null, "", "");
+        return {};
+      },
+    );
+
+    await findListenerPids(4310);
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "lsof",
+      expect.any(Array),
+      expect.objectContaining({ timeout: expect.any(Number) }),
+      expect.any(Function),
+    );
   });
 });
