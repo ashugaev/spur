@@ -685,6 +685,6 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+    expect(titleElement.parentElement?.className).toContain("items-center");
   });
 });
