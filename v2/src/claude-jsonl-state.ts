@@ -408,7 +408,9 @@ function extractAskUserQuestions(input: unknown): ClaudeQuestion[] {
     const options = Array.isArray(optionsValue)
       ? optionsValue.map((option, index) => ({
           label:
-            typeof option === "object" && option !== null && typeof (option as Record<string, unknown>)["label"] === "string"
+            typeof option === "object" &&
+            option !== null &&
+            typeof (option as Record<string, unknown>)["label"] === "string"
               ? ((option as Record<string, unknown>)["label"] as string)
               : "",
           index,

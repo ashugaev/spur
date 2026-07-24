@@ -600,9 +600,23 @@ export interface ConversationMessage {
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
-  | { kind: "tool"; name: string; callId?: string; inputSummary?: string; output?: string; timestampMs?: number }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      inputSummary?: string;
+      output?: string;
+      timestampMs?: number;
+    }
   | { kind: "reasoning"; text: string; timestampMs?: number }
-  | { kind: "question"; header: string; prompt: string; options?: { label: string; index: number }[]; multiSelect?: boolean; timestampMs?: number };
+  | {
+      kind: "question";
+      header: string;
+      prompt: string;
+      options?: { label: string; index: number }[];
+      multiSelect?: boolean;
+      timestampMs?: number;
+    };
 
 export interface ConversationResponse {
   messages: ConversationMessage[];

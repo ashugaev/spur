@@ -146,7 +146,12 @@ describe("ConversationView", () => {
 
   it("renders a question entry without options as header/prompt only", () => {
     const entries: TranscriptEntry[] = [
-      { kind: "question", header: "Approve?", prompt: "Type y or n in the terminal", timestampMs: 1 },
+      {
+        kind: "question",
+        header: "Approve?",
+        prompt: "Type y or n in the terminal",
+        timestampMs: 1,
+      },
     ];
     render(
       <ConversationView

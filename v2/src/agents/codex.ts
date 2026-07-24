@@ -1098,7 +1098,10 @@ function extractCodexReasoningText(summary: unknown): string {
 }
 
 /** input_required questions carry the same `{header, question}` shape AskUserQuestion does. */
-function extractCodexQuestionText(payload: Record<string, unknown>): { header: string; prompt: string } {
+function extractCodexQuestionText(payload: Record<string, unknown>): {
+  header: string;
+  prompt: string;
+} {
   const questionsValue = payload["questions"];
   if (Array.isArray(questionsValue) && questionsValue.length > 0 && isRecord(questionsValue[0])) {
     const first = questionsValue[0];
@@ -1116,7 +1119,9 @@ function extractCodexQuestionText(payload: Record<string, unknown>): { header: s
  * request_user_input/input_required prompts. Question option payload shape is
  * unverified in production data, so options are always omitted here.
  */
-export async function readCodexTranscriptEntries(sessionsDir: string): Promise<TranscriptEntry[] | null> {
+export async function readCodexTranscriptEntries(
+  sessionsDir: string,
+): Promise<TranscriptEntry[] | null> {
   const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
   if (!filePath) {
     return null;

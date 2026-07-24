@@ -540,7 +540,12 @@ describe("readCodexTranscriptEntries", () => {
     if (!entries) throw new Error("expected entries");
 
     expect(entries).toEqual([
-      { kind: "message", role: "user", text: "hi", timestampMs: Date.parse("2026-05-10T09:00:00.000Z") },
+      {
+        kind: "message",
+        role: "user",
+        text: "hi",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
       {
         kind: "tool",
         name: "exec_command",
@@ -603,5 +608,4 @@ describe("readCodexTranscriptEntries", () => {
       },
     ]);
   });
-
 });

@@ -3853,7 +3853,9 @@ export class SessionService {
     const entries =
       (await readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
-        ...(session.agent === "codex" ? { codexSessionsDir: this.codexSessionsDir(session.id) } : {}),
+        ...(session.agent === "codex"
+          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
+          : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       })) ?? [];
 
@@ -3865,8 +3867,14 @@ export class SessionService {
     }
 
     const messages: ConversationMessage[] = entries
-      .filter((entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message")
-      .map((entry) => ({ role: entry.role, text: entry.text, timestampMs: entry.timestampMs ?? 0 }));
+      .filter(
+        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+      )
+      .map((entry) => ({
+        role: entry.role,
+        text: entry.text,
+        timestampMs: entry.timestampMs ?? 0,
+      }));
     return { messages, entries, durationMs, state: statusFallbackState(session) };
   }
 

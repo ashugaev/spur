@@ -155,9 +155,7 @@ function QuestionEntryRow({
                 onClick={() => onSelectOption(option.index, option.label)}
                 className={OPTION_BUTTON_CLASS}
               >
-                <span className="font-mono text-[var(--color-text-tertiary)]">
-                  {option.index}.
-                </span>{" "}
+                <span className="font-mono text-[var(--color-text-tertiary)]">{option.index}.</span>{" "}
                 <span className={HARD_WRAP_TEXT_CLASS}>{option.label}</span>
               </button>
             ))}
@@ -166,9 +164,7 @@ function QuestionEntryRow({
           <ol aria-label="Answer options" className="mt-2 space-y-1">
             {entry.options.map((option) => (
               <li key={option.index} className="text-[var(--color-text-secondary)]">
-                <span className="font-mono text-[var(--color-text-tertiary)]">
-                  {option.index}.
-                </span>{" "}
+                <span className="font-mono text-[var(--color-text-tertiary)]">{option.index}.</span>{" "}
                 {option.label}
               </li>
             ))}

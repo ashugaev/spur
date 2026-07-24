@@ -265,7 +265,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
     readConversation: (ctx) =>
-      ctx.codexSessionsDir ? readCodexTranscriptEntries(ctx.codexSessionsDir) : Promise.resolve(null),
+      ctx.codexSessionsDir
+        ? readCodexTranscriptEntries(ctx.codexSessionsDir)
+        : Promise.resolve(null),
     setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
