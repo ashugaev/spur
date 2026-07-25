@@ -77,6 +77,16 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "needs_input",
 ]);
 
+// A running claude session whose live state is "error" is wedged on a
+// transient Claude server error (session-service.ts's reactivation nudge
+// self-clears it once it recovers), not actually closed or dead — the same
+// "still alive, just blocked" shape as rate_limited. Scoped to
+// status === "running" because a genuinely closed session (status stopped,
+// errored, or killed) can also carry state "error", and that case IS closed.
+function isLiveServerErrorWedge(session: SessionView): boolean {
+  return session.status === "running" && session.state === "error";
+}
+
 function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   if (!data || typeof data !== "object") return false;
   const record = data as Partial<Record<keyof WorkItemEventData, unknown>>;
@@ -149,7 +159,10 @@ async function shouldClaimWorkItemSpawn(
         });
         return false;
       }
-      if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
+      if (
+        session.status === "running" &&
+        (ACTIVE_WORK_ITEM_STATES.has(session.state) || isLiveServerErrorWedge(session))
+      ) {
         return false;
       }
       if (!sessionAllowsWorkItemReplacement(session)) {
@@ -483,12 +496,13 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
-// The rate-limit reactivation wakeup (session-service.ts processScheduledWakes)
-// calls SessionService.send() directly and never flows through this
+// The rate-limit reactivation wakeup and the server-error reactivation wakeup
+// (both in session-service.ts's processScheduledWakes) call
+// SessionService.send() directly and never flow through this
 // handleSendEvent/flushPending queue, so a blanket block here is already
-// correct — no whitelist exception is needed to let it through.
-function isBlockedByRateLimit(session: SessionView): boolean {
-  return session.state === "rate_limited";
+// correct — no whitelist exception is needed to let either through.
+function isBlockedAwaitingRecovery(session: SessionView): boolean {
+  return session.state === "rate_limited" || isLiveServerErrorWedge(session);
 }
 
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
@@ -720,7 +734,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -740,8 +754,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session)) {
-      return; // stays queued; delivered later once the session leaves rate_limited
+    if (isBlockedAwaitingRecovery(session)) {
+      return; // stays queued; delivered later once the session leaves rate_limited/error
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
@@ -880,7 +894,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -900,7 +914,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session)) {
+    if (isBlockedAwaitingRecovery(session)) {
       return; // batch already queued above; explicitly deferred
     }
 

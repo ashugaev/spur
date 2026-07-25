@@ -17,6 +17,8 @@ export interface ParsedRecord {
   requestsUserInput?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
+  /** True when the record is a synthetic `error: "server_error"` API error. */
+  serverError?: boolean;
   timestampMs: number;
 }
 
@@ -33,6 +35,23 @@ export const ACTIVITY_WINDOW_MS = 60_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
+// Claude transcript tail. A trailing synthetic assistant record flagged
+// `error: "server_error"` means the session is wedged on a transient Claude
+// API failure (5xx or connection failure). Walks backwards skipping
+// CLAUDE_BOOKKEEPING_RECORD_TYPES — the same shape as detectClaudeRateLimit —
+// because Claude always appends a `system`/`file-history-snapshot` record
+// after the error, which would otherwise mask it.
+export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): boolean {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
+      continue;
+    }
+    return record.serverError === true;
+  }
+  return false;
+}
+
 export function classifyClaudeJsonlState(
   records: ParsedRecord[],
   nowMs: number,
@@ -43,6 +62,10 @@ export function classifyClaudeJsonlState(
    */
   fileMtimeMs?: number,
 ): SessionState {
+  if (hasTrailingClaudeServerError(records)) {
+    return "error";
+  }
+
   // Walk backwards, skip progress noise to find the last meaningful record.
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -216,6 +239,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       hasToolUse: toolUseHints.hasToolUse,
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
+      ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -245,6 +269,7 @@ export async function readClaudeJsonlState(
   state: SessionState;
   reader: ClaudeJsonlReaderState;
   rateLimit: RateLimitDetection | null;
+  serverError: boolean;
 } | null> {
   // With a pinned id, resolve the transcript by id and never fall back to the
   // newest-mtime scan (which could cross-bind to a sibling session sharing the
@@ -278,6 +303,7 @@ export async function readClaudeJsonlState(
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
+      serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
     };
   }
 
@@ -325,6 +351,7 @@ export async function readClaudeJsonlState(
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectClaudeRateLimit(combined),
+    serverError: hasTrailingClaudeServerError(combined),
   };
 }
 

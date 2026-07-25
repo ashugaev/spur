@@ -1811,6 +1811,149 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not drop a send trigger as closed_session while the session is a live server-error wedge", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "error",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(warnMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.dropped",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("drops a send trigger as closed_session for a genuinely closed errored session (status !== running)", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "errored",
+      state: "error",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+          "trigger.send.dropped",
+        );
+      });
+      expect(deliverMock).not.toHaveBeenCalled();
+      const dropped = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "trigger.send.dropped",
+      );
+      expect(dropped?.[1]?.details).toMatchObject({ reason: "closed_session" });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers a previously-queued send trigger once a live server-error wedge session leaves error", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "error",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).toHaveBeenCalledOnce();
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("drops queued updates that disappeared from the latest source snapshot", async () => {
     const getMock = vi
       .fn()
@@ -2435,6 +2578,35 @@ describe("startConfiguredTriggers", () => {
       );
       bus.emit(workItemEvent());
       await vi.advanceTimersByTimeAsync(1);
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("suppresses a work-item spawn while the owner is a live server-error wedge, not a duplicate spawn", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "error",
+      workspaceExists: true,
+    });
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledWith("api-9");
+      });
       expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
