@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { AgentModel } from "./models.js";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
@@ -12,6 +13,22 @@ export function claudeCommand(): string {
 // Spur's default model for the Claude agent, applied when a spawn resolves to
 // claude without an explicit or configured model.
 export const DEFAULT_CLAUDE_MODEL = "opus";
+
+// Claude's selectable models. This catalog and its default live with the agent,
+// not in the generic models registry. listClaudeModels flags DEFAULT_CLAUDE_MODEL
+// at call time so the picker badge tracks the spawn default from one source.
+const CLAUDE_MODELS: AgentModel[] = [
+  { id: "opus", label: "Opus" },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "haiku", label: "Haiku" },
+  { id: "fable", label: "Fable" },
+];
+
+export function listClaudeModels(): AgentModel[] {
+  return CLAUDE_MODELS.map((model) =>
+    model.id === DEFAULT_CLAUDE_MODEL ? { ...model, isDefault: true } : model,
+  );
+}
 
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
