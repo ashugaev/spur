@@ -1629,6 +1629,7 @@ export class SessionService {
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
+  private sidecarReaperRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
@@ -1728,20 +1729,63 @@ export class SessionService {
   // Periodic sweep for playwright sidecar tmux sessions whose owning session
   // record is gone or terminal. Keyed on tmux ownership (not process ppid)
   // so a transient empty listSessions read can never reap a live sidecar.
+  // Guarded against re-entrancy: a slow pass (large tmux fleet) must not
+  // overlap the next interval tick.
   private async reapDeadSessionSidecars(): Promise<void> {
-    const suffix = `--${PLAYWRIGHT_SIDECAR_NAME}`;
-    const names = await listTmuxSessionNames();
-    for (const name of names) {
-      if (!name.endsWith(suffix)) {
-        continue;
+    if (this.sidecarReaperRunning) {
+      return;
+    }
+    this.sidecarReaperRunning = true;
+    try {
+      const suffix = `--${PLAYWRIGHT_SIDECAR_NAME}`;
+      const liveSessions = listSessions(this.config.dataDir).filter(
+        (session) => session.status === "running" || session.status === "spawning",
+      );
+      // Protect every sidecar tmux name a live session is entitled to (agent
+      // playwright sidecar plus any project-declared user sidecar), and also
+      // the raw `${id}--` prefix as a belt-and-suspenders guard against
+      // config drift where a live session's sidecar name isn't enumerated by
+      // sessionSidecarNames.
+      const protectedTmux = new Set<string>();
+      const liveIdPrefixes = new Set<string>();
+      for (const session of liveSessions) {
+        liveIdPrefixes.add(`${session.id}--`);
+        let project: ProjectConfig | undefined;
+        try {
+          project = this.resolveProjectForSession(session);
+        } catch {
+          project = undefined;
+        }
+        for (const scName of sessionSidecarNames(session, project)) {
+          protectedTmux.add(sidecarTmuxSession(session.id, scName));
+        }
       }
-      const sessionId = name.slice(0, -suffix.length);
-      const record = readSession(this.config.dataDir, sessionId);
-      if (!record || isTerminalSessionStatus(record.status)) {
+
+      const names = await listTmuxSessionNames();
+      for (const name of names) {
+        if (!name.endsWith(suffix)) {
+          continue;
+        }
+        if (protectedTmux.has(name)) {
+          continue;
+        }
+        let ownedByLiveSession = false;
+        for (const prefix of liveIdPrefixes) {
+          if (name.startsWith(prefix)) {
+            ownedByLiveSession = true;
+            break;
+          }
+        }
+        if (ownedByLiveSession) {
+          continue;
+        }
+        const sessionId = name.slice(0, -suffix.length);
         await killSidecarTmux(sessionId, PLAYWRIGHT_SIDECAR_NAME).catch(() => {});
       }
+      await this.sweepLeakedPlaywrightProcesses("reaper");
+    } finally {
+      this.sidecarReaperRunning = false;
     }
-    await this.sweepLeakedPlaywrightProcesses();
   }
 
   private startScheduledWakeMonitor(): void {
@@ -4026,14 +4070,14 @@ export class SessionService {
       }
     }
 
-    await this.sweepLeakedPlaywrightProcesses();
+    await this.sweepLeakedPlaywrightProcesses("boot");
 
     return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
 
   // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
   // port not reserved by any live session). Best-effort; logs the killed count.
-  private async sweepLeakedPlaywrightProcesses(): Promise<void> {
+  private async sweepLeakedPlaywrightProcesses(context: "boot" | "reaper"): Promise<void> {
     const ownedPorts = new Set<number>();
     for (const session of listSessions(this.config.dataDir)) {
       if (isTerminalSessionStatus(session.status)) continue;
@@ -4043,10 +4087,19 @@ export class SessionService {
       }
     }
     const killed = await sweepLeakedPlaywright(ownedPorts);
-    if (killed > 0) {
+    if (killed <= 0) {
+      return;
+    }
+    if (context === "boot") {
       this.logEvent("daemon.startup.playwright_sweep", {
         level: "info",
         message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
+        details: { killed },
+      });
+    } else {
+      this.logEvent("session.sidecar_reaper.swept", {
+        level: "info",
+        message: `Reaped ${killed} leaked playwright MCP process tree(s)`,
         details: { killed },
       });
     }

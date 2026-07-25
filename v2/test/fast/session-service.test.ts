@@ -10339,6 +10339,126 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("does not reap a compound user sidecar name ending in --playwright on a live session", async () => {
+    const sessions = createSessionStore();
+    sessions.set("live-2", {
+      id: "live-2",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "live-2",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/live-2",
+      tmuxSession: "live-2",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["api--playwright"],
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(new Set(["live-2--api--playwright"]));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("reaps playwright sidecars on the crash path for stopped and errored sessions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("stopped-1", {
+      id: "stopped-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "stopped-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/stopped-1",
+      tmuxSession: "stopped-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sessions.set("err-1", {
+      id: "err-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "err-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/err-1",
+      tmuxSession: "err-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(
+      new Set(["stopped-1--playwright", "err-1--playwright"]),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("stopped-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("err-1", "playwright");
+    service.dispose();
+  });
+
+  it("skips a running reaper pass instead of overlapping it", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      sidecarReaperRunning: boolean;
+      dispose(): void;
+    };
+    service.sidecarReaperRunning = true;
+
+    await service.reapDeadSessionSidecars();
+
+    expect(listTmuxSessionNamesMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("emits a reaper sweep event distinct from the boot sweep event", async () => {
+    createSessionStore();
+    listTmuxSessionNamesMock.mockResolvedValue(new Set());
+    sweepLeakedPlaywrightMock.mockResolvedValue(2);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.sidecar_reaper.swept",
+      ),
+    ).toBe(true);
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
+      ),
+    ).toBe(false);
+    service.dispose();
+  });
+
   it("rejects a branch override that would mutate the shared workspace", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
