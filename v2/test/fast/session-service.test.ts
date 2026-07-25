@@ -3721,6 +3721,14 @@ describe("SessionService", () => {
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
+      // The rotated account's isolated CLAUDE_CONFIG_DIR must thread into the
+      // mcp-config.json merge in setup() too, not just the launch env, so the
+      // relaunch under --strict-mcp-config still sees the backup account's
+      // host MCP servers instead of falling back to the default homedir.
+      expect(setupAgentHooksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ claudeConfigDir: "/abs/backup" }),
+      );
+
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
       expect(resumeCall?.[1]).toBe("session-uuid");
       expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: "/abs/backup" });

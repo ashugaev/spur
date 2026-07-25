@@ -720,12 +720,21 @@ async function setupSessionAgentHooks(args: {
   restrictWrites: boolean;
   playwrightPort?: number;
 }) {
+  // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
+  // .claude.json instead of the host ~/.claude.json when merging MCP
+  // servers below. Default (no bound account, or record not yet
+  // written at spawn time) falls back to homedir() inside setup().
+  const session = readSession(args.dataDir, args.sessionId);
+  const claudeConfigDir = session
+    ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
+    : undefined;
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.playwrightPort !== undefined ? { playwrightPort: args.playwrightPort } : {}),
+    ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
     return setupAgentHooks({
