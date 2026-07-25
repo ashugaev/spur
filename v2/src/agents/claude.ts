@@ -143,7 +143,9 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
 }
 
 function claudeMcpConfigArg(options?: ClaudePlanOptions): string {
-  return options?.mcpConfigPath ? ` --mcp-config ${shellEscape(options.mcpConfigPath)}` : "";
+  return options?.mcpConfigPath
+    ? ` --mcp-config ${shellEscape(options.mcpConfigPath)} --strict-mcp-config`
+    : "";
 }
 
 export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): AgentLaunchPlan {

@@ -86,6 +86,7 @@ const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undef
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
+const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const isProcessRunningInTmuxMock = vi.fn();
@@ -390,6 +391,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: sidecarTmuxAliveMock,
   sidecarTmuxSession: sidecarTmuxSessionMock,
   killSidecarTmux: killSidecarTmuxMock,
+  listTmuxSessionNames: listTmuxSessionNamesMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: getTmuxPanePidMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
@@ -922,6 +924,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
+    listTmuxSessionNamesMock.mockReset().mockResolvedValue(new Set());
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
@@ -5223,6 +5226,22 @@ describe("SessionService", () => {
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
+  });
+
+  it("tears down the playwright sidecar exactly once when reconciling a dead runtime to stopped", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.status).toBe("stopped");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledTimes(1);
   });
 
   it("reconciles a spawning session to stopped when its spawn is no longer in flight", async () => {
@@ -10262,6 +10281,54 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
       ),
     ).toBe(true);
+  });
+
+  it("reaps a playwright sidecar tmux session whose owning record is terminal or missing, but not a live one", async () => {
+    const sessions = createSessionStore();
+    sessions.set("term-1", {
+      id: "term-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "term-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/term-1",
+      tmuxSession: "term-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "completed",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sessions.set("live-1", {
+      id: "live-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "live-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/live-1",
+      tmuxSession: "live-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(
+      new Set(["term-1--playwright", "live-1--playwright", "missing-1--playwright", "live-1"]),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("term-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("missing-1", "playwright");
+    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("live-1", "playwright");
+    service.dispose();
   });
 
   it("rejects a branch override that would mutate the shared workspace", async () => {

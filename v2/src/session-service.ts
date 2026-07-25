@@ -164,6 +164,7 @@ import {
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
+  listTmuxSessionNames,
   sendSubmitKeyToTmux,
   setTmuxSocketName,
   sendMessageToTmux,
@@ -321,6 +322,7 @@ const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
@@ -1617,6 +1619,7 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
+  private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
@@ -1665,6 +1668,7 @@ export class SessionService {
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
+    this.startSidecarReaper();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
   }
@@ -1683,7 +1687,52 @@ export class SessionService {
       clearInterval(this.scheduledWakeTimer);
       this.scheduledWakeTimer = null;
     }
+    if (this.sidecarReaperTimer) {
+      clearInterval(this.sidecarReaperTimer);
+      this.sidecarReaperTimer = null;
+    }
     this.stopDashboardCacheLoop();
+  }
+
+  private startSidecarReaper(): void {
+    if (this.sidecarReaperTimer) {
+      return;
+    }
+    this.sidecarReaperTimer = setInterval(() => {
+      void this.runSidecarReaper();
+    }, SIDECAR_REAPER_INTERVAL_MS);
+    this.sidecarReaperTimer.unref();
+  }
+
+  private async runSidecarReaper(): Promise<void> {
+    try {
+      await this.reapDeadSessionSidecars();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.sidecar_reaper.failed", {
+        level: "warn",
+        message: `Sidecar reaper failed: ${message}`,
+      });
+    }
+  }
+
+  // Periodic sweep for playwright sidecar tmux sessions whose owning session
+  // record is gone or terminal. Keyed on tmux ownership (not process ppid)
+  // so a transient empty listSessions read can never reap a live sidecar.
+  private async reapDeadSessionSidecars(): Promise<void> {
+    const suffix = `--${PLAYWRIGHT_SIDECAR_NAME}`;
+    const names = await listTmuxSessionNames();
+    for (const name of names) {
+      if (!name.endsWith(suffix)) {
+        continue;
+      }
+      const sessionId = name.slice(0, -suffix.length);
+      const record = readSession(this.config.dataDir, sessionId);
+      if (!record || isTerminalSessionStatus(record.status)) {
+        await killSidecarTmux(sessionId, PLAYWRIGHT_SIDECAR_NAME).catch(() => {});
+      }
+    }
+    await this.sweepLeakedPlaywrightProcesses();
   }
 
   private startScheduledWakeMonitor(): void {
@@ -6529,7 +6578,7 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+  private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
       this.abortSidecarUrlProbe(session.id, scName);
@@ -6543,6 +6592,10 @@ export class SessionService {
       }
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
+  }
+
+  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+    await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       await killTmuxSession(service.tmuxSession);
     }
@@ -8602,6 +8655,7 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
+    await this.teardownSessionSidecars(updated).catch(() => {});
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
       {
