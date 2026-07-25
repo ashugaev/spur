@@ -235,20 +235,21 @@ async function readHostClaudeMcpServers(args: {
   const merged: Record<string, unknown> = {};
   const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
   const userConfig = await readJsonFile(userConfigPath);
+  let localProject: unknown;
   if (isPlainObject(userConfig)) {
     mergeMcpServers(merged, userConfig.mcpServers);
     const projects = userConfig.projects;
     if (isPlainObject(projects)) {
-      const localProject = projects[args.worktreePath];
-      if (isPlainObject(localProject)) {
-        mergeMcpServers(merged, localProject.mcpServers);
-      }
+      localProject = projects[args.worktreePath];
     }
   }
   const projectConfigPath = join(args.worktreePath, ".mcp.json");
   const projectConfig = await readJsonFile(projectConfigPath);
   if (isPlainObject(projectConfig)) {
     mergeMcpServers(merged, projectConfig.mcpServers);
+  }
+  if (isPlainObject(localProject)) {
+    mergeMcpServers(merged, localProject.mcpServers);
   }
   return merged;
 }

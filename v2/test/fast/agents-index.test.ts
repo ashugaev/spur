@@ -187,6 +187,49 @@ describe("setupAgentHooks", () => {
     });
   });
 
+  it("prefers the local-scope (projects[worktreePath]) server over .mcp.json on a name collision", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/.claude.json") {
+        return JSON.stringify({
+          projects: {
+            "/tmp/spur-worktrees/api/api-1": {
+              mcpServers: {
+                shared: { command: "npx", args: ["-y", "local-scope-mcp"] },
+              },
+            },
+          },
+        });
+      }
+      if (path === "/tmp/spur-worktrees/api/api-1/.mcp.json") {
+        return JSON.stringify({
+          mcpServers: {
+            shared: { command: "npx", args: ["-y", "project-scope-mcp"] },
+          },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      playwrightPort: 8742,
+      claudeConfigDir: "/home/user",
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        shared: { command: "npx", args: ["-y", "local-scope-mcp"] },
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
   it("forwards the playwright port to codex hook config", async () => {
     ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
 
