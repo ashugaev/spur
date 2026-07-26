@@ -1,11 +1,11 @@
 ---
 name: docs
-description: Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY). Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Not for README ## Config/## Commands field semantics (config-doc rule + spur skill) or SKILL.md/agent prose (skill-writer).
+description: Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY). Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Not for config/command field semantics (docs/configuration.md + docs/commands.md, owned by the config-doc rule and spur skill) or SKILL.md/agent prose (skill-writer).
 ---
 
 # Docs Management
 
-Root README is reference + hub (`## Docs` lists every published doc). How-tos under `docs/`. Load on any published-doc edit.
+Root README is a minimal hub — `## Docs` lists every published doc, plus the AI-agent install prompt. Reference lives in `docs/`. Load on any published-doc edit.
 
 ## Write caveman
 
@@ -21,19 +21,19 @@ One doc, one topic, one Diataxis mode. Split when a doc drifts across modes or t
 | Mode | Owner |
 |---|---|
 | Tutorial (first run) | `docs/install-from-npm.md` |
-| How-to (one task) | `docs/install-from-source.md`, `TROUBLESHOOTING.md`, `SETUP.md` |
-| Reference (commands, fields) | `README.md` `## Commands`, `## Config` |
+| How-to (one task) | `docs/install-from-source.md`, `docs/voice.md`, `TROUBLESHOOTING.md`, `SETUP.md` |
+| Reference (commands, fields) | `docs/commands.md`, `docs/configuration.md` |
 | Explanation (why) | gitignored planning notes (not shipped) |
 
 ## One source, max references
 
 - Each topic has one owning doc. Everything else links. Never restate.
-- Commands and config fields: `README.md` `## Commands`/`## Config` only.
+- Commands: `docs/commands.md` only. Config fields: `docs/configuration.md` only.
 - Contradiction: pick the owner, delete the copy, link.
 
 ## New functionality
 
-New command, flag, config field, source type, provider, or event is documented in the same change, in `README.md` `## Commands`/`## Config`. Reviewer treats undocumented new surface as a defect.
+New command, flag, config field, source type, provider, or event is documented in the same change — commands in `docs/commands.md`, config in `docs/configuration.md`. Reviewer treats undocumented new surface as a defect.
 
 ## Link graph
 
@@ -52,5 +52,5 @@ New command, flag, config field, source type, provider, or event is documented i
 
 ## Boundaries
 
-- Command and config field semantics: `README.md` `## Config`/`## Commands` plus the `spur` skill.
+- Command and config field semantics: `docs/commands.md` / `docs/configuration.md` plus the `spur` skill.
 - SKILL.md, agent definitions, `AGENTS.md`/`CLAUDE.md` prose: `skill-writer`.
