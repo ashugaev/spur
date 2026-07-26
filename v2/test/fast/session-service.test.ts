@@ -4017,6 +4017,105 @@ describe("SessionService", () => {
     expect(later.hasUnseenAttention).toBe(true);
   });
 
+  it("takes lastActivityAt from the agent transcript, so an attach-driven tmux bump cannot move it", async () => {
+    // Opening the web terminal runs `attach-session`, which resizes the window
+    // and makes the agent's TUI repaint on SIGWINCH. That repaint is genuine
+    // pane output, so BOTH tmux clocks jump to the attach instant (measured on
+    // tmux 3.4). Activity therefore has to come from the agent's own structured
+    // artifact — here the pinned claude transcript's mtime — which no attach,
+    // resize or capture-pane can touch.
+    const transcriptWrittenAt = "2026-03-18T10:02:00.000Z";
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: {
+        filePath: "test.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: Date.parse(transcriptWrittenAt),
+        tailRecords: [],
+      },
+    });
+    // The attach instant: "now". Pre-fix this won the max and became
+    // lastActivityAt, which is exactly the reported bug.
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:05:00.000Z"));
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+
+    expect(view.lastActivityAt).toBe(transcriptWrittenAt);
+    service.dispose();
+  });
+
+  it("falls back to tmux activity only while the agent has produced no structured artifact", async () => {
+    // A just-spawned session whose transcript does not exist yet: there is no
+    // structured signal to prefer, so tmux window activity is all we have and
+    // must still be reported rather than collapsing to updatedAt.
+    readClaudeJsonlStateMock.mockResolvedValue(null);
+    readClaudeSessionStatusMock.mockResolvedValue(null);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+
+    expect(view.lastActivityAt).toBe("2026-03-18T10:04:00.000Z");
+    service.dispose();
+  });
+
+  it("delivers a queued message while a sibling window keeps emitting, since the idle gate follows the agent transcript", async () => {
+    // tmux activity is the max across every window of the session, so a user's
+    // split running a dev server (or an attached web terminal repainting) would
+    // hold the delivery idle gate open forever. The gate must measure the
+    // agent's own transcript instead: idle since 10:02, well past the 30s wait.
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: {
+        filePath: "test.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: Date.parse("2026-03-18T10:02:00.000Z"),
+        tailRecords: [],
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    // The noisy sibling window: emitting right now, continuously.
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:05:00.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+        interrupt: false,
+        agent: "claude",
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("leaves updatedAt and lastActivityAt untouched when a session is merely viewed and opened", async () => {
     // Opening an agent in the web UI must record only that it was opened. Any
     // bump to updatedAt (or to the derived lastActivityAt) would reorder the
@@ -11589,6 +11688,28 @@ describe("SessionService", () => {
     expect(nativeOnlyResult.slots?.links).toEqual([
       { label: "tracker", url: "https://tracker.example.com/1" },
     ]);
+  });
+
+  it("relaunches a restored session on its persisted spawn-time model, not the agent default", async () => {
+    // normalizeSessionRecord used to drop SessionRecord.model on every write, so
+    // restore()'s resolveAgentLaunchModel(current.agent, current.model) always
+    // saw undefined and silently relaunched on the agent default. With the
+    // field persisted, a session spawned on sonnet comes back on sonnet.
+    mockClaudeJsonlState("waiting");
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1", model: "sonnet" }));
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      "/tmp/spur-worktrees/api/api-1",
+      expect.any(String),
+      expect.objectContaining({ model: "sonnet" }),
+    );
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {

@@ -546,6 +546,11 @@ interface SessionStateResult {
   historySourcePath?: string | null;
   workspacePresent: boolean;
   serverError: boolean;
+  // When the agent last wrote to its own structured artifact (claude transcript
+  // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
+  // when the agent has no such artifact yet. Every value here is a byproduct of
+  // reads classification already performed, so it costs no extra I/O.
+  agentActivityAt: Date | null;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -1207,12 +1212,45 @@ function buildWorkspaceAccess(
   return items.length > 0 ? { items } : undefined;
 }
 
+// Activity means "the agent did something", so it must be identical whether or
+// not a browser has the session open.
+//
+// The agent's own structured artifact is the only source that satisfies that.
+// Both tmux clocks are polluted by merely attaching a terminal, measured on
+// tmux 3.4: `#{session_activity}` is a pure client-attach clock (it jumps to
+// now on `attach-session` and never moves for pane output), and
+// `#{window_activity}` jumps too because attaching resizes the window and the
+// agent's TUI repaints on SIGWINCH — genuine pane output triggered by the act
+// of opening. A silent (non-TUI) pane shows no window_activity bump on attach,
+// which is what pins the cause on the redraw.
+//
+// So tmux activity is the fallback only, for a session whose agent has not yet
+// produced a structured artifact. That matches the standing repo rule: detect
+// session state from structured agent sources first, tmux only as a fallback.
+// A transcript the reader has not stat()ed yet reports mtime 0. The epoch is
+// never a real activity time, so treat it as "no structured artifact" and let
+// the tmux fallback stand rather than pinning activity to 1970.
+function mtimeActivityAt(mtimeMs: number): Date | null {
+  return mtimeMs > 0 ? new Date(mtimeMs) : null;
+}
+
+// Single source of truth for "when did the agent last do something", shared by
+// the dashboard's lastActivityAt and the delivery idle gate so the two can
+// never disagree about what counts as activity.
+function resolveAgentActivityAt(
+  classified: Pick<SessionStateResult, "runtime" | "agentActivityAt">,
+): Date | null {
+  return classified.agentActivityAt ?? classified.runtime.tmuxActivityAt;
+}
+
 function buildLastActivityAt(
   session: Pick<SessionRecord, "updatedAt">,
-  runtime: Pick<SessionRuntimeSnapshot, "tmuxActivityAt">,
+  classified: Pick<SessionStateResult, "runtime" | "agentActivityAt">,
 ): string {
   const updatedAt = new Date(session.updatedAt);
-  return (latestActivityAt(updatedAt, runtime.tmuxActivityAt) ?? updatedAt).toISOString();
+  return (
+    latestActivityAt(updatedAt, resolveAgentActivityAt(classified)) ?? updatedAt
+  ).toISOString();
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -8015,7 +8053,13 @@ export class SessionService {
     if (classified.state !== "waiting" && !classified.serverError) {
       return false;
     }
-    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
+    // Gate on the agent's own structured artifact, not raw tmux activity. Raw
+    // tmux activity is the session-wide max across every window, so a user's
+    // split running a dev server would stall delivery indefinitely, and merely
+    // attaching the web terminal (which makes the TUI repaint) would delay it
+    // by another full window. The agent's transcript is inherently scoped to
+    // the agent and is untouched by both.
+    if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
       return false;
     }
 
@@ -8794,7 +8838,7 @@ export class SessionService {
       await sleep(PIPELINE_POLL_INTERVAL_MS);
       // fresh:true — an independent re-sample, not a replay of the same
       // ~2s-TTL cached snapshot the first check above just read. Otherwise a
-      // single transient tmux/list-sessions blip would agree with itself on
+      // single transient tmux/list-windows blip would agree with itself on
       // both reads and mark a genuinely live session stopped.
       confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
@@ -8988,6 +9032,7 @@ export class SessionService {
         historySourcePath: null,
         workspacePresent: probeWorkspace(session.worktreePath).exists,
         serverError: false,
+        agentActivityAt: null,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -9027,6 +9072,8 @@ export class SessionService {
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
     let serverErrorJsonlPath: string | null = null;
+    // Set from whichever structured artifact the branches below already read.
+    let agentActivityAt: Date | null = null;
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -9047,6 +9094,8 @@ export class SessionService {
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
           serverErrorJsonlPath = jsonlResult.reader.filePath;
+          // The reader already stat()ed the pinned transcript; reuse its mtime.
+          agentActivityAt = mtimeActivityAt(jsonlResult.reader.lastMtimeMs);
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9089,6 +9138,15 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
+        // Codex's own in-content rollout timestamp plus its hook state — the
+        // rollout's mtime is unusable because `codex resume`'s poison-id heal
+        // rewrites every file at once, which is why classifyCodexState already
+        // ranks by timestampMs.
+        const codexActivityMs = Math.max(
+          codexState.rolloutState?.timestampMs ?? 0,
+          codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
+        );
+        agentActivityAt = codexActivityMs > 0 ? new Date(codexActivityMs) : null;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           const lastActivityMs = Math.max(
@@ -9137,6 +9195,7 @@ export class SessionService {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
+          agentActivityAt = mtimeActivityAt(jsonlResult.reader.lastMtimeMs);
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
@@ -9296,6 +9355,7 @@ export class SessionService {
       // instead of arming it — the two markers stay independently owned.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
+      agentActivityAt,
     };
   }
 
@@ -9314,7 +9374,7 @@ export class SessionService {
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
-    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
       session,
@@ -9365,7 +9425,7 @@ export class SessionService {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
-    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
     const history = await this.updateStateHistory(
       session,

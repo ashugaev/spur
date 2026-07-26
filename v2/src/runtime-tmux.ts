@@ -104,15 +104,20 @@ const FLEET_SESSION_CACHE_KEY = "sessions";
 // HTTP enrich all share the same ~2s fleet-wide read.
 //
 // Activity is `#{window_activity}` (max across the session's windows), never
-// `#{session_activity}`. Measured on tmux 3.4: session_activity is a
+// `#{session_activity}`. Measured on tmux 3.4: session_activity is a pure
 // client-attach clock — it jumps to now the moment anything runs
 // `attach-session` (the web terminal, `spur attach`, a user's own tmux) and
-// never moves for pane output, even with a client attached. Using it made
-// merely opening a session's terminal reset lastActivityAt and jump the
-// dashboard sort, while a busy detached agent kept reporting its creation
-// time. window_activity is the pane-output clock and is untouched by every
-// read-only probe here (list-windows, list-panes -a, capture-pane,
-// display-message), so Spur's own polling can never be the source of a bump.
+// never moves for pane output, even with a client attached, so a busy detached
+// agent reported its creation time forever. window_activity is the pane-output
+// clock and every read-only probe here (list-windows, list-panes -a,
+// capture-pane, display-message) leaves it alone.
+//
+// window_activity is NOT attach-proof on its own, though: attaching resizes the
+// window, and a real agent TUI repaints on SIGWINCH, which is genuine output.
+// So this is the FALLBACK activity source only. Callers must prefer the agent's
+// own structured artifact (session-service.ts resolveAgentActivityAt), which is
+// the only signal that is identical whether or not a browser is attached.
+//
 // `list-windows -a` also enumerates every live session (a tmux session always
 // has at least one window), so it replaces list-sessions for existence too.
 function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
