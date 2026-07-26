@@ -3972,10 +3972,13 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
 
-    await this.enrich(session);
-    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    // Only lastOpenedAt is stamped: updatedAt is carried through untouched so
+    // opening a session never counts as activity or moves it in the dashboard
+    // sort. The trailing enrich() classifies (and persists any genuine state
+    // change) off the record just read, so no separate pre-enrich pass is
+    // needed to avoid a lost update.
     const lastOpenedAt = nowIso();
-    const updated: SessionRecord = { ...latest, lastOpenedAt };
+    const updated: SessionRecord = { ...session, lastOpenedAt };
     writeSession(this.config.dataDir, updated);
     await this.refreshDashboardCacheEntry(updated);
     this.logEvent("session.opened", {

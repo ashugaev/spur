@@ -4017,6 +4017,46 @@ describe("SessionService", () => {
     expect(later.hasUnseenAttention).toBe(true);
   });
 
+  it("leaves updatedAt and lastActivityAt untouched when a session is merely viewed and opened", async () => {
+    // Opening an agent in the web UI must record only that it was opened. Any
+    // bump to updatedAt (or to the derived lastActivityAt) would reorder the
+    // dashboard's activity sort purely because someone looked at the session.
+    let stored: SessionRecord = runningSession({ id: "api-1" });
+    readSessionMock.mockImplementation(() => stored);
+    writeSessionMock.mockImplementation((_dataDir, next) => {
+      stored = next;
+    });
+    // The agent last printed at 10:04:30 and has been silent since.
+    const lastOutputAt = new Date("2026-03-18T10:04:30.000Z");
+    getTmuxSessionActivityMock.mockResolvedValue(lastOutputAt);
+    mockClaudeJsonlState("needs_input");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const before = await service.get("api-1");
+    expect(before.lastActivityAt).toBe(lastOutputAt.toISOString());
+    const updatedAtBefore = stored.updatedAt;
+
+    // The page's 4s poll (a full enrich with the capture-pane scan) — the only
+    // path that runs per-session tmux commands against the viewed session.
+    vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    const polled = await service.get("api-1");
+    expect(polled.lastActivityAt).toBe(lastOutputAt.toISOString());
+    expect(stored.updatedAt).toBe(updatedAtBefore);
+
+    // The explicit "I opened it" marker.
+    vi.setSystemTime(new Date("2026-03-18T10:06:00.000Z"));
+    const opened = await service.markOpened("api-1");
+    expect(stored.lastOpenedAt).toBe("2026-03-18T10:06:00.000Z");
+    expect(stored.updatedAt).toBe(updatedAtBefore);
+    expect(opened.lastActivityAt).toBe(lastOutputAt.toISOString());
+
+    vi.setSystemTime(new Date("2026-03-18T10:07:00.000Z"));
+    const after = await service.get("api-1");
+    expect(after.lastActivityAt).toBe(lastOutputAt.toISOString());
+    expect(stored.updatedAt).toBe(updatedAtBefore);
+  });
+
   it("renders needs_input sessions unseen after a restart when no lastOpenedAt has been recorded", async () => {
     // Simulates the daemon-restart case: in-memory stateHistory is empty and
     // no lastOpenedAt has ever been persisted for this session.
