@@ -181,3 +181,33 @@ describe("DirectTerminal send failures", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
+
+describe("DirectTerminal controls safe-area", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("insets the bottom controls sideways from bottom/side safe-area without adding vertical height", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="safe-area-session" />);
+    });
+
+    const controls = screen.getByTestId("direct-terminal-controls");
+    // Vertical padding stays fixed — no extra top/bottom height from the inset.
+    expect(controls.className).toContain("py-1.5");
+    expect(controls.className).not.toContain("pt-[");
+    expect(controls.className).not.toContain("pb-[");
+    // Side padding grows to clear rounded bottom corners (portrait) or a side
+    // notch (landscape); resolves to the 0.5rem base on flat screens.
+    expect(controls.className).toContain(
+      "pl-[max(0.5rem,env(safe-area-inset-left),env(safe-area-inset-bottom))]",
+    );
+    expect(controls.className).toContain(
+      "pr-[max(0.5rem,env(safe-area-inset-right),env(safe-area-inset-bottom))]",
+    );
+  });
+});

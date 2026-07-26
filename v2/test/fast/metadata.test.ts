@@ -704,4 +704,32 @@ describe("session metadata PR migration", () => {
 
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ allowedTriggers: [] }));
   });
+
+  it("preserves serverErrorAt when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      serverErrorAt: "2026-03-18T10:05:00.000Z",
+      prompt: "review only",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ serverErrorAt: "2026-03-18T10:05:00.000Z" }),
+    );
+    expect(listSessions(dataDir)).toEqual([
+      expect.objectContaining({ serverErrorAt: "2026-03-18T10:05:00.000Z" }),
+    ]);
+  });
 });
