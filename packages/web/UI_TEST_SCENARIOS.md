@@ -179,6 +179,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message
 - While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast
 
+### D6e: Backend-connection gate
+
+- Every screen probes `/api/runtime/info` on a heartbeat; a single failed probe does not show anything
+- After 3 consecutive failed probes, a full-screen blocking overlay appears (`data-testid="backend-connection-overlay"`, `role="alertdialog"`) reading "Reconnecting to Spur…", with an attempt counter and a `Reload now` action; the app tree behind it is `inert`
+- While disconnected, a stale/failing sessions-load response does not surface a competing dashboard error toast — only the overlay shows
+- When the backend recovers reporting a different version (real restart/update), the page reloads automatically exactly once
+- When the backend recovers reporting the same version (transient blip), the overlay clears and the dashboard resumes without a reload
+- Dormant while a version switch is in flight — only the version-switch overlay shows, never both at once
+
 ### D7: Spawn modal
 
 - Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint
