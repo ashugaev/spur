@@ -732,4 +732,37 @@ describe("session metadata PR migration", () => {
       expect.objectContaining({ serverErrorAt: "2026-03-18T10:05:00.000Z" }),
     ]);
   });
+
+  it("preserves model and originalTaskPrompt when writing and reading a session record", async () => {
+    // normalizeSessionRecord rebuilds the record field by field, so an
+    // optional SessionRecord field missing from its whitelist is silently
+    // dropped on the very next write — spawn persists both of these and every
+    // later write (a state transition, markOpened) would erase them.
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      model: "opus",
+      prompt: "ship it (with orchestrator preamble)",
+      originalTaskPrompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+    );
+    expect(listSessions(dataDir)).toEqual([
+      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+    ]);
+  });
 });
