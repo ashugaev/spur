@@ -336,7 +336,7 @@ const STATE_HOLD_MS = 4_000;
 // signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
 // incrementally within a single response, so a hung inference produces no new records at all. tmux
 // activity is rejected as a corroborating signal because codex's TUI repaints a per-second
-// "Working (… • esc to interrupt)" timer, advancing #{session_activity} every second even while the
+// "Working (… • esc to interrupt)" timer, advancing #{window_activity} every second even while the
 // turn is genuinely hung — it would mask exactly this bug. Pending tool calls are excluded (a long
 // exec_command is legitimately silent), so this threshold only needs to exceed the longest plausible
 // single model inference between tool batches (large context + high reasoning, observed ~tens of

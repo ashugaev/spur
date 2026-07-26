@@ -98,16 +98,29 @@ const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>
 const FLEET_SESSION_CACHE_KEY = "sessions";
 
 // Fleet-wide session existence AND activity in ONE fork instead of one
-// `has-session` plus one `display-message #{session_activity}` per session.
+// `has-session` plus one `display-message` per session.
 // `tmuxSessionExists`/`getTmuxSessionActivity` reroute through this cached
 // snapshot so the dashboard-cache tick, the attention monitor, and on-demand
 // HTTP enrich all share the same ~2s fleet-wide read.
+//
+// Activity is `#{window_activity}` (max across the session's windows), never
+// `#{session_activity}`. Measured on tmux 3.4: session_activity is a
+// client-attach clock — it jumps to now the moment anything runs
+// `attach-session` (the web terminal, `spur attach`, a user's own tmux) and
+// never moves for pane output, even with a client attached. Using it made
+// merely opening a session's terminal reset lastActivityAt and jump the
+// dashboard sort, while a busy detached agent kept reporting its creation
+// time. window_activity is the pane-output clock and is untouched by every
+// read-only probe here (list-windows, list-panes -a, capture-pane,
+// display-message), so Spur's own polling can never be the source of a bump.
+// `list-windows -a` also enumerates every live session (a tmux session always
+// has at least one window), so it replaces list-sessions for existence too.
 function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
   return memoizedProbe(fleetSessionCache, FLEET_SESSION_CACHE_KEY, async () => {
     const names = new Set<string>();
     const activity = new Map<string, Date | null>();
     try {
-      const out = await tmux("list-sessions", "-F", "#{session_name} #{session_activity}");
+      const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
         const [sessionName, activitySeconds] = line.trim().split(/\s+/);
         if (!sessionName) {
@@ -115,10 +128,17 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
         }
         names.add(sessionName);
         const seconds = Number.parseInt(activitySeconds ?? "", 10);
-        activity.set(sessionName, Number.isNaN(seconds) ? null : new Date(seconds * 1000));
+        const windowActivityAt = Number.isNaN(seconds) ? null : new Date(seconds * 1000);
+        const previous = activity.get(sessionName) ?? null;
+        activity.set(
+          sessionName,
+          windowActivityAt && (!previous || windowActivityAt.getTime() > previous.getTime())
+            ? windowActivityAt
+            : previous,
+        );
       }
     } catch {
-      // No tmux server running (or another list-sessions failure) — an empty
+      // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
     }
     return { names, activity };
