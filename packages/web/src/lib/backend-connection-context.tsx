@@ -46,20 +46,29 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const dormant = versionSwitchPhase !== "idle";
   const [state, setState] = useState<BackendConnectionState>(CONNECTED_STATE);
-  const consecutiveFailuresRef = useRef(0);
+  // Reactive (not a ref) so a failure immediately reschedules the interval
+  // onto the fast cadence below — see intervalMs.
+  const [consecutiveFailures, setConsecutiveFailures] = useState(0);
   const reloadedRef = useRef(false);
 
   useEffect(() => {
     if (dormant) {
-      consecutiveFailuresRef.current = 0;
+      setConsecutiveFailures(0);
       reloadedRef.current = false;
       setState(CONNECTED_STATE);
       return;
     }
 
     let cancelled = false;
+    // Use the slow heartbeat only in the fully-healthy steady state (zero
+    // failures). As soon as the first probe failure is seen, switch to the
+    // fast reconnect cadence for the rest of the FAILURE_THRESHOLD
+    // confirmation window so a real outage is confirmed in ~2x that cadence
+    // instead of waiting out a full heartbeat between each check.
     const intervalMs =
-      state.phase === "disconnected" ? RECONNECT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS;
+      state.phase === "disconnected" || consecutiveFailures > 0
+        ? RECONNECT_INTERVAL_MS
+        : HEARTBEAT_INTERVAL_MS;
 
     const timer = window.setInterval(() => {
       void (async () => {
@@ -79,11 +88,12 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
         }
 
         if (ok) {
-          consecutiveFailuresRef.current = 0;
+          setConsecutiveFailures(0);
           return;
         }
-        consecutiveFailuresRef.current += 1;
-        if (consecutiveFailuresRef.current >= FAILURE_THRESHOLD) {
+        const next = consecutiveFailures + 1;
+        setConsecutiveFailures(next);
+        if (next >= FAILURE_THRESHOLD) {
           setState({ phase: "disconnected", attempts: 1 });
         }
       })();
@@ -93,7 +103,7 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [dormant, state.phase]);
+  }, [dormant, state.phase, consecutiveFailures]);
 
   return (
     <BackendConnectionContext.Provider value={state}>{children}</BackendConnectionContext.Provider>

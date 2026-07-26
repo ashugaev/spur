@@ -31,6 +31,22 @@ function mockFetchResults(results: () => boolean) {
   });
 }
 
+// The first probe fires on the slow heartbeat; the moment it fails, the
+// provider swaps to the fast reconnect cadence for the remaining probes in
+// the confirmation window (see backend-connection-context.tsx). Returns a
+// stepper that advances exactly one probe interval per call, tracking which
+// cadence is active across calls so tests can assert on intermediate state.
+function makeFailureStepper() {
+  let first = true;
+  return async () => {
+    const intervalMs = first ? HEARTBEAT_INTERVAL_MS : RECONNECT_INTERVAL_MS;
+    first = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(intervalMs);
+    });
+  };
+}
+
 describe("BackendConnectionProvider", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -59,9 +75,10 @@ describe("BackendConnectionProvider", () => {
     });
     expect(result.current.phase).toBe("connected");
 
+    // Cadence already swapped to fast after the failure above.
     ok = true;
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
     });
     expect(result.current.phase).toBe("connected");
   });
@@ -71,15 +88,14 @@ describe("BackendConnectionProvider", () => {
 
     vi.useFakeTimers();
     const { result } = renderProvider();
+    const stepFailure = makeFailureStepper();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * (FAILURE_THRESHOLD - 1));
-    });
+    for (let i = 0; i < FAILURE_THRESHOLD - 1; i++) {
+      await stepFailure();
+    }
     expect(result.current.phase).toBe("connected");
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
+    await stepFailure();
     expect(result.current.phase).toBe("disconnected");
   });
 
@@ -89,10 +105,11 @@ describe("BackendConnectionProvider", () => {
 
     vi.useFakeTimers();
     const { result } = renderProvider();
+    const stepFailure = makeFailureStepper();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * FAILURE_THRESHOLD);
-    });
+    for (let i = 0; i < FAILURE_THRESHOLD; i++) {
+      await stepFailure();
+    }
     expect(result.current.phase).toBe("disconnected");
 
     ok = true;
@@ -112,10 +129,11 @@ describe("BackendConnectionProvider", () => {
 
     vi.useFakeTimers();
     const { result } = renderProvider();
+    const stepFailure = makeFailureStepper();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * FAILURE_THRESHOLD);
-    });
+    for (let i = 0; i < FAILURE_THRESHOLD; i++) {
+      await stepFailure();
+    }
     expect(result.current.phase).toBe("disconnected");
     expect(result.current.attempts).toBe(1);
 

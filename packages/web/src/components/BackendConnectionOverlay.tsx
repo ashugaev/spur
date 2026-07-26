@@ -29,16 +29,14 @@ export function BackendConnectionOverlay() {
               Reconnecting to Spur…
             </p>
             <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              The backend is unavailable. This page will reload automatically once it&apos;s back.
-            </p>
-            <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              Attempt {attempts}
+              The backend is unavailable (attempt {attempts}). This page will reload automatically
+              once it&apos;s back.
             </p>
           </div>
         </div>
         <div className="mt-3 flex items-center justify-end">
           <button
-            className="border border-[var(--color-border-default)] px-3 py-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
             type="button"
             onClick={() => window.location.reload()}
           >
