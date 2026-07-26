@@ -51,6 +51,7 @@ import {
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
   claudeCommand,
+  DEFAULT_CLAUDE_MODEL,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
@@ -1238,9 +1239,17 @@ function resolveSpawnWorktree(
   return overrides?.worktree ?? project.worktree;
 }
 
+// Spur's built-in default model per agent, applied when neither the request nor
+// the project config names one. codex has no Spur default (uses its own).
+const SPUR_DEFAULT_MODELS: Partial<Record<AgentName, string>> = {
+  claude: DEFAULT_CLAUDE_MODEL,
+  cursor: DEFAULT_CURSOR_MODEL,
+};
+
 // A model only ever applies to the agent it belongs to. An explicit request
 // model wins; otherwise the project defaultModels entry for the resolved agent
-// applies. The map is keyed by agent, so it never bleeds onto another agent.
+// applies, then Spur's built-in default for that agent. The map is keyed by
+// agent, so it never bleeds onto another agent.
 export function resolveSpawnModel(args: {
   requestModel: string | undefined;
   resolvedAgent: AgentName;
@@ -1249,7 +1258,7 @@ export function resolveSpawnModel(args: {
   return (
     args.requestModel ??
     args.project.defaultModels?.[args.resolvedAgent] ??
-    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+    SPUR_DEFAULT_MODELS[args.resolvedAgent]
   );
 }
 
