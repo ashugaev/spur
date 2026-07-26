@@ -106,6 +106,7 @@ const resolveRepoPathFromWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
 const probeWorkspaceMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
+const normalizeSlotLinksMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
@@ -425,6 +426,7 @@ vi.mock("../../src/session-slots.js", () => ({
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
+  normalizeSlotLinks: normalizeSlotLinksMock,
 }));
 
 vi.mock("../../src/session-artifacts.js", () => ({
@@ -956,6 +958,43 @@ describe("SessionService", () => {
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
+    normalizeSlotLinksMock.mockReset().mockImplementation((links: unknown) => {
+      const linksRaw = links ?? [];
+      if (!Array.isArray(linksRaw)) {
+        throw new Error("links must be an array");
+      }
+      return linksRaw.map((link: unknown, index: number) => {
+        if (!link || typeof link !== "object") {
+          throw new Error(`links[${index}] must be an object`);
+        }
+        const linkRecord = link as { label?: unknown; url?: unknown };
+        if (typeof linkRecord.label !== "string") {
+          throw new Error(`links[${index}].label must be a string`);
+        }
+        if (typeof linkRecord.url !== "string") {
+          throw new Error(`links[${index}].url must be a string`);
+        }
+        const normalizedLabel = linkRecord.label.trim().toLowerCase();
+        if (!/^[a-z0-9][a-z0-9_-]{0,15}$/.test(normalizedLabel)) {
+          throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+        }
+        const label =
+          normalizedLabel === "github-pr" || normalizedLabel === "github_pr"
+            ? "pr"
+            : normalizedLabel;
+        const trimmedUrl = linkRecord.url.trim();
+        if (!trimmedUrl) {
+          throw new Error("slot link URLs must be non-empty strings");
+        }
+        let url: string;
+        try {
+          url = new URL(trimmedUrl).toString();
+        } catch {
+          throw new Error(`Invalid slot link URL: ${trimmedUrl}`);
+        }
+        return { label, url };
+      });
+    });
     applySlotsUpdateMock.mockReset().mockImplementation((current, request) => {
       const links = [...(current?.links ?? [])];
       if (request.unlinkLabels) {
@@ -1295,6 +1334,58 @@ describe("SessionService", () => {
           session.worktreePath === "/tmp/spur-worktrees/api/api-1",
       ),
     ).toBe(true);
+  });
+
+  it("rejects a background spawn whose slot link label fails validation", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        slots: { links: [{ label: "Tracker!", url: "https://jira.example.com/browse/WEB-1" }] },
+      }),
+    ).rejects.toThrow("slot link labels must match");
+  });
+
+  it("rejects a background spawn whose slot link url is not a valid URL", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        slots: { links: [{ label: "tracker", url: "not-a-url" }] },
+      }),
+    ).rejects.toThrow("Invalid slot link URL");
+  });
+
+  it("persists normalized slot links for a valid background spawn", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      slots: { links: [{ label: "TRACKER", url: "https://jira.example.com/browse/WEB-1" }] },
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      id: "api-1",
+      slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-1" }] },
+    });
   });
 
   it("background spawn reserves sidecar ports during autostart and passes them into sidecar env", async () => {

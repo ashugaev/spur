@@ -1838,6 +1838,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
+    setSpawnPrompt("");
     setSpawnTrackerUrl(null);
     setSpawnOpen(true);
   };
@@ -1850,6 +1851,7 @@ export function Dashboard() {
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
+    setSpawnPrompt("");
     setSpawnTrackerUrl(null);
     setSpawnOpen(true);
   };

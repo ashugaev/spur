@@ -175,6 +175,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
@@ -4414,7 +4415,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -5007,7 +5010,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };

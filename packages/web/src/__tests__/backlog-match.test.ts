@@ -8,21 +8,22 @@ import type { AvailableBacklogItem, DashboardSession, SpurSessionState } from "@
 
 function item(
   overrides: Partial<AvailableBacklogItem> = {},
-): Pick<AvailableBacklogItem, "url" | "key"> {
+): Pick<AvailableBacklogItem, "url" | "projectId"> {
   return {
     url: "https://jira.example.com/browse/WEB-17",
-    key: "WEB-17",
+    projectId: "web",
     ...overrides,
   };
 }
 
 function session(
-  overrides: Partial<Pick<DashboardSession, "state" | "prompt" | "links">> = {},
-): Pick<DashboardSession, "state" | "prompt" | "links"> {
+  overrides: Partial<Pick<DashboardSession, "state" | "prompt" | "links" | "projectId">> = {},
+): Pick<DashboardSession, "state" | "prompt" | "links" | "projectId"> {
   return {
     state: "working" as SpurSessionState,
     prompt: "",
     links: [],
+    projectId: "web",
     ...overrides,
   };
 }
@@ -35,19 +36,22 @@ describe("isBacklogItemActivelyWorked", () => {
     expect(isBacklogItemActivelyWorked(item(), [active])).toBe(true);
   });
 
-  it("matches a bounded key token in the prompt", () => {
-    const active = session({ prompt: "Work on WEB-17: fix the checkout bug" });
-    expect(isBacklogItemActivelyWorked(item(), [active])).toBe(true);
+  it("does not match a url that is a prefix of a longer url in the prompt", () => {
+    const active = session({
+      prompt: "Work on https://jira.example.com/browse/WEB-15: unrelated",
+    });
+    expect(
+      isBacklogItemActivelyWorked(item({ url: "https://jira.example.com/browse/WEB-1" }), [active]),
+    ).toBe(false);
   });
 
-  it("does not match a longer key containing the item key as a prefix", () => {
-    const active = session({ prompt: "Work on SP-15: unrelated" });
-    expect(
-      isBacklogItemActivelyWorked(
-        item({ key: "SP-1", url: "https://jira.example.com/browse/SP-1" }),
-        [active],
-      ),
-    ).toBe(false);
+  it("does not hide the item when the active session is in a different project", () => {
+    const active = session({
+      projectId: "other",
+      links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      prompt: "please look at https://jira.example.com/browse/WEB-17 today",
+    });
+    expect(isBacklogItemActivelyWorked(item(), [active])).toBe(false);
   });
 
   it("matches tracker urls differing by trailing slash", () => {

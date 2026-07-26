@@ -22,12 +22,13 @@ export function hasBoundedToken(text: string, token: string): boolean {
 }
 
 export function isBacklogItemActivelyWorked(
-  item: Pick<AvailableBacklogItem, "url" | "key">,
-  sessions: ReadonlyArray<Pick<DashboardSession, "state" | "prompt" | "links">>,
+  item: Pick<AvailableBacklogItem, "url" | "projectId">,
+  sessions: ReadonlyArray<Pick<DashboardSession, "state" | "prompt" | "links" | "projectId">>,
 ): boolean {
   const normalizedItemUrl = normalizeTrackerUrl(item.url);
   for (const session of sessions) {
     if (!ACTIVE_STATES.has(session.state)) continue;
+    if (session.projectId !== item.projectId) continue;
     const links = session.links ?? [];
     if (
       links.some(
@@ -38,7 +39,6 @@ export function isBacklogItemActivelyWorked(
     }
     const prompt = session.prompt ?? "";
     if (hasBoundedToken(prompt, item.url)) return true;
-    if (hasBoundedToken(prompt, item.key)) return true;
   }
   return false;
 }

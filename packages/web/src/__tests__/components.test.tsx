@@ -277,6 +277,71 @@ describe("Dashboard", () => {
     expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
   });
 
+  it("spawns from the prefilled backlog modal with the tracker link in slots.links", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(
+          JSON.stringify({
+            projectId: "api",
+            prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+            agent: "claude",
+            slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
+          }),
+        );
+        return new Response(
+          JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-backlog-1" }),
+          { status: 201 },
+        );
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+        "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining(
+            '"slots":{"links":[{"label":"tracker","url":"https://jira.example.com/browse/WEB-17"}]}}',
+          ),
+        }),
+      );
+    });
+  });
+
   it("hides a backlog row while an active session references its tracker link", async () => {
     const backlogItem = {
       provider: "jira",
