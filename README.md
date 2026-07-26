@@ -8,20 +8,17 @@ Local daemon + CLI orchestrator for AI coding agents.
 
 ## Install
 
-Spur installs itself. Hand this to your coding agent and let it drive:
+Spur installs itself. Hand this to your coding agent:
 
 ```text
-Install and run Spur on this machine. It is an AI-agent orchestrator, npm package @shugaev/spur.
-Read its install guide at https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md
-(or docs/install-from-source.md to build from source) and follow it end to end: install the CLI,
-run `spur init` to lay down the systemd user units, bring up the daemon and web UI bound to
-loopback/Tailscale only (never 0.0.0.0), and verify with `spur doctor`. Configure this VM as the
-guide describes. Do not ask me to run steps you can run yourself.
+Read https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md and install and run
+Spur on this machine end to end, following the guide. Do the steps yourself; don't ask me to run
+what you can run.
 ```
 
-Tested on an Ubuntu VM. Other environments are not guaranteed to be smooth — expect to resolve host and infrastructure differences yourself.
+Everything — ports, Tailscale, verification — is in that guide. Tested on Ubuntu; elsewhere, expect to sort out host differences yourself.
 
-Prefer to run it by hand? Follow [docs/install-from-npm.md](docs/install-from-npm.md) (npm, official) or [docs/install-from-source.md](docs/install-from-source.md) (from source).
+By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/install-from-source.md](docs/install-from-source.md) (source).
 
 ## Docs
 

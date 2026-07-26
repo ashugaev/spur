@@ -137,7 +137,7 @@ projects:
 
 When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Optional `conditions` replace the default completion condition. Disabled or omitted capability returns access denied and leaves the session running.
 
-With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt just opens the session.
+With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message.
 
 ## Desk groups
 

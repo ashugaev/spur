@@ -1,6 +1,6 @@
 # Voice input
 
-Dictate prompts and messages in the web UI via the microphone button (spawn modal, session message box, terminal controls). Stays disabled until the chosen provider's dependencies are installed. `openai_compatible` is the no-install path — just a key in `~/.spur/.env`.
+Dictate prompts and messages in the web UI via the microphone button (spawn modal, session message box, terminal controls). Stays disabled until the chosen provider's dependencies are installed. `openai_compatible` is the no-install path — one key in `~/.spur/.env`.
 
 ## Server dependencies
 
