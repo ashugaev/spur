@@ -51,6 +51,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
   never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
+- When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route builds a diagnostic prompt server-side and spawns the built-in Shepherd through daemon `POST /shepherd/spawn`, which is project-independent and works on a clean install with no configured projects.
 
 ## Current config shape
 
