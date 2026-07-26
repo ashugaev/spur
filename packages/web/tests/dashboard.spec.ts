@@ -1525,7 +1525,7 @@ test.describe("D6a: Backlog zone", () => {
   test("hides a backlog row while an active session references its tracker link", async ({
     page,
   }) => {
-    const activeSession = makeSessionWithTracker({ state: "working" });
+    const activeSession = makeSessionWithTracker({ state: "working", project: "my-project" });
     await mockSessions(page, [activeSession], DEFAULT_PROJECTS, [
       {
         provider: "jira",
