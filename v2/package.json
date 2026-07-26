@@ -5,7 +5,7 @@
     "access": "public"
   },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
