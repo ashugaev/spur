@@ -14,6 +14,16 @@ import type { ITheme } from "xterm";
 /** Mirrors `--color-bg-base`. Used by Next.js manifest / viewport / icon routes. */
 export const BG_BASE_HEX = "#0d0d0e";
 
+/**
+ * Brand spark glyph path, a 24-unit viewBox path. Shared between the static
+ * app icon (`src/app/icon.tsx`) and the dynamic status favicon
+ * (`SessionDetail.tsx`) so both render pixel-identical geometry. Lives here
+ * rather than in the route file because `icon.tsx` imports `next/og`
+ * (server/edge-only, pulls in `fs`), which cannot be bundled into a client
+ * component.
+ */
+export const SPARK_GLYPH_PATH = "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
+
 /** Mirrors `--color-terminal-bg` (dark). Used by the xterm `ITheme` and the container div. */
 export const TERMINAL_BG_HEX = "#0a0a0f";
 

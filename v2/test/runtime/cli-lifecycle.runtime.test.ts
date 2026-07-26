@@ -34,7 +34,13 @@ import {
 const tmuxOk = await isTmuxAvailable();
 
 interface DoctorResult {
-  hostChecks: Array<{ id: string; ok: boolean; detail: string; fix?: string }>;
+  hostChecks: Array<{
+    id: string;
+    ok: boolean;
+    severity: "error" | "warn" | "info";
+    detail: string;
+    fix?: string;
+  }>;
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -605,11 +611,15 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
-      cwd: context.repoDir,
-      env: doctorEnv,
-      timeout: 60_000,
-    });
+    const doctorRun = await execFileAsync(
+      process.execPath,
+      [CLI_PATH, "doctor", "--json", "--scaffold"],
+      {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      },
+    );
     let doctor: DoctorResult;
     try {
       doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
@@ -654,12 +664,37 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     const nestedDir = join(context.repoDir, "packages", "service");
     const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
     await mkdir(nestedDir, { recursive: true });
+    // Pin an isolated instance config at a free port instead of relying on the
+    // ambient-HOME auto-bootstrap default (4310) — the new daemon health probe
+    // (F6) would otherwise cross-talk with a real daemon already bound to that
+    // port on a shared host, matching the documented self-hosted-CI collision
+    // class.
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
-      cwd: nestedDir,
-      env: context.env,
-      timeout: 60_000,
-    });
+    const doctorRun = await execFileAsync(
+      process.execPath,
+      [CLI_PATH, "doctor", "--json", "--scaffold"],
+      {
+        cwd: nestedDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      },
+    );
     let doctor: DoctorResult;
     try {
       doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
@@ -685,17 +720,194 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     activeContexts.push({ context, sessionPrefix });
     const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
     await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+    // Pin an isolated instance config so the new daemon health probe (F6)
+    // never cross-talks with a real daemon bound to the ambient default port
+    // on a shared host (same self-hosted-CI collision class as above).
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
 
     const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
       cwd: context.repoDir,
-      env: context.env,
+      env: doctorEnv,
       timeout: 60_000,
     });
 
     const doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
     expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
     expect(doctor.hostChecks.length).toBeGreaterThan(0);
+    expect(doctor.hostChecks.some((check) => check.id === "project-config-valid" && check.ok)).toBe(
+      true,
+    );
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
+
+  it("doctor --json without --scaffold never creates spur.yaml or the global/pinned instance config on a never-initialized host", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    const sessionPrefix = `rt-doctor-readonly-${context.port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
+    // Unlike the other doctor tests, deliberately do NOT pre-create the
+    // pinned instance config — this is the exact never-run-Spur-before
+    // scenario the read-only invariant guards, so `SPUR_CONFIG` must point at
+    // a path that does not exist yet.
+    const instanceConfigPath = join(context.rootDir, "never-created-instance.yaml");
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    // The default daemon port (4310) is host-global, not isolated by the
+    // temp `HOME` above (documented self-hosted-CI collision class): a real
+    // ambient daemon already bound there makes `checkServiceHealth` report a
+    // `daemon-port-conflict` (error severity), so the CLI can legitimately
+    // exit non-zero here. That is unrelated to the invariant this test
+    // guards (no config file gets written), so tolerate either exit code and
+    // still parse stdout.
+    let stdout: string;
+    try {
+      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+    } catch (error) {
+      const execError = error as { stdout?: string };
+      stdout = execError.stdout ?? "";
+    }
+
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${stdout}`, {
+        cause: error,
+      });
+    }
+    expect(doctor.configPath).toBeUndefined();
+    expect(doctor.existingProjectConfigPath).toBeUndefined();
+    expect(existsSync(join(context.repoDir, "spur.yaml"))).toBe(false);
+    expect(existsSync(globalConfigPath)).toBe(false);
+    expect(existsSync(instanceConfigPath)).toBe(false);
+  });
+
+  it("doctor reports project-config-valid ok:false and a non-zero exit for a malformed spur.yaml, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-malformed-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(join(context.repoDir, "spur.yaml"), "projects: [\n", "utf8");
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    let stdout: string;
+    let exitCode: number | undefined;
+    try {
+      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      exitCode = 0;
+    } catch (error) {
+      const execError = error as { stdout?: string; code?: number };
+      stdout = execError.stdout ?? "";
+      exitCode = execError.code;
+    }
+
+    expect(exitCode).toBe(1);
+    const doctor = JSON.parse(stdout) as DoctorResult;
+    expect(doctor.hostChecks.find((check) => check.id === "project-config-valid")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+  });
+
+  // Group D full-process crossing: the fast `workspace.test.ts` tests cover
+  // `checkProjectWorkspace`'s composition logic directly; this is the one
+  // real CLI invocation confirming `cli.ts` actually wires it up end-to-end
+  // (loop over `loadProjectConfig`'s previously-discarded return value)
+  // without the process throwing.
+  it("doctor reports a missing project path as a distinct error and a non-zero exit, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-project-path-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(
+      join(context.repoDir, "spur.yaml"),
+      ["projects:", "  gone:", "    path: /spur-doctor-runtime-test-gone-path", ""].join("\n"),
+      "utf8",
+    );
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    let stdout: string;
+    let exitCode: number | undefined;
+    try {
+      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+        cwd: context.repoDir,
+        env: doctorEnv,
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      exitCode = 0;
+    } catch (error) {
+      const execError = error as { stdout?: string; code?: number };
+      stdout = execError.stdout ?? "";
+      exitCode = execError.code;
+    }
+
+    expect(exitCode).toBe(1);
+    const doctor = JSON.parse(stdout) as DoctorResult;
+    expect(
+      doctor.hostChecks.find((check) => check.id === "project-path-exists:gone"),
+    ).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
   });
 
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {

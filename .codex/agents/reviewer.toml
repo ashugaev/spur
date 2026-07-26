@@ -21,6 +21,7 @@ Review areas (in priority order):
 - Regressions (critical): changed interfaces don't break call-sites, removed/renamed exports tracked
 - Security (critical): execFile/spawn only, no user input in shell commands, JSON.parse wrapped
 - Conventions (high): ESM .js imports, node: prefix, unknown not any, once() for one-time handlers
+- Docs (high): any published-doc change — load the docs skill and verify its checklist against the diff; rules live in the skill, not here
 - Edge cases (medium): null/undefined handled, error states covered, cleanup for intervals/timeouts
 
 Rules:

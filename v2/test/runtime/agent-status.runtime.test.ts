@@ -39,8 +39,19 @@ projects:
 }
 
 async function getSession(port: number, sessionId: string): Promise<SessionView> {
-  const response = await fetch(`http://127.0.0.1:${port}/sessions/${sessionId}`);
-  return (await response.json()) as SessionView;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/sessions/${sessionId}`);
+    return (await response.json()) as SessionView;
+  } catch {
+    // A transient connection/parse error (e.g. ECONNREFUSED during a daemon GC
+    // pause or a port race under heavy CI load) is "not ready yet", not a
+    // failure. `pollUntil` propagates any throw from `fn` immediately, so a
+    // single momentary refusal would otherwise fail the whole test. Return a
+    // sentinel that matches no expected state so the poll keeps retrying until
+    // the daemon accepts again or the caller's timeout fires (a genuinely dead
+    // daemon still fails, with the timeout message).
+    return { state: "__unreachable__" } as unknown as SessionView;
+  }
 }
 
 async function waitForState(

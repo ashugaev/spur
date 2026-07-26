@@ -130,6 +130,19 @@ projects:
                 conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
               overrides:
                 worktree: true
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Docs-only review of PR {{url}}. Load the `docs` skill and judge the diff against its checklist, nothing else.
+                Flag only Spur-specific doc defects: a new command, flag, config field, source, provider, or event shipped without a doc update; content duplicated instead of linked to its one owner; a wrong command, port, path, or package name; a dead relative link; a doc in the wrong file or Diataxis mode.
+                Ignore prose style, grammar, and anything a competent dev or agent already knows. If the docs are clean, post nothing.
+                Post findings as one concise PR comment via `gh pr comment`. Do not edit files, ask questions, or wait for confirmation.
+                Apply the `review` tag to this session.
+              selfDestruct:
+                enabled: true
+                conditions: "the docs review has been posted, or the PR changes no docs and no user-facing surface."
+              overrides:
+                worktree: true
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

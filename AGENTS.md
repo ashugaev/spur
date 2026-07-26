@@ -44,6 +44,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 | [`self-verify`](.agents/skills/self-verify/SKILL.md)               | Final close-out gate validation                                                           |
 | [`telegram`](.agents/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                               |
 | [`pr-comments-fix`](.agents/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                                        |
+| [`docs`](.agents/skills/docs/SKILL.md)                             | Task touches published docs under `docs/` or the root doc files                           |
 | [`clean-install-test`](.agents/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release             |
 
 ## Response style
@@ -52,6 +53,10 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Drop articles, filler (just/really/basically), pleasantries, hedging.
 - Fragments OK. Code/commits/PRs/identifiers unchanged.
 - Pattern: [thing] [action] [reason]. [next step].
+- Lead with the answer or result. No preamble ("Here is", "Based on", "I'll now"), no closing recap of what you just did.
+- No sycophancy or validation openers: never "good question", "great", "you're right", "absolutely". Answer, do not flatter.
+- Reasoning is draft-style: few words per step, proportional to difficulty (brief on simple, deep only when hard), no reflection filler ("Wait", "Hmm", "Let me think").
+- Default short. Expand only on request or when correctness needs the detail.
 - Off only on explicit "stop caveman" / "normal mode".
 
 ## Always-on rules
@@ -78,4 +83,5 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.agents/skills/spur/SKILL.md` Agent Isolation for detail.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
-- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical config doc: README.md `## Config`; mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
+- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical docs: `docs/configuration.md` (config) and `docs/commands.md` (CLI); mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
+- Document user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) in the same change; never ship it undocumented. Any published-doc edit loads the `docs` skill and follows it — the skill owns the doc standards (single source, granular, link don't restate).

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -7,6 +8,7 @@ import {
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
+  loadInstanceConfigReadOnly,
   loadProjectConfig,
   resolveConfigPath,
   writeProjectConfigScaffold,
@@ -2377,7 +2379,7 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock, docsBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
@@ -2388,7 +2390,7 @@ projects:
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 4, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
@@ -2401,6 +2403,15 @@ projects:
       uiBlock?.overrides?.worktree,
       uiBlock?.selfDestruct?.enabled,
     ]).toEqual(["claude", "sonnet", true, true]);
+    expect([
+      docsBlock?.agent,
+      docsBlock?.model,
+      docsBlock?.overrides?.worktree,
+      docsBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
+    expect(docsBlock?.selfDestruct?.conditions).toBe(
+      "the docs review has been posted, or the PR changes no docs and no user-facing surface.",
+    );
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
@@ -3481,5 +3492,44 @@ describe("buildSidecarLinkUrl", () => {
     expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
       "https://7.example.com/p/7",
     );
+  });
+});
+
+describe("loadInstanceConfigReadOnly", () => {
+  it("reports absent without creating the file when no instance config exists", async () => {
+    const dir = await createTempDir("spur-fast-instance-readonly-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "config.yaml");
+
+    expect(loadInstanceConfigReadOnly(configPath)).toEqual({ status: "absent" });
+    expect(existsSync(configPath)).toBe(false);
+  });
+
+  it("reports invalid with the parse error for malformed YAML, without rewriting the file", async () => {
+    const dir = await createTempDir("spur-fast-instance-readonly-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "config.yaml");
+    const malformed = "server:\n  host: 127.0.0.1\nprojects: [unclosed\n";
+    await writeFile(configPath, malformed, "utf8");
+
+    const result = loadInstanceConfigReadOnly(configPath);
+    expect(result.status).toBe("invalid");
+    if (result.status === "invalid") {
+      expect(result.error.length).toBeGreaterThan(0);
+    }
+    expect(await readFile(configPath, "utf8")).toBe(malformed);
+  });
+
+  it("reports ok with a parsed AppConfig matching loadConfig's own parse for a valid file", async () => {
+    const dir = await createTempDir("spur-fast-instance-readonly-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "config.yaml");
+    await writeFile(configPath, "server:\n  port: 5555\n", "utf8");
+
+    const result = loadInstanceConfigReadOnly(configPath);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.config).toEqual(loadConfig(configPath));
+    }
   });
 });

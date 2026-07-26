@@ -36,6 +36,7 @@ Property modifiers (orthogonal, add to any tier):
 | Introduces or changes visible `packages/web` UI | `design-author` before `architect` (Claude runtime); manager hard-stops for user approval of the exported design-spec before any implementation; on a non-Claude runtime design-author is consume-only (use an existing approved design-spec, else route the design step to a Claude session; never stall) |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
+| Adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), or touches published docs (`docs/`, `README.md`, root doc files) | `docs` before `reviewer`; `developer` documents new surface and updates the owning doc in the same change |
 | Any code change | `reviewer` -> `tester`; `github` close-out (mandatory PR) |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |
@@ -44,7 +45,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 
 ## Canonical gate order
 
-`researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `docs` -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
 `design-author` and `designer` apply only to tasks with visible `packages/web` changes; both are skipped otherwise.
 
@@ -59,6 +60,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
    - Plan: `architect`.
    - Implement: `developer`.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
+   - Docs: `docs` when the change adds or alters user-facing functionality or touches published docs. New functionality is documented in the same change; never close out a user-facing change with stale or missing docs.
    - Simplify: `code-simplifier`.
    - Review: `reviewer`.
    - Design: `designer` for visible UI changes.
