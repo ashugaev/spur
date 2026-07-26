@@ -17,6 +17,7 @@ interface SpawnBody {
   selfDestruct?: { enabled: boolean; conditions?: string };
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
+  slots?: { links?: Array<{ label: string; url: string }> };
 }
 
 export async function POST(request: NextRequest) {
@@ -52,6 +53,9 @@ export async function POST(request: NextRequest) {
     const reuseId = body.reuseWorkspaceSessionId?.trim();
     if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
     if (body.bootstrap === true) payload.bootstrap = true;
+    if (Array.isArray(body.slots?.links) && body.slots.links.length > 0) {
+      payload.slots = { links: body.slots.links };
+    }
 
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions/background",

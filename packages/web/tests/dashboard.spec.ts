@@ -1484,7 +1484,18 @@ test.describe("D6a: Backlog zone", () => {
     await expect(page.getByText("Backlog")).toHaveCount(0);
   });
 
-  test("disables only the taken row, leaving neighbors clickable", async ({ page }) => {
+  test("Take task opens a prefilled spawn modal without any network request", async ({ page }) => {
+    let backlogTakeHit = false;
+    let spawnHit = false;
+    await page.route("/api/backlog/take", (route) => {
+      backlogTakeHit = true;
+      void route.fulfill({ status: 404, body: "not found" });
+    });
+    await page.route("/api/spawn", (route) => {
+      spawnHit = true;
+      void route.fulfill({ status: 201, contentType: "application/json", body: "{}" });
+    });
+
     await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
       {
         provider: "jira",
@@ -1496,47 +1507,43 @@ test.describe("D6a: Backlog zone", () => {
         url: "https://jira.example.com/browse/WEB-17",
         fetchedAt: "2026-06-16T12:00:00.000Z",
       },
+    ]);
+
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Take task" }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue(
+      "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+    );
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+    expect(backlogTakeHit).toBe(false);
+    expect(spawnHit).toBe(false);
+  });
+
+  test("hides a backlog row while an active session references its tracker link", async ({
+    page,
+  }) => {
+    const activeSession = makeSessionWithTracker({ state: "working" });
+    await mockSessions(page, [activeSession], DEFAULT_PROJECTS, [
       {
         provider: "jira",
         projectId: "my-project",
         backlogId: "features",
-        externalId: "10002",
-        key: "WEB-18",
-        title: "Fix cart",
-        url: "https://jira.example.com/browse/WEB-18",
+        externalId: "10001",
+        key: "WEBDEV-4617",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEBDEV-4617",
         fetchedAt: "2026-06-16T12:00:00.000Z",
       },
     ]);
 
-    // Hold the take request open so the pending state stays observable.
-    let releaseTake: (() => void) | null = null;
-    const takeGate = new Promise<void>((resolve) => {
-      releaseTake = resolve;
-    });
-    await page.route("/api/backlog/take", async (route) => {
-      await takeGate;
-      await route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify({
-          item: { projectId: "my-project", backlogId: "features", externalId: "10001" },
-          session: makeWorkingSession(),
-        }),
-      });
-    });
-
     await page.goto("/");
 
-    const takeButtons = page.getByRole("button", { name: "Take task" });
-    await expect(takeButtons).toHaveCount(2);
-
-    await takeButtons.first().click();
-
-    // Only the clicked row disables; the neighbor stays clickable.
-    await expect(takeButtons.first()).toBeDisabled();
-    await expect(takeButtons.nth(1)).toBeEnabled();
-
-    releaseTake?.();
+    await expect(page.getByRole("link", { name: "Session with tracker" })).toBeVisible();
+    await expect(page.getByText("Backlog")).toHaveCount(0);
+    await expect(page.getByText("Fix checkout")).toHaveCount(0);
   });
 });
 
