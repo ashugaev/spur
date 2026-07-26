@@ -204,6 +204,15 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it("derives the live model from the newest turn_context record in the tail", async () => {
+    const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-model.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.model).toBe("gpt-5.5");
+  });
+
   it("ignores turn_aborted events when the reason is not interrupted", async () => {
     const sessionsDir = await makeSessionsDir(
       [

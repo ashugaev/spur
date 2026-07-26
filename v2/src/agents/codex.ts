@@ -804,6 +804,7 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  model?: string;
 }
 
 function readRolloutString(value: unknown): string | undefined {
@@ -826,6 +827,23 @@ function codexRolloutStateRecord(
     ...(turnId ? { turnId } : {}),
     ...(callId ? { callId } : {}),
   };
+}
+
+function extractCodexTurnContextModel(line: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed) || parsed["type"] !== "turn_context") {
+    return undefined;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  return readRolloutString(payload["model"]);
 }
 
 function extractCodexRolloutStateLine(
@@ -957,6 +975,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
+  let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index] ?? "";
     if (rateLimit === null) {
@@ -967,22 +986,21 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     }
     if (rollout === null) {
       const state = extractCodexRolloutStateLine(line);
-      if (!state) {
-        continue;
+      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+        rollout = {
+          ...state,
+          filePath,
+        };
       }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      rollout = {
-        ...state,
-        filePath,
-      };
     }
-    if (rateLimit) {
+    if (model === undefined) {
+      model = extractCodexTurnContextModel(line);
+    }
+    if (rollout && rateLimit && model !== undefined) {
       break;
     }
   }
-  return { rollout, rateLimit };
+  return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
 export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
@@ -1040,7 +1058,11 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
   const newestByMtime = existing.reduce((left, right) =>
     right.mtimeMs > left.mtimeMs ? right : left,
   );
-  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
+  return {
+    rollout: null,
+    rateLimit: newestByMtime.result.rateLimit,
+    ...(newestByMtime.result.model ? { model: newestByMtime.result.model } : {}),
+  };
 }
 
 // ── Transcript entries (unified message/tool/question timeline) ──────

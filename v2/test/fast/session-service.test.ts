@@ -761,7 +761,7 @@ type SessionServiceInternals = {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void>;
-  enrichDashboard(session: SessionRecord): Promise<{ id: string }>;
+  enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -17453,6 +17453,80 @@ describe("SessionService", () => {
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      service.dispose();
+    });
+  });
+
+  describe("live model override", () => {
+    it("overrides record.model with the claude jsonl liveModel", async () => {
+      const sessions = createSessionStore();
+      const record = runningSession({ id: "api-1", model: "claude-opus-4-5" });
+      sessions.set(record.id, record);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "/tmp/spur-worktrees/api/api-1/.claude/transcript.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        },
+        rateLimit: null,
+        liveModel: "claude-opus-4-6",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await sessionServiceInternals(service).enrichDashboard(record);
+
+      expect(view.model).toBe("claude-opus-4-6");
+      service.dispose();
+    });
+
+    it("fills a missing record.model from the codex rollout live model", async () => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        id: "api-2",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      });
+      sessions.set(record.id, record);
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: null,
+        rateLimit: null,
+        model: "gpt-5.5",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await sessionServiceInternals(service).enrichDashboard(record);
+
+      expect(view.model).toBe("gpt-5.5");
+      service.dispose();
+    });
+
+    it("falls back to the persisted record.model when no live model is derived", async () => {
+      const sessions = createSessionStore();
+      const record = runningSession({ id: "api-1", model: "claude-opus-4-5" });
+      sessions.set(record.id, record);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "/tmp/spur-worktrees/api/api-1/.claude/transcript.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        },
+        rateLimit: null,
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await sessionServiceInternals(service).enrichDashboard(record);
+
+      expect(view.model).toBe("claude-opus-4-5");
       service.dispose();
     });
   });

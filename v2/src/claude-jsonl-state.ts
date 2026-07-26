@@ -19,6 +19,8 @@ export interface ParsedRecord {
   rateLimited?: boolean;
   /** True when the record is a synthetic `error: "server_error"` API error. */
   serverError?: boolean;
+  /** Model reported by the assistant message, when present. */
+  model?: string;
   timestampMs: number;
 }
 
@@ -32,6 +34,17 @@ export interface ClaudeJsonlReaderState {
 const TAIL_RECORD_LIMIT = 50;
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
+
+/** Scan backward for the model reported by the most recent assistant record. */
+export function deriveClaudeLiveModel(records: ParsedRecord[]): string | undefined {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record && record.role === "assistant" && typeof record.model === "string") {
+      return record.model;
+    }
+  }
+  return undefined;
+}
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
@@ -240,6 +253,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
+      ...(typeof message["model"] === "string" ? { model: message["model"] } : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -270,6 +284,7 @@ export async function readClaudeJsonlState(
   reader: ClaudeJsonlReaderState;
   rateLimit: RateLimitDetection | null;
   serverError: boolean;
+  liveModel?: string;
 } | null> {
   // With a pinned id, resolve the transcript by id and never fall back to the
   // newest-mtime scan (which could cross-bind to a sibling session sharing the
@@ -299,11 +314,13 @@ export async function readClaudeJsonlState(
 
   // Mtime unchanged and we already have records → skip re-read
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+    const cachedLiveModel = deriveClaudeLiveModel(currentReader.tailRecords);
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
       serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
+      ...(cachedLiveModel ? { liveModel: cachedLiveModel } : {}),
     };
   }
 
@@ -347,11 +364,13 @@ export async function readClaudeJsonlState(
     return null;
   }
 
+  const liveModel = deriveClaudeLiveModel(combined);
   return {
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectClaudeRateLimit(combined),
     serverError: hasTrailingClaudeServerError(combined),
+    ...(liveModel ? { liveModel } : {}),
   };
 }
 

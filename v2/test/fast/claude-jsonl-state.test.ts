@@ -681,3 +681,38 @@ describe("readClaudeJsonlState server error detection", () => {
     }
   });
 });
+
+describe("readClaudeJsonlState live model derivation", () => {
+  it("derives the live model from the last assistant record on initial read", async () => {
+    const fixturePath = join(__dirname, "../fixtures/agent-history/claude/waiting-end-turn.jsonl");
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "live-model-"));
+    const tempFile = join(tempDir, "waiting-end-turn.jsonl");
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.liveModel).toBe("claude-opus-4-6");
+
+      // Re-reading with the returned reader and an unchanged mtime exercises
+      // the cached early-return path, which must also derive liveModel.
+      const secondResult = await readClaudeJsonlState(tempDir, result.reader);
+      expect(secondResult).not.toBeNull();
+      if (!secondResult) {
+        throw new Error("expected cached fixture result");
+      }
+      expect(secondResult.liveModel).toBe("claude-opus-4-6");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
