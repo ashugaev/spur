@@ -46,7 +46,7 @@ Description is the routing signal — agents decide to load based on it alone. B
 Body:
 - Numbered steps for procedures; explicit decision branches ("If X -> step N. Otherwise -> step M").
 - Templates inline only if < 5 lines, else move to `assets/`.
-- Repo-root paths only (`v2/TEST_SCENARIOS.md`), never `../../...`.
+- Repo-root paths only (`docs/install-from-npm.md`), never `../../...`.
 - No README, CHANGELOG, or doc files alongside SKILL.md.
 
 ## Agent definition

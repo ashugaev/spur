@@ -2,7 +2,7 @@
 
 Contributor bootstrap for this repo.
 
-For package install, first run, and runtime behavior, use [v2/README.md](v2/README.md). For deploy and operator flow, use [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md).
+For package install use [docs/install-from-npm.md](docs/install-from-npm.md); for the CLI and config surface use [docs/commands.md](docs/commands.md) and [docs/configuration.md](docs/configuration.md). For deploy and operator flow use [docs/install-from-source.md](docs/install-from-source.md).
 
 ## Prerequisites
 

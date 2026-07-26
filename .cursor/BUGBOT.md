@@ -21,7 +21,8 @@ Spur is a TypeScript monorepo: a local daemon plus CLI, and an optional Next.js 
 - **Resource leaks**: uncleared intervals/timeouts, uncleaned event listeners, missing `cancel()` on streams
 - **ESM compliance**: imports must use `.js` extension for local files, `node:` prefix for builtins
 - **State detection order**: session state and rate-limit detection must read structured agent sources first (transcript/rollout JSONL, status files); the tmux pane scan is a fallback only. Flag tmux-first detection.
-- Config or interface changes that do not update the config docs (v2/README.md `## Config` and the `spur` SKILL.md mirrors)
+- Config or interface changes that do not update the config docs (`docs/configuration.md`, `docs/commands.md`, and the `spur` SKILL.md mirrors)
+- Docs drift (rules: the `docs` skill): new user-facing functionality shipped without documenting it, content duplicated instead of linked, or docs that over-explain what a mid dev or agent already knows
 
 ## Ignore
 
