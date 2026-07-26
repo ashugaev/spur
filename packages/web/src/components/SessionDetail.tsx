@@ -2589,7 +2589,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </button>
             ) : null}
             {session.agent === "claude" &&
-            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
+            (session.claudeAccounts?.filter((account) => account.status === "ready").length ?? 0) >
+            0 ? (
               <button
                 type="button"
                 disabled={busyAction !== null}
@@ -3258,7 +3259,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {switchAuthOpen && session ? (
             <SwitchAuthDialog
-              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
+              accounts={session.claudeAccounts ?? []}
               activeAccountId={session.activeClaudeAccountId ?? null}
               status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
               errorMessage={switchAuthError}

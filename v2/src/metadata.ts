@@ -11,6 +11,7 @@ import { dirname, join, relative } from "node:path";
 import {
   isSessionState,
   type AvailableBacklogItem,
+  type ClaudeAuthSwitchIntent,
   type PersistedPendingBatch,
   type ReviewProviderId,
   type ReviewSignal,
@@ -512,9 +513,33 @@ function normalizeStateSubscriptions(
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeClaudeAuthSwitch(value: unknown): ClaudeAuthSwitchIntent | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const intent = value as Record<string, unknown>;
+  if (
+    typeof intent.toAccountId !== "string" ||
+    typeof intent.startedAt !== "string" ||
+    (intent.phase !== "prepared" && intent.phase !== "candidate_started") ||
+    (intent.fromAccountId !== undefined && typeof intent.fromAccountId !== "string") ||
+    (intent.fromFingerprint !== undefined && typeof intent.fromFingerprint !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    ...(typeof intent.fromAccountId === "string" ? { fromAccountId: intent.fromAccountId } : {}),
+    ...(typeof intent.fromFingerprint === "string"
+      ? { fromFingerprint: intent.fromFingerprint }
+      : {}),
+    toAccountId: intent.toAccountId,
+    startedAt: intent.startedAt,
+    phase: intent.phase,
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const claudeAuthSwitch = normalizeClaudeAuthSwitch(normalizedSession.claudeAuthSwitch);
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -565,6 +590,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
+    ...(normalizedSession.claudeAccountFingerprint
+      ? { claudeAccountFingerprint: normalizedSession.claudeAccountFingerprint }
+      : {}),
+    ...(claudeAuthSwitch ? { claudeAuthSwitch } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };

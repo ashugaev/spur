@@ -136,18 +136,25 @@ const readClaudeConversationMock = vi.fn();
 const readClaudeSessionStatusMock = vi.fn();
 const listAccountsMock = vi.fn();
 const findAccountMock = vi.fn();
-const isAccountAuthenticatedMock = vi.fn();
-const addAccountMock = vi.fn();
+const accountStatusMock = vi.fn();
+const publicAccountMock = vi.fn();
+const readSetupTokenMock = vi.fn();
+const addSetupTokenAccountMock = vi.fn();
+const enrollSetupTokenMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
 
 interface TestAccount {
   id: string;
   label?: string;
-  configDir: string;
+  kind?: "setup_token" | "legacy_profile";
+  configDir?: string;
   createdAt: string;
   lastUsedAt?: string;
   authenticated: boolean;
+  tokenFingerprint?: string;
+  validatedAt?: string;
+  expiresAt?: string;
 }
 let testAccounts: TestAccount[] = [];
 function resetAccountStoreMocks(): void {
@@ -156,14 +163,28 @@ function resetAccountStoreMocks(): void {
   findAccountMock
     .mockReset()
     .mockImplementation((_dataDir: string, id: string) => testAccounts.find((a) => a.id === id));
-  isAccountAuthenticatedMock
+  accountStatusMock
     .mockReset()
-    .mockImplementation((account: TestAccount) => account.authenticated);
+    .mockImplementation((_dataDir: string, account: TestAccount) =>
+      account.authenticated ? "ready" : account.kind === "setup_token" ? "insecure" : "legacy",
+    );
+  publicAccountMock.mockReset().mockImplementation((_dataDir: string, account: TestAccount) => ({
+    id: account.id,
+    ...(account.label ? { label: account.label } : {}),
+    status: account.authenticated
+      ? "ready"
+      : account.kind === "setup_token"
+        ? "insecure"
+        : "legacy",
+    ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+  }));
+  readSetupTokenMock.mockReset().mockReturnValue("runtime-token");
   touchAccountUsedMock.mockReset().mockImplementation((_dataDir: string, id: string) => {
     const account = testAccounts.find((a) => a.id === id);
     if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
   });
-  addAccountMock.mockReset();
+  addSetupTokenAccountMock.mockReset();
+  enrollSetupTokenMock.mockReset();
   removeAccountMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
@@ -233,10 +254,13 @@ vi.mock("../../src/claude-session-status.js", () => ({
 }));
 
 vi.mock("../../src/claude-accounts.js", () => ({
+  accountStatus: accountStatusMock,
+  publicAccount: publicAccountMock,
+  readSetupToken: readSetupTokenMock,
   listAccounts: listAccountsMock,
   findAccount: findAccountMock,
-  isAccountAuthenticated: isAccountAuthenticatedMock,
-  addAccount: addAccountMock,
+  addSetupTokenAccount: addSetupTokenAccountMock,
+  enrollSetupToken: enrollSetupTokenMock,
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
 }));
@@ -246,8 +270,11 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
 }));
 
 vi.mock("../../src/agents/claude.js", () => ({
+  CLAUDE_MANAGED_AUTH_UNSET_ENV: ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"],
   findLatestSessionFile: findLatestClaudeSessionFileMock,
   DEFAULT_CLAUDE_MODEL: "opus",
+  isClaudeResumePaneReady: vi.fn(() => true),
+  validateClaudeSetupToken: vi.fn(async () => undefined),
 }));
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
@@ -1097,6 +1124,7 @@ describe("SessionService", () => {
     testAccounts = [
       {
         id: "acc-2",
+        kind: "legacy_profile",
         configDir: "/abs/acc-2",
         createdAt: "2026-03-18T09:00:00.000Z",
         authenticated: true,
@@ -3691,22 +3719,35 @@ describe("SessionService", () => {
       testAccounts = [
         {
           id: "primary",
-          configDir: "/abs/primary",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:primary",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
         {
           id: "backup",
-          configDir: "/abs/backup",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:backup",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
       ];
     }
 
     it("refuses to switch while working without force", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
       seedAccounts();
       mockClaudeSessionStatus("working", "busy");
       loadConfigMock.mockReturnValue(baseConfig());
@@ -3721,7 +3762,7 @@ describe("SessionService", () => {
 
     it("rejects an unknown account", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
       seedAccounts();
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue(baseConfig());
@@ -3735,7 +3776,7 @@ describe("SessionService", () => {
 
     it("rejects an account that is not logged in", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
       seedAccounts();
       testAccounts = testAccounts.map((account) =>
         account.id === "backup" ? { ...account, authenticated: false } : account,
@@ -3746,15 +3787,30 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
-        /not logged in/,
+        /re-enrolled/,
       );
     });
 
-    it("switches with force while working and relaunches with the new config dir", async () => {
+    it("switches with force and resumes canonically before committing the binding", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
       seedAccounts();
       mockClaudeJsonlState("waiting");
+      readClaudeSessionStatusMock.mockResolvedValue({
+        state: "waiting",
+        status: "idle",
+        sessionId: "session-uuid",
+        filePath: "status.json",
+        updatedMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      });
+      captureTmuxPaneMock.mockResolvedValue("Claude Code\nReady\n❯");
       tmuxSessionExistsMock.mockResolvedValue(false);
       loadConfigMock.mockReturnValue(baseConfig());
       const { SessionService } = await loadSessionServiceModule();
@@ -3770,17 +3826,13 @@ describe("SessionService", () => {
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
-      // The rotated account's isolated CLAUDE_CONFIG_DIR must thread into the
-      // mcp-config.json merge in setup() too, not just the launch env, so the
-      // relaunch under --strict-mcp-config still sees the backup account's
-      // host MCP servers instead of falling back to the default homedir.
       expect(setupAgentHooksMock).toHaveBeenCalledWith(
-        expect.objectContaining({ claudeConfigDir: "/abs/backup" }),
+        expect.not.objectContaining({ claudeConfigDir: expect.anything() }),
       );
 
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
       expect(resumeCall?.[1]).toBe("session-uuid");
-      expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: "/abs/backup" });
+      expect(resumeCall?.[3]).not.toHaveProperty("claudeConfigDir");
       expect(
         createTmuxSessionMock.mock.calls.some(
           ([args]) =>
@@ -3815,6 +3867,7 @@ describe("SessionService", () => {
       testAccounts = [
         {
           id: "acc-1",
+          kind: "legacy_profile",
           configDir: "/abs/acc-1",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
@@ -3945,8 +3998,8 @@ describe("SessionService", () => {
       const [batched] = (await service.list()) as SessionView[];
 
       expect(single.claudeAccounts).toEqual([
-        { id: "acc-1", label: "primary", authenticated: true },
-        { id: "acc-2", authenticated: false },
+        { id: "acc-1", label: "primary", status: "ready" },
+        { id: "acc-2", status: "legacy" },
       ]);
       expect(batched?.claudeAccounts).toEqual(single.claudeAccounts);
       service.dispose();

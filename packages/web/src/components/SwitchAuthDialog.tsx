@@ -30,7 +30,10 @@ export function SwitchAuthDialog({
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [selected, setSelected] = useState(
-    () => accounts.find((account) => account.id !== activeAccountId)?.id ?? accounts[0]?.id ?? "",
+    () =>
+      accounts.find(
+        (account) => account.status === "ready" && account.id !== activeAccountId,
+      )?.id ?? "",
   );
   const [force, setForce] = useState(false);
 
@@ -111,9 +114,14 @@ export function SwitchAuthDialog({
             onChange={(event) => setSelected(event.target.value)}
           >
             {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
+              <option
+                key={account.id}
+                disabled={account.status !== "ready" || account.id === activeAccountId}
+                value={account.id}
+              >
                 {accountLabel(account)}
                 {account.id === activeAccountId ? " (current)" : ""}
+                {account.status !== "ready" ? ` (${account.status})` : ""}
               </option>
             ))}
           </select>

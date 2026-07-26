@@ -1456,10 +1456,12 @@ describe("startServer", () => {
       "utf8",
     );
 
-    // Stub the login pane so the route mapping is tested without spawning tmux.
-    const startLoginSpy = vi
-      .spyOn(SessionService.prototype, "startAccountLogin")
-      .mockResolvedValue({ loginTmuxSession: "claude-login-test" });
+    const addAccountSpy = vi.spyOn(SessionService.prototype, "addClaudeAccount").mockResolvedValue({
+      id: "new-account",
+      label: "work",
+      status: "ready",
+      expiresAt: "2027-04-15T00:00:00.000Z",
+    });
     const server = await startServer(configPath, {
       info: () => undefined,
       warn: () => undefined,
@@ -1469,19 +1471,22 @@ describe("startServer", () => {
       const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/add`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: "work" }),
+        body: JSON.stringify({ label: "work", setupToken: "test-token" }),
       });
       expect(response.status).toBe(201);
       const payload = (await response.json()) as {
         account: Record<string, unknown>;
-        loginTmuxSession: string;
       };
-      expect(payload.loginTmuxSession).toBe("claude-login-test");
-      expect(payload.account).toMatchObject({ label: "work", authenticated: false });
-      expect(payload.account.id).toEqual(expect.any(String));
+      expect(payload.account).toMatchObject({
+        id: "new-account",
+        label: "work",
+        status: "ready",
+      });
       expect(payload.account).not.toHaveProperty("configDir");
+      expect(payload.account).not.toHaveProperty("setupToken");
+      expect(addAccountSpy).toHaveBeenCalledWith({ label: "work", setupToken: "test-token" });
     } finally {
-      startLoginSpy.mockRestore();
+      addAccountSpy.mockRestore();
       await server.stop();
     }
   });

@@ -634,6 +634,8 @@ export interface SessionRecord {
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
+  claudeAccountFingerprint?: string;
+  claudeAuthSwitch?: ClaudeAuthSwitchIntent;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
@@ -665,6 +667,14 @@ export interface SessionRecord {
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+}
+
+export interface ClaudeAuthSwitchIntent {
+  fromAccountId?: string;
+  fromFingerprint?: string;
+  toAccountId: string;
+  startedAt: string;
+  phase: "prepared" | "candidate_started";
 }
 
 export interface ServiceInstanceRecord {
@@ -711,7 +721,13 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
-  claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
+  claudeAccounts?: {
+    id: string;
+    label?: string;
+    status: "ready" | "legacy" | "expired" | "insecure";
+    expiresAt?: string;
+    lastUsedAt?: string;
+  }[];
   activeClaudeAccountId?: string;
 }
 
@@ -783,9 +799,8 @@ export interface SpawnSessionRequest {
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
   allowUnvalidatedFallbackBranch?: boolean;
-  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
-  // respawn so a rotated session relaunches onto its current account instead of
-  // falling back to the (still-rate-limited) default.
+  // Claude setup-token account bound to the main agent process. Carried across
+  // respawn so a rotated session keeps its committed account.
   claudeAccountId?: string;
 }
 

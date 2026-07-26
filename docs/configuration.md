@@ -176,6 +176,9 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
+- `authRotation.autoRotateOnRateLimit`: instance-only boolean, default `false`. For Claude, switches a rate-limited session to the next `ready` setup-token account.
+- `authRotation.cooldownMinutes`: instance-only number, default `60`. Excludes a limited account for this window.
+- `authRotation.maxRotationsPerEpisode`: instance-only number, default `2`. Caps switches for one rate-limit episode.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
@@ -215,6 +218,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk, and rejects mixed resolved `overrides.worktree`/`overrides.defaultBranch`.
 - `send.interrupt`: optional boolean, default `false`. `false` queues while `working`/`needs_input`, dedupes, flushes when `waiting`. `true` interrupts immediately while `working`; `needs_input` still queues.
 - `send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
+
+`authRotation` in a project `spur.yaml` has no effect. Legacy, expired, or insecure Claude accounts are never rotation candidates. Re-enroll them in the dashboard.
 
 ## Events
 

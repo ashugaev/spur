@@ -29,6 +29,7 @@ import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-lo
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   BacklogItemUnavailableError,
+  ClaudeAuthSwitchConflictError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidSourceReplyInputError,
@@ -618,20 +619,23 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
-        const body = await readJsonBody<{ label?: unknown }>(request);
+        const body = await readJsonBody<{ label?: unknown; setupToken?: unknown }>(request);
         const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = service.addClaudeAccount(label ? { label } : {});
-        const { loginTmuxSession } = await service.startAccountLogin(account.id);
-        // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
-        sendJson(response, 201, {
-          account: {
-            id: account.id,
-            label: account.label,
-            authenticated: false,
-            lastUsedAt: account.lastUsedAt,
-          },
-          loginTmuxSession,
-        });
+        const setupToken =
+          typeof body.setupToken === "string" ? body.setupToken.trim() : "";
+        if (!setupToken) {
+          sendJson(response, 400, { error: "setupToken must be a non-empty string" });
+          return;
+        }
+        try {
+          const account = await service.addClaudeAccount({
+            ...(label ? { label } : {}),
+            setupToken,
+          });
+          sendJson(response, 201, { account });
+        } catch (error) {
+          sendError(response, 400, error instanceof Error ? error.message : "Enrollment failed");
+        }
         return;
       }
 
@@ -654,15 +658,23 @@ export async function startServer(
         return;
       }
 
-      const finishLoginAccountId = path.match(/^\/claude-accounts\/([^/]+)\/finish-login$/)?.[1];
-      if (method === "POST" && finishLoginAccountId) {
-        sendJson(response, 200, await service.finishAccountLogin(finishLoginAccountId));
-        return;
-      }
-
-      const loginStatusAccountId = path.match(/^\/claude-accounts\/([^/]+)\/login-status$/)?.[1];
-      if (method === "GET" && loginStatusAccountId) {
-        sendJson(response, 200, await service.getAccountLoginStatus(loginStatusAccountId));
+      const enrollAccountId = path.match(/^\/claude-accounts\/([^/]+)\/enroll$/)?.[1];
+      if (method === "POST" && enrollAccountId) {
+        const body = await readJsonBody<{ setupToken?: unknown }>(request);
+        const setupToken =
+          typeof body.setupToken === "string" ? body.setupToken.trim() : "";
+        if (!setupToken) {
+          sendJson(response, 400, { error: "setupToken must be a non-empty string" });
+          return;
+        }
+        try {
+          sendJson(response, 200, {
+            account: await service.enrollClaudeAccount(enrollAccountId, setupToken),
+          });
+        } catch (error) {
+          const status = error instanceof ClaudeAuthSwitchConflictError ? 409 : 400;
+          sendError(response, status, error instanceof Error ? error.message : "Enrollment failed");
+        }
         return;
       }
 
@@ -1174,14 +1186,22 @@ export async function startServer(
           sendJson(response, 400, { error: "accountId must be a non-empty string" });
           return;
         }
-        sendJson(
-          response,
-          200,
-          await service.switchAuth(switchAuthSessionId, accountId, {
-            reason: "manual",
-            force: body.force === true,
-          }),
-        );
+        try {
+          sendJson(
+            response,
+            200,
+            await service.switchAuth(switchAuthSessionId, accountId, {
+              reason: "manual",
+              force: body.force === true,
+            }),
+          );
+        } catch (error) {
+          if (error instanceof ClaudeAuthSwitchConflictError) {
+            sendError(response, 409, error.message);
+            return;
+          }
+          throw error;
+        }
         return;
       }
 

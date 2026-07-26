@@ -19,6 +19,7 @@ vi.mock("node:os", () => ({
 import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
+  CLAUDE_MANAGED_AUTH_UNSET_ENV,
   buildClaudePlan,
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
@@ -26,6 +27,7 @@ import {
   ensureClaudeRestrictWritesSettings,
   findLatestSessionFile,
   findClaudeSessionId,
+  isClaudeResumePaneReady,
   sessionFileForId,
 } from "../../src/agents/claude.js";
 
@@ -52,6 +54,34 @@ describe("claudeCommand", () => {
   it("returns SPUR_CLAUDE_BIN when set", () => {
     process.env["SPUR_CLAUDE_BIN"] = "/custom/claude";
     expect(claudeCommand()).toBe("/custom/claude");
+  });
+});
+
+describe("managed Claude auth", () => {
+  it("declares every conflicting inherited source", () => {
+    expect(CLAUDE_MANAGED_AUTH_UNSET_ENV).toEqual(
+      expect.arrayContaining([
+        "CLAUDE_CONFIG_DIR",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+      ]),
+    );
+  });
+
+  it.each([
+    "Choose a theme ❯",
+    "Login required ❯",
+    "Do you trust this folder? ❯",
+    "OAuth error ❯",
+    "Usage limit reached ❯",
+  ])("rejects blocking resume pane: %s", (pane) => {
+    expect(isClaudeResumePaneReady(`Claude Code\n${pane}`)).toBe(false);
+  });
+
+  it("requires a Claude header and prompt instead of accepting bare prompt", () => {
+    expect(isClaudeResumePaneReady("❯")).toBe(false);
+    expect(isClaudeResumePaneReady("Claude Code\nReady\n❯")).toBe(true);
   });
 });
 

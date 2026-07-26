@@ -70,6 +70,55 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
+  it("removes inherited auth before respawning the agent shell", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-auth",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "selected" },
+      unsetEnv: ["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"],
+    });
+
+    const calls = execFileAsyncMock.mock.calls.map(([, args]) => args);
+    const firstUnset = calls.findIndex(
+      (args) => args[0] === "set-environment" && args.includes("ANTHROPIC_API_KEY"),
+    );
+    const secondUnset = calls.findIndex(
+      (args) => args[0] === "set-environment" && args.includes("CLAUDE_CONFIG_DIR"),
+    );
+    const respawn = calls.findIndex((args) => args[0] === "respawn-pane");
+    const firstSend = calls.findIndex((args) => args[0] === "send-keys");
+    expect(firstUnset).toBeGreaterThan(0);
+    expect(secondUnset).toBeGreaterThan(firstUnset);
+    expect(respawn).toBeGreaterThan(secondUnset);
+    expect(firstSend).toBeGreaterThan(respawn);
+    expect(calls[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN=selected");
+  });
+
+  it("kills a new session when inherited-auth removal fails", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "set-environment") throw new Error("unset failed");
+      return { stdout: "", stderr: "" };
+    });
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxSession({
+        sessionName: "api-auth",
+        cwd: "/tmp/worktree",
+        launchCommand: "claude",
+        unsetEnv: ["ANTHROPIC_API_KEY"],
+      }),
+    ).rejects.toThrow("unset failed");
+    expect(
+      execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "kill-session"),
+    ).toBe(true);
+  });
+
   it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {
     process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
     execFileAsyncMock.mockImplementation(async (_file, args) => ({

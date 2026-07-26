@@ -627,7 +627,7 @@ describe("session metadata PR migration", () => {
     ]);
   });
 
-  it("preserves claudeAccountId when writing, reading, and listing session records", async () => {
+  it("preserves committed Claude binding and switch intent", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
       id: "api-1",
@@ -641,6 +641,14 @@ describe("session metadata PR migration", () => {
       launchCommand: "claude",
       status: "running",
       claudeAccountId: "acc-2",
+      claudeAccountFingerprint: "sha256:1234",
+      claudeAuthSwitch: {
+        fromAccountId: "acc-2",
+        fromFingerprint: "sha256:1234",
+        toAccountId: "acc-3",
+        startedAt: "2026-03-18T10:00:30.000Z",
+        phase: "prepared",
+      },
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     };
@@ -650,7 +658,13 @@ describe("session metadata PR migration", () => {
     const rawSession = JSON.parse(
       readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
     );
-    expect(rawSession).toEqual(expect.objectContaining({ claudeAccountId: "acc-2" }));
+    expect(rawSession).toEqual(
+      expect.objectContaining({
+        claudeAccountId: "acc-2",
+        claudeAccountFingerprint: "sha256:1234",
+        claudeAuthSwitch: expect.objectContaining({ toAccountId: "acc-3", phase: "prepared" }),
+      }),
+    );
     expect(readSession(dataDir, "api-1")).toEqual(
       expect.objectContaining({ claudeAccountId: "acc-2" }),
     );

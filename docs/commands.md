@@ -64,6 +64,14 @@ While an agent is busy, manual `send` queues per session and flushes when it ret
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery).
 
+## Claude accounts
+
+Dashboard Accounts enrolls Claude subscription setup tokens. Run `claude setup-token` in a trusted terminal, then paste the token. Spur makes one minimal validation inference at enrollment and before each switch; it can consume quota or incur billing.
+
+Setup-token accounts use Claude's canonical state directory. Switch keeps the native session id, settings, MCP config, and transcript. Spur commits `(current)` only after the exact session resumes idle. Failed or interrupted switches roll back to the prior committed account.
+
+Setup tokens last about one year. Re-enroll `expired`, `insecure`, or legacy accounts. Setup-token auth supports inference only: no Remote Control, claude.ai connectors, or bare mode. Spur does not infer account organization. The token is stored in a mode-`0600` file and passed in the Claude process environment; processes under the same Unix user can inspect it. Linux cloud hosts are supported.
+
 ## spur-slots
 
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session:

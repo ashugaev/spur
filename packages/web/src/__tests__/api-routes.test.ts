@@ -92,6 +92,8 @@ import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/proje
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { POST as addClaudeAccount } from "@/app/api/claude-accounts/add/route";
+import { POST as enrollClaudeAccount } from "@/app/api/claude-accounts/[id]/enroll/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -2521,8 +2523,8 @@ describe("Spur web API routes", () => {
 
     it("GET /api/claude-accounts maps the daemon accounts shape", async () => {
       const accounts = [
-        { id: "acc-1", label: "Work", authenticated: true, lastUsedAt: "2026-07-01T00:00:00.000Z" },
-        { id: "acc-2", authenticated: false },
+        { id: "acc-1", label: "Work", status: "ready", lastUsedAt: "2026-07-01T00:00:00.000Z" },
+        { id: "acc-2", status: "legacy" },
       ];
       mockedSpurRequestJson.mockResolvedValue({ accounts });
 
@@ -2532,6 +2534,51 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
       expect(mockedSpurRequestJson).toHaveBeenCalledWith("/claude-accounts");
       expect(payload.accounts).toEqual(accounts);
+    });
+
+    it("POST /api/claude-accounts/add forwards the private setup token once", async () => {
+      mockedSpurRequestJson.mockResolvedValue({
+        account: { id: "acc-1", status: "ready" },
+      });
+      const response = await addClaudeAccount(
+        new Request("http://localhost:3000/api/claude-accounts/add", {
+          method: "POST",
+          body: JSON.stringify({ label: "Work", setupToken: "private-token" }),
+        }),
+      );
+
+      expect(response.status).toBe(201);
+      const init = mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string };
+      expect(JSON.parse(init.body)).toEqual({ label: "Work", setupToken: "private-token" });
+      expect(await response.text()).not.toContain("private-token");
+    });
+
+    it("POST /api/claude-accounts/:id/enroll validates and forwards the token", async () => {
+      mockedSpurRequestJson.mockResolvedValue({
+        account: { id: "acc-1", status: "ready" },
+      });
+      const response = await enrollClaudeAccount(
+        new Request("http://localhost:3000/api/claude-accounts/acc-1/enroll", {
+          method: "POST",
+          body: JSON.stringify({ setupToken: "replacement-token" }),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson.mock.calls[0]?.[0]).toBe("/claude-accounts/acc-1/enroll");
+      expect(await response.text()).not.toContain("replacement-token");
+    });
+
+    it("rejects an empty setup token before contacting the daemon", async () => {
+      const response = await addClaudeAccount(
+        new Request("http://localhost:3000/api/claude-accounts/add", {
+          method: "POST",
+          body: JSON.stringify({ setupToken: " " }),
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
     });
 
     it("GET /api/claude-accounts returns 502 when the daemon fails", async () => {

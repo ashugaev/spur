@@ -62,7 +62,8 @@ export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 export interface SpurClaudeAccount {
   id: string;
   label?: string;
-  authenticated: boolean;
+  status: "ready" | "legacy" | "expired" | "insecure";
+  expiresAt?: string;
 }
 
 export interface ClaudeAccountSummary extends SpurClaudeAccount {

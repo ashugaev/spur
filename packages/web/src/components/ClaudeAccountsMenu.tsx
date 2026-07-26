@@ -1,22 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
-import { TerminalModal } from "@/components/TerminalModal";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
-import type { ClaudeAccountSummary, DashboardSession } from "@/lib/types";
-
-const LOGIN_POLL_INTERVAL_MS = 3_000;
+import type { ClaudeAccountSummary } from "@/lib/types";
 
 interface AccountProvider {
   agent: AgentName;
 }
 
-// Only claude has a working account surface today; codex/cursor would be
-// appended here once they gain an equivalent accounts API.
 const PROVIDERS: AccountProvider[] = [{ agent: "claude" }];
 const activeProvider = PROVIDERS[0];
 
@@ -24,19 +19,8 @@ interface AccountsResponse {
   accounts: ClaudeAccountSummary[];
 }
 
-interface AddAccountResult {
+interface AccountResult {
   account: ClaudeAccountSummary;
-  loginTmuxSession: string;
-}
-
-interface LoginStatusResult {
-  authenticated: boolean;
-  loginActive: boolean;
-}
-
-interface LoginState {
-  account: ClaudeAccountSummary;
-  tmuxSession: string;
 }
 
 function isAccountsResponse(value: unknown): value is AccountsResponse {
@@ -47,66 +31,25 @@ function isAccountsResponse(value: unknown): value is AccountsResponse {
   );
 }
 
-function isAddAccountResult(value: unknown): value is AddAccountResult {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as { account?: unknown; loginTmuxSession?: unknown };
+function isAccountResult(value: unknown): value is AccountResult {
   return (
-    typeof record.loginTmuxSession === "string" &&
-    typeof record.account === "object" &&
-    record.account !== null
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { account?: unknown }).account === "object" &&
+    (value as { account?: unknown }).account !== null
   );
-}
-
-function isLoginStatusResult(value: unknown): value is LoginStatusResult {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as { authenticated?: unknown; loginActive?: unknown };
-  return typeof record.authenticated === "boolean" && typeof record.loginActive === "boolean";
 }
 
 function accountName(account: ClaudeAccountSummary): string {
   return account.label?.trim() || account.id.slice(0, 8);
 }
 
-// A synthetic session so TerminalModal can attach to the login tmux pane. The
-// override drives the terminal; the rest is filler for the shared component.
-function buildLoginSession(account: ClaudeAccountSummary, tmuxSession: string): DashboardSession {
-  return {
-    id: `claude-login-${account.id}`,
-    projectId: "",
-    projectName: "Claude login",
-    agent: "claude",
-    title: accountName(account),
-    prompt: "",
-    originalTaskPrompt: null,
-    startupAttachmentIds: [],
-    branch: null,
-    worktree: false,
-    tmuxSession,
-    status: "running",
-    state: "working",
-    createdAt: "",
-    updatedAt: "",
-    lastActivityAt: "",
-    runtimeAlive: true,
-    workspaceExists: true,
-    worktreePath: "",
-    services: [],
-    artifacts: [],
-    queuedMessages: { messages: [], awaitingPrompt: false },
-    sidecars: [],
-    runningSidecars: [],
-    links: [],
-    tags: [],
-    hasServiceIssues: false,
-    deskKey: "",
-  };
-}
-
 export function ClaudeAccountsMenu() {
   const popover = useFooterPopover();
   const queryClient = useQueryClient();
   const [label, setLabel] = useState("");
-  const [login, setLogin] = useState<LoginState | null>(null);
+  const [setupToken, setSetupToken] = useState("");
+  const [enrollId, setEnrollId] = useState<string | null>(null);
 
   const accountsQuery = useQuery<AccountsResponse>({
     queryKey: ["claude-accounts"],
@@ -118,40 +61,39 @@ export function ClaudeAccountsMenu() {
       }
       return payload;
     },
-    enabled: popover.open || login !== null,
+    enabled: popover.open,
     staleTime: 30_000,
   });
 
   const refreshAccounts = () => queryClient.invalidateQueries({ queryKey: ["claude-accounts"] });
 
-  const addMutation = useMutation<AddAccountResult, Error, string>({
-    mutationFn: async (nextLabel) => {
-      const response = await fetch("/api/claude-accounts/add", {
+  const enrollMutation = useMutation<
+    AccountResult,
+    Error,
+    { id: string | null; label: string; setupToken: string }
+  >({
+    mutationFn: async (input) => {
+      const path = input.id
+        ? `/api/claude-accounts/${encodeURIComponent(input.id)}/enroll`
+        : "/api/claude-accounts/add";
+      const response = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(nextLabel ? { label: nextLabel } : {}),
+        body: JSON.stringify({
+          ...(input.id ? {} : { label: input.label }),
+          setupToken: input.setupToken,
+        }),
       });
       const payload = await readResponsePayload(response);
-      if (response.status !== 201 || !isAddAccountResult(payload)) {
-        throw new Error(responseErrorMessage(payload, "Failed to add Claude account"));
+      if (!response.ok || !isAccountResult(payload)) {
+        throw new Error(responseErrorMessage(payload, "Failed to enroll Claude account"));
       }
       return payload;
     },
-    onSuccess: (result) => {
+    onSuccess: () => {
       setLabel("");
-      setLogin({ account: result.account, tmuxSession: result.loginTmuxSession });
-      void refreshAccounts();
-    },
-  });
-
-  const finishMutation = useMutation({
-    mutationFn: async (id: string) => {
-      await fetch(`/api/claude-accounts/${encodeURIComponent(id)}/finish-login`, {
-        method: "POST",
-      });
-    },
-    onSettled: () => {
-      setLogin(null);
+      setSetupToken("");
+      setEnrollId(null);
       void refreshAccounts();
     },
   });
@@ -168,43 +110,12 @@ export function ClaudeAccountsMenu() {
         throw new Error(responseErrorMessage(payload, "Failed to remove Claude account"));
       }
     },
-    onSuccess: () => {
-      void refreshAccounts();
-    },
+    onSuccess: () => void refreshAccounts(),
   });
-
-  // Poll the pending login until the account authenticates, then auto-close.
-  const loginStatusQuery = useQuery<LoginStatusResult>({
-    queryKey: ["claude-account-login", login?.account.id],
-    queryFn: async ({ signal }) => {
-      const response = await fetch(
-        `/api/claude-accounts/${encodeURIComponent(login?.account.id ?? "")}/login-status`,
-        { signal },
-      );
-      const payload = await readResponsePayload(response);
-      if (!response.ok || !isLoginStatusResult(payload)) {
-        throw new Error(responseErrorMessage(payload, "Failed to read login status"));
-      }
-      return payload;
-    },
-    enabled: login !== null,
-    refetchInterval: LOGIN_POLL_INTERVAL_MS,
-  });
-
-  const loginAuthenticated = loginStatusQuery.data?.authenticated === true;
-  useEffect(() => {
-    // Route auto-close through finishMutation (same as manual close) so the
-    // claude-login-{id} tmux pane is killed; onSettled clears login + refreshes.
-    if (login && loginAuthenticated && !finishMutation.isPending) {
-      finishMutation.mutate(login.account.id);
-    }
-  }, [login, loginAuthenticated, finishMutation]);
 
   const accounts = accountsQuery.data?.accounts ?? [];
-  const authenticatedCount = accounts.filter((account) => account.authenticated).length;
-
-  const addError = addMutation.error?.message ?? null;
-  const removeError = removeMutation.error?.message ?? null;
+  const readyCount = accounts.filter((account) => account.status === "ready").length;
+  const error = enrollMutation.error?.message ?? removeMutation.error?.message ?? null;
 
   return (
     <div
@@ -227,23 +138,14 @@ export function ClaudeAccountsMenu() {
         <AccountsIcon className="h-4 w-4" />
       </button>
       {popover.open ? (
-        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(22rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(28rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">
               {getAgentDisplayName(activeProvider.agent)} accounts
             </span>
-            <span className="font-bold text-[var(--color-text-primary)]">
-              {authenticatedCount} ready
-            </span>
+            <span className="font-bold text-[var(--color-text-primary)]">{readyCount} ready</span>
           </div>
-          {/* Additional providers (codex, cursor) append here once they gain an accounts API. */}
-          {accounts.length === 0 ? (
-            <div className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              {accountsQuery.isError
-                ? (accountsQuery.error as Error).message
-                : "No accounts yet. Add extra accounts to rotate between them — manually, or automatically onto a fresh one when the current account runs out of quota."}
-            </div>
-          ) : (
+          {accounts.length > 0 ? (
             <ul className="mb-2 flex max-h-48 flex-col gap-1 overflow-y-auto">
               {accounts.map((account) => (
                 <li
@@ -256,30 +158,27 @@ export function ClaudeAccountsMenu() {
                     </span>
                     <span
                       className={
-                        account.authenticated
+                        account.status === "ready"
                           ? "text-[var(--color-status-ready)]"
                           : "text-[var(--color-status-attention)]"
                       }
                     >
-                      {account.authenticated ? "ready" : "not logged in"}
+                      {account.status}
                     </span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
-                    <button
-                      aria-label={`Use Claude account ${accountName(account)}`}
-                      className="cursor-not-allowed border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] opacity-50 outline-none"
-                      data-testid={`use-account-${account.id}`}
-                      disabled
-                      tabIndex={-1}
-                      title="Switching accounts is per-session (pick this account when starting a session); no global switch is available yet."
-                      type="button"
-                    >
-                      Use
-                    </button>
+                    {account.status !== "ready" ? (
+                      <button
+                        className="border border-[var(--color-border-default)] px-1.5 py-0.5 font-bold text-[var(--color-text-secondary)]"
+                        type="button"
+                        onClick={() => setEnrollId(account.id)}
+                      >
+                        Re-enroll
+                      </button>
+                    ) : null}
                     <button
                       aria-label={`Remove Claude account ${accountName(account)}`}
-                      className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
-                      data-testid={`remove-account-${account.id}`}
+                      className="border border-[var(--color-border-default)] px-1.5 py-0.5 font-bold text-[var(--color-status-error)] disabled:opacity-50"
                       disabled={removeMutation.isPending}
                       type="button"
                       onClick={() => removeMutation.mutate(account.id)}
@@ -290,46 +189,68 @@ export function ClaudeAccountsMenu() {
                 </li>
               ))}
             </ul>
+          ) : (
+            <p className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
+              No enrolled accounts.
+            </p>
           )}
-          {removeError ? (
-            <div className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]">
-              {removeError}
+          <div className="border-t border-[var(--color-border-subtle)] pt-2">
+            <p className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
+              Run <code>claude setup-token</code> in a trusted terminal, then paste the token.
+              Enrollment makes one validation request. Tokens last about one year and support
+              inference only: no Remote Control, connectors, or bare mode. Spur cannot verify the
+              organization. Processes under the same Unix user can inspect process environment.
+            </p>
+            {!enrollId ? (
+              <input
+                aria-label="New Claude account label"
+                className="mb-2 w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 normal-case tracking-normal text-[var(--color-text-primary)] outline-none focus-visible:border-[var(--color-accent)]"
+                disabled={enrollMutation.isPending}
+                placeholder="Label (optional)"
+                type="text"
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
+              />
+            ) : null}
+            <div className="flex gap-2">
+              <input
+                aria-label="Claude setup token"
+                autoComplete="off"
+                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 normal-case tracking-normal text-[var(--color-text-primary)] outline-none focus-visible:border-[var(--color-accent)]"
+                disabled={enrollMutation.isPending}
+                placeholder="Setup token"
+                type="password"
+                value={setupToken}
+                onChange={(event) => setSetupToken(event.target.value)}
+              />
+              <button
+                className="border border-[var(--color-border-default)] px-2 py-1 font-bold text-[var(--color-text-secondary)] disabled:opacity-50"
+                data-testid="add-account"
+                disabled={enrollMutation.isPending || !setupToken.trim()}
+                type="button"
+                onClick={() =>
+                  enrollMutation.mutate({
+                    id: enrollId,
+                    label: label.trim(),
+                    setupToken: setupToken.trim(),
+                  })
+                }
+              >
+                {enrollMutation.isPending ? "Validating…" : enrollId ? "Re-enroll" : "Enroll"}
+              </button>
+              {enrollId ? (
+                <button type="button" onClick={() => setEnrollId(null)}>
+                  Cancel
+                </button>
+              ) : null}
             </div>
-          ) : null}
-          <div className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] pt-2">
-            <input
-              aria-label="New Claude account label"
-              className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 normal-case tracking-normal text-[var(--color-text-primary)] outline-none focus-visible:border-[var(--color-accent)]"
-              disabled={addMutation.isPending}
-              placeholder="Label (optional)"
-              type="text"
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-            />
-            <button
-              className="border border-[var(--color-border-default)] px-2 py-1 font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-              data-testid="add-account"
-              disabled={addMutation.isPending}
-              type="button"
-              onClick={() => addMutation.mutate(label.trim())}
-            >
-              {addMutation.isPending ? "Adding…" : "Add account"}
-            </button>
           </div>
-          {addError ? (
-            <div className="mt-2 normal-case tracking-normal text-[var(--color-status-error)]">
-              {addError}
-            </div>
+          {error ? (
+            <p className="mt-2 normal-case tracking-normal text-[var(--color-status-error)]">
+              {error}
+            </p>
           ) : null}
         </div>
-      ) : null}
-      {login ? (
-        <TerminalModal
-          session={buildLoginSession(login.account, login.tmuxSession)}
-          titleSuffix="Login — run /login, then complete browser auth"
-          tmuxSessionOverride={login.tmuxSession}
-          onClose={() => finishMutation.mutate(login.account.id)}
-        />
       ) : null}
     </div>
   );

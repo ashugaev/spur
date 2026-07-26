@@ -487,6 +487,7 @@ export async function createTmuxSession(input: {
   launchCommand: string;
   agent?: AgentName;
   env?: Record<string, string>;
+  unsetEnv?: readonly string[];
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs = buildEnvArgs(input.env);
@@ -504,9 +505,16 @@ export async function createTmuxSession(input: {
     ...envArgs,
   ]);
   invalidateFleetProbeCaches();
-  await sleep(300);
 
   try {
+    if (input.unsetEnv?.length) {
+      for (const key of input.unsetEnv) {
+        await tmux("set-environment", "-r", "-t", sessionTarget, key);
+      }
+      await tmux("respawn-pane", "-k", "-t", exactPaneTarget(input.sessionName), "-c", input.cwd);
+      invalidateFleetProbeCaches();
+    }
+    await sleep(300);
     await sendMessageToTmux(input.sessionName, input.launchCommand, {
       ...(input.agent ? { agent: input.agent } : {}),
     });

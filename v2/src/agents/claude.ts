@@ -1,10 +1,155 @@
-import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { execFile } from "node:child_process";
+import { readdir, stat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { AgentModel } from "./models.js";
+
+const execFileAsync = promisify(execFile);
+
+export const CLAUDE_MANAGED_AUTH_UNSET_ENV = [
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_OAUTH_SCOPES",
+] as const;
+
+export function claudeManagedAuthEnv(setupToken: string): NodeJS.ProcessEnv {
+  const denied = new Set<string>(CLAUDE_MANAGED_AUTH_UNSET_ENV);
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && !denied.has(entry[0]),
+    ),
+  );
+  env["CLAUDE_CODE_OAUTH_TOKEN"] = setupToken;
+  return env;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error("Claude authentication check returned an invalid response");
+  }
+}
+
+function probeError(error: unknown): Error {
+  if (isRecord(error) && (error.code === "ETIMEDOUT" || error.killed === true)) {
+    return new Error("Claude setup-token validation timed out");
+  }
+  return new Error("Claude setup token was rejected, expired, or rate limited");
+}
+
+export async function validateClaudeSetupToken(
+  setupToken: string,
+  options: { cwd?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const timeout = options.timeoutMs ?? 30_000;
+  const env = claudeManagedAuthEnv(setupToken);
+  let authStdout: string;
+  try {
+    const result = await execFileAsync(claudeCommand(), ["auth", "status", "--json"], {
+      cwd: options.cwd,
+      env,
+      timeout,
+      maxBuffer: 256 * 1_024,
+    });
+    authStdout = result.stdout;
+  } catch (error) {
+    throw probeError(error);
+  }
+  const auth = parseJson(authStdout);
+  if (
+    !isRecord(auth) ||
+    auth.loggedIn !== true ||
+    auth.authMethod !== "oauth_token" ||
+    auth.apiProvider !== "firstParty"
+  ) {
+    throw new Error("Claude setup token conflicts with the configured authentication source");
+  }
+
+  const probeDir = await mkdtemp(join(tmpdir(), "spur-claude-auth-"));
+  try {
+    const configDir = join(probeDir, "config");
+    await mkdir(configDir, { mode: 0o700 });
+    const settingsPath = join(probeDir, "settings.json");
+    const mcpPath = join(probeDir, "mcp.json");
+    await writeFile(settingsPath, '{"disableAllHooks":true}\n', { encoding: "utf8", mode: 0o600 });
+    await writeFile(mcpPath, '{"mcpServers":{}}\n', { encoding: "utf8", mode: 0o600 });
+    let inferenceStdout: string;
+    try {
+      const result = await execFileAsync(
+        claudeCommand(),
+        [
+          "-p",
+          "Reply with OK.",
+          "--model",
+          "haiku",
+          "--output-format",
+          "json",
+          "--max-budget-usd",
+          "0.02",
+          "--tools",
+          "",
+          "--no-session-persistence",
+          "--settings",
+          settingsPath,
+          "--mcp-config",
+          mcpPath,
+          "--strict-mcp-config",
+        ],
+        {
+          cwd: probeDir,
+          env: { ...env, CLAUDE_CONFIG_DIR: configDir },
+          timeout,
+          maxBuffer: 1_024 * 1_024,
+        },
+      );
+      inferenceStdout = result.stdout;
+    } catch (error) {
+      throw probeError(error);
+    }
+    const inference = parseJson(inferenceStdout);
+    if (!isRecord(inference) || inference.is_error === true || typeof inference.result !== "string") {
+      throw new Error("Claude setup token was rejected, expired, or rate limited");
+    }
+  } finally {
+    await rm(probeDir, { recursive: true, force: true });
+  }
+}
+
+const CLAUDE_BLOCKING_PANE_PATTERNS = [
+  /choose (?:a )?theme/i,
+  /select (?:a )?theme/i,
+  /log in|login required|not logged in/i,
+  /trust this folder|do you trust/i,
+  /oauth (?:error|failed|invalid)/i,
+  /api (?:error|key required)/i,
+  /usage limit|rate limit|extra usage/i,
+];
+
+export function isClaudeResumePaneReady(paneText: string): boolean {
+  return (
+    /Claude Code/i.test(paneText) &&
+    /❯/.test(paneText) &&
+    !CLAUDE_BLOCKING_PANE_PATTERNS.some((pattern) => pattern.test(paneText))
+  );
+}
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";

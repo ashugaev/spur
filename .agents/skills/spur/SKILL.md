@@ -168,23 +168,27 @@ backlog:
 
 ### Claude auth rotation
 
-Rotate Claude login accounts across the rate limit. Each account is an isolated
-`CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` +
-`<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
+Rotate Claude subscription accounts with setup tokens. Accounts are runtime
+state, not config: v2 metadata in `<dataDir>/claude-accounts.json`, mode-`0600`
+secrets under `<dataDir>/claude-accounts/<id>/`.
 
-Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
-accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
-Spur auto-detects the account once `.credentials.json` lands. Select sets the
-active account; remove drops it.
+Accounts UI: run `claude setup-token` in a trusted terminal, paste the token,
+then Spur runs one minimal validation inference. Setup tokens last about one
+year and support inference only: no Remote Control, claude.ai connectors, or
+bare mode. Spur does not verify organization. Same-uid processes can inspect
+the selected process environment. Legacy/expired/insecure accounts require
+explicit re-enrollment.
 
-Per-session switch auth (claude sessions only): kills and relaunches the session
-under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
-switches even while the session is working.
+Managed sessions keep canonical Claude state. Spur selects the account with
+`CLAUDE_CODE_OAUTH_TOKEN`, removes conflicting inherited auth, and never sets
+`CLAUDE_CONFIG_DIR`. Per-session switch preflights the target, resumes the exact
+native session id, then commits `(current)`. Failure or daemon restart rolls
+back to the prior committed binding. Force may stop in-flight work.
 
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;
 the account store is currently claude-only). When on,
-a claude session that hits `rate_limited` rotates to the next authenticated,
+a claude session that hits `rate_limited` rotates to the next ready,
 non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
 limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
 limited -> falls through to the reactivation nudge.

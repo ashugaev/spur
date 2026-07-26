@@ -1786,7 +1786,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText("System")).not.toBeVisible();
   });
 
-  test("footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts", async ({
+  test("footer right side shows a Claude accounts trigger next to the version menu with a ready count", async ({
     page,
   }) => {
     await mockSessions(page, []);
@@ -1796,8 +1796,8 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
         contentType: "application/json",
         body: JSON.stringify({
           accounts: [
-            { id: "acc-ready-01", label: "Work", authenticated: true },
-            { id: "acc-idle-02", label: "Home", authenticated: false },
+            { id: "acc-ready-01", label: "Work", status: "ready" },
+            { id: "acc-idle-02", label: "Home", status: "expired" },
           ],
         }),
       });
@@ -1821,12 +1821,12 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       rightGroup.getByRole("button", { name: "Show Spur version information" }),
     ).toBeVisible();
 
-    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
+    // Opening the menu, the header reflects only ready accounts (1 of 2).
     await trigger.click();
     await expect(page.getByText("1 ready")).toBeVisible();
   });
 
-  test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
+  test("opening the Claude accounts menu lists readiness and re-enrollment actions", async ({
     page,
   }) => {
     await mockSessions(page, []);
@@ -1836,8 +1836,8 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
         contentType: "application/json",
         body: JSON.stringify({
           accounts: [
-            { id: "acc-labelled-01", label: "Work", authenticated: true },
-            { id: "abcdef1234567890", authenticated: false },
+            { id: "acc-labelled-01", label: "Work", status: "ready" },
+            { id: "abcdef1234567890", status: "legacy" },
           ],
         }),
       });
@@ -1846,31 +1846,26 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     await page.getByRole("button", { name: "Manage Claude accounts" }).click();
 
-    // Labelled account renders its label with the "ready" badge, a disabled Use
-    // action, and a Remove action.
     const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
     await expect(labelledRow).toContainText("ready");
-    await expect(labelledRow.getByTestId("use-account-acc-labelled-01")).toBeDisabled();
     await expect(
       labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
     ).toBeVisible();
 
-    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
     const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
-    await expect(shortIdRow).toContainText("not logged in");
-    await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
+    await expect(shortIdRow).toContainText("legacy");
+    await expect(shortIdRow.getByRole("button", { name: "Re-enroll" })).toBeVisible();
     await expect(
       shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
     ).toBeVisible();
   });
 
-  test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
+  test("enrolling a setup token validates privately and clears the secret on success", async ({
     page,
   }) => {
     await mockSessions(page, []);
 
-    let loginStatusCalls = 0;
-    let finishLoginCalled = false;
+    let submittedBody: unknown;
 
     await page.route("/api/claude-accounts", (route) => {
       void route.fulfill({
@@ -1880,47 +1875,30 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       });
     });
     await page.route("/api/claude-accounts/add", (route) => {
+      submittedBody = route.request().postDataJSON();
       void route.fulfill({
         status: 201,
         contentType: "application/json",
         body: JSON.stringify({
-          account: { id: "new-1", label: "New", authenticated: false },
-          loginTmuxSession: "claude-login-x",
+          account: { id: "new-1", label: "New", status: "ready" },
         }),
-      });
-    });
-    await page.route("/api/claude-accounts/new-1/login-status", (route) => {
-      loginStatusCalls += 1;
-      // First poll is still pending; the next poll reports the account authenticated.
-      const authenticated = loginStatusCalls > 1;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
-      });
-    });
-    await page.route("/api/claude-accounts/new-1/finish-login", (route) => {
-      finishLoginCalled = true;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authenticated: true }),
       });
     });
 
     await page.goto("/");
 
     await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+    await expect(page.getByText(/one validation request/i)).toBeVisible();
+    await page.getByRole("textbox", { name: "New Claude account label" }).fill("New");
+    const tokenInput = page.getByLabel("Claude setup token");
+    await expect(tokenInput).toHaveAttribute("type", "password");
+    const token = `fixture-${Date.now()}`;
+    await tokenInput.fill(token);
     await page.getByTestId("add-account").click();
 
-    // The login terminal opens on the returned tmux session (session id claude-login-new-1).
-    const loginTerminal = page.getByRole("dialog", { name: "Terminal claude-login-new-1" });
-    await expect(loginTerminal).toBeVisible();
-
-    // Polling login-status (every LOGIN_POLL_INTERVAL_MS = 3s) flips to authenticated,
-    // which finishes login and auto-closes the terminal.
-    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
-    expect(finishLoginCalled).toBe(true);
+    await expect(tokenInput).toHaveValue("");
+    expect(submittedBody).toEqual({ label: "New", setupToken: token });
+    await expect(page.locator("body")).not.toContainText(token);
   });
 });
 
