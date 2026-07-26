@@ -5,15 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
-import { getAgentDisplayName, type AgentName } from "@/lib/agents";
+import { getAgentDisplayName } from "@/lib/agents";
 import type { ClaudeAccountSummary } from "@/lib/types";
-
-interface AccountProvider {
-  agent: AgentName;
-}
-
-const PROVIDERS: AccountProvider[] = [{ agent: "claude" }];
-const activeProvider = PROVIDERS[0];
 
 interface AccountsResponse {
   accounts: ClaudeAccountSummary[];
@@ -141,7 +134,7 @@ export function ClaudeAccountsMenu() {
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(28rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">
-              {getAgentDisplayName(activeProvider.agent)} accounts
+              {getAgentDisplayName("claude")} accounts
             </span>
             <span className="font-bold text-[var(--color-text-primary)]">{readyCount} ready</span>
           </div>

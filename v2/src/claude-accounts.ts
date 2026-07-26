@@ -298,10 +298,6 @@ export function removeAccount(dataDir: string, id: string): void {
   rmSync(accountDir(dataDir, id), { recursive: true, force: true });
 }
 
-export function isAccountAuthenticated(account: ClaudeAccount): boolean {
-  return account.kind === "setup_token";
-}
-
 export function touchAccountUsed(dataDir: string, id: string): void {
   writeAccounts(
     dataDir,

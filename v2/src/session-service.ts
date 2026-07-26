@@ -2664,7 +2664,7 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
-      const claudeAccounts = this.computeClaudeAccountsView();
+      const claudeAccounts = this.listClaudeAccounts();
       for (const session of sessions) {
         const view = await this.enrich(session, claudeAccounts);
         this.checkPrForSession(session, view.state);
@@ -3812,7 +3812,7 @@ export class SessionService {
     });
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich (N listAccounts reads + N×M existsSync).
-    const claudeAccounts = this.computeClaudeAccountsView();
+    const claudeAccounts = this.listClaudeAccounts();
     const views = await Promise.all(
       sessions.map((session) => this.enrich(session, claudeAccounts)),
     );
@@ -9542,13 +9542,6 @@ export class SessionService {
     };
   }
 
-  // Snapshot of claude accounts for SessionView.claudeAccounts.
-  // Computed once per listSessions() batch and threaded into every enrich so a
-  // batch of N claude sessions does one listAccounts read instead of N.
-  private computeClaudeAccountsView(): PublicClaudeAccount[] {
-    return this.listClaudeAccounts();
-  }
-
   private async enrich(
     session: SessionRecord,
     claudeAccounts?: PublicClaudeAccount[],
@@ -9588,7 +9581,7 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
     });
     const resolvedClaudeAccounts =
-      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+      session.agent === "claude" ? (claudeAccounts ?? this.listClaudeAccounts()) : [];
     const committedClaudeAccount =
       session.agent === "claude" && session.claudeAccountId && session.claudeAccountFingerprint
         ? findAccount(this.config.dataDir, session.claudeAccountId)
