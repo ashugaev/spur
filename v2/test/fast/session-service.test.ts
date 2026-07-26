@@ -86,6 +86,7 @@ const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undef
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
+const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const isProcessRunningInTmuxMock = vi.fn();
@@ -391,6 +392,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: sidecarTmuxAliveMock,
   sidecarTmuxSession: sidecarTmuxSessionMock,
   killSidecarTmux: killSidecarTmuxMock,
+  listTmuxSessionNames: listTmuxSessionNamesMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: getTmuxPanePidMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
@@ -923,6 +925,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
+    listTmuxSessionNamesMock.mockReset().mockResolvedValue(new Set());
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
@@ -3767,6 +3770,14 @@ describe("SessionService", () => {
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
+      // The rotated account's isolated CLAUDE_CONFIG_DIR must thread into the
+      // mcp-config.json merge in setup() too, not just the launch env, so the
+      // relaunch under --strict-mcp-config still sees the backup account's
+      // host MCP servers instead of falling back to the default homedir.
+      expect(setupAgentHooksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ claudeConfigDir: "/abs/backup" }),
+      );
+
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
       expect(resumeCall?.[1]).toBe("session-uuid");
       expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: "/abs/backup" });
@@ -5473,6 +5484,22 @@ describe("SessionService", () => {
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
+  });
+
+  it("tears down the playwright sidecar exactly once when reconciling a dead runtime to stopped", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.status).toBe("stopped");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledTimes(1);
   });
 
   it("reconciles a spawning session to stopped when its spawn is no longer in flight", async () => {
@@ -10512,6 +10539,174 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
       ),
     ).toBe(true);
+  });
+
+  it("reaps a playwright sidecar tmux session whose owning record is terminal or missing, but not a live one", async () => {
+    const sessions = createSessionStore();
+    sessions.set("term-1", {
+      id: "term-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "term-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/term-1",
+      tmuxSession: "term-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "completed",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sessions.set("live-1", {
+      id: "live-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "live-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/live-1",
+      tmuxSession: "live-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(
+      new Set(["term-1--playwright", "live-1--playwright", "missing-1--playwright", "live-1"]),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("term-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("missing-1", "playwright");
+    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("live-1", "playwright");
+    service.dispose();
+  });
+
+  it("does not reap a compound user sidecar name ending in --playwright on a live session", async () => {
+    const sessions = createSessionStore();
+    sessions.set("live-2", {
+      id: "live-2",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "live-2",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/live-2",
+      tmuxSession: "live-2",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["api--playwright"],
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(new Set(["live-2--api--playwright"]));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("reaps playwright sidecars on the crash path for stopped and errored sessions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("stopped-1", {
+      id: "stopped-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "stopped-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/stopped-1",
+      tmuxSession: "stopped-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sessions.set("err-1", {
+      id: "err-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "err-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/err-1",
+      tmuxSession: "err-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(
+      new Set(["stopped-1--playwright", "err-1--playwright"]),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("stopped-1", "playwright");
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("err-1", "playwright");
+    service.dispose();
+  });
+
+  it("skips a running reaper pass instead of overlapping it", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      sidecarReaperRunning: boolean;
+      dispose(): void;
+    };
+    service.sidecarReaperRunning = true;
+
+    await service.reapDeadSessionSidecars();
+
+    expect(listTmuxSessionNamesMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("emits a reaper sweep event distinct from the boot sweep event", async () => {
+    createSessionStore();
+    listTmuxSessionNamesMock.mockResolvedValue(new Set());
+    sweepLeakedPlaywrightMock.mockResolvedValue(2);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      dispose(): void;
+    };
+
+    await service.reapDeadSessionSidecars();
+
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.sidecar_reaper.swept",
+      ),
+    ).toBe(true);
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
+      ),
+    ).toBe(false);
+    service.dispose();
   });
 
   it("rejects a branch override that would mutate the shared workspace", async () => {
