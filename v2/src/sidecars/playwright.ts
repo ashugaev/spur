@@ -4,13 +4,12 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
-import { shellEscape } from "./shell-escape.js";
+import { shellEscape } from "../agents/shell-escape.js";
 
 const execFileAsync = promisify(execFile);
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
-export const SPUR_PLAYWRIGHT_SESSION_ENV = "SPUR_PLAYWRIGHT_SESSION";
 
 const PLAYWRIGHT_PORT_RANGE = { start: 8730, end: 8799 } as const;
 // Host used to BIND the server process (--host). Keep on loopback IP.
@@ -53,26 +52,30 @@ export function playwrightMcpUrl(port: number): string {
 }
 
 /**
- * Built-in implicit sidecar for one Spur-owned playwright MCP server bound to
- * loopback. Built per session so the marker env carries the concrete session id
- * (tmux -e passes literal values, not shell-expanded). The port env is expanded
- * at runtime inside the sidecar pane (`bash -lc "exec ..."`).
+ * Built-in implicit sidecar def for one Spur-owned playwright MCP server bound
+ * to loopback. A static template (no per-session state): the port env is
+ * expanded at runtime inside the sidecar pane (`bash -lc "exec ..."`). Off by
+ * default; a project opts in via `sidecars.playwright.autoStart: true`, and
+ * `agents` scopes it to claude/codex — cursor never gets it.
  */
-export function buildPlaywrightSidecarConfig(sessionId: string): SidecarConfig {
-  const bin = resolvePlaywrightMcpBin();
-  return {
-    command: `node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
-    autoStart: true,
-    env: { [SPUR_PLAYWRIGHT_SESSION_ENV]: sessionId },
-    ports: {
-      http: {
-        env: SPUR_RESERVED_PORT_PLAYWRIGHT,
-        start: PLAYWRIGHT_PORT_RANGE.start,
-        end: PLAYWRIGHT_PORT_RANGE.end,
-      },
+export const PLAYWRIGHT_SIDECAR_CONFIG: SidecarConfig = {
+  command: `node ${shellEscape(resolvePlaywrightMcpBin())} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
+  autoStart: false,
+  agents: ["claude", "codex"],
+  ports: {
+    http: {
+      env: SPUR_RESERVED_PORT_PLAYWRIGHT,
+      start: PLAYWRIGHT_PORT_RANGE.start,
+      end: PLAYWRIGHT_PORT_RANGE.end,
     },
-  };
-}
+  },
+  mcp: {
+    server: PLAYWRIGHT_SIDECAR_NAME,
+    portId: "http",
+    path: PLAYWRIGHT_ENDPOINT_PATH,
+    clientHost: PLAYWRIGHT_CLIENT_HOST,
+  },
+};
 
 const READINESS_ATTEMPTS = 8;
 const READINESS_INTERVAL_MS = 250;

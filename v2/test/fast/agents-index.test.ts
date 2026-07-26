@@ -131,12 +131,12 @@ describe("setupAgentHooks", () => {
     });
   });
 
-  it("writes an http mcp-config.json and returns its path for claude when a playwright port is set", async () => {
+  it("writes an http mcp-config.json and returns its path for claude when mcpBindings are set", async () => {
     const result = await setupAgentHooks({
       agent: "claude",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
-      playwrightPort: 8742,
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
     });
 
     expect(result).toEqual({
@@ -170,7 +170,7 @@ describe("setupAgentHooks", () => {
       agent: "claude",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
-      playwrightPort: 8742,
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
       claudeConfigDir: "/home/user",
     });
 
@@ -214,7 +214,7 @@ describe("setupAgentHooks", () => {
       agent: "claude",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
-      playwrightPort: 8742,
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
       claudeConfigDir: "/home/user",
     });
 
@@ -230,20 +230,44 @@ describe("setupAgentHooks", () => {
     });
   });
 
-  it("forwards the playwright port to codex hook config", async () => {
+  it("emits one mcpServers entry per binding for claude", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [
+        { server: "playwright", url: "http://localhost:8742/mcp" },
+        { server: "widget", url: "http://localhost:9001/widget" },
+      ],
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+        widget: { type: "http", url: "http://localhost:9001/widget" },
+      },
+    });
+  });
+
+  it("forwards mcpBindings to codex hook config", async () => {
     ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+    const mcpBindings = [{ server: "playwright", url: "http://localhost:8742/mcp" }];
 
     await setupAgentHooks({
       agent: "codex",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
-      playwrightPort: 8742,
+      mcpBindings,
     });
 
     expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
       "/tmp/spur-data/session-tools/api-1",
       ["/tmp/spur-worktrees/api/api-1"],
-      { playwrightPort: 8742 },
+      { mcpBindings },
     );
   });
 

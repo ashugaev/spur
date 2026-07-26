@@ -13,11 +13,10 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { playwrightMcpUrl } from "./playwright-mcp.js";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { TranscriptEntry } from "../types.js";
+import type { TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -538,19 +537,18 @@ export function appendCodexTrustedProjects(
   return result;
 }
 
-const CODEX_PLAYWRIGHT_TABLE = "[mcp_servers.playwright]";
-
-// Remove an inherited [mcp_servers.playwright] table (header through the line
+// Remove an inherited [mcp_servers.<server>] table (header through the line
 // before the next "[" table header or EOF). Parse-aware so adjacent tables stay
 // intact. Only strips this exact table, never partial matches like
-// [mcp_servers.playwright_x].
-function stripCodexPlaywrightTable(configText: string): string {
+// [mcp_servers.<server>_x].
+function stripCodexMcpTable(configText: string, server: string): string {
+  const header = `[mcp_servers.${server}]`;
   const lines = configText.split("\n");
   const result: string[] = [];
   let inTable = false;
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed === CODEX_PLAYWRIGHT_TABLE) {
+    if (trimmed === header) {
       inTable = true;
       continue;
     }
@@ -566,24 +564,22 @@ function stripCodexPlaywrightTable(configText: string): string {
   return result.join("\n");
 }
 
-function withCodexPlaywrightServer(configText: string, port: number): string {
-  const stripped = stripCodexPlaywrightTable(configText);
+function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): string {
+  const stripped = stripCodexMcpTable(configText, binding.server);
   const trimmed = stripped.trimEnd();
   const separator = trimmed ? "\n\n" : "";
-  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "${playwrightMcpUrl(port)}"\n`;
+  const table = `[mcp_servers.${binding.server}]\nurl = "${binding.url}"\n`;
   return `${trimmed}${separator}${table}`;
 }
 
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
-  playwrightPort?: number,
+  mcpBindings: readonly SidecarMcpBinding[] = [],
 ): Promise<string> {
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
-  return playwrightPort === undefined
-    ? stripCodexPlaywrightTable(withTrust)
-    : withCodexPlaywrightServer(withTrust, playwrightPort);
+  return mcpBindings.reduce((text, binding) => withCodexMcpServer(text, binding), withTrust);
 }
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
@@ -621,7 +617,7 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; playwrightPort?: number },
+  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[] },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -632,7 +628,7 @@ export async function ensureCodexHooksConfig(
     next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
   }
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.playwrightPort);
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.mcpBindings ?? []);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);

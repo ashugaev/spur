@@ -32,6 +32,7 @@ describe("spur help", () => {
     expect(help).not.toContain("subscribe");
     expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
+    expect(help).not.toContain("playwright");
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {

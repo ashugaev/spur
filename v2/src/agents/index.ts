@@ -1,7 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { playwrightMcpUrl } from "./playwright-mcp.js";
 import {
   buildClaudePlan,
   buildClaudeRestorePlan,
@@ -36,7 +35,7 @@ import {
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
-import type { AgentName, TranscriptEntry } from "../types.js";
+import type { AgentName, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -118,7 +117,7 @@ interface AgentAdapter {
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
-    playwrightPort?: number;
+    mcpBindings?: SidecarMcpBinding[];
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
@@ -277,7 +276,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     setup: async ({
       worktreePath,
       sessionToolDir,
-      playwrightPort,
+      mcpBindings,
       restrictWrites,
       claudeConfigDir,
     }) => {
@@ -285,14 +284,15 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       if (restrictWrites) {
         result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
-      if (playwrightPort !== undefined) {
+      if (mcpBindings?.length) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
         const mcpServers = await readHostClaudeMcpServers({
           worktreePath,
           ...(claudeConfigDir ? { claudeConfigDir } : {}),
         });
-        delete mcpServers.playwright;
-        mcpServers.playwright = { type: "http", url: playwrightMcpUrl(playwrightPort) };
+        for (const binding of mcpBindings) {
+          mcpServers[binding.server] = { type: "http", url: binding.url };
+        }
         const mcpConfig = { mcpServers };
         await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
         result.claudeMcpConfigPath = mcpConfigPath;
@@ -340,10 +340,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       ctx.codexSessionsDir
         ? readCodexTranscriptEntries(ctx.codexSessionsDir)
         : Promise.resolve(null),
-    setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => ({
+    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
-        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+        ...(mcpBindings?.length ? { mcpBindings } : {}),
       }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
@@ -502,7 +502,7 @@ export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
-  playwrightPort?: number;
+  mcpBindings?: SidecarMcpBinding[];
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;
