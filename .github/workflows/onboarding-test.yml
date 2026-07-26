@@ -11,6 +11,7 @@ on:
       - "tests/integration/**"
       - "v2/**"
       - "README.md"
+      - "docs/**"
       - "SETUP.md"
       - "TROUBLESHOOTING.md"
       - "CONTRIBUTING.md"

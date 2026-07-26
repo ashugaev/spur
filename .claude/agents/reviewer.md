@@ -63,6 +63,9 @@ Hunt for: incorrect architecture assumptions, missing error/loading states, brok
 - `once()` for one-time event handlers
 - `const` preferred, no `var`
 
+### Docs (high)
+- Any published-doc change: load the `docs` skill and verify its checklist holds against the diff. Rules live there, not here.
+
 ### Edge cases (medium)
 - Null/undefined handled (optional chaining, type guards)
 - Error states covered

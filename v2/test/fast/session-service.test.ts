@@ -1655,7 +1655,7 @@ describe("SessionService", () => {
     expect(sent).toContain(
       "From inside a sidecar, nested sidecars are manual-only and stop after one more level.",
     );
-    expect(sent).toContain("See `v2/README.md` for sidecar usage.");
+    expect(sent).toContain("See `docs/commands.md` for sidecar usage.");
     expect(sent).toContain("Available: `dev`.");
   });
 
