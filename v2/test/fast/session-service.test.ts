@@ -5235,7 +5235,10 @@ describe("SessionService", () => {
     const classifiedCall = logSpurEventMock.mock.calls.find(
       ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "spur-hung",
     );
-    expect(classifiedCall?.[1].message).toContain("codex stale, idle=");
+    // Exact idle value, not just the prefix: the staleness decision and this
+    // log line read one shared activityMs off classifyCodexState, so pinning
+    // the number guards them against drifting apart again.
+    expect(classifiedCall?.[1].message).toContain(`codex stale, idle=${10 * 60_000}ms`);
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 

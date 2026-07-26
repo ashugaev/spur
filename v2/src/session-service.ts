@@ -1227,11 +1227,12 @@ function buildWorkspaceAccess(
 // So tmux activity is the fallback only, for a session whose agent has not yet
 // produced a structured artifact. That matches the standing repo rule: detect
 // session state from structured agent sources first, tmux only as a fallback.
-// A transcript the reader has not stat()ed yet reports mtime 0. The epoch is
-// never a real activity time, so treat it as "no structured artifact" and let
-// the tmux fallback stand rather than pinning activity to 1970.
-function mtimeActivityAt(mtimeMs: number): Date | null {
-  return mtimeMs > 0 ? new Date(mtimeMs) : null;
+// A transcript the reader has not stat()ed yet reports mtime 0, and codex
+// reports 0 when it has neither a rollout nor hook state. The epoch is never a
+// real activity time, so treat it as "no structured artifact" and let the tmux
+// fallback stand rather than pinning activity to 1970.
+function activityAtFromMs(activityMs: number): Date | null {
+  return activityMs > 0 ? new Date(activityMs) : null;
 }
 
 // Single source of truth for "when did the agent last do something", shared by
@@ -8515,6 +8516,7 @@ export class SessionService {
     hookState: ReturnType<typeof readAgentHookState>;
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
+    activityMs: number;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
@@ -8527,12 +8529,18 @@ export class SessionService {
       source = "jsonl";
     }
 
+    // When codex last did something, from its own structured sources: the
+    // in-content rollout timestamp (rollout mtime is unusable — `codex resume`'s
+    // poison-id heal rewrites every file at once) and the hook state. 0 means
+    // neither source exists yet. The single derivation for both the hung-turn
+    // check below and the caller's activity/idle-gate signal.
+    const activityMs = Math.max(
+      rolloutState?.timestampMs ?? 0,
+      hookState ? new Date(hookState.updatedAt).getTime() : 0,
+    );
+
     if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
-      const lastActivityMs = Math.max(
-        rolloutState.timestampMs,
-        hookState ? new Date(hookState.updatedAt).getTime() : 0,
-      );
-      if (Date.now() - lastActivityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
+      if (Date.now() - activityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
         state = "waiting";
         source = "codex_stale";
       }
@@ -8544,6 +8552,7 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      activityMs,
     };
   }
 
@@ -9095,7 +9104,7 @@ export class SessionService {
           hasServerErrorRecord = jsonlResult.serverError;
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
-          agentActivityAt = mtimeActivityAt(jsonlResult.reader.lastMtimeMs);
+          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9138,26 +9147,14 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
-        // Codex's own in-content rollout timestamp plus its hook state — the
-        // rollout's mtime is unusable because `codex resume`'s poison-id heal
-        // rewrites every file at once, which is why classifyCodexState already
-        // ranks by timestampMs.
-        const codexActivityMs = Math.max(
-          codexState.rolloutState?.timestampMs ?? 0,
-          codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
-        );
-        agentActivityAt = codexActivityMs > 0 ? new Date(codexActivityMs) : null;
+        agentActivityAt = activityAtFromMs(codexState.activityMs);
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          const lastActivityMs = Math.max(
-            codexState.rolloutState.timestampMs,
-            codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
-          );
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (codex stale, idle=${Date.now() - lastActivityMs}ms)`,
+            message: `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`,
           });
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
@@ -9195,7 +9192,7 @@ export class SessionService {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
-          agentActivityAt = mtimeActivityAt(jsonlResult.reader.lastMtimeMs);
+          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
