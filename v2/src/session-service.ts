@@ -1227,10 +1227,12 @@ function buildWorkspaceAccess(
 // So tmux activity is the fallback only, for a session whose agent has not yet
 // produced a structured artifact. That matches the standing repo rule: detect
 // session state from structured agent sources first, tmux only as a fallback.
-// A transcript the reader has not stat()ed yet reports mtime 0, and codex
-// reports 0 when it has neither a rollout nor hook state. The epoch is never a
-// real activity time, so treat it as "no structured artifact" and let the tmux
-// fallback stand rather than pinning activity to 1970.
+// 0 means "no structured artifact": codex reports it when it has neither a
+// rollout nor hook state. The claude/cursor readers cannot produce it in
+// practice — they return either a real stat mtime or null — so for them this is
+// only a floor against a nonsense epoch timestamp. Either way 0 is never a real
+// activity time, so it must not pin activity to 1970; let the tmux fallback
+// stand instead.
 function activityAtFromMs(activityMs: number): Date | null {
   return activityMs > 0 ? new Date(activityMs) : null;
 }
@@ -1238,6 +1240,14 @@ function activityAtFromMs(activityMs: number): Date | null {
 // Single source of truth for "when did the agent last do something", shared by
 // the dashboard's lastActivityAt and the delivery idle gate so the two can
 // never disagree about what counts as activity.
+//
+// Strictly `??`, never `max(agentActivityAt, tmuxActivityAt)`. A max would let
+// the attach-driven tmux bump win again whenever it is newer than the last
+// transcript write, which is exactly the bug this resolver exists to fix. The
+// accepted cost is that activity lags within a long single tool call, since
+// claude only appends at tool boundaries — a stale-looking timestamp next to a
+// "working" badge. Nothing treats that staleness as death: the stop/stale
+// reconcilers read runtimeAlive/paneUsable/processAlive, never this value.
 function resolveAgentActivityAt(
   classified: Pick<SessionStateResult, "runtime" | "agentActivityAt">,
 ): Date | null {

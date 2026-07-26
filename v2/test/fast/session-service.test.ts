@@ -5242,6 +5242,74 @@ describe("SessionService", () => {
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 
+  it("delivers a queued message to a codex_stale session, since typing is what un-wedges a hung turn", async () => {
+    // Deliberate, not an accident of the activity switch. CODEX_HUNG_AFTER_TOOLS_MS
+    // is documented as being set well above any realistic single inference
+    // precisely so "the working->waiting edge lets a queued interrupt:false
+    // message be typed in after a further idle gate". Pre-fix that further gate
+    // never opened, because codex's per-second "Working…" repaint kept tmux
+    // activity at now — so a hung turn stayed hung with the un-wedge message
+    // stuck in the queue. Reading the rollout/hook timestamps instead makes the
+    // documented intent actually happen: a turn idle for 10min is past the 30s
+    // gate, so the queued message goes in.
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    const sessions = createSessionStore();
+    sessions.set("spur-hung", {
+      id: "spur-hung",
+      project: "sp",
+      agent: "codex",
+      prompt: "hung after tools",
+      branch: "feature/hung",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-hung",
+      tmuxSession: "spur-hung",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+      queuedMessages: {
+        messages: ["please continue"],
+        awaitingPrompt: false,
+      },
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf6",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-hung/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf6",
+      },
+      rateLimit: null,
+    });
+    // A codex TUI repainting its "Working…" timer right now: pre-fix this alone
+    // held the gate shut forever.
+    getTmuxSessionActivityMock.mockResolvedValue(now);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("spur-hung", "please continue", {
+        interrupt: false,
+        agent: "codex",
+      });
+      expect(sessions.get("spur-hung")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("keeps codex working while a long exec_command tool call is still pending", async () => {
     const now = new Date("2026-04-14T19:30:00.000Z");
     vi.setSystemTime(now);
