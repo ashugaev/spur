@@ -9,6 +9,12 @@ import { join } from "node:path";
 // `runNpmInit`'s heal) derives from this function instead of its own literal.
 export const NPM_PREFIX_ENV = "NPM_CONFIG_PREFIX";
 
+// npm lowercases every `npm_config_*` env key before matching it to a config
+// option, so this and `NPM_PREFIX_ENV` both resolve to npm's `prefix` option.
+// Kept alongside it so consumers that must set/strip both casings (session
+// env pin, doctor's probe) share one name instead of a scattered literal.
+export const NPM_PREFIX_ENV_LOWER = "npm_config_prefix";
+
 export function npmGlobalPrefix(home = homedir()): string {
   return join(home, ".local");
 }
