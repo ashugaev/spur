@@ -105,13 +105,13 @@ Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reus
 
 ## Troubleshooting
 
-| Symptom                                                | Fix                                                                                               |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `status=203/EXEC` or `EACCES .../usr/lib/node_modules` | npm prefix isn't `~/.local` — run `spur init` (re-applies it), or reset it manually and reinstall |
-| units die after SSH logout                             | linger off: `loginctl enable-linger $USER`                                                        |
-| web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                        |
-| `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue             |
-| web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                      |
+| Symptom                                                | Fix                                                                                                                                           |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC` or `EACCES .../usr/lib/node_modules` | npm prefix isn't `~/.local` — run `spur init` (re-applies it, only when `~/.npmrc` has no `prefix=` line), or reset it manually and reinstall |
+| units die after SSH logout                             | linger off: `loginctl enable-linger $USER`                                                                                                    |
+| web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                                                    |
+| `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                                                         |
+| web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                                                  |
 
 ## System-wide units (advanced)
 

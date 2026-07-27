@@ -19,7 +19,7 @@ Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env 
 - pnpm pinned to `9.15.4` via corepack. This exact version matters: pnpm 11+ uses vm dynamic-import semantics incompatible with Node 24 and crashes on startup with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
 - GitHub SSH access on the VM (for the clone).
 - Agent CLIs installed user-scoped, not `sudo npm -g`: set `npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH. The daemon unit's `PATH` includes that dir; a system-wide install won't be found. Then `codex login` / `claude login` / `gh auth login` on the host.
-- Spur pins every agent session's `NPM_CONFIG_PREFIX` to `~/.local` (see [install-from-npm.md](install-from-npm.md#setup)), so `claude`/`codex` self-update lands under `~/.local/bin` regardless of this `~/.npm-global` layout — the daemon unit's `PATH` (below) lists `~/.local/bin` first, so the self-updated copy wins for Spur sessions.
+- Spur pins every agent session's `NPM_CONFIG_PREFIX` to `~/.local` (see [install-from-npm.md](install-from-npm.md#setup)), so `claude`/`codex` self-update lands under `~/.local/bin` regardless of this `~/.npm-global` layout — the daemon unit's `PATH` lists `~/.local/bin` first, so the self-updated copy wins for Spur sessions.
 
 ### claude permission prompt
 
