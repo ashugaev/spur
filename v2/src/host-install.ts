@@ -6,7 +6,7 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
-import { ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
+import { NPM_PREFIX_ENV, ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
 import {
   probe,
   probeInfo,
@@ -682,8 +682,20 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
   // without this override the probe would read the ambient npmrc while
   // `expectedPrefix` above is derived from `home`.
+  //
+  // Spur pins `NPM_CONFIG_PREFIX` (and npm's lowercase `npm_config_prefix`
+  // mirror) into every agent session's env (see `session-service.ts`), so a
+  // `spur doctor` run from inside a session would otherwise read back its own
+  // env pin instead of the persisted `~/.npmrc` state this check exists to
+  // detect drift in. Strip both so the probe reports the file, not the
+  // session.
+  const {
+    [NPM_PREFIX_ENV]: _pinnedUpper,
+    npm_config_prefix: _pinnedLower,
+    ...restEnv
+  } = process.env;
   const npmPrefix = tryExec("npm", ["config", "get", "prefix"], {
-    env: { ...process.env, HOME: home },
+    env: { ...restEnv, HOME: home },
   });
   checks.push({
     id: "npm-prefix",

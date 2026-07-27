@@ -19,12 +19,18 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
   const originalHome = process.env["HOME"];
   const originalLower = process.env["npm_config_prefix"];
   const originalUpper = process.env["NPM_CONFIG_PREFIX"];
+  const originalUserconfig = process.env["npm_config_userconfig"];
 
   beforeEach(async () => {
     targetHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-target-"));
     ambientHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-ambient-"));
     delete process.env["npm_config_prefix"];
     delete process.env["NPM_CONFIG_PREFIX"];
+    // An inherited `npm_config_userconfig` would steer the spawned `npm
+    // config set` at a different `.npmrc` than the `<home>/.npmrc` this test
+    // asserts against — clear it alongside the prefix vars so no ambient npm
+    // lifecycle env can redirect the write.
+    delete process.env["npm_config_userconfig"];
     // Simulates a caller passing a `home` other than the process's own —
     // never the real account $HOME.
     process.env["HOME"] = ambientHome;
@@ -37,6 +43,8 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
     else process.env["npm_config_prefix"] = originalLower;
     if (originalUpper === undefined) delete process.env["NPM_CONFIG_PREFIX"];
     else process.env["NPM_CONFIG_PREFIX"] = originalUpper;
+    if (originalUserconfig === undefined) delete process.env["npm_config_userconfig"];
+    else process.env["npm_config_userconfig"] = originalUserconfig;
     await rm(targetHome, { recursive: true, force: true });
     await rm(ambientHome, { recursive: true, force: true });
   });
