@@ -109,7 +109,14 @@ describe("runNpmInit npm-prefix heal ordering", () => {
     expect(execFileSyncCalls).toHaveLength(2);
     expect(execFileSyncCalls[0]).toMatchObject({
       command: "npm",
-      args: ["config", "set", "prefix", join(fakeHome, ".local")],
+      args: [
+        "config",
+        "set",
+        "prefix",
+        join(fakeHome, ".local"),
+        "--userconfig",
+        join(fakeHome, ".npmrc"),
+      ],
     });
     expect(execFileSyncCalls[1]?.command).toBe("bash");
   });

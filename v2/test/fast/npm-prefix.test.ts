@@ -100,14 +100,34 @@ describe("ensureNpmGlobalPrefixConfigured", () => {
     await writeFile(join(tmpHome, ".npmrc"), TOKEN_ONLY_NPMRC, "utf8");
     ensureNpmGlobalPrefixConfigured(tmpHome);
     expect(execFileSyncCalls).toEqual([
-      { command: "npm", args: ["config", "set", "prefix", npmGlobalPrefix(tmpHome)] },
+      {
+        command: "npm",
+        args: [
+          "config",
+          "set",
+          "prefix",
+          npmGlobalPrefix(tmpHome),
+          "--userconfig",
+          join(tmpHome, ".npmrc"),
+        ],
+      },
     ]);
   });
 
   it("writes npm config set prefix when .npmrc does not exist at all", () => {
     ensureNpmGlobalPrefixConfigured(tmpHome);
     expect(execFileSyncCalls).toEqual([
-      { command: "npm", args: ["config", "set", "prefix", npmGlobalPrefix(tmpHome)] },
+      {
+        command: "npm",
+        args: [
+          "config",
+          "set",
+          "prefix",
+          npmGlobalPrefix(tmpHome),
+          "--userconfig",
+          join(tmpHome, ".npmrc"),
+        ],
+      },
     ]);
   });
 
@@ -136,7 +156,17 @@ describe("ensureNpmGlobalPrefixConfigured", () => {
     process.env["npm_config_prefix"] = npmGlobalPrefix(tmpHome);
     ensureNpmGlobalPrefixConfigured(tmpHome);
     expect(execFileSyncCalls).toEqual([
-      { command: "npm", args: ["config", "set", "prefix", npmGlobalPrefix(tmpHome)] },
+      {
+        command: "npm",
+        args: [
+          "config",
+          "set",
+          "prefix",
+          npmGlobalPrefix(tmpHome),
+          "--userconfig",
+          join(tmpHome, ".npmrc"),
+        ],
+      },
     ]);
   });
 });

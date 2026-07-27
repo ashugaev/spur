@@ -47,11 +47,13 @@ export function ensureNpmGlobalPrefixConfigured(home = homedir()): void {
     return;
   }
 
-  // npm resolves its userconfig (`~/.npmrc`) from `$HOME` at spawn time, not
-  // from the `home` argument above — without this override the write target
-  // would diverge from the read target whenever a caller passes a `home`
-  // other than the ambient one.
-  execFileSync("npm", ["config", "set", "prefix", expected], {
+  // `HOME` is only npm's *default* source for its userconfig path — an
+  // inherited `npm_config_userconfig` (npx/`npm exec`/`npm run` all set one)
+  // outranks it, which would steer this write at a different file than the
+  // `<home>/.npmrc` read above. Pass `--userconfig` explicitly so the write
+  // target can never diverge from the read target, with no env stripping
+  // needed.
+  execFileSync("npm", ["config", "set", "prefix", expected, "--userconfig", join(home, ".npmrc")], {
     stdio: "ignore",
     env: { ...process.env, HOME: home },
   });

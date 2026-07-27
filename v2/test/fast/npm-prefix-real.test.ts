@@ -21,16 +21,20 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
   const originalUpper = process.env["NPM_CONFIG_PREFIX"];
   const originalUserconfig = process.env["npm_config_userconfig"];
 
+  let decoyDir: string;
+
   beforeEach(async () => {
     targetHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-target-"));
     ambientHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-ambient-"));
+    decoyDir = await mkdtemp(join(tmpdir(), "spur-npm-prefix-decoy-"));
     delete process.env["npm_config_prefix"];
     delete process.env["NPM_CONFIG_PREFIX"];
-    // An inherited `npm_config_userconfig` would steer the spawned `npm
-    // config set` at a different `.npmrc` than the `<home>/.npmrc` this test
-    // asserts against — clear it alongside the prefix vars so no ambient npm
-    // lifecycle env can redirect the write.
-    delete process.env["npm_config_userconfig"];
+    // Simulates the ambient env `npx`/`npm exec`/`npm run` set on every
+    // lifecycle invocation: an inherited `npm_config_userconfig` outranks
+    // `HOME` as npm's userconfig source. Positive proof, not a defensive
+    // clear: the write must still land in `<targetHome>/.npmrc` and this
+    // decoy file must never be created.
+    process.env["npm_config_userconfig"] = join(decoyDir, "decoy.npmrc");
     // Simulates a caller passing a `home` other than the process's own —
     // never the real account $HOME.
     process.env["HOME"] = ambientHome;
@@ -47,6 +51,7 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
     else process.env["npm_config_userconfig"] = originalUserconfig;
     await rm(targetHome, { recursive: true, force: true });
     await rm(ambientHome, { recursive: true, force: true });
+    await rm(decoyDir, { recursive: true, force: true });
   });
 
   it("writes prefix into <targetHome>/.npmrc, not the ambient $HOME's npmrc", async () => {
@@ -58,5 +63,20 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
     );
 
     await expect(readFile(join(ambientHome, ".npmrc"), "utf8")).rejects.toThrow(/ENOENT/);
+  });
+
+  // MUST FIX regression guard: an inherited `npm_config_userconfig` outranks
+  // `HOME` as npm's userconfig source (npx/`npm exec`/`npm run` all set one),
+  // so without an explicit `--userconfig` the write would land in the decoy
+  // file this env var names instead of `<targetHome>/.npmrc`.
+  it("writes prefix into <targetHome>/.npmrc even with an inherited npm_config_userconfig decoy", async () => {
+    ensureNpmGlobalPrefixConfigured(targetHome);
+
+    const targetNpmrc = await readFile(join(targetHome, ".npmrc"), "utf8");
+    expect(targetNpmrc).toMatch(
+      new RegExp(`prefix\\s*=\\s*${npmGlobalPrefix(targetHome).replaceAll("/", "\\/")}`),
+    );
+
+    await expect(readFile(join(decoyDir, "decoy.npmrc"), "utf8")).rejects.toThrow(/ENOENT/);
   });
 });

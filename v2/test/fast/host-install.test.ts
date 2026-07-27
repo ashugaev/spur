@@ -281,6 +281,24 @@ describe("collectHostInstallChecks", () => {
     }
   });
 
+  // Regression guard: an inherited `npm_config_userconfig` (npx/`npm
+  // exec`/`npm run` all set one) outranks `HOME` as npm's userconfig source
+  // and would steer the probe at a different `.npmrc` than `home`/.npmrc,
+  // which `expectedPrefix` is derived from — `--userconfig` must be passed
+  // explicitly so the probe can never diverge from it.
+  it("passes an explicit --userconfig pointing at <home>/.npmrc to the npm-prefix probe", async () => {
+    const fakeHome = "/tmp/spur-host-install-test-npm-prefix-userconfig";
+    await collectHostInstallChecks(fakeHome);
+    const npmCall = execFileSyncMock.mock.calls.find(([file]) => file === "npm") as
+      | [string, string[]]
+      | undefined;
+    expect(npmCall).toBeDefined();
+    const args = npmCall?.[1] ?? [];
+    const flagIndex = args.indexOf("--userconfig");
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(args[flagIndex + 1]).toBe(join(fakeHome, ".npmrc"));
+  });
+
   it("keeps a fresh, never-initialized host exit-safe (no error severity)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
     expect(hasErrorSeverity(checks)).toBe(false);

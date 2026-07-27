@@ -680,8 +680,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   const expectedPrefix = npmGlobalPrefix(home);
 
   // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
-  // without this override the probe would read the ambient npmrc while
-  // `expectedPrefix` above is derived from `home`.
+  // an inherited `npm_config_userconfig` outranks `HOME` as npm's userconfig
+  // source, so without `--userconfig` the probe could read a different file
+  // than the `<home>/.npmrc` `expectedPrefix` above is derived from.
   //
   // Spur pins `NPM_CONFIG_PREFIX` (and npm's lowercase `npm_config_prefix`
   // mirror) into every agent session's env (see `session-service.ts`), so a
@@ -694,9 +695,11 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     npm_config_prefix: _pinnedLower,
     ...restEnv
   } = process.env;
-  const npmPrefix = tryExec("npm", ["config", "get", "prefix"], {
-    env: { ...restEnv, HOME: home },
-  });
+  const npmPrefix = tryExec(
+    "npm",
+    ["config", "get", "prefix", "--userconfig", join(home, ".npmrc")],
+    { env: { ...restEnv, HOME: home } },
+  );
   checks.push({
     id: "npm-prefix",
     ok: npmPrefix === expectedPrefix,
