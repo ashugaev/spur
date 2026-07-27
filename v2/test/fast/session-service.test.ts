@@ -140,6 +140,8 @@ const isAccountAuthenticatedMock = vi.fn();
 const addAccountMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
+const ensureAccountProjectsLinkMock = vi.fn();
+const ensureDefaultAccountMock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -165,6 +167,8 @@ function resetAccountStoreMocks(): void {
   });
   addAccountMock.mockReset();
   removeAccountMock.mockReset();
+  ensureAccountProjectsLinkMock.mockReset();
+  ensureDefaultAccountMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
@@ -239,6 +243,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
   addAccount: addAccountMock,
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
+  ensureAccountProjectsLink: ensureAccountProjectsLinkMock,
+  ensureDefaultAccount: ensureDefaultAccountMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -3804,11 +3810,13 @@ describe("SessionService", () => {
           claudeAccountId: "acc-1",
         }),
       ).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
 
     it("returns {} when the session has no bound account", async () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude" })).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
 
     it("resolves the config dir from the account store", async () => {
@@ -3827,6 +3835,9 @@ describe("SessionService", () => {
           claudeAccountId: "acc-1",
         }),
       ).toEqual({ claudeConfigDir: "/abs/acc-1" });
+      expect(ensureAccountProjectsLinkMock).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "acc-1", configDir: "/abs/acc-1" }),
+      );
     });
 
     it("returns {} when the bound account was removed", async () => {
@@ -3838,6 +3849,7 @@ describe("SessionService", () => {
           claudeAccountId: "gone",
         }),
       ).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
   });
 
@@ -3909,6 +3921,16 @@ describe("SessionService", () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(runningSession({ status: "completed" }));
       expect(request.claudeAccountId).toBeUndefined();
+    });
+  });
+
+  describe("listClaudeAccounts", () => {
+    it("calls ensureDefaultAccount before listing", async () => {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.listClaudeAccounts();
+      expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
+      service.dispose();
     });
   });
 
