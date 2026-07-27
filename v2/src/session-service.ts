@@ -118,6 +118,7 @@ import {
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { NPM_PREFIX_ENV, npmGlobalPrefix } from "./npm-prefix.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
@@ -1058,6 +1059,11 @@ function buildSessionEnv(args: {
     // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
     SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
+    // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
+    // `~/.npmrc` has been clobbered down to just a registry `_authToken`
+    // line — uppercase wins over any stale lowercase `npm_config_prefix` the
+    // daemon process may have set (see update.ts's reinit pin).
+    [NPM_PREFIX_ENV]: npmGlobalPrefix(),
   };
   if (
     args.symlinks.includes("node_modules") &&

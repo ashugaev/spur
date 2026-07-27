@@ -6,6 +6,7 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
 import {
   probe,
   probeInfo,
@@ -675,7 +676,7 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
 export async function collectHostInstallChecks(home = homedir()): Promise<HostInstallCheck[]> {
   const checks: HostInstallCheck[] = [];
   const scope = resolveSystemdScope(home);
-  const expectedPrefix = join(home, ".local");
+  const expectedPrefix = npmGlobalPrefix(home);
 
   const npmPrefix = tryExec("npm", ["config", "get", "prefix"]);
   checks.push({
@@ -903,6 +904,7 @@ export function runNpmInit(
   if (!existsSync(script)) {
     throw new Error(`npm init script not found: ${script}`);
   }
+  ensureNpmGlobalPrefixConfigured();
   const args: string[] = [];
   if (options.noStart) {
     args.push("--no-start");

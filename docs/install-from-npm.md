@@ -21,8 +21,9 @@ spur init                           # installs + starts the systemd user units
 
 Two non-obvious points:
 
-- Prefix must be `~/.local`. A system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH and persist it for new logins so bare `spur` resolves.
+- Prefix must be `~/.local`. A system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH and persist it for new logins so bare `spur` resolves. The manual `npm config set prefix ~/.local` above is only needed once, before the first `npm install -g @shugaev/spur` — if `~/.npmrc` later loses that line (an external process rewriting it down to just the registry `_authToken` is the observed cause), `spur init` / `spur update` re-apply it before touching the systemd units.
 - `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger.
+- Every agent session also carries `NPM_CONFIG_PREFIX=~/.local` in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session, independent of whatever `~/.npmrc` currently says.
 
 Units installed:
 
@@ -104,13 +105,13 @@ Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reus
 
 ## Troubleshooting
 
-| Symptom                                                | Fix                                                                                   |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `status=203/EXEC` or `EACCES .../usr/lib/node_modules` | npm prefix isn't `~/.local` — reset it, reinstall                                     |
-| units die after SSH logout                             | linger off: `loginctl enable-linger $USER`                                            |
-| web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`            |
-| `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue |
-| web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                          |
+| Symptom                                                | Fix                                                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC` or `EACCES .../usr/lib/node_modules` | npm prefix isn't `~/.local` — run `spur init` (re-applies it), or reset it manually and reinstall |
+| units die after SSH logout                             | linger off: `loginctl enable-linger $USER`                                                        |
+| web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                        |
+| `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue             |
+| web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                      |
 
 ## System-wide units (advanced)
 
