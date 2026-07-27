@@ -43,13 +43,14 @@ export interface SystemdScope {
 function tryExec(
   command: string,
   args: string[],
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
 ): string | undefined {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+      ...(options?.env !== undefined ? { env: options.env } : {}),
     }).trim();
   } catch {
     return undefined;
@@ -678,7 +679,12 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   const scope = resolveSystemdScope(home);
   const expectedPrefix = npmGlobalPrefix(home);
 
-  const npmPrefix = tryExec("npm", ["config", "get", "prefix"]);
+  // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
+  // without this override the probe would read the ambient npmrc while
+  // `expectedPrefix` above is derived from `home`.
+  const npmPrefix = tryExec("npm", ["config", "get", "prefix"], {
+    env: { ...process.env, HOME: home },
+  });
   checks.push({
     id: "npm-prefix",
     ok: npmPrefix === expectedPrefix,
