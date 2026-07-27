@@ -22,7 +22,7 @@ export function npmGlobalPrefix(home = homedir()): string {
 export function ensureNpmGlobalPrefixConfigured(home = homedir()): void {
   const expected = npmGlobalPrefix(home);
 
-  const pinned = process.env["npm_config_prefix"] ?? process.env["NPM_CONFIG_PREFIX"];
+  const pinned = process.env["npm_config_prefix"] ?? process.env[NPM_PREFIX_ENV];
   if (pinned !== undefined && pinned !== expected) {
     // An explicit non-`~/.local` prefix (e.g. spur update's derived install
     // location) governs this run; never overwrite the file behind it.
