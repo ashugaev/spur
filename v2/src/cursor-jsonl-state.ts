@@ -34,13 +34,23 @@ function tryParseJson(line: string): Record<string, unknown> | null {
   }
 }
 
+// Cursor slugifies the absolute workspace path into its
+// `~/.cursor/projects/<slug>` directory name by replacing every run of
+// characters that are neither alphanumeric nor an underscore with a single
+// hyphen, then trimming leading and trailing hyphens. Underscores are kept
+// verbatim (GitHub Actions `_work` dirs rely on this); a mid-segment dot
+// (`spur-isolated-daemon.xOPkB8`) becomes a hyphen (`...daemon-xOPkB8`); a
+// slash-adjacent dot (`/.spur`) collapses with the slash into one hyphen
+// (`-spur`). Deleting dots outright — as an earlier version did — only happened
+// to match slash-adjacent dots and silently pointed dotted worktree paths
+// (shared shepherd workspaces, scratchpad dirs) at a nonexistent project dir,
+// so the transcript was never found.
 export function toCursorProjectPath(worktreePath: string): string {
   return worktreePath
     .replaceAll("\\", "/")
-    .replaceAll(":", "")
-    .replace(/^\/+/, "")
-    .replace(/\//g, "-")
-    .replace(/\./g, "");
+    .replace(/[^a-zA-Z0-9_]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
 }
 
 async function findLatestCursorTranscriptInDir(transcriptsDir: string): Promise<string | null> {

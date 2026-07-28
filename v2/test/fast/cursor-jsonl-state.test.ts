@@ -419,6 +419,33 @@ describe("findLatestCursorTranscriptFile", () => {
   });
 });
 
+describe("toCursorProjectPath", () => {
+  // Expected slugs verified against real `~/.cursor/projects/<slug>` directories.
+  it.each([
+    // Slash-adjacent dot (`/.spur`) collapses with the slash into one hyphen.
+    ["/home/alek/.spur/worktrees/sp/spur-e7e6", "home-alek-spur-worktrees-sp-spur-e7e6"],
+    // Mid-segment dot (`daemon.xOPkB8`) becomes a hyphen — the regression: an
+    // earlier version deleted the dot and pointed at a nonexistent project dir.
+    [
+      "/tmp/spur-isolated-daemon.xOPkB8/data/shepherd",
+      "tmp-spur-isolated-daemon-xOPkB8-data-shepherd",
+    ],
+    // Consecutive separators (`/-`, `--`) collapse to a single hyphen.
+    [
+      "/tmp/claude-1001/-home-alek--spur/scratchpad/data/shepherd",
+      "tmp-claude-1001-home-alek-spur-scratchpad-data-shepherd",
+    ],
+    // Underscores are kept verbatim — Cursor does not hyphenate them, and the
+    // GitHub Actions runner path (`_work`) depends on it.
+    [
+      "/home/github-runner/actions-runner-3/_work/spur/spur-runtime-ab12/worktrees/test/rt-cursor-1",
+      "home-github-runner-actions-runner-3-_work-spur-spur-runtime-ab12-worktrees-test-rt-cursor-1",
+    ],
+  ])("slugifies %s", (worktreePath, expected) => {
+    expect(toCursorProjectPath(worktreePath)).toBe(expected);
+  });
+});
+
 describe("readCursorTranscriptEntries", () => {
   const tempRoots: string[] = [];
 
