@@ -137,7 +137,7 @@ projects:
 
 When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Optional `conditions` replace the default completion condition. Disabled or omitted capability returns access denied and leaves the session running.
 
-With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message.
+With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message — unless a mode resolved (see Modes below), in which case the mode instruction becomes the session's initial message on its own.
 
 ## Desk groups
 
@@ -171,7 +171,7 @@ projects:
       manager: { skill: manager, default: true }
 ```
 
-A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load. Resolved once at spawn from `--mode`, the `POST /sessions` body, or a trigger `spawn.mode`; an explicit request beats the project's `default: true` entry, which beats no suffix. An unknown requested name fails the spawn, listing the configured names. No `modes:` on a project means no suffix. The parser does not check that the named skill exists — the daemon cannot see the agent's skill search path.
+A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load. Resolved once at spawn from `--mode`, the `POST /sessions` body, or a trigger `spawn.mode`; an explicit request beats the project's `default: true` entry, which beats no suffix. An unknown requested name fails the spawn, listing the configured names. No `modes:` on a project means no suffix. The parser does not check that the named skill exists — the daemon cannot see the agent's skill search path. A resolved mode always reaches the session even with an empty/no prompt: the mode instruction becomes the session's whole initial message instead of being appended to nothing.
 
 Respawn, handoff, and restore carry the persisted mode forward instead of re-resolving it against the project default. If the config changed underneath the session (mode renamed or removed) the carried-forward lookup degrades to no-mode with a logged warning instead of blocking the respawn/handoff/restore.
 

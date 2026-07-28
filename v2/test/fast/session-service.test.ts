@@ -1548,6 +1548,20 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
   });
 
+  it("still delivers the resolved mode instruction when no prompt is supplied", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      "slot-instructions\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+    );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
+  });
+
   it("lets an explicit --mode override the project default mode", async () => {
     mockClaudeJsonlState("waiting");
     loadConfigMock.mockReturnValue(configWithModes());

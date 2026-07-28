@@ -678,6 +678,19 @@ function tryRealpath(path: string): string {
   }
 }
 
+// Return shape shared by resolveSpawnTarget's three branches and its
+// finalizeSpawnTarget helper.
+interface SpawnTarget {
+  project: ProjectConfig;
+  prompt: string;
+  steps?: string[];
+  mode?: ResolvedSessionMode;
+  planMode: boolean;
+  restrictWrites: boolean;
+  allowedTriggers?: string[];
+  selfDestruct?: SelfDestructConfig;
+}
+
 function normalizeSpawnRequest(
   request: SpawnSessionRequest,
   defaultSteps?: string[],
@@ -764,7 +777,11 @@ function buildSessionPrompt(
   mode?: ResolvedSessionMode,
 ): string {
   if (!prompt.trim()) {
-    return prompt;
+    // No prompt was supplied. A resolved mode still must reach the session —
+    // otherwise a bare `spur spawn <project>` with a default mode configured
+    // starts the agent with no routing at all. With no mode there is nothing
+    // to append; return the prompt unchanged rather than inventing content.
+    return mode ? renderModeInstruction(mode) : prompt;
   }
   let result = prompt;
   if (planMode) {
@@ -4386,19 +4403,24 @@ export class SessionService {
     );
   }
 
+  // Attaches the resolved mode (per modeResolution) to a normalizeSpawnRequest
+  // result and pairs it with its project, giving resolveSpawnTarget's three
+  // branches one shared return-shape assembly instead of repeating it.
+  private finalizeSpawnTarget(
+    project: ProjectConfig,
+    normalized: ReturnType<typeof normalizeSpawnRequest>,
+    modeResolution: "strict" | "carried",
+    projectId: string,
+  ): SpawnTarget {
+    const { mode: rawMode, ...rest } = normalized;
+    const mode = this.resolveSpawnModeEntry(rawMode, project.modes, modeResolution, projectId);
+    return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
+  }
+
   private resolveSpawnTarget(
     request: SpawnSessionRequest,
     modeResolution: "strict" | "carried" = "strict",
-  ): {
-    project: ProjectConfig;
-    prompt: string;
-    steps?: string[];
-    mode?: ResolvedSessionMode;
-    planMode: boolean;
-    restrictWrites: boolean;
-    allowedTriggers?: string[];
-    selfDestruct?: SelfDestructConfig;
-  } {
+  ): SpawnTarget {
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -4414,25 +4436,12 @@ export class SessionService {
         },
         project.spawn?.steps,
       );
-      const { mode: rawMode, ...rest } = normalized;
-      const mode = this.resolveSpawnModeEntry(
-        rawMode,
-        project.modes,
-        modeResolution,
-        request.project,
-      );
-      return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
+      return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);
     }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
-      const { mode: rawMode, ...rest } = normalizeSpawnRequest(request, project.spawn?.steps);
-      const mode = this.resolveSpawnModeEntry(
-        rawMode,
-        project.modes,
-        modeResolution,
-        request.project,
-      );
-      return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
+      const normalized = normalizeSpawnRequest(request, project.spawn?.steps);
+      return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);
     }
     const entry = this.listUnconfiguredProjects().find(
       (existing) => existing.id === request.project,
@@ -4460,17 +4469,8 @@ export class SessionService {
       path: entry.path,
       port: this.config.server.port,
     });
-    const { mode: rawMode, ...rest } = normalizeSpawnRequest({
-      ...request,
-      prompt: bootstrapPrompt,
-    });
-    const mode = this.resolveSpawnModeEntry(
-      rawMode,
-      project.modes,
-      modeResolution,
-      request.project,
-    );
-    return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
+    const normalized = normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt });
+    return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);
   }
 
   async spawn(
