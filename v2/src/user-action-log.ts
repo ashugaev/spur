@@ -191,7 +191,6 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (path === "/shepherd/spawn") return { action: "session.spawn_shepherd" };
     if (path === "/sessions/background") return { action: "session.spawn_background" };
     if (path === "/sessions") return { action: "session.spawn" };
-    if (path === "/backlog/take") return { action: "backlog.take" };
     if (path === "/projects/connect") return { action: "project.connect" };
     if (path === "/projects/disconnect") return { action: "project.disconnect" };
     const preflight = path.match(/^\/projects\/([^/]+)\/preflight$/);

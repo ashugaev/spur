@@ -12,7 +12,6 @@ import {
   type AgentName,
   type AppConfig,
   type BacklogConfig,
-  type BacklogSpawnConfig,
   type CronSourceConfig,
   type GitHubCiSourceConfig,
   type GitHubSourceConfig,
@@ -684,21 +683,6 @@ function parseJiraSource(
   };
 }
 
-function parseBacklogSpawn(
-  projectId: string,
-  backlogId: string,
-  value: unknown,
-): BacklogSpawnConfig {
-  const label = `projects.${projectId}.backlog.${backlogId}.spawn`;
-  const raw = asObject(value, label);
-  const prompt = asOptionalString(raw["prompt"], `${label}.prompt`);
-  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
-  return {
-    ...(prompt !== undefined ? { prompt } : {}),
-    ...(agent !== undefined ? { agent } : {}),
-  };
-}
-
 function parseBacklog(
   projectId: string,
   backlogId: string,
@@ -730,9 +714,6 @@ function parseBacklog(
     query: asString(raw["query"], `${label}.query`),
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
-    ...(raw["spawn"] !== undefined
-      ? { spawn: parseBacklogSpawn(projectId, backlogId, raw["spawn"]) }
-      : {}),
   };
 }
 

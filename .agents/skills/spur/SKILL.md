@@ -11,6 +11,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `docs/configuration.md` and `docs/install-from-npm.md`.
+- `spur init` / `spur update` / `spur reinit` re-apply `npm config set prefix ~/.local` when `~/.npmrc` lost the line (never overwrites an operator-set `prefix=` line or an explicit non-`~/.local` pin). Every agent session also runs with `NPM_CONFIG_PREFIX=~/.local` so `claude`/`codex` self-update lands there regardless of `~/.npmrc`'s current state.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
@@ -141,12 +142,16 @@ GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for
 
 `jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
 skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
-(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
-take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
-at `/backlog/available` and `/backlog/take`. Item order is fetch/JQL order (server never re-sorts); include
-`ORDER BY Rank ASC` in `query` to surface Jira's real backlog rank order.
+(default 60000), `runOnStart` (default false). `provider` derives from source type. Backlog subsystem
+polls each binding and serves items at `/backlog/available` only. Item order is fetch/JQL order (server
+never re-sorts); include `ORDER BY Rank ASC` in `query` to surface Jira's real backlog rank order.
 
-Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
+Dashboard "Take task" opens the default spawn window prefilled with `Work on {{key}}: {{title}}\n\n{{url}}`
+and the item's project preset; no request fires until the user submits. The spawned session carries a
+`tracker` link (`{label: "tracker", url: item.url}`). The dashboard hides the backlog row client-side
+while any active session (working/waiting/needs_input/rate_limited) references the issue, matched by
+tracker link or a bounded key/url token in the session prompt; the row reappears once that session leaves
+the active set.
 
 ```yaml
 sources:
@@ -161,9 +166,6 @@ backlog:
     query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
     intervalMs: 60000
     runOnStart: false
-    spawn:
-      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
-      agent: claude
 ```
 
 ### Claude auth rotation
@@ -177,7 +179,8 @@ then Spur runs one minimal validation inference. Setup tokens last about one
 year and support inference only: no Remote Control, claude.ai connectors, or
 bare mode. Spur does not verify organization. Same-uid processes can inspect
 the selected process environment. Legacy/expired/insecure accounts require
-explicit re-enrollment.
+explicit re-enrollment. Existing `~/.claude` credentials can appear as a
+legacy `default` account for migration only.
 
 Managed sessions keep canonical Claude state. Spur selects the account with
 `CLAUDE_CODE_OAUTH_TOKEN`, removes conflicting inherited auth, and never sets

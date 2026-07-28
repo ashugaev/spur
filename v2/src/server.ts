@@ -28,7 +28,6 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
-  BacklogItemUnavailableError,
   ClaudeAuthSwitchConflictError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
@@ -63,7 +62,6 @@ import {
   type StartSidecarRequest,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
-  type TakeBacklogItemRequest,
   type UpdateProjectRequest,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -698,12 +696,6 @@ export async function startServer(
         return;
       }
 
-      if (method === "POST" && path === "/backlog/take") {
-        const body = await readJsonBody<TakeBacklogItemRequest>(request);
-        sendJson(response, 201, await service.takeAvailableBacklog(body));
-        return;
-      }
-
       if (method === "GET" && path === "/models") {
         const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
         let agent;
@@ -1270,7 +1262,6 @@ export async function startServer(
       errorMessage = message;
       if (
         error instanceof SessionResourceNotFoundError ||
-        error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||

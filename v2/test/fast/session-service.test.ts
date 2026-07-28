@@ -56,7 +56,6 @@ const loadConfigMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
 const findProjectConfigPathMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
-const claimAvailableBacklogItemMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
@@ -108,6 +107,7 @@ const resolveRepoPathFromWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
 const probeWorkspaceMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
+const normalizeSlotLinksMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
@@ -143,6 +143,8 @@ const addSetupTokenAccountMock = vi.fn();
 const enrollSetupTokenMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
+const ensureAccountProjectsLinkMock = vi.fn();
+const ensureDefaultAccountMock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -186,6 +188,8 @@ function resetAccountStoreMocks(): void {
   addSetupTokenAccountMock.mockReset();
   enrollSetupTokenMock.mockReset();
   removeAccountMock.mockReset();
+  ensureAccountProjectsLinkMock.mockReset();
+  ensureDefaultAccountMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
@@ -263,6 +267,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
   enrollSetupToken: enrollSetupTokenMock,
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
+  ensureAccountProjectsLink: ensureAccountProjectsLinkMock,
+  ensureDefaultAccount: ensureDefaultAccountMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -361,7 +367,6 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
-  claimAvailableBacklogItem: claimAvailableBacklogItemMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -457,6 +462,7 @@ vi.mock("../../src/session-slots.js", () => ({
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
+  normalizeSlotLinks: normalizeSlotLinksMock,
 }));
 
 vi.mock("../../src/session-artifacts.js", () => ({
@@ -921,7 +927,6 @@ describe("SessionService", () => {
     setSessionMemoryRecordMock.mockReset();
     resolveSessionMemoryRecordMock.mockReset().mockReturnValue(null);
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
-    claimAvailableBacklogItemMock.mockReset().mockReturnValue(null);
     listSessionsMock.mockReset().mockReturnValue([]);
     readAvailableBacklogItemsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
@@ -989,6 +994,43 @@ describe("SessionService", () => {
     setSessionArtifactUserAddedMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
+    });
+    normalizeSlotLinksMock.mockReset().mockImplementation((links: unknown) => {
+      const linksRaw = links ?? [];
+      if (!Array.isArray(linksRaw)) {
+        throw new Error("links must be an array");
+      }
+      return linksRaw.map((link: unknown, index: number) => {
+        if (!link || typeof link !== "object") {
+          throw new Error(`links[${index}] must be an object`);
+        }
+        const linkRecord = link as { label?: unknown; url?: unknown };
+        if (typeof linkRecord.label !== "string") {
+          throw new Error(`links[${index}].label must be a string`);
+        }
+        if (typeof linkRecord.url !== "string") {
+          throw new Error(`links[${index}].url must be a string`);
+        }
+        const normalizedLabel = linkRecord.label.trim().toLowerCase();
+        if (!/^[a-z0-9][a-z0-9_-]{0,15}$/.test(normalizedLabel)) {
+          throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+        }
+        const label =
+          normalizedLabel === "github-pr" || normalizedLabel === "github_pr"
+            ? "pr"
+            : normalizedLabel;
+        const trimmedUrl = linkRecord.url.trim();
+        if (!trimmedUrl) {
+          throw new Error("slot link URLs must be non-empty strings");
+        }
+        let url: string;
+        try {
+          url = new URL(trimmedUrl).toString();
+        } catch {
+          throw new Error(`Invalid slot link URL: ${trimmedUrl}`);
+        }
+        return { label, url };
+      });
     });
     applySlotsUpdateMock.mockReset().mockImplementation((current, request) => {
       const links = [...(current?.links ?? [])];
@@ -1067,6 +1109,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
@@ -1148,7 +1192,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("lists configured available backlog and takes an item once through background spawn", async () => {
+  it("lists configured available backlog items", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
     tmuxSessionExistsMock.mockResolvedValue(false);
@@ -1189,39 +1233,10 @@ describe("SessionService", () => {
       },
     });
     readAvailableBacklogItemsMock.mockReturnValue([backlogItem]);
-    claimAvailableBacklogItemMock.mockReturnValueOnce(backlogItem).mockReturnValueOnce(null);
-    const { BacklogItemUnavailableError, SessionService } = await loadSessionServiceModule();
+    const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     expect(service.listAvailableBacklog()).toEqual([backlogItem]);
-    const result = await service.takeAvailableBacklog({
-      projectId: "api",
-      backlogId: "features",
-      externalId: "10001",
-    });
-
-    expect(result.item).toEqual(backlogItem);
-    expect(result.session).toMatchObject({
-      id: "api-1",
-      status: "spawning",
-      slots: {
-        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
-      },
-    });
-    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
-      prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
-      slots: {
-        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
-      },
-    });
-    await expect(
-      service.takeAvailableBacklog({
-        projectId: "api",
-        backlogId: "features",
-        externalId: "10001",
-      }),
-    ).rejects.toBeInstanceOf(BacklogItemUnavailableError);
-    expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
   });
 
   it("concatenates per-backlog blocks in config order without a global fetchedAt/position sort", async () => {
@@ -1314,63 +1329,6 @@ describe("SessionService", () => {
     ]);
   });
 
-  it("honors the backlog spawn prompt template and agent when taking an item", async () => {
-    mockClaudeJsonlState("waiting");
-    createSessionStore();
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    const backlogItem = {
-      provider: "jira" as const,
-      projectId: "api",
-      backlogId: "features",
-      externalId: "10001",
-      key: "WEB-17",
-      title: "Fix checkout",
-      url: "https://jira.example.com/browse/WEB-17",
-      fetchedAt: "2026-06-16T12:00:00.000Z",
-      position: 0,
-    };
-    loadConfigMock.mockReturnValue({
-      ...baseConfig(),
-      projects: {
-        api: {
-          ...baseConfig().projects.api,
-          sources: {
-            jira: {
-              type: "jira",
-              baseUrl: "https://jira.example.com/",
-              email: "bot@example.com",
-              token: "token",
-            },
-          },
-          backlog: {
-            features: {
-              source: "jira",
-              provider: "jira",
-              query: "project = WEB",
-              intervalMs: 60_000,
-              runOnStart: false,
-              spawn: { prompt: "Ticket {{key}} ({{provider}}): {{title}}", agent: "codex" },
-            },
-          },
-        },
-      },
-    });
-    claimAvailableBacklogItemMock.mockReturnValueOnce(backlogItem);
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    await service.takeAvailableBacklog({
-      projectId: "api",
-      backlogId: "features",
-      externalId: "10001",
-    });
-
-    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
-      agent: "codex",
-      prompt: "Ticket WEB-17 (jira): Fix checkout",
-    });
-  });
-
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
@@ -1419,6 +1377,58 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
+  it("rejects a background spawn whose slot link label fails validation", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        slots: { links: [{ label: "Tracker!", url: "https://jira.example.com/browse/WEB-1" }] },
+      }),
+    ).rejects.toThrow("slot link labels must match");
+  });
+
+  it("rejects a background spawn whose slot link url is not a valid URL", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        slots: { links: [{ label: "tracker", url: "not-a-url" }] },
+      }),
+    ).rejects.toThrow("Invalid slot link URL");
+  });
+
+  it("persists normalized slot links for a valid background spawn", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      slots: { links: [{ label: "TRACKER", url: "https://jira.example.com/browse/WEB-1" }] },
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      id: "api-1",
+      slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-1" }] },
+    });
+  });
+
   it("background spawn reserves sidecar ports during autostart and passes them into sidecar env", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -1457,6 +1467,8 @@ describe("SessionService", () => {
           sidecarName: "dev",
           env: expect.objectContaining({
             SPUR_RESERVED_PORT_DEV: "3000",
+            NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+            npm_config_prefix: join(homedir(), ".local"),
           }),
         }),
       );
@@ -2587,6 +2599,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(result.branch).toBe("main");
@@ -3856,11 +3870,13 @@ describe("SessionService", () => {
           claudeAccountId: "acc-1",
         }),
       ).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
 
     it("returns {} when the session has no bound account", async () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude" })).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
 
     it("resolves the config dir from the account store", async () => {
@@ -3880,6 +3896,9 @@ describe("SessionService", () => {
           claudeAccountId: "acc-1",
         }),
       ).toEqual({ claudeConfigDir: "/abs/acc-1" });
+      expect(ensureAccountProjectsLinkMock).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "acc-1", configDir: "/abs/acc-1" }),
+      );
     });
 
     it("returns {} when the bound account was removed", async () => {
@@ -3891,6 +3910,7 @@ describe("SessionService", () => {
           claudeAccountId: "gone",
         }),
       ).toEqual({});
+      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
     });
   });
 
@@ -3962,6 +3982,16 @@ describe("SessionService", () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(runningSession({ status: "completed" }));
       expect(request.claudeAccountId).toBeUndefined();
+    });
+  });
+
+  describe("listClaudeAccounts", () => {
+    it("calls ensureDefaultAccount before listing", async () => {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.listClaudeAccounts();
+      expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
+      service.dispose();
     });
   });
 
@@ -9074,6 +9104,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
@@ -11653,6 +11685,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -11905,6 +11939,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -12245,6 +12281,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(

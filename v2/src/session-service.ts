@@ -83,6 +83,8 @@ import {
   accountStatus,
   addSetupTokenAccount,
   enrollSetupToken,
+  ensureAccountProjectsLink,
+  ensureDefaultAccount,
   findAccount,
   listAccounts,
   publicAccount,
@@ -112,7 +114,6 @@ import {
   wrapShepherdSpawnPrompt,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
-import { renderSpawnPrompt } from "./prompt-template.js";
 import {
   logSpurEvent,
   logUserInputEvent,
@@ -121,6 +122,7 @@ import {
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { NPM_PREFIX_ENV, NPM_PREFIX_ENV_LOWER, npmGlobalPrefix } from "./npm-prefix.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
@@ -129,7 +131,6 @@ import {
   sendTelegramReply,
 } from "./telegram-source-state.js";
 import {
-  claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -184,6 +185,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
@@ -293,8 +295,6 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
-  type TakeBacklogItemRequest,
-  type TakeBacklogItemResponse,
   type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -404,12 +404,6 @@ interface PrCheckTracker {
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
-
-export class BacklogItemUnavailableError extends Error {
-  readonly statusCode = 409;
-}
-
-const DEFAULT_BACKLOG_PROMPT = "Work on {{key}}: {{title}}\n\n{{url}}";
 
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
@@ -994,7 +988,9 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
-  return account.kind === "legacy_profile" ? { claudeConfigDir: account.configDir } : {};
+  if (account.kind !== "legacy_profile") return {};
+  ensureAccountProjectsLink(account);
+  return { claudeConfigDir: account.configDir };
 }
 
 function resolveClaudeRuntimeAuth(
@@ -1075,6 +1071,18 @@ function buildSessionEnv(args: {
     // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
     SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
+    // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
+    // `~/.npmrc` has been clobbered down to just a registry `_authToken`
+    // line. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
+    // `process.env` before this pin, and npm lowercases every `npm_config_*`
+    // key when resolving its `prefix` option — so an inherited lowercase
+    // `npm_config_prefix` (e.g. from update.ts's reinit pin, or pnpm's own
+    // env when it launched the daemon) collides with this uppercase key and
+    // whichever one iterates last wins. Setting both keys to the identical
+    // value removes that ordering dependence instead of relying on either
+    // casing being authoritative.
+    [NPM_PREFIX_ENV]: npmGlobalPrefix(),
+    [NPM_PREFIX_ENV_LOWER]: npmGlobalPrefix(),
   };
   if (
     args.symlinks.includes("node_modules") &&
@@ -1088,6 +1096,12 @@ function buildSessionEnv(args: {
     ...(args.extraEnv ?? {}),
   };
 }
+
+// Test-only: lets the real-npm regression test exercise the exact env
+// buildSessionEnv produces without standing up a full SessionService mock
+// harness (all other assertions on it go through the SessionService.spawn/
+// restore/send call sites instead, per the rest of this file's tests).
+export const _buildSessionEnvForTests = buildSessionEnv;
 
 function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
@@ -3837,41 +3851,6 @@ export class SessionService {
     return items;
   }
 
-  async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
-    const project = this.config.projects[request.projectId];
-    const binding = project?.backlog[request.backlogId];
-    if (!project || !binding) {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
-    }
-
-    const item = claimAvailableBacklogItem(
-      this.config.dataDir,
-      request.projectId,
-      request.backlogId,
-      request.externalId,
-    );
-    if (!item) {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
-    }
-
-    const prompt = renderSpawnPrompt(binding.spawn?.prompt ?? DEFAULT_BACKLOG_PROMPT, {
-      key: item.key,
-      title: item.title,
-      url: item.url,
-      provider: item.provider,
-      backlogId: request.backlogId,
-    });
-    const session = await this.spawnInBackground({
-      project: request.projectId,
-      prompt,
-      ...(binding.spawn?.agent ? { agent: binding.spawn.agent } : {}),
-      slots: {
-        links: [{ label: "tracker", url: item.url }],
-      },
-    });
-    return { item, session };
-  }
-
   listStateSubscriptions(subscriberId: string): SessionStateSubscriptionListResponse {
     const subscriber = this.requireSession(subscriberId);
     return { records: subscriber.stateSubscriptions ?? [] };
@@ -4656,7 +4635,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -5258,7 +5239,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -7847,6 +7830,7 @@ export class SessionService {
   }
 
   listClaudeAccounts(): PublicClaudeAccount[] {
+    ensureDefaultAccount(this.config.dataDir);
     return listAccounts(this.config.dataDir).map((account) =>
       publicAccount(this.config.dataDir, account),
     );

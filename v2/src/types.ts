@@ -163,17 +163,6 @@ export interface AvailableBacklogItem {
   position: number;
 }
 
-export interface TakeBacklogItemRequest {
-  projectId: string;
-  backlogId: string;
-  externalId: string;
-}
-
-export interface TakeBacklogItemResponse {
-  item: AvailableBacklogItem;
-  session: SessionView;
-}
-
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
@@ -241,18 +230,12 @@ export interface JiraSourceConfig {
   token: string;
 }
 
-export interface BacklogSpawnConfig {
-  prompt?: string;
-  agent?: AgentName;
-}
-
 export interface BacklogConfig {
   source: string;
   provider: BacklogProviderId;
   query: string;
   intervalMs: number;
   runOnStart: boolean;
-  spawn?: BacklogSpawnConfig;
 }
 
 export interface GitHubCiSourceConfig extends BaseSourceConfig {

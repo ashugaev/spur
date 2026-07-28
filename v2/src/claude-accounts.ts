@@ -1,13 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const ACCOUNTS_FILE = "claude-accounts.json";
@@ -158,7 +164,7 @@ export function fingerprintSetupToken(token: string): string {
 }
 
 function assertAccountId(id: string): void {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+  if (id === "." || id === ".." || id.includes("/") || id.includes("\\") || id.trim() === "") {
     throw new Error("Invalid Claude account id");
   }
 }
@@ -246,6 +252,70 @@ export function addSetupTokenAccount(
   }
 }
 
+function mergeProjectsInto(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const srcPath = join(source, entry.name);
+    const dstPath = join(target, entry.name);
+    if (entry.isDirectory()) {
+      if (existsSync(dstPath)) {
+        mergeProjectsInto(srcPath, dstPath);
+      } else {
+        renameSync(srcPath, dstPath);
+      }
+    } else {
+      renameSync(srcPath, dstPath);
+    }
+  }
+}
+
+function linkProjectsDir(link: string, target: string): void {
+  try {
+    symlinkSync(target, link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const st = lstatSync(link);
+      if (st.isSymbolicLink() && readlinkSync(link) === target) return;
+    }
+    throw error;
+  }
+}
+
+export function ensureAccountProjectsLink(account: ClaudeAccount): void {
+  if (account.kind !== "legacy_profile") return;
+  const target = join(homedir(), ".claude", "projects");
+  mkdirSync(target, { recursive: true });
+  const link = join(account.configDir, "projects");
+  if (link === target) return;
+
+  let stat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    stat = lstatSync(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      linkProjectsDir(link, target);
+      return;
+    }
+    throw error;
+  }
+
+  if (stat.isSymbolicLink()) {
+    if (readlinkSync(link) === target) return;
+    unlinkSync(link);
+    linkProjectsDir(link, target);
+    return;
+  }
+
+  if (stat.isDirectory()) {
+    mergeProjectsInto(link, target);
+    rmSync(link, { recursive: true, force: true });
+    linkProjectsDir(link, target);
+    return;
+  }
+
+  throw new Error(`${link} exists but is neither a symlink nor a directory`);
+}
+
 export function enrollSetupToken(
   dataDir: string,
   id: string,
@@ -286,6 +356,7 @@ export function addAccount(dataDir: string, opts: { label?: string } = {}): Lega
     createdAt: new Date().toISOString(),
   };
   writeAccounts(dataDir, [...listAccounts(dataDir), account]);
+  ensureAccountProjectsLink(account);
   return account;
 }
 
@@ -296,6 +367,23 @@ export function removeAccount(dataDir: string, id: string): void {
     listAccounts(dataDir).filter((account) => account.id !== id),
   );
   rmSync(accountDir(dataDir, id), { recursive: true, force: true });
+}
+
+export function ensureDefaultAccount(
+  dataDir: string,
+  defaultConfigDir: string = join(homedir(), ".claude"),
+): void {
+  if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
+  const existing = listAccounts(dataDir);
+  if (existing.some((account) => account.kind === "legacy_profile" && account.configDir === defaultConfigDir)) return;
+  const account: LegacyClaudeAccount = {
+    kind: "legacy_profile",
+    id: "default",
+    label: "default",
+    configDir: defaultConfigDir,
+    createdAt: new Date().toISOString(),
+  };
+  writeAccounts(dataDir, [...existing, account]);
 }
 
 export function touchAccountUsed(dataDir: string, id: string): void {

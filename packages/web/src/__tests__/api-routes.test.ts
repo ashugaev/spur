@@ -65,7 +65,6 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
-import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -669,37 +668,42 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST /api/backlog/take proxies unavailable status from daemon", async () => {
-    mockedSpurRequest.mockResolvedValue(
-      new Response(JSON.stringify({ error: "Backlog item is unavailable" }), {
-        status: 409,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+  it("POST /api/spawn forwards slots.links to /sessions/background", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
-    const response = await takeBacklog(
-      new NextRequest("http://localhost:3000/api/backlog/take", {
+    await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
         body: JSON.stringify({
           projectId: "api",
-          backlogId: "features",
-          externalId: "10001",
+          prompt: "Work on WEB-17",
+          slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
         }),
       }),
     );
 
-    expect(response.status).toBe(409);
-    expect(mockedSpurRequest).toHaveBeenCalledWith(
-      "/backlog/take",
-      expect.objectContaining({
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body.slots).toEqual({
+      links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+    });
+  });
+
+  it("POST /api/spawn omits slots when not provided", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
-        body: JSON.stringify({
-          projectId: "api",
-          backlogId: "features",
-          externalId: "10001",
-        }),
+        body: JSON.stringify({ projectId: "api", prompt: "hi" }),
       }),
     );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("slots");
   });
 
   it("complete and kill forward PR actions and preserve daemon conflicts", async () => {
