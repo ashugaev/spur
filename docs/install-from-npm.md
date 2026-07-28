@@ -63,11 +63,11 @@ Auth is yours — two ways to bring the tailnet up:
 
 Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
 
-### HTTPS
+### HTTPS (voice input only)
 
-Tailnet up → terminate TLS on the tailnet hostname, verify `200`: [https-tailscale.md](https-tailscale.md). Part of the install: without it voice input is dead.
+Wanted voice input? Tailnet up → terminate TLS on the tailnet hostname, verify `200`: [https-tailscale.md](https-tailscale.md). Voice also needs its own server deps ([voice.md](voice.md)); the UI, terminal, and agents all work over plain HTTP, so skip this whole step when voice is not wanted.
 
-Skip when another service holds 443 — never displace it. On failure report that doc's blocker message; the rest of the install stands.
+Skip too when another service holds 443 — never displace it. On failure report that doc's blocker message; the rest of the install stands.
 
 ## Identity steps (operator TODO)
 
@@ -75,9 +75,9 @@ A few steps use your own accounts and each needs one interactive action — they
 
 - Log in an agent — `claude` (sign in) or `codex login`. At least one is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
-- Enable HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Blocks HTTPS, and therefore voice input.
+- Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
-Spur installs and its services start without these, but until they're done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
+Spur installs and its services start without these; until the first two are done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
 
 ## Verify
 

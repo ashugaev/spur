@@ -1,24 +1,29 @@
 # HTTPS over Tailscale
 
-Browsers block microphone access (`getUserMedia`) over plain HTTP, `localhost` excepted. Tailnet hostname over HTTP → [voice input](voice.md) dead. Rest of the UI unaffected.
+Browsers block microphone access (`getUserMedia`) over plain HTTP, `localhost` excepted. Tailnet hostname over HTTP → [voice input](voice.md) dead, and terminal copy silently no-ops (`navigator.clipboard` is secure-context only). Rest of the UI works.
 
 `tailscale serve` terminates TLS with a Let's Encrypt cert issued through the tailnet and renews itself. No cert files, no timer, no reverse proxy. Tailnet-only — `serve` is not `funnel`.
 
 ## Prerequisites
 
 - Tailnet up — [install-from-npm.md](install-from-npm.md#private-access-tailscale-default-on).
+- MagicDNS enabled for the tailnet — a hard prerequisite of HTTPS Certificates, and what gives the node the `<host>.<tailnet>.ts.net` name every command below uses. Tailnet-level only; devices can still run `--accept-dns=false`.
 - HTTPS Certificates enabled for the tailnet: admin console → DNS → HTTPS Certificates → Enable. Once per tailnet, owner/admin only. Without it no cert issues, ever.
+
+The certs are public Let's Encrypt certs, so every node name a cert is issued for lands in public certificate-transparency logs — permanently, tailnet-wide. Names leak, nothing else: the addresses stay tailnet-only and unreachable from the internet.
 
 ## Skip check
 
 Run first. 443 belongs to whoever already holds it.
 
 ```bash
-tailscale serve status              # expect: No serve config
+tailscale serve status --json | jq -e '.TCP."443"' >/dev/null && echo "443 served by tailscale"
 sudo ss -tlnp | grep -E ':443\b'    # expect: no output
 ```
 
-Either one non-empty → stop. Change nothing, report the blocker below.
+Either one printing → stop. Change nothing, report the blocker below.
+
+Scoped to 443 deliberately: bare `tailscale serve status` is non-empty for a `serve` on any port, so an operator already serving `--http=80` would get a false abort.
 
 ## Enable
 
@@ -44,7 +49,7 @@ Then open `https://$FQDN/` on a tailnet device and hit the mic button.
 ## Off
 
 ```bash
-tailscale serve --https=443 off
+sudo tailscale serve --https=443 off
 ```
 
 ## Failure blocks voice input
