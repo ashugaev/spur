@@ -9,7 +9,7 @@ npm install -g @shugaev/spur
 spur init
 ```
 
-`npm install -g` only unpacks the package; `spur init` installs the systemd user units (daemon on `:4310`, web UI on `:4311`). Fresh Linux server walkthrough — Node setup, systemd, Tailscale — in the install guide below.
+`npm install -g` only unpacks the package; `spur init` installs the systemd user units (daemon on `:4310`, web UI on `:5555`). Fresh Linux server walkthrough — Node setup, systemd, Tailscale — in the install guide below.
 
 ## Docs
 

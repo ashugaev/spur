@@ -30,7 +30,7 @@ Units installed:
 | Unit                  | Role                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
 | `spur-daemon.service` | HTTP API `:4310`, tmux sessions                                                 |
-| `spur-web.service`    | Web UI `:4311`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
+| `spur-web.service`    | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
 
 Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
 
@@ -49,7 +49,7 @@ Each still needs a login under your own account (`claude`, or `codex login`) bef
 | ------------------- | ------------------------------------------- |
 | `--no-start`        | install units + linger, don't start         |
 | `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`) |
-| `--web-port <port>` | web port (default `4311`)                   |
+| `--web-port <port>` | web port (default `5555`)                   |
 | `--no-tailscale`    | skip Tailscale (on by default)              |
 
 ## Private access (Tailscale, default on)
@@ -83,7 +83,7 @@ Spur installs and its services start without these, but until they're done it st
 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/           # 200
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5555/           # 200
 ```
 
 Terminal rides `/ws` on the web port — no separate port or check.
