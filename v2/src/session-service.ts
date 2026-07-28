@@ -157,6 +157,7 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
   renderModeInstruction,
+  resolveCarriedSessionMode,
   resolveSessionMode,
   type ResolvedSessionMode,
 } from "./session-mode.js";
@@ -276,6 +277,7 @@ import {
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
+  type SessionModeConfig,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -4365,7 +4367,33 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  private resolveSpawnTarget(request: SpawnSessionRequest): {
+  // Shared by resolveSpawnTarget's three branches. "strict" (default) is the
+  // spawn boundary: an unknown requested mode is a caller mistake and throws.
+  // "carried" is respawn/handoff carrying a persisted mode forward through a
+  // fresh spawn request: an unknown mode degrades to no-mode with a warning
+  // instead of blocking recovery.
+  private resolveSpawnModeEntry(
+    rawMode: string | null | undefined,
+    modes: Record<string, SessionModeConfig> | undefined,
+    modeResolution: "strict" | "carried",
+    projectId: string,
+  ): ResolvedSessionMode | undefined {
+    if (modeResolution === "strict") {
+      return resolveSessionMode(rawMode, modes);
+    }
+    return resolveCarriedSessionMode(rawMode ?? undefined, modes, (message) =>
+      this.logEvent("session.mode.dropped", {
+        level: "warn",
+        projectId,
+        message,
+      }),
+    );
+  }
+
+  private resolveSpawnTarget(
+    request: SpawnSessionRequest,
+    modeResolution: "strict" | "carried" = "strict",
+  ): {
     project: ProjectConfig;
     prompt: string;
     steps?: string[];
@@ -4391,13 +4419,23 @@ export class SessionService {
         project.spawn?.steps,
       );
       const { mode: rawMode, ...rest } = normalized;
-      const mode = resolveSessionMode(rawMode, project.modes);
+      const mode = this.resolveSpawnModeEntry(
+        rawMode,
+        project.modes,
+        modeResolution,
+        request.project,
+      );
       return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
     }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
       const { mode: rawMode, ...rest } = normalizeSpawnRequest(request, project.spawn?.steps);
-      const mode = resolveSessionMode(rawMode, project.modes);
+      const mode = this.resolveSpawnModeEntry(
+        rawMode,
+        project.modes,
+        modeResolution,
+        request.project,
+      );
       return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
     }
     const entry = this.listUnconfiguredProjects().find(
@@ -4430,13 +4468,18 @@ export class SessionService {
       ...request,
       prompt: bootstrapPrompt,
     });
-    const mode = resolveSessionMode(rawMode, project.modes);
+    const mode = this.resolveSpawnModeEntry(
+      rawMode,
+      project.modes,
+      modeResolution,
+      request.project,
+    );
     return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
   }
 
   async spawn(
     request: SpawnSessionRequest,
-    options?: { promptKind?: UserInputKind },
+    options?: { promptKind?: UserInputKind; modeResolution?: "strict" | "carried" },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -4463,7 +4506,7 @@ export class SessionService {
     let allocatedNewWorktree = false;
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options?.modeResolution ?? "strict"));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -7368,10 +7411,19 @@ export class SessionService {
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
       const restrictWrites = resolveRestrictWrites(current);
-      // Restore never re-resolves mode: pass the persisted value through
-      // resolveSessionMode's null branch (never through undefined) so an
-      // unmoded session never picks up a newly-configured project default.
-      const mode = resolveSessionMode(current.mode ?? null, restoreProjectConfig.modes);
+      // Restore never re-resolves mode against the request > project-default
+      // precedence: it carries the persisted value forward leniently, so an
+      // unmoded session never picks up a newly-configured project default,
+      // and a session whose mode was renamed/removed out from under it
+      // degrades to no-mode instead of blocking restore.
+      const mode = resolveCarriedSessionMode(current.mode, restoreProjectConfig.modes, (message) =>
+        this.logEvent("session.mode.dropped", {
+          level: "warn",
+          sessionId: current.id,
+          projectId: current.project,
+          message,
+        }),
+      );
       const shouldSendRestoreMessage =
         current.status !== "paused" && current.stopReason !== "manual_pause";
       const restorePrompt = shouldSendRestoreMessage
@@ -7835,7 +7887,10 @@ export class SessionService {
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
       }),
-      request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
+      {
+        modeResolution: "carried",
+        ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
+      },
     );
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
@@ -7935,6 +7990,7 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
       }),
+      { modeResolution: "carried" },
     );
 
     const spawnedRecord = readSession(this.config.dataDir, spawned.id);

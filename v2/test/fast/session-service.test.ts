@@ -1607,6 +1607,247 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "council" });
   });
 
+  it("does not let a mode-less session pick up the project default on respawn", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        status: "completed",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.respawn("api-1");
+
+    expect(result.status).toBe("running");
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("Mode:");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
+  });
+
+  it("does not let a mode-less session pick up the project default on handoff", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        agent: "codex",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        slots: { links: [] },
+      }),
+    );
+    workspaceExistsMock.mockReturnValue(true);
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.handoff("api-1", { agent: "cursor" });
+
+    expect(result.id).toBe("api-2");
+    const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+    expect(launchPrompt).not.toContain("Mode:");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
+  });
+
+  it("does not let a mode-less session pick up the project default on restore", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).not.toContain("Mode:");
+  });
+
+  it("carries a configured mode through restore's resume-plan prompt", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      mode: "council",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    const restored = await service.restore("api-1");
+
+    expect(restored.id).toBe("api-1");
+    expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).toContain(
+      "Mode: council. Load the `council` skill",
+    );
+  });
+
+  it("degrades a stale carried mode to no-mode instead of throwing on respawn", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        mode: "retired-mode",
+        status: "completed",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.respawn("api-1");
+
+    expect(result.status).toBe("running");
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("Mode:");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.mode.dropped"),
+    ).toBe(true);
+  });
+
+  it("degrades a stale carried mode to no-mode instead of throwing on handoff", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        agent: "codex",
+        mode: "retired-mode",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        slots: { links: [] },
+      }),
+    );
+    workspaceExistsMock.mockReturnValue(true);
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.handoff("api-1", { agent: "cursor" });
+
+    // Config drift must not lose the session: a replacement is always
+    // created, even when the persisted mode no longer resolves.
+    expect(result.id).toBe("api-2");
+    const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+    expect(launchPrompt).not.toContain("Mode:");
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.mode.dropped"),
+    ).toBe(true);
+  });
+
+  it("degrades a stale carried mode to no-mode instead of throwing on restore", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      mode: "retired-mode",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    const restored = await service.restore("api-1");
+
+    expect(restored.id).toBe("api-1");
+    expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).not.toContain("Mode:");
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.mode.dropped"),
+    ).toBe(true);
+  });
+
+  it("appends both the plan-mode suffix and the mode instruction, in that order", async () => {
+    loadConfigMock.mockReturnValue(configWithModes());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", planMode: true });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      "slot-instructions\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+    );
+  });
+
+  it("appends both the restrict-writes suffix and the mode instruction, in that order", async () => {
+    loadConfigMock.mockReturnValue(configWithModes());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", restrictWrites: true });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      "slot-instructions\nhello\n\nRestricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+    );
+  });
+
+  it("carries the resolved default mode onto the background spawn placeholder", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({ project: "api", prompt: "hello" });
+
+    expect(placeholder.mode).toBe("manager");
+    await vi.waitFor(() => {
+      expect(
+        writeSessionMock.mock.calls.some(
+          ([, session]) => session.id === placeholder.id && session.mode === "manager",
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("retries background spawn up to three attempts without reserving a new session id", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
