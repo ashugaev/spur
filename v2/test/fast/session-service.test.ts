@@ -1517,6 +1517,96 @@ describe("SessionService", () => {
     });
   });
 
+  function configWithModes() {
+    const base = baseConfig();
+    return {
+      ...base,
+      projects: {
+        ...base.projects,
+        api: {
+          ...base.projects.api,
+          modes: {
+            manager: { skill: "manager", default: true },
+            council: { skill: "council" },
+          },
+        },
+      },
+    };
+  }
+
+  it("emits the project default mode line in the launch prompt", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      "slot-instructions\nhello\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+    );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
+  });
+
+  it("lets an explicit --mode override the project default mode", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", mode: "council" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      "slot-instructions\nhello\n\nMode: council. Load the `council` skill and follow it as your behavior contract for this session.",
+    );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "council" });
+  });
+
+  it("produces a byte-identical prompt for a project without a modes registry", async () => {
+    mockClaudeJsonlState("waiting");
+    // baseConfig() has no modes key on the "api" project; this is the
+    // regression guard that D5 ("no modes: -> today's behavior exactly")
+    // holds.
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe("slot-instructions\nhello");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
+  });
+
+  it("preserves a session's mode across respawn without falling back to the project default", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithModes());
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        mode: "council",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService, resolveRespawnRequest } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const current = sessions.get("api-1");
+    if (!current) throw new Error("expected api-1 to exist");
+    const respawnRequest = resolveRespawnRequest(current);
+    expect(respawnRequest.mode).toBe("council");
+
+    await service.spawn(respawnRequest);
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      "Mode: council. Load the `council` skill",
+    );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "council" });
+  });
+
   it("retries background spawn up to three attempts without reserving a new session id", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();

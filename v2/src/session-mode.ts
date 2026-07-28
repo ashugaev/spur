@@ -10,9 +10,16 @@ export interface ResolvedSessionMode {
 }
 
 export function resolveSessionMode(
-  requestMode: string | undefined,
+  // string = explicit/requested mode name; null = a respawn/handoff/restore
+  // carrying forward a session that had no mode, which must suppress the
+  // project default rather than newly adopt it; undefined = a fresh spawn,
+  // apply the normal request > project-default precedence.
+  requestMode: string | null | undefined,
   modes: Record<string, SessionModeConfig> | undefined,
 ): ResolvedSessionMode | undefined {
+  if (requestMode === null) {
+    return undefined;
+  }
   if (requestMode !== undefined) {
     const entry = modes?.[requestMode];
     if (!entry) {

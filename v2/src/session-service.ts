@@ -156,6 +156,11 @@ import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  renderModeInstruction,
+  resolveSessionMode,
+  type ResolvedSessionMode,
+} from "./session-mode.js";
+import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
@@ -677,6 +682,7 @@ function normalizeSpawnRequest(
 ): {
   prompt: string;
   steps?: string[];
+  mode?: string | null;
   planMode: boolean;
   restrictWrites: boolean;
   allowedTriggers?: string[];
@@ -694,6 +700,7 @@ function normalizeSpawnRequest(
     prompt,
     planMode: request.planMode === true,
     restrictWrites: request.restrictWrites === true,
+    ...(request.mode !== undefined ? { mode: request.mode } : {}),
     ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
@@ -748,17 +755,25 @@ async function setupSessionAgentHooks(args: {
   return setupAgentHooks(hookArgs);
 }
 
-function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
+function buildSessionPrompt(
+  prompt: string,
+  planMode: boolean,
+  restrictWrites = false,
+  mode?: ResolvedSessionMode,
+): string {
   if (!prompt.trim()) {
     return prompt;
   }
+  let result = prompt;
   if (planMode) {
-    return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+    result = `${result}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+  } else if (restrictWrites) {
+    result = `${result}\n\n${RESTRICT_WRITES_PROMPT_SUFFIX}`;
   }
-  if (restrictWrites) {
-    return `${prompt}\n\n${RESTRICT_WRITES_PROMPT_SUFFIX}`;
+  if (mode) {
+    result = `${result}\n\n${renderModeInstruction(mode)}`;
   }
-  return prompt;
+  return result;
 }
 
 function withAgentModeOptions(
@@ -1005,8 +1020,9 @@ export function buildRestorePrompt(
   prompt: string,
   planMode = false,
   restrictWrites = false,
+  mode?: ResolvedSessionMode,
 ): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode, restrictWrites)}`;
+  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode, restrictWrites, mode)}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -1366,6 +1382,7 @@ interface PreparedSpawn {
   agent: SessionRecord["agent"];
   prompt: string;
   steps?: string[];
+  mode?: ResolvedSessionMode;
   planMode: boolean;
   restrictWrites: boolean;
   allowedTriggers?: string[];
@@ -1408,6 +1425,9 @@ export function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
+    // Always set, using null when absent, so the spawn resolver never falls
+    // back to a project default mode this session never had.
+    mode: session.mode ?? null,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -1457,6 +1477,9 @@ function resolveHandoffSpawnRequest(
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+    // Always set, using null when absent, so the spawn resolver never falls
+    // back to a project default mode this session never had.
+    mode: session.mode ?? null,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -4346,6 +4369,7 @@ export class SessionService {
     project: ProjectConfig;
     prompt: string;
     steps?: string[];
+    mode?: ResolvedSessionMode;
     planMode: boolean;
     restrictWrites: boolean;
     allowedTriggers?: string[];
@@ -4354,25 +4378,27 @@ export class SessionService {
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
-      return {
-        project,
-        ...normalizeSpawnRequest(
-          {
-            ...request,
-            prompt: wrapShepherdSpawnPrompt(request.prompt, {
-              ...(request.bareSpawnMessage !== undefined
-                ? { bareSpawnMessage: request.bareSpawnMessage }
-                : {}),
-            }),
-            overrides: { ...(request.overrides ?? {}), worktree: false },
-          },
-          project.spawn?.steps,
-        ),
-      };
+      const normalized = normalizeSpawnRequest(
+        {
+          ...request,
+          prompt: wrapShepherdSpawnPrompt(request.prompt, {
+            ...(request.bareSpawnMessage !== undefined
+              ? { bareSpawnMessage: request.bareSpawnMessage }
+              : {}),
+          }),
+          overrides: { ...(request.overrides ?? {}), worktree: false },
+        },
+        project.spawn?.steps,
+      );
+      const { mode: rawMode, ...rest } = normalized;
+      const mode = resolveSessionMode(rawMode, project.modes);
+      return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
     }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
-      return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
+      const { mode: rawMode, ...rest } = normalizeSpawnRequest(request, project.spawn?.steps);
+      const mode = resolveSessionMode(rawMode, project.modes);
+      return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
     }
     const entry = this.listUnconfiguredProjects().find(
       (existing) => existing.id === request.project,
@@ -4400,7 +4426,12 @@ export class SessionService {
       path: entry.path,
       port: this.config.server.port,
     });
-    return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
+    const { mode: rawMode, ...rest } = normalizeSpawnRequest({
+      ...request,
+      prompt: bootstrapPrompt,
+    });
+    const mode = resolveSessionMode(rawMode, project.modes);
+    return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
   }
 
   async spawn(
@@ -4420,6 +4451,7 @@ export class SessionService {
     let resolvedModel: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
+    let mode: ResolvedSessionMode | undefined;
     let planMode: boolean;
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
@@ -4430,7 +4462,7 @@ export class SessionService {
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+      ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
@@ -4594,6 +4626,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -4674,7 +4707,7 @@ export class SessionService {
       }
 
       const firstStage = steps?.[0];
-      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites, mode);
       const initialMessage =
         steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
@@ -5120,6 +5153,7 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
+    let mode: ResolvedSessionMode | undefined;
     let planMode: boolean;
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
@@ -5133,7 +5167,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+      ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
@@ -5189,6 +5223,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -5245,6 +5280,7 @@ export class SessionService {
         agent,
         prompt,
         ...(steps ? { steps } : {}),
+        ...(mode !== undefined ? { mode } : {}),
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -5309,6 +5345,7 @@ export class SessionService {
   ): Promise<BackgroundSpawnAttemptResult> {
     const {
       agent,
+      mode,
       planMode,
       project,
       prompt,
@@ -5501,7 +5538,7 @@ export class SessionService {
       }
 
       const firstStage = prepared.steps?.[0];
-      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites, mode);
       const initialMessage =
         prepared.steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
@@ -7331,10 +7368,14 @@ export class SessionService {
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
       const restrictWrites = resolveRestrictWrites(current);
+      // Restore never re-resolves mode: pass the persisted value through
+      // resolveSessionMode's null branch (never through undefined) so an
+      // unmoded session never picks up a newly-configured project default.
+      const mode = resolveSessionMode(current.mode ?? null, restoreProjectConfig.modes);
       const shouldSendRestoreMessage =
         current.status !== "paused" && current.stopReason !== "manual_pause";
       const restorePrompt = shouldSendRestoreMessage
-        ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
+        ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
       const planOptions = {
         ...withAgentModeOptions(

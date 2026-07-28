@@ -761,7 +761,11 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
-  mode?: string;
+  // string = explicit/requested mode; null = respawn/handoff/restore carrying
+  // forward a session that had no mode, suppressing the project default;
+  // undefined = a fresh spawn, apply the normal request > project-default
+  // precedence.
+  mode?: string | null;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
