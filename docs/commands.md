@@ -15,7 +15,7 @@ Read-only. Checks host install, config validity, and daemon/web health; exits no
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -24,6 +24,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
 - `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
+- `--mode <name>` selects a session mode from `projects.<id>.modes`; overrides the project's `default: true` mode. Resolved once at spawn; unknown name fails fast. See [configuration.md](configuration.md#modes).
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.
 

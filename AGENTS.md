@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Every task starts with `$manager`. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
+Every session runs in one mode (see Modes below); `manager` is the default and starts every task unless another mode was requested at spawn. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
 
 ## Mirror
 
@@ -46,6 +46,15 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 | [`docs`](.agents/skills/docs/SKILL.md)                             | Task touches published docs under `docs/` or the root doc files               |
 | [`clean-install-test`](.agents/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
 
+## Modes
+
+Per-session behavior contract: config `projects.<id>.modes`, resolved once at spawn (`--mode`, spawn request, or the project's `default: true` entry), delivered as a prompt suffix. A mode is prompt-level and therefore advisory; anything mandatory belongs in hooks or the daemon, not a mode.
+
+| Mode      | Skill                                        | Use when                                                                  |
+| --------- | -------------------------------------------- | ------------------------------------------------------------------------- |
+| `manager` | [`manager`](.agents/skills/manager/SKILL.md) | Default. Orchestrates every repo task per the catalogs above.             |
+| `council` | not shipped yet                              | Multi-agent QA / technical research deliberation. Ships in a later phase. |
+
 ## Response style
 
 - Terse like caveman. Technical substance exact. Only fluff dies.
@@ -78,7 +87,6 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
-- Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
 - Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.agents/skills/spur/SKILL.md` Agent Isolation for detail.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.

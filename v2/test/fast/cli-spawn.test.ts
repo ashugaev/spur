@@ -49,7 +49,9 @@ async function parseCli(args: string[]): Promise<void> {
 describe("spawn", () => {
   beforeEach(() => {
     vi.resetModules();
-    postJsonMock.mockReset().mockResolvedValue({ id: "api-1", agent: "claude", status: "spawning" });
+    postJsonMock
+      .mockReset()
+      .mockResolvedValue({ id: "api-1", agent: "claude", status: "spawning" });
     listProjectsMock.mockReset().mockResolvedValue([{ id: "api" }]);
     writeStdoutMock.mockReset();
   });

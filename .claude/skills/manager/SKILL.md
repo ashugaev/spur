@@ -11,8 +11,9 @@ The agent and skill catalog with triggers lives in `AGENTS.md` and `CLAUDE.md`. 
 
 ## Mode
 
+- Sessions select a behavior contract via `mode` (config `projects.<id>.modes`, resolved once at spawn, delivered as a prompt suffix — see `CLAUDE.md`/`AGENTS.md` Modes). `manager` is the default and strict mode: every task in this repo runs it unless a different mode was requested at spawn.
 - Manager always enters Plan mode first. Build the plan, confirm acceptance criteria, then execute.
-- Outside `$manager`, agents may deviate from canonical gates.
+- Outside `$manager` mode, agents may deviate from canonical gates below; a session in another mode does not run manager's gates and follows its own mode's skill instead.
 - `TodoWrite` is the single source of truth for the task list. The Output template below is the run report only.
 
 ## Routing rules

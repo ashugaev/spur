@@ -162,6 +162,18 @@ triggers:
 
 `spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`; mixed workspace overrides are rejected.
 
+## Modes
+
+```yaml
+projects:
+  backend-api:
+    modes:
+      manager: { skill: manager, default: true }
+      council: { skill: council }
+```
+
+A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load, resolved once at spawn (`--mode`, the `POST /sessions` body, or a trigger `spawn.mode`), never re-resolved on respawn/handoff/restore. Precedence: explicit request > the project's `default: true` entry > no suffix. Unknown mode name fails fast, listing the configured names. No `modes:` on a project means no suffix — today's behavior exactly. The parser does not check that the named skill exists; the daemon cannot see the agent's skill search path.
+
 ## Telegram binding
 
 Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker; `/watch <sessionId>` binds directly. Bound messages reach the agent with `Source: telegram` and are answered with `spur source reply "message"` from inside the session — Telegram-spawned sessions get that contract in their prompt. `/watch@otherbot` is ignored in group chats.
@@ -188,6 +200,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
+- `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
+- `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
@@ -207,6 +221,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `spawn.prompt` / `spawn[].prompt`: required task prompt.
 - `spawn.steps` / `spawn[].steps`: optional ordered phase list.
 - `spawn.agent` / `spawn[].agent`: optional `claude|codex|cursor`.
+- `spawn.mode` / `spawn[].mode`: optional mode name from `projects.<id>.modes`.
 - `spawn.selfDestruct` / `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
 - `spawn.branch` / `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
 - `spawn.overrides.worktree` / `spawn[].overrides.worktree`: optional boolean.

@@ -12,7 +12,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `docs/configuration.md` and `docs/install-from-npm.md`.
 - `spur init` / `spur update` / `spur reinit` re-apply `npm config set prefix ~/.local` when `~/.npmrc` lost the line (never overwrites an operator-set `prefix=` line or an explicit non-`~/.local` pin). Every agent session also runs with `NPM_CONFIG_PREFIX=~/.local` so `claude`/`codex` self-update lands there regardless of `~/.npmrc`'s current state.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--model <id>`, `--mode <name>`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -111,6 +111,8 @@ projects:
 ```
 
 Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
+
+Mode selection: `projects.<id>.modes.<name>` is `{skill: string (required, non-empty), default?: boolean}`; at most one mode per project may set `default: true`. Resolved once at spawn — `--mode`/`POST /sessions` body/trigger `spawn.mode` beats the project's default mode, which beats no suffix at all. Unknown mode name fails fast, listing configured names. Delivered as a prompt suffix telling the session which skill to load; never re-resolved on respawn/handoff/restore, which carry the persisted `mode` forward. No `modes:` on a project means no suffix. A mode is prompt-level and advisory only; the web spawn route does not forward `mode` (UI spawns get the project default).
 
 ### Sentry source
 
