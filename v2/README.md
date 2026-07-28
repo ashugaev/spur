@@ -17,6 +17,7 @@ Full documentation lives in the repository (not shipped in this package):
 
 - [Install from npm (official)](https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md)
 - [Install from source](https://github.com/ashugaev/spur/blob/main/docs/install-from-source.md)
-- [CLI, config, and architecture reference](https://github.com/ashugaev/spur/blob/main/README.md)
+- [CLI reference](https://github.com/ashugaev/spur/blob/main/docs/commands.md)
+- [Config reference](https://github.com/ashugaev/spur/blob/main/docs/configuration.md)
 
 Repository: https://github.com/ashugaev/spur

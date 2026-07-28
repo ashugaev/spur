@@ -1408,6 +1408,50 @@ test.describe("S2b: Conversation dialog", () => {
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
 
+  test("wide dialog code blocks and tables stay within the mobile viewport width", async ({
+    page,
+  }) => {
+    // A fenced code block (white-space: pre) and a wide table have irreducible
+    // min-content that `overflow-wrap` cannot break — unlike the plain long token
+    // above. They only stay contained when the mobile grid columns carry min-w-0,
+    // so this guards that fix. See SessionDetail content grid.
+    const wideCodeLine = `const payload = "${"x".repeat(180)}";`;
+    const wideTable = [
+      `| ${"alpha".repeat(6)} | ${"bravo".repeat(6)} |`,
+      "| --- | --- |",
+      "| 1 | 2 |",
+    ].join("\n");
+    const session = makeWorkingSession({ id: "detail-s2b-wide-content" });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "assistant", text: `\`\`\`\n${wideCodeLine}\n\`\`\``, timestampMs: 1 },
+        { role: "assistant", text: wideTable, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByText("const payload", { exact: false })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+  });
+
   test("long unbroken dialog and queued tokens hard-wrap on desktop without horizontal overflow", async ({
     page,
   }) => {

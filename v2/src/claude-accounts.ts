@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 // Runtime store of Claude login accounts. Each account is an isolated
@@ -80,6 +93,69 @@ export function findAccount(dataDir: string, id: string): ClaudeAccount | undefi
   return listAccounts(dataDir).find((account) => account.id === id);
 }
 
+function mergeProjectsInto(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const srcPath = join(source, entry.name);
+    const dstPath = join(target, entry.name);
+    if (entry.isDirectory()) {
+      if (existsSync(dstPath)) {
+        mergeProjectsInto(srcPath, dstPath);
+      } else {
+        renameSync(srcPath, dstPath);
+      }
+    } else {
+      renameSync(srcPath, dstPath);
+    }
+  }
+}
+
+function linkProjectsDir(link: string, target: string): void {
+  try {
+    symlinkSync(target, link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const st = lstatSync(link);
+      if (st.isSymbolicLink() && readlinkSync(link) === target) return;
+    }
+    throw error;
+  }
+}
+
+export function ensureAccountProjectsLink(account: ClaudeAccount): void {
+  const target = join(homedir(), ".claude", "projects");
+  mkdirSync(target, { recursive: true });
+  const link = join(account.configDir, "projects");
+  if (link === target) return;
+
+  let stat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    stat = lstatSync(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      linkProjectsDir(link, target);
+      return;
+    }
+    throw error;
+  }
+
+  if (stat.isSymbolicLink()) {
+    if (readlinkSync(link) === target) return;
+    unlinkSync(link);
+    linkProjectsDir(link, target);
+    return;
+  }
+
+  if (stat.isDirectory()) {
+    mergeProjectsInto(link, target);
+    rmSync(link, { recursive: true, force: true });
+    linkProjectsDir(link, target);
+    return;
+  }
+
+  throw new Error(`${link} exists but is neither a symlink nor a directory`);
+}
+
 export function addAccount(dataDir: string, opts: { label?: string } = {}): ClaudeAccount {
   const id = randomUUID();
   const configDir = accountConfigDir(dataDir, id);
@@ -92,6 +168,7 @@ export function addAccount(dataDir: string, opts: { label?: string } = {}): Clau
     createdAt: new Date().toISOString(),
   };
   writeAccounts(dataDir, [...listAccounts(dataDir), account]);
+  ensureAccountProjectsLink(account);
   return account;
 }
 
@@ -107,6 +184,22 @@ export function removeAccount(dataDir: string, id: string): void {
 
 export function isAccountAuthenticated(account: ClaudeAccount): boolean {
   return existsSync(join(account.configDir, ".credentials.json"));
+}
+
+export function ensureDefaultAccount(
+  dataDir: string,
+  defaultConfigDir: string = join(homedir(), ".claude"),
+): void {
+  if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
+  const existing = listAccounts(dataDir);
+  if (existing.some((a) => a.configDir === defaultConfigDir)) return;
+  const account: ClaudeAccount = {
+    id: "default",
+    label: "default",
+    configDir: defaultConfigDir,
+    createdAt: new Date().toISOString(),
+  };
+  writeAccounts(dataDir, [...existing, account]);
 }
 
 export function touchAccountUsed(dataDir: string, id: string): void {

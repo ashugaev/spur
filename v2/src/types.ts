@@ -645,6 +645,7 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
 }

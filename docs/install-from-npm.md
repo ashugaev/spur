@@ -118,4 +118,4 @@ Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reus
 
 ## Reference
 
-CLI and config: [README.md](../README.md).
+CLI: [commands.md](commands.md). Config: [configuration.md](configuration.md).
