@@ -50,10 +50,9 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 
 One mode per session: a prompt suffix naming the skill that session follows. Resolved once at spawn; config shape in [docs/configuration.md](docs/configuration.md#modes). A mode is prompt-level and therefore advisory — anything mandatory belongs in hooks or the daemon.
 
-| Mode      | Skill                                        | Use when                                         |
-| --------- | -------------------------------------------- | ------------------------------------------------ |
-| `manager` | [`manager`](.agents/skills/manager/SKILL.md) | Default for every repo task                      |
-| `council` | not shipped yet                              | Multi-agent QA / technical research deliberation |
+| Mode      | Skill                                        | Use when                    |
+| --------- | -------------------------------------------- | --------------------------- |
+| `manager` | [`manager`](.agents/skills/manager/SKILL.md) | Default for every repo task |
 
 ## Response style
 
