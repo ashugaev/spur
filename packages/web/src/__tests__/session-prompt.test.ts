@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getDisplayTaskLine, parseSessionPromptView } from "@/lib/session-prompt";
 import type { DashboardSession } from "@/lib/types";
+import { renderBootstrapPrompt } from "../../../../v2/src/bootstrap-prompt.js";
 
 function makeSession(overrides: Partial<DashboardSession>): DashboardSession {
   return {
@@ -137,6 +138,18 @@ Then update the docs.`;
         }),
       ).task,
     ).toBe("");
+  });
+
+  it("excludes generated bootstrap prompts whose display name contains quotes", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: 'Bob’s "API"',
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+    });
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe("");
   });
 
   it("preserves user tasks that only resemble bootstrap prose", () => {

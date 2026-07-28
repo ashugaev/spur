@@ -13,6 +13,8 @@ const TELEGRAM_REPLY_SUFFIX = [
 ].join("\n");
 const BOOTSTRAP_GOAL =
   "Goal: write a spur.yaml at the project root that registers this project, then ask Spur to connect it.";
+const BOOTSTRAP_HEADER_PREFIX = 'You are configuring a new Spur project named "';
+const BOOTSTRAP_HEADER_BOUNDARY = '".\n\nInputs (do not change these values):\n';
 const BOOTSTRAP_CONSTRAINTS = [
   "Constraints:",
   "- Do not modify any file other than spur.yaml.",
@@ -62,32 +64,36 @@ function stripTelegramReplySuffix(text: string): string {
 }
 
 function isBootstrapPrompt(text: string): boolean {
-  const lines = text.split("\n");
-  if (!/^You are configuring a new Spur project named "[^"\n]+"[.]$/.test(lines[0] ?? "")) {
-    return false;
-  }
-  if (
-    lines[1] !== "" ||
-    lines[2] !== "Inputs (do not change these values):" ||
-    !/^- project id: .+$/.test(lines[3] ?? "") ||
-    !/^- sessionPrefix: .+$/.test(lines[4] ?? "") ||
-    !/^- project path: .+$/.test(lines[5] ?? "") ||
-    lines[6] !== "" ||
-    lines[7] !== BOOTSTRAP_GOAL ||
-    lines[8] !== "" ||
-    lines[9] !== "Steps:"
-  ) {
+  if (!text.startsWith(BOOTSTRAP_HEADER_PREFIX)) {
     return false;
   }
 
-  const constraintsIndex = lines.lastIndexOf(BOOTSTRAP_CONSTRAINTS[0]);
-  return (
-    constraintsIndex !== -1 &&
-    constraintsIndex + BOOTSTRAP_CONSTRAINTS.length === lines.length &&
-    BOOTSTRAP_CONSTRAINTS.every(
-      (constraint, offset) => lines[constraintsIndex + offset] === constraint,
-    )
-  );
+  let boundaryIndex = text.indexOf(BOOTSTRAP_HEADER_BOUNDARY, BOOTSTRAP_HEADER_PREFIX.length);
+  while (boundaryIndex !== -1) {
+    const displayName = text.slice(BOOTSTRAP_HEADER_PREFIX.length, boundaryIndex);
+    const lines = text.slice(boundaryIndex + BOOTSTRAP_HEADER_BOUNDARY.length).split("\n");
+    const constraintsIndex = lines.lastIndexOf(BOOTSTRAP_CONSTRAINTS[0]);
+    if (
+      displayName.trim() !== "" &&
+      /^- project id: .+$/.test(lines[0] ?? "") &&
+      /^- sessionPrefix: .+$/.test(lines[1] ?? "") &&
+      /^- project path: .+$/.test(lines[2] ?? "") &&
+      lines[3] === "" &&
+      lines[4] === BOOTSTRAP_GOAL &&
+      lines[5] === "" &&
+      lines[6] === "Steps:" &&
+      constraintsIndex !== -1 &&
+      constraintsIndex + BOOTSTRAP_CONSTRAINTS.length === lines.length &&
+      BOOTSTRAP_CONSTRAINTS.every(
+        (constraint, offset) => lines[constraintsIndex + offset] === constraint,
+      )
+    ) {
+      return true;
+    }
+    boundaryIndex = text.indexOf(BOOTSTRAP_HEADER_BOUNDARY, boundaryIndex + 1);
+  }
+
+  return false;
 }
 
 function canonicalizeTask(text: string): string {
