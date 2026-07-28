@@ -24,6 +24,7 @@ import {
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
+  type SessionModeConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -262,6 +263,7 @@ function parseTriggerSpawnBlock(
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
+  const mode = asOptionalString(raw["mode"], `${label}.mode`);
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -277,6 +279,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -313,6 +316,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "mode",
       "branch",
       "overrides",
       "selfDestruct",
@@ -1226,6 +1230,40 @@ function parseTrigger(
   };
 }
 
+function parseModes(
+  projectId: string,
+  value: unknown,
+): Record<string, SessionModeConfig> | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.modes`;
+  const raw = asObject(value, label);
+  const modes: Record<string, SessionModeConfig> = {};
+  let defaultName: string | undefined;
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!VALID_ID_RE.test(name)) {
+      throw new Error(`${label}.${name} is invalid: mode names must match ${VALID_ID_RE.source}`);
+    }
+    const entryLabel = `${label}.${name}`;
+    const entryRaw = asObject(entry, entryLabel);
+    const skill = asString(entryRaw["skill"], `${entryLabel}.skill`);
+    if (skill.trim().length === 0) {
+      throw new Error(`${entryLabel}.skill must be a non-empty string`);
+    }
+    const isDefault = asOptionalBoolean(entryRaw["default"], `${entryLabel}.default`);
+    if (isDefault === true) {
+      if (defaultName !== undefined) {
+        throw new Error(`${label}: at most one mode may set default: true`);
+      }
+      defaultName = name;
+    }
+    modes[name] = {
+      skill,
+      ...(isDefault !== undefined ? { default: isDefault } : {}),
+    };
+  }
+  return modes;
+}
+
 function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
   if (!VALID_ID_RE.test(projectId)) {
     throw new Error(
@@ -1263,6 +1301,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const defaultModels = parseDefaultModels(raw["defaultModels"], label);
+  const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1353,6 +1392,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
+    ...(modes !== undefined ? { modes } : {}),
     sources,
     backlog,
     triggers,
