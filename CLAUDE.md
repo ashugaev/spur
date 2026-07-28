@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Every session runs in one mode (see Modes below); `manager` is the default and starts every task unless another mode was requested at spawn. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
+Every task starts in `manager` mode unless spawn requested another (see Modes). Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
 
 ## Mirror
 
@@ -48,12 +48,12 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 
 ## Modes
 
-Per-session behavior contract: config `projects.<id>.modes`, resolved once at spawn (`--mode`, spawn request, or the project's `default: true` entry), delivered as a prompt suffix. A mode is prompt-level and therefore advisory; anything mandatory belongs in hooks or the daemon, not a mode.
+One mode per session: a prompt suffix naming the skill that session follows. Resolved once at spawn; config shape in [docs/configuration.md](docs/configuration.md#modes). A mode is prompt-level and therefore advisory — anything mandatory belongs in hooks or the daemon.
 
-| Mode      | Skill                                        | Use when                                                                  |
-| --------- | -------------------------------------------- | ------------------------------------------------------------------------- |
-| `manager` | [`manager`](.claude/skills/manager/SKILL.md) | Default. Orchestrates every repo task per the catalogs above.             |
-| `council` | not shipped yet                              | Multi-agent QA / technical research deliberation. Ships in a later phase. |
+| Mode      | Skill                                        | Use when                                         |
+| --------- | -------------------------------------------- | ------------------------------------------------ |
+| `manager` | [`manager`](.claude/skills/manager/SKILL.md) | Default for every repo task                      |
+| `council` | not shipped yet                              | Multi-agent QA / technical research deliberation |
 
 ## Response style
 

@@ -172,7 +172,7 @@ projects:
       council: { skill: council }
 ```
 
-A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load, resolved once at spawn (`--mode`, the `POST /sessions` body, or a trigger `spawn.mode`), never re-resolved on respawn/handoff/restore. Precedence: explicit request > the project's `default: true` entry > no suffix. Unknown mode name fails fast, listing the configured names. No `modes:` on a project means no suffix — today's behavior exactly. The parser does not check that the named skill exists; the daemon cannot see the agent's skill search path.
+A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load. Resolved once at spawn from `--mode`, the `POST /sessions` body, or a trigger `spawn.mode`; an explicit request beats the project's `default: true` entry, which beats no suffix. Respawn, handoff, and restore reuse the persisted mode instead of re-resolving. An unknown requested name fails the spawn, listing the configured names. No `modes:` on a project means no suffix. The parser does not check that the named skill exists — the daemon cannot see the agent's skill search path.
 
 ## Telegram binding
 
