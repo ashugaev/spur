@@ -63,12 +63,19 @@ Auth is yours — two ways to bring the tailnet up:
 
 Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
 
+### HTTPS
+
+With the tailnet up, terminate TLS on the tailnet hostname and check the URL answers `200`: [https-tailscale.md](https-tailscale.md). Do it as part of the install — a browser refuses microphone access over plain HTTP, so skipping it leaves voice input dead.
+
+Skip it when another service already owns 443 on the host; displacing that service is never the right move. If it fails, report the voice-input blocker verbatim from that doc and leave the rest of the install as it stands.
+
 ## Identity steps (operator TODO)
 
 A few steps use your own accounts and each needs one interactive action — they can't be scripted, and a setup agent must not hack around them. Do everything else first, then hand the operator this list:
 
 - Log in an agent — `claude` (sign in) or `codex login`. At least one is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
+- Enable HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Blocks HTTPS, and therefore voice input.
 
 Spur installs and its services start without these, but until they're done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
 
@@ -112,6 +119,7 @@ Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reus
 | web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                                                    |
 | `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                                                         |
 | web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                                                  |
+| mic button dead on the tailnet URL                     | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                                                        |
 
 ## System-wide units (advanced)
 
