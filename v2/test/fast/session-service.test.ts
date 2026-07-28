@@ -1103,6 +1103,9 @@ describe("SessionService", () => {
         agent: "claude",
       },
     );
+    expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], undefined, {
+      agent: "claude",
+    });
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -1334,6 +1337,9 @@ describe("SessionService", () => {
       expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
         true,
       );
+    });
+    expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], 120_000, {
+      agent: "claude",
     });
 
     expect(createWorktreeMock).toHaveBeenCalledWith({
@@ -1570,6 +1576,42 @@ describe("SessionService", () => {
           text: "hello",
         }),
       }),
+    ]);
+  });
+
+  it("uses the extended background readiness timeout only on the first attempt", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    waitForTmuxReadyMock
+      .mockRejectedValueOnce(new Error("agent prompt timeout"))
+      .mockResolvedValueOnce(undefined);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    await vi.waitFor(() => {
+      expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(2);
+      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
+        true,
+      );
+    });
+
+    expect(waitForTmuxReadyMock.mock.calls[0]).toEqual([
+      "api-1",
+      ["Claude Code", "❯"],
+      120_000,
+      { agent: "claude" },
+    ]);
+    expect(waitForTmuxReadyMock.mock.calls[1]).toEqual([
+      "api-1",
+      ["Claude Code", "❯"],
+      undefined,
+      { agent: "claude" },
     ]);
   });
 
