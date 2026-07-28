@@ -515,6 +515,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     agent: normalizedSession.agent,
+    ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
@@ -527,6 +528,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.originalTaskPrompt
+      ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
+      : {}),
     ...(normalizedSession.startupAttachmentIds
       ? { startupAttachmentIds: normalizedSession.startupAttachmentIds }
       : {}),

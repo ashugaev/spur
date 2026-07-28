@@ -47,8 +47,8 @@ function fleetPaneLine(name: string, index: number): string {
 
 function installFleetTmuxMock(): void {
   execFileAsyncMock.mockImplementation(async (file, args) => {
-    if (file === "tmux" && args.includes("list-sessions")) {
-      // "#{session_name} #{session_activity}" — one line per session.
+    if (file === "tmux" && args.includes("list-windows")) {
+      // "#{session_name} #{window_activity}" — one line per window.
       const lines = sessionNames.map((name) => `${name} 1700000000`);
       return { stdout: lines.join("\n"), stderr: "" };
     }
@@ -75,8 +75,8 @@ describe("runtime-tmux shared probe cache", () => {
 
     await Promise.all(sessionNames.map((name) => simulateReadRuntimeSnapshot(name)));
 
-    const listSessionsCalls = callsFor(
-      (file, args) => file === "tmux" && args.includes("list-sessions"),
+    const listWindowsCalls = callsFor(
+      (file, args) => file === "tmux" && args.includes("list-windows"),
     );
     const listPanesCalls = callsFor(
       (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
@@ -87,9 +87,9 @@ describe("runtime-tmux shared probe cache", () => {
     // Fleet existence+activity, fleet pane state, and the process table each
     // cost exactly one fork regardless of fleet size — the fork-storm fix's
     // core invariant. A cold tick over 50 sessions must stay a small
-    // constant (list-sessions + list-panes -a + ps), NOT the old 3N+2 (still
+    // constant (list-windows -a + list-panes -a + ps), NOT the old 3N+2 (still
     // one list-panes/pane-dead/activity fork per session) or the original 5N.
-    expect(listSessionsCalls).toBe(1);
+    expect(listWindowsCalls).toBe(1);
     expect(listPanesCalls).toBe(1);
     expect(psCalls).toBe(1);
     expect(totalCalls).toBeLessThanOrEqual(5);
@@ -117,7 +117,7 @@ describe("runtime-tmux shared probe cache", () => {
     // Change what a *fresh* probe would return — a warm read must ignore
     // this and keep serving the frozen cold-probe result within the TTL.
     execFileAsyncMock.mockImplementation(async (file, args) => {
-      if (file === "tmux" && args.includes("list-sessions")) {
+      if (file === "tmux" && args.includes("list-windows")) {
         return { stdout: "", stderr: "" };
       }
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
@@ -246,10 +246,58 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(isProcessRunningInTmux(sessionName, ["agent-on-split-pane"])).resolves.toBe(true);
   });
 
+  it("reads activity from the pane-output clock, taking the newest window of a multi-window session", async () => {
+    const rows = [
+      // Two sessions interleaved, each with several windows. The newest window
+      // wins per session; a row whose activity field is unparseable must not
+      // clobber an already-seen newer value.
+      "multi-window 1700000000",
+      "other-session 1700000500",
+      "multi-window 1700009999",
+      "multi-window 1700000042",
+      "multi-window not-a-number",
+    ];
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: rows.join("\n"), stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getTmuxSessionActivity, listTmuxSessionNames } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxSessionActivity("multi-window")).resolves.toEqual(
+      new Date(1700009999 * 1000),
+    );
+
+    // `#{session_activity}` is a client-attach clock on tmux 3.4: it jumps to
+    // now whenever anything runs `attach-session` (opening the web terminal)
+    // and never moves for pane output. Activity must come from
+    // `#{window_activity}` instead, so merely opening a session cannot reset
+    // its lastActivityAt and a busy detached agent still reports fresh.
+    const firstCall = execFileAsyncMock.mock.calls[0];
+    expect(firstCall?.[0]).toBe("tmux");
+    const probeArgs = (firstCall?.[1] ?? []).join(" ");
+    expect(probeArgs).toContain("list-windows");
+    expect(probeArgs).toContain("#{window_activity}");
+    expect(probeArgs).not.toContain("#{session_activity}");
+
+    await expect(getTmuxSessionActivity("other-session")).resolves.toEqual(
+      new Date(1700000500 * 1000),
+    );
+    await expect(getTmuxSessionActivity("absent-session")).resolves.toBeNull();
+    // Every live tmux session has at least one window, so `list-windows -a`
+    // still enumerates the fleet for existence checks.
+    await expect(listTmuxSessionNames()).resolves.toEqual(
+      new Set(["multi-window", "other-session"]),
+    );
+  });
+
   it("invalidates the fleet caches after a real tmux create so a just-created session isn't read as stale-absent", async () => {
     let sessionExists = false;
     execFileAsyncMock.mockImplementation(async (file, args) => {
-      if (file === "tmux" && args.includes("list-sessions")) {
+      if (file === "tmux" && args.includes("list-windows")) {
         return { stdout: sessionExists ? "fresh-api-1 1700000000" : "", stderr: "" };
       }
       if (file === "tmux" && args.includes("new-session")) {
@@ -284,7 +332,7 @@ describe("runtime-tmux shared probe cache", () => {
   it("invalidates the fleet caches after a real tmux kill so a just-killed session isn't read as stale-alive", async () => {
     let sessionExists = true;
     execFileAsyncMock.mockImplementation(async (file, args) => {
-      if (file === "tmux" && args.includes("list-sessions")) {
+      if (file === "tmux" && args.includes("list-windows")) {
         return { stdout: sessionExists ? "dying-api-1 1700000000" : "", stderr: "" };
       }
       if (file === "tmux" && args.includes("kill-session")) {
@@ -305,7 +353,7 @@ describe("runtime-tmux shared probe cache", () => {
 
   it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
-      if (file === "tmux" && args.includes("list-sessions")) {
+      if (file === "tmux" && args.includes("list-windows")) {
         const error = new Error("no server running on /tmp/tmux-0/default");
         throw Object.assign(error, { code: 1 });
       }
