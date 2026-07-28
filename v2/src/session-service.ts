@@ -684,7 +684,7 @@ function normalizeSpawnRequest(
 ): {
   prompt: string;
   steps?: string[];
-  mode?: string | null;
+  mode?: string;
   planMode: boolean;
   restrictWrites: boolean;
   allowedTriggers?: string[];
@@ -1427,9 +1427,7 @@ export function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
-    // Always set, using null when absent, so the spawn resolver never falls
-    // back to a project default mode this session never had.
-    mode: session.mode ?? null,
+    ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -1479,9 +1477,7 @@ function resolveHandoffSpawnRequest(
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
-    // Always set, using null when absent, so the spawn resolver never falls
-    // back to a project default mode this session never had.
-    mode: session.mode ?? null,
+    ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -4373,7 +4369,7 @@ export class SessionService {
   // fresh spawn request: an unknown mode degrades to no-mode with a warning
   // instead of blocking recovery.
   private resolveSpawnModeEntry(
-    rawMode: string | null | undefined,
+    rawMode: string | undefined,
     modes: Record<string, SessionModeConfig> | undefined,
     modeResolution: "strict" | "carried",
     projectId: string,
@@ -4381,7 +4377,7 @@ export class SessionService {
     if (modeResolution === "strict") {
       return resolveSessionMode(rawMode, modes);
     }
-    return resolveCarriedSessionMode(rawMode ?? undefined, modes, (message) =>
+    return resolveCarriedSessionMode(rawMode, modes, (message) =>
       this.logEvent("session.mode.dropped", {
         level: "warn",
         projectId,

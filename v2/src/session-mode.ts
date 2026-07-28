@@ -20,16 +20,9 @@ function lookupMode(
 // from a human/caller-supplied request (CLI --mode, API body, trigger
 // block.mode). An unknown name is a caller mistake and must fail fast.
 export function resolveSessionMode(
-  // string = explicit/requested mode name; null = a respawn/handoff/restore
-  // carrying forward a session that had no mode, which must suppress the
-  // project default rather than newly adopt it; undefined = a fresh spawn,
-  // apply the normal request > project-default precedence.
-  requestMode: string | null | undefined,
+  requestMode: string | undefined,
   modes: Record<string, SessionModeConfig> | undefined,
 ): ResolvedSessionMode | undefined {
-  if (requestMode === null) {
-    return undefined;
-  }
   if (requestMode !== undefined) {
     const entry = lookupMode(modes, requestMode);
     if (!entry) {
