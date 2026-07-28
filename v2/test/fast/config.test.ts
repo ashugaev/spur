@@ -1786,43 +1786,6 @@ projects:
     });
   });
 
-  it("parses backlog spawn prompt, agent, interval and runOnStart", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      jira:
-        type: jira
-        baseUrl: \${JIRA_BASE_URL}
-        email: \${JIRA_EMAIL}
-        token: \${JIRA_TOKEN}
-    backlog:
-      features:
-        source: jira
-        query: "project = WEB"
-        intervalMs: 120000
-        runOnStart: true
-        spawn:
-          prompt: "Handle {{key}}"
-          agent: codex
-`);
-    await writeProjectEnv(
-      configPath,
-      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
-    );
-
-    const config = loadConfig(configPath);
-    expect(config.projects["backend"]?.backlog["features"]).toEqual({
-      source: "jira",
-      provider: "jira",
-      query: "project = WEB",
-      intervalMs: 120_000,
-      runOnStart: true,
-      spawn: { prompt: "Handle {{key}}", agent: "codex" },
-    });
-  });
-
   it("rejects a backlog binding referencing a missing source", async () => {
     const configPath = await writeConfig(`
 projects:

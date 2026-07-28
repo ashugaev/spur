@@ -109,7 +109,6 @@ import {
   wrapShepherdSpawnPrompt,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
-import { renderSpawnPrompt } from "./prompt-template.js";
 import {
   logSpurEvent,
   logUserInputEvent,
@@ -126,7 +125,6 @@ import {
   sendTelegramReply,
 } from "./telegram-source-state.js";
 import {
-  claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -181,6 +179,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
@@ -290,8 +289,6 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
-  type TakeBacklogItemRequest,
-  type TakeBacklogItemResponse,
   type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -401,12 +398,6 @@ interface PrCheckTracker {
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
-
-export class BacklogItemUnavailableError extends Error {
-  readonly statusCode = 409;
-}
-
-const DEFAULT_BACKLOG_PROMPT = "Work on {{key}}: {{title}}\n\n{{url}}";
 
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
@@ -3820,41 +3811,6 @@ export class SessionService {
     return items;
   }
 
-  async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
-    const project = this.config.projects[request.projectId];
-    const binding = project?.backlog[request.backlogId];
-    if (!project || !binding) {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
-    }
-
-    const item = claimAvailableBacklogItem(
-      this.config.dataDir,
-      request.projectId,
-      request.backlogId,
-      request.externalId,
-    );
-    if (!item) {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
-    }
-
-    const prompt = renderSpawnPrompt(binding.spawn?.prompt ?? DEFAULT_BACKLOG_PROMPT, {
-      key: item.key,
-      title: item.title,
-      url: item.url,
-      provider: item.provider,
-      backlogId: request.backlogId,
-    });
-    const session = await this.spawnInBackground({
-      project: request.projectId,
-      prompt,
-      ...(binding.spawn?.agent ? { agent: binding.spawn.agent } : {}),
-      slots: {
-        links: [{ label: "tracker", url: item.url }],
-      },
-    });
-    return { item, session };
-  }
-
   listStateSubscriptions(subscriberId: string): SessionStateSubscriptionListResponse {
     const subscriber = this.requireSession(subscriberId);
     return { records: subscriber.stateSubscriptions ?? [] };
@@ -4636,7 +4592,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -5229,7 +5187,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(request.slots?.links?.length
+          ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
+          : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };

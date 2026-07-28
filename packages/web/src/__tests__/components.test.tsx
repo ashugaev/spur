@@ -230,7 +230,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+  it("renders backlog above sessions and opens a prefilled spawn modal on take", async () => {
     const backlogItem = {
       provider: "jira",
       projectId: "api",
@@ -242,36 +242,13 @@ describe("Dashboard", () => {
       fetchedAt: "2026-06-16T12:00:00.000Z",
       position: 0,
     };
-    const spawnedSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-backlog-1",
-      prompt: "Work on Jira WEB-17: Fix checkout",
-      slots: {
-        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
-      },
-    };
-    let backlogAvailable = true;
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
-      if (url === "/api/backlog/take") {
-        expect(init?.method).toBe("POST");
-        backlogAvailable = false;
-        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
-          status: 201,
-        });
-      }
-      const payload = sessionsPayload();
-      return new Response(
-        JSON.stringify({
-          ...payload,
-          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
-          backlog: backlogAvailable ? [backlogItem] : [],
-        }),
-      );
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
     });
 
     render(<Dashboard />);
@@ -288,102 +265,127 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Take task" }));
 
     await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+        "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+      );
+    });
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/backlog/take", expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/spawn", expect.anything());
+    // Taking the task only opened the prefilled spawn modal; the backlog row
+    // stays visible (and thus untouched) until a session is actually spawned.
+    expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+  });
+
+  it("spawns from the prefilled backlog modal with the tracker link in slots.links", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(
+          JSON.stringify({
+            projectId: "api",
+            prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+            agent: "claude",
+            slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
+          }),
+        );
+        return new Response(
+          JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-backlog-1" }),
+          { status: 201 },
+        );
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+        "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/backlog/take",
+        "/api/spawn",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({
-            projectId: "api",
-            backlogId: "features",
-            externalId: "10001",
-          }),
+          body: expect.stringContaining(
+            '"slots":{"links":[{"label":"tracker","url":"https://jira.example.com/browse/WEB-17"}]}}',
+          ),
         }),
       );
     });
-    await waitFor(() => {
-      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
-      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
-    });
   });
 
-  it("disables only the pending backlog take button, leaving neighbors clickable", async () => {
-    const backlogItems = [
-      {
-        provider: "jira",
-        projectId: "api",
-        backlogId: "features",
-        externalId: "10001",
-        key: "WEB-17",
-        title: "Fix checkout",
-        url: "https://jira.example.com/browse/WEB-17",
-        fetchedAt: "2026-06-16T12:00:00.000Z",
-        position: 0,
+  it("hides a backlog row while an active session references its tracker link", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
+    };
+    const activeSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+      state: "working",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
       },
-      {
-        provider: "jira",
-        projectId: "api",
-        backlogId: "features",
-        externalId: "10002",
-        key: "WEB-18",
-        title: "Fix cart",
-        url: "https://jira.example.com/browse/WEB-18",
-        fetchedAt: "2026-06-16T12:00:00.000Z",
-        position: 1,
-      },
-    ];
-    const takeResolvers: ((response: Response) => void)[] = [];
-    let takeRequests = 0;
+    };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
-      if (url === "/api/backlog/take") {
-        takeRequests += 1;
-        return new Promise<Response>((resolve) => {
-          takeResolvers.push(resolve);
-        });
-      }
-      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: [activeSession, ...payload.sessions],
+          backlog: [backlogItem],
+        }),
+      );
     });
 
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
-
-    // Only the pending row disables; the neighbor stays enabled.
-    await waitFor(() => {
-      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
-      expect(takeButtons).toHaveLength(2);
-      expect(takeButtons[0]).toBeDisabled();
-      expect(takeButtons[1]).toBeEnabled();
-    });
-    expect(takeRequests).toBe(1);
-
-    // Clicking the still-enabled neighbor while the first take is in flight fires
-    // its own request (per-item guard, not a global single-flight) — no dead click.
-    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
-    await waitFor(() => expect(takeRequests).toBe(2));
-    await waitFor(() => {
-      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
-      expect(takeButtons[0]).toBeDisabled();
-      expect(takeButtons[1]).toBeDisabled();
-    });
-
-    for (const [index, resolve] of takeResolvers.entries()) {
-      resolve(
-        new Response(
-          JSON.stringify({ item: backlogItems[index], session: sessionsPayload().sessions[0] }),
-          { status: 201 },
-        ),
-      );
-    }
+    expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Fix checkout")).not.toBeInTheDocument();
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {

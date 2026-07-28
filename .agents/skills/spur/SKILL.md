@@ -141,12 +141,16 @@ GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for
 
 `jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
 skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
-(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
-take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
-at `/backlog/available` and `/backlog/take`. Item order is fetch/JQL order (server never re-sorts); include
-`ORDER BY Rank ASC` in `query` to surface Jira's real backlog rank order.
+(default 60000), `runOnStart` (default false). `provider` derives from source type. Backlog subsystem
+polls each binding and serves items at `/backlog/available` only. Item order is fetch/JQL order (server
+never re-sorts); include `ORDER BY Rank ASC` in `query` to surface Jira's real backlog rank order.
 
-Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
+Dashboard "Take task" opens the default spawn window prefilled with `Work on {{key}}: {{title}}\n\n{{url}}`
+and the item's project preset; no request fires until the user submits. The spawned session carries a
+`tracker` link (`{label: "tracker", url: item.url}`). The dashboard hides the backlog row client-side
+while any active session (working/waiting/needs_input/rate_limited) references the issue, matched by
+tracker link or a bounded key/url token in the session prompt; the row reappears once that session leaves
+the active set.
 
 ```yaml
 sources:
@@ -161,9 +165,6 @@ backlog:
     query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
     intervalMs: 60000
     runOnStart: false
-    spawn:
-      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
-      agent: claude
 ```
 
 ### Claude auth rotation

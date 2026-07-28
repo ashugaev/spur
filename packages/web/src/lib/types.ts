@@ -363,11 +363,6 @@ export interface AvailableBacklogItem {
   position: number;
 }
 
-export interface TakeBacklogItemResponse {
-  item: AvailableBacklogItem;
-  session: SpurSessionView;
-}
-
 export type AttentionLevel =
   | "error"
   | "rate_limited"

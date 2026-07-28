@@ -53,10 +53,6 @@ function availableBacklogFilePath(dataDir: string, projectId: string, backlogId:
   return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
 }
 
-function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
-  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
-}
-
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
@@ -859,14 +855,6 @@ function readIdRegistry(path: string): Set<string> {
   }
 }
 
-function readClaimedBacklogRegistry(
-  dataDir: string,
-  projectId: string,
-  backlogId: string,
-): Set<string> {
-  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
-}
-
 export function readAvailableBacklogItems(
   dataDir: string,
   projectId: string,
@@ -874,10 +862,9 @@ export function readAvailableBacklogItems(
 ): AvailableBacklogItem[] {
   const path = availableBacklogFilePath(dataDir, projectId, backlogId);
   if (!existsSync(path)) return [];
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
-  return [...readAvailableBacklogFile(path).values()]
-    .filter((item) => !claimed.has(item.externalId))
-    .sort((left, right) => left.position - right.position);
+  return [...readAvailableBacklogFile(path).values()].sort(
+    (left, right) => left.position - right.position,
+  );
 }
 
 export function replaceAvailableBacklogItems(
@@ -886,29 +873,9 @@ export function replaceAvailableBacklogItems(
   backlogId: string,
   items: readonly AvailableBacklogItem[],
 ): void {
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
-    items: items.filter((item) => !claimed.has(item.externalId)),
+    items: [...items],
   });
-}
-
-export function claimAvailableBacklogItem(
-  dataDir: string,
-  projectId: string,
-  backlogId: string,
-  externalId: string,
-): AvailableBacklogItem | null {
-  const item = readAvailableBacklogFile(
-    availableBacklogFilePath(dataDir, projectId, backlogId),
-  ).get(externalId);
-  if (!item) return null;
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
-  if (claimed.has(externalId)) return null;
-  claimed.add(externalId);
-  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
-    ids: [...claimed].sort(),
-  });
-  return item;
 }
 
 export function readWorkItemRegistry(

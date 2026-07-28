@@ -28,6 +28,7 @@ import {
 import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
+import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import type { AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
@@ -49,7 +50,6 @@ import {
   type SpurSessionView,
   type SpawnOverrides,
   type SpurSessionsResponse,
-  type TakeBacklogItemResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
 } from "@/lib/types";
@@ -153,13 +153,11 @@ function StatItem({
 function BacklogZone({
   items,
   projectNameMap,
-  takingKeys,
   onTake,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
-  takingKeys: ReadonlySet<string>;
-  onTake: (item: AvailableBacklogItem) => Promise<void>;
+  onTake: (item: AvailableBacklogItem) => void;
 }) {
   if (items.length === 0) return null;
   return (
@@ -192,13 +190,11 @@ function BacklogZone({
             </span>
             <RowIconButton
               activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              disabled={takingKeys.has(itemKey)}
+              disabled={false}
               label="Take task"
-              onClick={() => void onTake(item)}
+              onClick={() => onTake(item)}
             >
-              <span className={takingKeys.has(itemKey) ? "animate-pulse" : undefined}>
-                <IconTake />
-              </span>
+              <IconTake />
             </RowIconButton>
           </DataRow>
         );
@@ -937,7 +933,7 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [takingBacklogKeys, setTakingBacklogKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [spawnTrackerUrl, setSpawnTrackerUrl] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -1175,6 +1171,7 @@ export function Dashboard() {
   const visibleBacklog = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return availableBacklog.filter((item) => {
+      if (isBacklogItemActivelyWorked(item, allSessions)) return false;
       if (projectId && item.projectId !== projectId) return false;
       if (!q) return true;
       return (
@@ -1183,7 +1180,7 @@ export function Dashboard() {
         item.projectId.toLowerCase().includes(q)
       );
     });
-  }, [availableBacklog, projectId, searchQuery]);
+  }, [availableBacklog, allSessions, projectId, searchQuery]);
 
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
@@ -1450,6 +1447,9 @@ export function Dashboard() {
       }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
+      if (spawnTrackerUrl) {
+        payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
+      }
 
       const response = await fetch("/api/spawn", {
         method: "POST",
@@ -1480,6 +1480,7 @@ export function Dashboard() {
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
       setSpawnPinnedProjectId(null);
+      setSpawnTrackerUrl(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
     } catch (spawnError) {
@@ -1487,53 +1488,6 @@ export function Dashboard() {
     } finally {
       spawningRef.current = false;
       setSpawning(false);
-    }
-  };
-
-  const handleTakeBacklog = async (item: AvailableBacklogItem) => {
-    const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
-    if (takingBacklogKeys.has(itemKey)) return;
-    setTakingBacklogKeys((prev) => new Set(prev).add(itemKey));
-    try {
-      const response = await fetch("/api/backlog/take", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: item.projectId,
-          backlogId: item.backlogId,
-          externalId: item.externalId,
-        }),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const result = (await response.json()) as TakeBacklogItemResponse;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== result.session.id,
-        );
-        const currentBacklog = current?.backlog ?? [];
-        return {
-          ...(current ?? {}),
-          sessions: [result.session, ...currentSessions],
-          projects: current?.projects ?? [],
-          backlog: currentBacklog.filter(
-            (entry) =>
-              !(
-                entry.projectId === result.item.projectId &&
-                entry.backlogId === result.item.backlogId &&
-                entry.externalId === result.item.externalId
-              ),
-          ),
-        };
-      });
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    } catch (takeError) {
-      showErrorToast(errorMessage(takeError, "Failed to take backlog item"));
-    } finally {
-      setTakingBacklogKeys((prev) => {
-        const next = new Set(prev);
-        next.delete(itemKey);
-        return next;
-      });
     }
   };
 
@@ -1884,6 +1838,8 @@ export function Dashboard() {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
+    setSpawnPrompt("");
+    setSpawnTrackerUrl(null);
     setSpawnOpen(true);
   };
 
@@ -1895,6 +1851,17 @@ export function Dashboard() {
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
+    setSpawnPrompt("");
+    setSpawnTrackerUrl(null);
+    setSpawnOpen(true);
+  };
+
+  const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
+    setSpawnPinnedProjectId(null);
+    setSpawnProjectId(item.projectId);
+    setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
+    setSpawnAttachments([]);
+    setSpawnTrackerUrl(item.url);
     setSpawnOpen(true);
   };
 
@@ -2349,8 +2316,7 @@ export function Dashboard() {
               <BacklogZone
                 items={visibleBacklog}
                 projectNameMap={projectNameMap}
-                takingKeys={takingBacklogKeys}
-                onTake={handleTakeBacklog}
+                onTake={openBacklogSpawnModal}
               />
             ) : null}
             {visibleLevels.map((level) => (
