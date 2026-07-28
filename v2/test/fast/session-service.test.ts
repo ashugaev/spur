@@ -1576,7 +1576,7 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
   });
 
-  it("preserves a session's mode across respawn without falling back to the project default", async () => {
+  it("carries a session's mode through resolveRespawnRequest into the spawned launch prompt", async () => {
     mockClaudeJsonlState("waiting");
     loadConfigMock.mockReturnValue(configWithModes());
     const sessions = createSessionStore();
@@ -1845,6 +1845,7 @@ describe("SessionService", () => {
           ([, session]) => session.id === placeholder.id && session.mode === "manager",
         ),
       ).toBe(true);
+      expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1]).toContain("Mode: manager.");
     });
   });
 
