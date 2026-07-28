@@ -7097,6 +7097,11 @@ export class SessionService {
         sessionProcessMatchers(session),
       );
       if (processAlive) {
+        if (options.strictClaudeResume) {
+          throw new Error(
+            `Claude auth switch cannot reuse the process that survived replacement`,
+          );
+        }
         return this.captureAgentSessionId(session, 0);
       }
     }
@@ -7725,7 +7730,12 @@ export class SessionService {
       if (!preparedIntent) throw new Error("Failed to persist Claude auth switch intent");
 
       try {
-        await killTmuxSession(prepared.tmuxSession);
+        try {
+          await killTmuxSession(prepared.tmuxSession, { required: true });
+        } catch (error) {
+          const original = error instanceof Error ? error.message : "Claude auth switch failed";
+          throw new Error(`${original}; automatic recovery remains pending`, { cause: error });
+        }
         const candidateStarted: SessionRecord = {
           ...prepared,
           claudeAuthSwitch: { ...preparedIntent, phase: "candidate_started" },
@@ -7748,8 +7758,16 @@ export class SessionService {
           updatedAt: nowIso(),
         };
         writeSession(this.config.dataDir, committed);
-        touchAccountUsed(this.config.dataDir, account.id);
-        await this.refreshDashboardCacheEntry(committed);
+        try {
+          touchAccountUsed(this.config.dataDir, account.id);
+        } catch {
+          // Binding is already committed. Usage metadata is best effort.
+        }
+        try {
+          await this.refreshDashboardCacheEntry(committed);
+        } catch {
+          // The periodic dashboard refresh reconciles this cache.
+        }
         this.logEvent("session.auth.switched", {
           level: "info",
           sessionId,
@@ -7759,9 +7777,19 @@ export class SessionService {
         });
         return await this.enrich(committed);
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("automatic recovery remains pending")
+        ) {
+          throw error;
+        }
+        const persisted = readSession(this.config.dataDir, sessionId);
+        if (persisted && !persisted.claudeAuthSwitch) {
+          throw error;
+        }
         const original = error instanceof Error ? error.message : "Claude auth switch failed";
-        await killTmuxSession(prepared.tmuxSession);
         try {
+          await killTmuxSession(prepared.tmuxSession, { required: true });
           const rollback = await this.ensureSessionReadyForSend(prepared, {
             persist: false,
             allowFreshFallback: false,
@@ -7770,7 +7798,11 @@ export class SessionService {
           const { claudeAuthSwitch: _intent, ...rollbackWithoutIntent } = rollback;
           const restored = { ...rollbackWithoutIntent, updatedAt: nowIso() };
           writeSession(this.config.dataDir, restored);
-          await this.refreshDashboardCacheEntry(restored);
+          try {
+            await this.refreshDashboardCacheEntry(restored);
+          } catch {
+            // The durable rollback is complete; cache refresh is best effort.
+          }
         } catch (rollbackError) {
           throw new Error(`${original}; automatic recovery remains pending`, {
             cause: rollbackError,
@@ -8120,18 +8152,20 @@ export class SessionService {
     if (!intent || this.claudeAuthSwitches.has(session.id)) return;
     this.claudeAuthSwitches.add(session.id);
     try {
-      if (intent.phase === "candidate_started") {
-        await killTmuxSession(session.tmuxSession);
-      }
+      await killTmuxSession(session.tmuxSession, { required: true });
       const recovered = await this.ensureSessionReadyForSend(session, {
         persist: false,
         allowFreshFallback: false,
-        strictClaudeResume: intent.phase === "candidate_started",
+        strictClaudeResume: true,
       });
       const { claudeAuthSwitch: _intent, ...withoutIntent } = recovered;
       const committed = { ...withoutIntent, updatedAt: nowIso() };
       writeSession(this.config.dataDir, committed);
-      await this.refreshDashboardCacheEntry(committed);
+      try {
+        await this.refreshDashboardCacheEntry(committed);
+      } catch {
+        // Durable recovery is complete; cache refresh is best effort.
+      }
       if (this.shouldRunDelivery(committed)) this.scheduleDeliveryRunner(committed.id);
       this.logEvent("session.auth.recovered", {
         level: "info",

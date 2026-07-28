@@ -188,7 +188,12 @@ function writeSecret(dataDir: string, id: string, setupToken: string): void {
 function secretIsSecure(dataDir: string, id: string): boolean {
   try {
     const stat = lstatSync(secretPath(dataDir, id));
-    return stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0;
+    return (
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      stat.uid === process.getuid?.() &&
+      (stat.mode & 0o777) === 0o600
+    );
   } catch {
     return false;
   }
@@ -198,7 +203,11 @@ export function readSetupToken(dataDir: string, account: SetupTokenClaudeAccount
   if (!secretIsSecure(dataDir, account.id)) {
     throw new Error("Claude account secret is insecure; re-enroll the account");
   }
-  return readFileSync(secretPath(dataDir, account.id), "utf8");
+  const setupToken = readFileSync(secretPath(dataDir, account.id), "utf8");
+  if (fingerprintSetupToken(setupToken) !== account.tokenFingerprint) {
+    throw new Error("Claude account secret does not match its metadata; re-enroll the account");
+  }
+  return setupToken;
 }
 
 export function accountStatus(
@@ -208,7 +217,12 @@ export function accountStatus(
 ): ClaudeAccountStatus {
   if (account.kind === "legacy_profile") return "legacy";
   if (Date.parse(account.expiresAt) <= now) return "expired";
-  return secretIsSecure(dataDir, account.id) ? "ready" : "insecure";
+  try {
+    readSetupToken(dataDir, account);
+    return "ready";
+  } catch {
+    return "insecure";
+  }
 }
 
 export function publicAccount(
@@ -334,11 +348,30 @@ export function enrollSetupToken(
     validatedAt: validatedAt.toISOString(),
     expiresAt: new Date(validatedAt.getTime() + TOKEN_LIFETIME_MS).toISOString(),
   };
+  const previousToken =
+    existing.kind === "setup_token"
+      ? (() => {
+          try {
+            return readSetupToken(dataDir, existing);
+          } catch {
+            return undefined;
+          }
+        })()
+      : undefined;
   writeSecret(dataDir, id, setupToken);
-  writeAccounts(
-    dataDir,
-    listAccounts(dataDir).map((candidate) => (candidate.id === id ? account : candidate)),
-  );
+  try {
+    writeAccounts(
+      dataDir,
+      listAccounts(dataDir).map((candidate) => (candidate.id === id ? account : candidate)),
+    );
+  } catch (error) {
+    if (previousToken !== undefined) {
+      writeSecret(dataDir, id, previousToken);
+    } else {
+      rmSync(secretPath(dataDir, id), { force: true });
+    }
+    throw error;
+  }
   return account;
 }
 

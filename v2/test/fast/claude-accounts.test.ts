@@ -85,9 +85,20 @@ describe("claude-accounts store", () => {
     chmodSync(secret, 0o644);
     expect(accountStatus(dataDir, account)).toBe("insecure");
     expect(() => readSetupToken(dataDir, account)).toThrow("insecure");
+    chmodSync(secret, 0o700);
+    expect(accountStatus(dataDir, account)).toBe("insecure");
     rmSync(secret);
     symlinkSync(join(dataDir, "elsewhere"), secret);
     expect(accountStatus(dataDir, account)).toBe("insecure");
+  });
+
+  it("rejects a mode-safe secret whose content does not match metadata", () => {
+    const account = addSetupTokenAccount(dataDir, { setupToken: "original" });
+    const secret = join(dataDir, "claude-accounts", account.id, "setup-token");
+    writeFileSync(secret, "replacement", { mode: 0o600 });
+
+    expect(accountStatus(dataDir, account)).toBe("insecure");
+    expect(() => readSetupToken(dataDir, account)).toThrow(/does not match/);
   });
 
   it("marks enrollment-expired accounts unavailable", () => {

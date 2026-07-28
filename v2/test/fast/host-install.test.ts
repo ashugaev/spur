@@ -477,15 +477,16 @@ describe("satisfiesNodeEngineRange", () => {
       range,
       "engines.node must be present so node-version never silently no-ops",
     ).toBeTruthy();
+    if (!range) throw new Error("engines.node must be present");
     const supported = /^\^\d+\.\d+\.\d+$|^>=\d+(?:\.\d+){0,2}$/;
-    for (const clause of range!.split("||").map((c) => c.trim())) {
+    for (const clause of range.split("||").map((c) => c.trim())) {
       expect(
         clause,
         `unsupported engines.node clause "${clause}" — extend satisfiesClause`,
       ).toMatch(supported);
     }
     // And the pinned range must actually admit a version inside it.
-    expect(satisfiesNodeEngineRange(range!, "v20.19.0")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v20.19.0")).toBe(true);
   });
 });
 

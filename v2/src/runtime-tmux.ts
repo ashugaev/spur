@@ -285,10 +285,14 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 // the service user, while `required` propagates the failure. Either way,
 // KillMode=process on the daemon unit remains the actual guarantee that a
 // daemon restart does not stop the session.
-async function runTmuxNewSession(args: string[]): Promise<void> {
+async function runTmuxNewSession(
+  args: string[],
+  environment?: NodeJS.ProcessEnv,
+): Promise<void> {
+  const options = environment ? { env: environment } : undefined;
   const mode = systemdScopeMode();
   if (mode === "direct") {
-    await execFileAsync("tmux", args);
+    await execFileAsync("tmux", args, options);
     return;
   }
   try {
@@ -299,7 +303,7 @@ async function runTmuxNewSession(args: string[]): Promise<void> {
       "--collect",
       "tmux",
       ...args,
-    ]);
+    ], options);
   } catch (error) {
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
       if (!warnedSystemdScopeFallback) {
@@ -312,7 +316,7 @@ async function runTmuxNewSession(args: string[]): Promise<void> {
             "KillMode=process.\n",
         );
       }
-      await execFileAsync("tmux", args);
+      await execFileAsync("tmux", args, options);
       return;
     }
     throw error;
@@ -330,9 +334,26 @@ function buildEnvArgs(env?: Record<string, string>): string[] {
     ...(env ?? {}),
   };
   for (const [key, value] of Object.entries(sessionEnv)) {
+    if (key === "CLAUDE_CODE_OAUTH_TOKEN") continue;
     envArgs.push("-e", `${key}=${value}`);
   }
   return envArgs;
+}
+
+async function ensureClaudeTokenImport(): Promise<void> {
+  try {
+    const current = await tmux("show-options", "-gv", "update-environment");
+    if (!current.split(/\s+/).includes("CLAUDE_CODE_OAUTH_TOKEN")) {
+      await tmux(
+        "set-option",
+        "-g",
+        "update-environment",
+        `${current} CLAUDE_CODE_OAUTH_TOKEN`.trim(),
+      );
+    }
+  } catch {
+    // A new tmux server will load the same setting from tmux.conf.
+  }
 }
 
 function exactSessionTarget(sessionName: string): string {
@@ -491,6 +512,16 @@ export async function createTmuxSession(input: {
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs = buildEnvArgs(input.env);
+  const omitted = new Set(input.unsetEnv ?? []);
+  const launchEnvironment: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries({ ...process.env, ...(input.env ?? {}) }).filter(
+      ([key, value]) => typeof value === "string" && !omitted.has(key),
+    ),
+  );
+
+  if (input.env?.["CLAUDE_CODE_OAUTH_TOKEN"]) {
+    await ensureClaudeTokenImport();
+  }
 
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
@@ -503,7 +534,7 @@ export async function createTmuxSession(input: {
     "-c",
     input.cwd,
     ...envArgs,
-  ]);
+  ], launchEnvironment);
   invalidateFleetProbeCaches();
 
   try {
@@ -709,12 +740,15 @@ export async function waitForTmuxReady(
   );
 }
 
-export async function killTmuxSession(sessionName: string): Promise<void> {
+export async function killTmuxSession(
+  sessionName: string,
+  options: { required?: boolean } = {},
+): Promise<void> {
   const target = exactSessionTarget(sessionName);
   try {
     await tmux("kill-session", "-t", target);
-  } catch {
-    // Best effort only.
+  } catch (error) {
+    if (options.required) throw error;
   } finally {
     invalidateFleetProbeCaches();
   }

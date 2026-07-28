@@ -145,6 +145,7 @@ const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
 const ensureAccountProjectsLinkMock = vi.fn();
 const ensureDefaultAccountMock = vi.fn();
+const validateClaudeSetupTokenMock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -181,6 +182,7 @@ function resetAccountStoreMocks(): void {
     ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
   }));
   readSetupTokenMock.mockReset().mockReturnValue("runtime-token");
+  validateClaudeSetupTokenMock.mockReset().mockResolvedValue(undefined);
   touchAccountUsedMock.mockReset().mockImplementation((_dataDir: string, id: string) => {
     const account = testAccounts.find((a) => a.id === id);
     if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
@@ -280,7 +282,7 @@ vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestClaudeSessionFileMock,
   DEFAULT_CLAUDE_MODEL: "opus",
   isClaudeResumePaneReady: vi.fn(() => true),
-  validateClaudeSetupToken: vi.fn(async () => undefined),
+  validateClaudeSetupToken: validateClaudeSetupTokenMock,
 }));
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
@@ -3752,6 +3754,18 @@ describe("SessionService", () => {
       ];
     }
 
+    function mockStrictResume(sessionId = "session-uuid"): void {
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      captureTmuxPaneMock.mockResolvedValue("Claude Code\nReady\n❯");
+      readClaudeSessionStatusMock.mockResolvedValue({
+        state: "waiting",
+        status: "idle",
+        sessionId,
+        filePath: "status.json",
+        updatedMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      });
+    }
+
     it("refuses to switch while working without force", async () => {
       const sessions = createSessionStore();
       sessions.set(
@@ -3858,6 +3872,211 @@ describe("SessionService", () => {
           ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
         ),
       ).toBe(true);
+    });
+
+    it("keeps the committed binding and durable intent when replacement kill fails", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      killTmuxSessionMock.mockRejectedValue(new Error("kill failed"));
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/recovery remains pending/);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("primary");
+      expect(sessions.get("api-1")?.claudeAuthSwitch?.phase).toBe("prepared");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1", { required: true });
+    });
+
+    it("never commits a candidate while the previous Claude process survives", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/recovery remains pending/);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("primary");
+      expect(sessions.get("api-1")?.claudeAuthSwitch).toBeDefined();
+    });
+
+    it("rolls back candidate launch failure to the prior canonical binding", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      createTmuxSessionMock
+        .mockRejectedValueOnce(new Error("candidate failed"))
+        .mockResolvedValueOnce(undefined);
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/previous Claude account restored/);
+      expect(sessions.get("api-1")).toMatchObject({
+        claudeAccountId: "primary",
+        claudeAccountFingerprint: "sha256:primary",
+      });
+      expect(sessions.get("api-1")?.claudeAuthSwitch).toBeUndefined();
+    });
+
+    it("keeps candidate recovery pending when rollback kill fails", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("candidate failed"));
+      killTmuxSessionMock
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("rollback kill failed"));
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/rollback kill failed; automatic recovery remains pending/);
+      expect(sessions.get("api-1")).toMatchObject({
+        claudeAccountId: "primary",
+        claudeAccountFingerprint: "sha256:primary",
+        claudeAuthSwitch: expect.objectContaining({ phase: "candidate_started" }),
+      });
+    });
+
+    it("does not roll back a committed binding when account touch fails", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      touchAccountUsedMock.mockImplementation(() => {
+        throw new Error("metadata unavailable");
+      });
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("api-1")).toMatchObject({
+        claudeAccountId: "backup",
+        claudeAccountFingerprint: "sha256:backup",
+      });
+      expect(sessions.get("api-1")?.claudeAuthSwitch).toBeUndefined();
+    });
+
+    it("serializes concurrent switches for the same session", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      let releaseValidation: (() => void) | undefined;
+      validateClaudeSetupTokenMock.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseValidation = resolve;
+          }),
+      );
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+      await vi.waitFor(() => expect(validateClaudeSetupTokenMock).toHaveBeenCalled());
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/already in progress/);
+      releaseValidation?.();
+      await expect(first).resolves.toMatchObject({ activeClaudeAccountId: "backup" });
+    });
+
+    it("strictly restores the committed binding from a prepared restart intent", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+          claudeAuthSwitch: {
+            fromAccountId: "primary",
+            fromFingerprint: "sha256:primary",
+            toAccountId: "backup",
+            startedAt: "2026-03-18T10:04:00.000Z",
+            phase: "prepared",
+          },
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.settleBackgroundSpawns();
+      expect(sessions.get("api-1")).toMatchObject({
+        claudeAccountId: "primary",
+        claudeAccountFingerprint: "sha256:primary",
+      });
+      expect(sessions.get("api-1")?.claudeAuthSwitch).toBeUndefined();
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1", { required: true });
     });
   });
 
@@ -3989,6 +4208,7 @@ describe("SessionService", () => {
     it("calls ensureDefaultAccount before listing", async () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      ensureDefaultAccountMock.mockClear();
       service.listClaudeAccounts();
       expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
       service.dispose();
@@ -17556,24 +17776,53 @@ describe("SessionService", () => {
       testAccounts = [
         {
           id: "acc-1",
-          configDir: "/abs/acc-1",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-1",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
         {
           id: "acc-2",
-          configDir: "/abs/acc-2",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-2",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
       ];
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "acc-1",
+          claudeAccountFingerprint: "sha256:acc-1",
+        }),
+      );
       mockRateLimited();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.get("api-1");
+      let runtimeAlive = true;
+      tmuxSessionExistsMock.mockImplementation(async () => runtimeAlive);
+      killTmuxSessionMock.mockImplementation(async () => {
+        runtimeAlive = false;
+      });
+      createTmuxSessionMock.mockImplementation(async () => {
+        runtimeAlive = true;
+      });
+      captureTmuxPaneMock.mockResolvedValue("Claude Code\nReady\n❯");
+      readClaudeSessionStatusMock.mockResolvedValue({
+        state: "waiting",
+        status: "idle",
+        sessionId: "session-uuid",
+        filePath: "status.json",
+        updatedMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      });
       // One wake tick (1s), far below any afterHours threshold, already rotates.
       await advanceSeconds(2);
 
@@ -17647,31 +17896,50 @@ describe("SessionService", () => {
       testAccounts = [
         {
           id: "acc-1",
-          configDir: "/abs/acc-1",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-1",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
         {
           id: "acc-2",
-          configDir: "/abs/acc-2",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-2",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
         {
           id: "acc-3",
-          configDir: "/abs/acc-3",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-3",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
       ];
       const sessions = createSessionStore();
       const session = runningSession({
+        agentSessionId: "session-uuid",
         claudeAccountId: "acc-1",
+        claudeAccountFingerprint: "sha256:acc-1",
         rateLimitedAt: "2026-03-18T09:00:00.000Z",
       });
       sessions.set("api-1", session);
       mockClaudeJsonlState("waiting");
       tmuxSessionExistsMock.mockResolvedValue(false);
+      captureTmuxPaneMock.mockResolvedValue("Claude Code\nReady\n❯");
+      readClaudeSessionStatusMock.mockResolvedValue({
+        state: "waiting",
+        status: "idle",
+        sessionId: "session-uuid",
+        filePath: "status.json",
+        updatedMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService(
         "/tmp/spur.yaml",
@@ -17693,20 +17961,42 @@ describe("SessionService", () => {
       testAccounts = [
         {
           id: "acc-1",
-          configDir: "/abs/acc-1",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-1",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
         {
           id: "acc-2",
-          configDir: "/abs/acc-2",
+          kind: "setup_token",
           createdAt: "2026-03-18T09:00:00.000Z",
           authenticated: true,
+          tokenFingerprint: "sha256:acc-2",
+          validatedAt: "2026-03-18T09:00:00.000Z",
+          expiresAt: "2027-03-18T09:00:00.000Z",
         },
       ];
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ id: "api-1", claudeAccountId: "acc-1" }));
-      sessions.set("api-2", runningSession({ id: "api-2", claudeAccountId: "acc-1" }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agentSessionId: "session-uuid-1",
+          claudeAccountId: "acc-1",
+          claudeAccountFingerprint: "sha256:acc-1",
+        }),
+      );
+      sessions.set(
+        "api-2",
+        runningSession({
+          id: "api-2",
+          agentSessionId: "session-uuid-2",
+          claudeAccountId: "acc-1",
+          claudeAccountFingerprint: "sha256:acc-1",
+        }),
+      );
       mockRateLimited();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -17714,6 +18004,29 @@ describe("SessionService", () => {
       // Populate live state for both sessions so the wake loop attempts rotation.
       await service.get("api-1");
       await service.get("api-2");
+      const runtimeAlive = new Map([
+        ["api-1", true],
+        ["api-2", true],
+      ]);
+      tmuxSessionExistsMock.mockImplementation(async (sessionName: string) =>
+        runtimeAlive.get(sessionName) ?? false,
+      );
+      killTmuxSessionMock.mockImplementation(async (sessionName: string) => {
+        runtimeAlive.set(sessionName, false);
+      });
+      createTmuxSessionMock.mockImplementation(async ({ sessionName }) => {
+        runtimeAlive.set(sessionName, true);
+      });
+      captureTmuxPaneMock.mockResolvedValue("Claude Code\nReady\n❯");
+      readClaudeSessionStatusMock.mockImplementation(
+        async (_worktree: string, sessionId: string) => ({
+          state: "waiting",
+          status: "idle",
+          sessionId,
+          filePath: "status.json",
+          updatedMs: Date.parse("2026-03-18T10:05:01.000Z"),
+        }),
+      );
 
       const internal = service as unknown as {
         tryAutoRotateClaudeAccount(s: SessionRecord): Promise<boolean>;

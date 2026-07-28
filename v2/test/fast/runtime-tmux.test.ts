@@ -2,7 +2,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options?: { env?: NodeJS.ProcessEnv },
+) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
 const execFileMock: ((...args: unknown[]) => void) & {
@@ -96,7 +100,44 @@ describe("runtime-tmux", () => {
     expect(secondUnset).toBeGreaterThan(firstUnset);
     expect(respawn).toBeGreaterThan(secondUnset);
     expect(firstSend).toBeGreaterThan(respawn);
-    expect(calls[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN=selected");
+    expect(calls.flat()).not.toContain("CLAUDE_CODE_OAUTH_TOKEN=selected");
+    const newSessionCall = execFileAsyncMock.mock.calls.find(([, args]) =>
+      args.includes("new-session"),
+    );
+    expect(newSessionCall?.[2]?.env?.["CLAUDE_CODE_OAUTH_TOKEN"]).toBe("selected");
+    expect(newSessionCall?.[2]?.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(newSessionCall?.[2]?.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+  });
+
+  it("never exposes a selected token through failed tmux argv or errors", async () => {
+    const sentinel = "setup-token-argv-sentinel";
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args.includes("new-session")) {
+        throw new Error(`tmux failed: ${args.join(" ")}`);
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    const error = await createTmuxSession({
+      sessionName: "api-auth",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: sentinel },
+    }).catch((reason: unknown) => reason);
+
+    expect(String(error)).not.toContain(sentinel);
+    expect(execFileAsyncMock.mock.calls.flatMap(([, args]) => args).join(" ")).not.toContain(
+      sentinel,
+    );
+  });
+
+  it("makes required kill failures observable", async () => {
+    execFileAsyncMock.mockRejectedValue(new Error("kill failed"));
+    const { killTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(killTmuxSession("api-auth", { required: true })).rejects.toThrow("kill failed");
+    await expect(killTmuxSession("api-auth")).resolves.toBeUndefined();
   });
 
   it("kills a new session when inherited-auth removal fails", async () => {
