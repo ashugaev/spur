@@ -5,6 +5,7 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 ## Mirror
 
 - `AGENTS.md` and `CLAUDE.md` stay content-synced; tree-specific link paths differ between them.
+- Root `LICENSE` and `NOTICE` stay byte-synced with their `v2/` copies.
 - Files under `.agents/` and `.claude/` must stay in sync. When you change one, mirror the other in the same change.
 - `.codex/agents/*.toml` are the Codex-side agent prompts (parallel to `.claude/agents/*.md`). Update them when behavior or rules change.
 - `.cursor/BUGBOT.md` configures Cursor BugBot review focus. Keep aligned with `## Always-on rules`.
