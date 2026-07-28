@@ -667,6 +667,28 @@ export async function sendSubmitKeyToTmux(sessionName: string): Promise<void> {
   await tmux("send-keys", "-t", target, "Enter");
 }
 
+/**
+ * Select an AskUserQuestion menu option in a claude TUI by keystroke. Claude's
+ * interactive menus map digit keys 1-9 directly to the first nine options and
+ * require arrow-key navigation beyond that — sending the option text via
+ * `/send` would type it into the menu and corrupt the prompt instead of
+ * selecting an option.
+ */
+export async function sendMenuSelectionKeys(
+  sessionName: string,
+  optionIndex: number,
+): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  if (optionIndex <= 8) {
+    await tmux("send-keys", "-t", target, String(optionIndex + 1));
+    return;
+  }
+  for (let i = 0; i < optionIndex; i++) {
+    await tmux("send-keys", "-t", target, "Down");
+  }
+  await tmux("send-keys", "-t", target, "Enter");
+}
+
 export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],

@@ -1,5 +1,5 @@
 import { open, readFile, stat } from "node:fs/promises";
-import type { ConversationMessage, SessionState } from "./types.js";
+import type { ConversationMessage, SessionState, TranscriptEntry } from "./types.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
@@ -404,4 +404,119 @@ export async function readClaudeConversation(
   }
 
   return parseConversationLines(text.split("\n"), Date.now());
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+interface ClaudeQuestionOption {
+  label: string;
+  index: number;
+}
+
+interface ClaudeQuestion {
+  header: string;
+  prompt: string;
+  options?: ClaudeQuestionOption[];
+  multiSelect?: boolean;
+}
+
+function extractAskUserQuestions(input: unknown): ClaudeQuestion[] {
+  if (typeof input !== "object" || input === null) return [];
+  const questionsValue = (input as Record<string, unknown>)["questions"];
+  if (!Array.isArray(questionsValue)) return [];
+
+  const questions: ClaudeQuestion[] = [];
+  for (const raw of questionsValue) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const q = raw as Record<string, unknown>;
+    const header = typeof q["header"] === "string" ? q["header"] : "";
+    const prompt = typeof q["question"] === "string" ? q["question"] : "";
+    const optionsValue = q["options"];
+    const options = Array.isArray(optionsValue)
+      ? optionsValue.map((option, index) => ({
+          label:
+            typeof option === "object" &&
+            option !== null &&
+            typeof (option as Record<string, unknown>)["label"] === "string"
+              ? ((option as Record<string, unknown>)["label"] as string)
+              : "",
+          index,
+        }))
+      : undefined;
+    const multiSelect = typeof q["multiSelect"] === "boolean" ? q["multiSelect"] : undefined;
+    questions.push({
+      header,
+      prompt,
+      ...(options ? { options } : {}),
+      ...(multiSelect !== undefined ? { multiSelect } : {}),
+    });
+  }
+  return questions;
+}
+
+/** Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion prompts. */
+export async function readClaudeTranscriptEntries(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let fileText: string;
+  try {
+    fileText = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of fileText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const message = unwrapMessage(parsed);
+    const role = extractRole(parsed, message);
+    if (role !== "user" && role !== "assistant") continue;
+
+    const timestampMs = extractTimestampMs(parsed, message, nowMs);
+
+    const messageText = extractTextContent(message);
+    if (messageText) {
+      entries.push({ kind: "message", role, text: messageText, timestampMs });
+    }
+
+    if (role !== "assistant") continue;
+
+    for (const block of contentBlocks(message)) {
+      if (typeof block !== "object" || block === null) continue;
+      const tool = block as Record<string, unknown>;
+      if (tool["type"] !== "tool_use") continue;
+
+      const name = typeof tool["name"] === "string" ? tool["name"] : "";
+      const callId = typeof tool["id"] === "string" ? tool["id"] : undefined;
+
+      if (name === "AskUserQuestion") {
+        for (const question of extractAskUserQuestions(tool["input"])) {
+          entries.push({ kind: "question", ...question, timestampMs });
+        }
+        continue;
+      }
+
+      entries.push({
+        kind: "tool",
+        name,
+        ...(callId ? { callId } : {}),
+        timestampMs,
+      });
+    }
+  }
+
+  return entries;
 }

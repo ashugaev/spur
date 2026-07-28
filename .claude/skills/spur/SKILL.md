@@ -218,6 +218,8 @@ spawn
   -> persist session metadata
 ```
 
+`POST /sessions/:id/answer { optionIndex }` selects a claude AskUserQuestion single-select menu option by tmux keystroke (digit for the first nine options, arrow-key navigation beyond that) instead of typing text into the menu; claude only.
+
 ## Cron flow
 
 ```text

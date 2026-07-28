@@ -26,6 +26,7 @@ import {
   createAgentSubmitAckBinding,
   findAgentSessionId,
   parseAgentName,
+  readAgentConversation,
   setupAgentHooks,
   type SubmitAckBinding,
   type SubmitAckScanResult,
@@ -169,6 +170,7 @@ import {
   killTmuxSession,
   listTmuxSessionNames,
   sendSubmitKeyToTmux,
+  sendMenuSelectionKeys,
   setTmuxSocketName,
   sendMessageToTmux,
   tmuxPaneDead,
@@ -236,6 +238,7 @@ import {
   type BranchSource,
   type CompleteDeskResponse,
   type CompleteSessionRequest,
+  type ConversationMessage,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
@@ -291,6 +294,7 @@ import {
   type SpawnSessionRequest,
   type StateSource,
   type TagDefinition,
+  type TranscriptEntry,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -4036,12 +4040,37 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const fallback: ConversationResponse = {
       messages: [],
+      entries: [],
       durationMs,
       state: statusFallbackState(session),
     };
-    if (session.agent !== "claude") return fallback;
-    const result = await readClaudeConversation(session.worktreePath);
-    return result ? { ...result, durationMs } : fallback;
+
+    const entries =
+      (await readAgentConversation(session.agent, {
+        worktreePath: session.worktreePath,
+        ...(session.agent === "codex"
+          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
+          : {}),
+        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      })) ?? [];
+
+    if (session.agent === "claude") {
+      const result = await readClaudeConversation(session.worktreePath);
+      return result
+        ? { messages: result.messages, entries, durationMs, state: result.state }
+        : { ...fallback, entries };
+    }
+
+    const messages: ConversationMessage[] = entries
+      .filter(
+        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+      )
+      .map((entry) => ({
+        role: entry.role,
+        text: entry.text,
+        timestampMs: entry.timestampMs ?? 0,
+      }));
+    return { messages, entries, durationMs, state: statusFallbackState(session) };
   }
 
   async getProjectSuggestions(
@@ -6087,6 +6116,23 @@ export class SessionService {
     }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
+  }
+
+  async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.agent !== "claude") {
+      throw new Error("Interactive answering is only supported for claude sessions");
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) {
+      throw new Error("optionIndex must be a non-negative integer");
+    }
+    await sendMenuSelectionKeys(session.tmuxSession, optionIndex);
   }
 
   async deliver(
