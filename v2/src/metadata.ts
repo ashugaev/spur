@@ -561,6 +561,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),

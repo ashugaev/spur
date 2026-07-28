@@ -26,8 +26,9 @@ Process:
 2. Implement one logical chunk
 3. Verify: pnpm typecheck && pnpm lint; fix all errors before moving on
 4. Tests: add/update tests for externally observable behavior in the same chunk (spec change map lists them); run; fix inline; move on once green
-5. Commit: git add <files> && git commit -m "<type>(<scope>): <description>" — fix for bugs, feat for new behavior; see AGENTS.md
-6. Repeat; final check pnpm typecheck && pnpm lint && pnpm test
+5. Docs: when the chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, or install/deploy/CLI behavior), document it in the same chunk — load the docs skill and follow it; never ship new functionality undocumented
+6. Commit: git add <files> && git commit -m "<type>(<scope>): <description>" — fix for bugs, feat for new behavior; see AGENTS.md
+7. Repeat; final check pnpm typecheck && pnpm lint && pnpm test
 
 On build errors — minimal diff only, fix the error, don't refactor.
 

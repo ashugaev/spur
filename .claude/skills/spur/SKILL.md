@@ -10,7 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `README.md` Config and `docs/install-from-npm.md`.
+- `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `docs/configuration.md` and `docs/install-from-npm.md`.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
@@ -51,6 +51,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
   never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
+- When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route builds a diagnostic prompt server-side and spawns the built-in Shepherd through daemon `POST /shepherd/spawn`, which is project-independent and works on a clean install with no configured projects.
 
 ## Current config shape
 
@@ -174,11 +175,11 @@ Rotate Claude login accounts across the rate limit. Each account is an isolated
 Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
 accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
 Spur auto-detects the account once `.credentials.json` lands. Select sets the
-active account; remove drops it.
+active account; remove drops it. The default ~/.claude login is auto-adopted as an account named "default" when its .credentials.json exists.
 
 Per-session switch auth (claude sessions only): kills and relaunches the session
 under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
-switches even while the session is working.
+switches even while the session is working. Each account's `CLAUDE_CONFIG_DIR/projects` symlinks to shared `~/.claude/projects`, so `--resume <uuid>` resolves the same transcript across accounts; history preserved on rotation.
 
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;

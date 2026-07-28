@@ -69,6 +69,7 @@ import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
+import { POST as diagnoseUpdate } from "@/app/api/diagnose-update/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
@@ -406,6 +407,71 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(400);
     expect(payload.error).toBe("branch name is invalid");
+  });
+
+  // ── POST /api/diagnose-update ────────────────────────────────────────────
+
+  it("POST /api/diagnose-update returns 400 when target is missing", async () => {
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/diagnose-update returns 400 when target is blank", async () => {
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "   " }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "spur-shepherd" }));
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/shepherd/spawn",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body.project).toBeUndefined();
+    expect(body.agent).toBeUndefined();
+    expect(body.prompt).toContain("1.5.0");
+    expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
+  });
+
+  it("POST /api/diagnose-update preserves daemon error status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("daemon unavailable", 503));
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(503);
+    expect(payload.error).toBe("daemon unavailable");
   });
 
   // ── POST /api/sessions/:id/send ────────────────────────────────────────

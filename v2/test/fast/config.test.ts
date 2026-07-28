@@ -2379,7 +2379,7 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock, docsBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
@@ -2390,7 +2390,7 @@ projects:
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 4, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
@@ -2403,6 +2403,15 @@ projects:
       uiBlock?.overrides?.worktree,
       uiBlock?.selfDestruct?.enabled,
     ]).toEqual(["claude", "sonnet", true, true]);
+    expect([
+      docsBlock?.agent,
+      docsBlock?.model,
+      docsBlock?.overrides?.worktree,
+      docsBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
+    expect(docsBlock?.selfDestruct?.conditions).toBe(
+      "the docs review has been posted, or the PR changes no docs and no user-facing surface.",
+    );
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,

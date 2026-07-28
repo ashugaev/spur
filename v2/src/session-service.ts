@@ -52,6 +52,7 @@ import {
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
   claudeCommand,
+  DEFAULT_CLAUDE_MODEL,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
@@ -79,6 +80,8 @@ import {
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   addAccount,
+  ensureAccountProjectsLink,
+  ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
   listAccounts,
@@ -166,6 +169,7 @@ import {
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
+  listTmuxSessionNames,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
   setTmuxSocketName,
@@ -324,8 +328,12 @@ import { version } from "./version.js";
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
+const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
+  "Claude hit a temporary server error earlier. Please try to continue the task now.";
+const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
@@ -543,6 +551,7 @@ interface SessionStateResult {
   source: StateSource;
   historySourcePath?: string | null;
   workspacePresent: boolean;
+  serverError: boolean;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -726,12 +735,21 @@ async function setupSessionAgentHooks(args: {
   restrictWrites: boolean;
   playwrightPort?: number;
 }) {
+  // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
+  // .claude.json instead of the host ~/.claude.json when merging MCP
+  // servers below. Default (no bound account, or record not yet
+  // written at spawn time) falls back to homedir() inside setup().
+  const session = readSession(args.dataDir, args.sessionId);
+  const claudeConfigDir = session
+    ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
+    : undefined;
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.playwrightPort !== undefined ? { playwrightPort: args.playwrightPort } : {}),
+    ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
     return setupAgentHooks({
@@ -887,7 +905,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -980,6 +998,7 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
+  ensureAccountProjectsLink(account);
   return { claudeConfigDir: account.configDir };
 }
 
@@ -1238,9 +1257,17 @@ function resolveSpawnWorktree(
   return overrides?.worktree ?? project.worktree;
 }
 
+// Spur's built-in default model per agent, applied when neither the request nor
+// the project config names one. codex has no Spur default (uses its own).
+const SPUR_DEFAULT_MODELS: Partial<Record<AgentName, string>> = {
+  claude: DEFAULT_CLAUDE_MODEL,
+  cursor: DEFAULT_CURSOR_MODEL,
+};
+
 // A model only ever applies to the agent it belongs to. An explicit request
 // model wins; otherwise the project defaultModels entry for the resolved agent
-// applies. The map is keyed by agent, so it never bleeds onto another agent.
+// applies, then Spur's built-in default for that agent. The map is keyed by
+// agent, so it never bleeds onto another agent.
 export function resolveSpawnModel(args: {
   requestModel: string | undefined;
   resolvedAgent: AgentName;
@@ -1249,7 +1276,7 @@ export function resolveSpawnModel(args: {
   return (
     args.requestModel ??
     args.project.defaultModels?.[args.resolvedAgent] ??
-    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+    SPUR_DEFAULT_MODELS[args.resolvedAgent]
   );
 }
 
@@ -1632,6 +1659,8 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
+  private sidecarReaperTimer: NodeJS.Timeout | null = null;
+  private sidecarReaperRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
@@ -1680,6 +1709,7 @@ export class SessionService {
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
+    this.startSidecarReaper();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
   }
@@ -1698,7 +1728,95 @@ export class SessionService {
       clearInterval(this.scheduledWakeTimer);
       this.scheduledWakeTimer = null;
     }
+    if (this.sidecarReaperTimer) {
+      clearInterval(this.sidecarReaperTimer);
+      this.sidecarReaperTimer = null;
+    }
     this.stopDashboardCacheLoop();
+  }
+
+  private startSidecarReaper(): void {
+    if (this.sidecarReaperTimer) {
+      return;
+    }
+    this.sidecarReaperTimer = setInterval(() => {
+      void this.runSidecarReaper();
+    }, SIDECAR_REAPER_INTERVAL_MS);
+    this.sidecarReaperTimer.unref();
+  }
+
+  private async runSidecarReaper(): Promise<void> {
+    try {
+      await this.reapDeadSessionSidecars();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.sidecar_reaper.failed", {
+        level: "warn",
+        message: `Sidecar reaper failed: ${message}`,
+      });
+    }
+  }
+
+  // Periodic sweep for playwright sidecar tmux sessions whose owning session
+  // record is gone or terminal. Keyed on tmux ownership (not process ppid)
+  // so a transient empty listSessions read can never reap a live sidecar.
+  // Guarded against re-entrancy: a slow pass (large tmux fleet) must not
+  // overlap the next interval tick.
+  private async reapDeadSessionSidecars(): Promise<void> {
+    if (this.sidecarReaperRunning) {
+      return;
+    }
+    this.sidecarReaperRunning = true;
+    try {
+      const suffix = `--${PLAYWRIGHT_SIDECAR_NAME}`;
+      const liveSessions = listSessions(this.config.dataDir).filter(
+        (session) => session.status === "running" || session.status === "spawning",
+      );
+      // Protect every sidecar tmux name a live session is entitled to (agent
+      // playwright sidecar plus any project-declared user sidecar), and also
+      // the raw `${id}--` prefix as a belt-and-suspenders guard against
+      // config drift where a live session's sidecar name isn't enumerated by
+      // sessionSidecarNames.
+      const protectedTmux = new Set<string>();
+      const liveIdPrefixes = new Set<string>();
+      for (const session of liveSessions) {
+        liveIdPrefixes.add(`${session.id}--`);
+        let project: ProjectConfig | undefined;
+        try {
+          project = this.resolveProjectForSession(session);
+        } catch {
+          project = undefined;
+        }
+        for (const scName of sessionSidecarNames(session, project)) {
+          protectedTmux.add(sidecarTmuxSession(session.id, scName));
+        }
+      }
+
+      const names = await listTmuxSessionNames();
+      for (const name of names) {
+        if (!name.endsWith(suffix)) {
+          continue;
+        }
+        if (protectedTmux.has(name)) {
+          continue;
+        }
+        let ownedByLiveSession = false;
+        for (const prefix of liveIdPrefixes) {
+          if (name.startsWith(prefix)) {
+            ownedByLiveSession = true;
+            break;
+          }
+        }
+        if (ownedByLiveSession) {
+          continue;
+        }
+        const sessionId = name.slice(0, -suffix.length);
+        await killSidecarTmux(sessionId, PLAYWRIGHT_SIDECAR_NAME).catch(() => {});
+      }
+      await this.sweepLeakedPlaywrightProcesses("reaper");
+    } finally {
+      this.sidecarReaperRunning = false;
+    }
   }
 
   private startScheduledWakeMonitor(): void {
@@ -1997,6 +2115,56 @@ export class SessionService {
                 const { rateLimitedAt: _rateLimitedAt, ...base } = current;
                 writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
               }
+            }
+          }
+        }
+
+        // Nudge a claude session wedged on a transient server error (5xx /
+        // connection failure): typed, not queued (queued delivery requires
+        // "waiting", which this session never reaches while wedged). Gated on
+        // liveState === "error" so an undefined liveState (fresh post-restart
+        // tick) or a liveState that already moved on both skip the send —
+        // clearing serverErrorAt is updateStateHistory's job alone, not this
+        // loop's, so a non-"error" liveState leaves the marker untouched here.
+        if (session.serverErrorAt) {
+          const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
+          if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
+            try {
+              await this.send(session.id, {
+                message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                queue: false,
+              });
+              this.logEvent("session.server_error.reactivated", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent server-error reactivation to ${session.id}`,
+                details: {
+                  serverErrorAt: session.serverErrorAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.server_error.reactivation_failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
+                details: {
+                  serverErrorAt: session.serverErrorAt,
+                },
+              });
+            }
+            // Re-arm under CAS: only if the marker is still what this tick read
+            // (a concurrent clear/re-arm wins otherwise), so the next attempt is
+            // a fresh 30 minutes out.
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (current.serverErrorAt === session.serverErrorAt) {
+              writeSession(this.config.dataDir, {
+                ...current,
+                serverErrorAt: new Date(now).toISOString(),
+                updatedAt: nowIso(),
+              });
             }
           }
         }
@@ -4013,14 +4181,14 @@ export class SessionService {
       }
     }
 
-    await this.sweepLeakedPlaywrightProcesses();
+    await this.sweepLeakedPlaywrightProcesses("boot");
 
     return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
 
   // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
   // port not reserved by any live session). Best-effort; logs the killed count.
-  private async sweepLeakedPlaywrightProcesses(): Promise<void> {
+  private async sweepLeakedPlaywrightProcesses(context: "boot" | "reaper"): Promise<void> {
     const ownedPorts = new Set<number>();
     for (const session of listSessions(this.config.dataDir)) {
       if (isTerminalSessionStatus(session.status)) continue;
@@ -4030,10 +4198,19 @@ export class SessionService {
       }
     }
     const killed = await sweepLeakedPlaywright(ownedPorts);
-    if (killed > 0) {
+    if (killed <= 0) {
+      return;
+    }
+    if (context === "boot") {
       this.logEvent("daemon.startup.playwright_sweep", {
         level: "info",
         message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
+        details: { killed },
+      });
+    } else {
+      this.logEvent("session.sidecar_reaper.swept", {
+        level: "info",
+        message: `Reaped ${killed} leaked playwright MCP process tree(s)`,
         details: { killed },
       });
     }
@@ -6591,7 +6768,7 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+  private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
       this.abortSidecarUrlProbe(session.id, scName);
@@ -6605,6 +6782,10 @@ export class SessionService {
       }
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
+  }
+
+  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+    await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       await killTmuxSession(service.tmuxSession);
     }
@@ -7556,6 +7737,7 @@ export class SessionService {
     authenticated: boolean;
     lastUsedAt?: string;
   }[] {
+    ensureDefaultAccount(this.config.dataDir);
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
@@ -7872,7 +8054,12 @@ export class SessionService {
 
     const readySession = await this.ensureSessionReadyForSend(session);
     const classified = await this.classifySessionRecord(readySession);
-    if (classified.state !== "waiting") {
+    // A live claude server-error wedge behaves like "waiting" for delivery
+    // purposes: typing the queued message is exactly what un-wedges Claude
+    // (the same mechanism as the reactivation nudge in processScheduledWakes),
+    // so an ordinary queued send must not sit for up to 30 minutes waiting
+    // for that nudge to fire on its own.
+    if (classified.state !== "waiting" && !classified.serverError) {
       return false;
     }
     if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
@@ -8524,7 +8711,19 @@ export class SessionService {
     state: SessionState,
     stateSource: StateSource,
     historySourcePath: string | null,
+    serverError: boolean,
   ): Promise<SessionStateTransition[]> {
+    // The state can stay "error" across many ticks while the marker must
+    // still be armed/cleared, so this runs outside the transition branch
+    // below. Gated on the in-hand session record (no extra readSession) so
+    // the steady state (serverError already agrees with session.serverErrorAt)
+    // costs nothing.
+    if (serverError && !session.serverErrorAt) {
+      this.writeServerErrorMarker(session.id, nowIso());
+    } else if (!serverError && session.serverErrorAt) {
+      this.writeServerErrorMarker(session.id, null);
+    }
+
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
     if (history.length === 0 || lastEntry?.state !== state) {
@@ -8569,6 +8768,25 @@ export class SessionService {
       }
     }
     return history;
+  }
+
+  // Sole writer/clearer of serverErrorAt outside the wake-loop CAS re-arm.
+  // Re-reads before writing since this runs off the in-hand session record.
+  private writeServerErrorMarker(sessionId: string, serverErrorAt: string | null): void {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current) return;
+    if (serverErrorAt) {
+      // Guard against an overlapping tick's stale in-hand session (the caller
+      // only checked !session.serverErrorAt before calling this): re-reading
+      // here can find the marker already armed by another tick, and writing
+      // again would restart the 30-minute window for no reason.
+      if (current.serverErrorAt) return;
+      writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
+    } else {
+      if (!current.serverErrorAt) return;
+      const { serverErrorAt: _serverErrorAt, ...base } = current;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+    }
   }
 
   private async hasServiceIssues(session: Pick<SessionRecord, "id" | "project">): Promise<boolean> {
@@ -8664,6 +8882,7 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
+    await this.teardownSessionSidecars(updated).catch(() => {});
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
       {
@@ -8815,6 +9034,7 @@ export class SessionService {
         source: "status",
         historySourcePath: null,
         workspacePresent: probeWorkspace(session.worktreePath).exists,
+        serverError: false,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -8852,6 +9072,8 @@ export class SessionService {
     );
 
     let rateLimit: RateLimitDetection | null = null;
+    let hasServerErrorRecord = false;
+    let serverErrorJsonlPath: string | null = null;
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -8870,6 +9092,8 @@ export class SessionService {
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
+          hasServerErrorRecord = jsonlResult.serverError;
+          serverErrorJsonlPath = jsonlResult.reader.filePath;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9094,6 +9318,16 @@ export class SessionService {
           projectId: session.project,
           message: `State: rate_limited (${rateLimit.reason})`,
         });
+      } else if (hasServerErrorRecord) {
+        state = "error";
+        stateSource = "jsonl";
+        historySourcePath = serverErrorJsonlPath;
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: "State: error (claude server error)",
+        });
       }
     }
 
@@ -9103,6 +9337,11 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
+      // Only true when the override above actually applied: a rate_limit
+      // record always wins state, so when that happens this reports false
+      // and updateStateHistory's clear branch drops any stale serverErrorAt
+      // instead of arming it — the two markers stay independently owned.
+      serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
     };
   }
@@ -9129,6 +9368,7 @@ export class SessionService {
       state,
       classified.source,
       classified.historySourcePath ?? null,
+      classified.serverError,
     );
     const displaySlots = deriveSessionSlots(session);
     const runningSidecarNames = (
@@ -9179,6 +9419,7 @@ export class SessionService {
       state,
       classified.source,
       classified.historySourcePath ?? null,
+      classified.serverError,
     );
 
     const services: ServiceInstanceView[] = [];

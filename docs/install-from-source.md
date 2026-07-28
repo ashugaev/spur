@@ -134,7 +134,7 @@ Optional hourly auto-release from the managed clone:
 - Never `kill -9` the daemon — `main:deploy` clears orphan PIDs (`kill_rogue_daemon_on_port`). `EADDRINUSE :4310` → just re-run `pnpm main:deploy`.
 - `status=217/USER` on a unit → service-user mismatch; redeploy with `MAIN_DEPLOY_SERVICE_USER=<user>` (and `MAIN_DEPLOY_SERVICE_HOME`).
 - Interactive auth (`codex login`, `claude login`, `gh auth login`) is done by a human at the terminal, not scripted. Never echo secrets to logs or chat — write them only to `/etc/spur/daemon.env` or `~/.spur/.env`.
-- Voice input is optional and needs extra host deps; `openai_compatible` is the no-install path (key in `~/.spur/.env`). See [README.md — Voice Input](../README.md#voice-input).
+- Voice input is optional and needs extra host deps; `openai_compatible` is the no-install path (key in `~/.spur/.env`). See [voice.md](voice.md).
 
 ## Logs
 

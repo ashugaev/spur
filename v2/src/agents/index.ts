@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { playwrightMcpUrl } from "./playwright-mcp.js";
 import {
@@ -120,6 +121,7 @@ interface AgentAdapter {
     playwrightPort?: number;
     restrictWrites?: boolean;
     cursorConfigDir?: string;
+    claudeConfigDir?: string;
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -200,6 +202,68 @@ function defaultProcessMatchers(launchCommand: string, fallbackBinary: string): 
   return binary ? [binary] : [];
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function mergeMcpServers(
+  target: Record<string, unknown>,
+  servers: unknown,
+): Record<string, unknown> {
+  if (!isPlainObject(servers)) {
+    return target;
+  }
+  for (const [name, value] of Object.entries(servers)) {
+    if (isPlainObject(value)) {
+      target[name] = value;
+    }
+  }
+  return target;
+}
+
+// Merges the same MCP server sources Claude itself loads (user < project <
+// local, later wins), so --strict-mcp-config only drops servers Claude
+// wouldn't have loaded anyway rather than every host/project MCP server.
+async function readHostClaudeMcpServers(args: {
+  worktreePath: string;
+  claudeConfigDir?: string;
+}): Promise<Record<string, unknown>> {
+  const merged: Record<string, unknown> = {};
+  const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
+  const userConfig = await readJsonFile(userConfigPath);
+  let localProject: unknown;
+  if (isPlainObject(userConfig)) {
+    mergeMcpServers(merged, userConfig.mcpServers);
+    const projects = userConfig.projects;
+    if (isPlainObject(projects)) {
+      localProject = projects[args.worktreePath];
+    }
+  }
+  const projectConfigPath = join(args.worktreePath, ".mcp.json");
+  const projectConfig = await readJsonFile(projectConfigPath);
+  if (isPlainObject(projectConfig)) {
+    mergeMcpServers(merged, projectConfig.mcpServers);
+  }
+  if (isPlainObject(localProject)) {
+    mergeMcpServers(merged, localProject.mcpServers);
+  }
+  return merged;
+}
+
 const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
   claude: {
     command: claudeCommand,
@@ -210,18 +274,26 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
     readConversation: (ctx) => readClaudeTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
-    setup: async ({ sessionToolDir, playwrightPort, restrictWrites }) => {
+    setup: async ({
+      worktreePath,
+      sessionToolDir,
+      playwrightPort,
+      restrictWrites,
+      claudeConfigDir,
+    }) => {
       const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {};
       if (restrictWrites) {
         result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
       if (playwrightPort !== undefined) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
-        const mcpConfig = {
-          mcpServers: {
-            playwright: { type: "http", url: playwrightMcpUrl(playwrightPort) },
-          },
-        };
+        const mcpServers = await readHostClaudeMcpServers({
+          worktreePath,
+          ...(claudeConfigDir ? { claudeConfigDir } : {}),
+        });
+        delete mcpServers.playwright;
+        mcpServers.playwright = { type: "http", url: playwrightMcpUrl(playwrightPort) };
+        const mcpConfig = { mcpServers };
         await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
         result.claudeMcpConfigPath = mcpConfigPath;
       }
@@ -433,6 +505,7 @@ export async function setupAgentHooks(args: {
   playwrightPort?: number;
   restrictWrites?: boolean;
   cursorConfigDir?: string;
+  claudeConfigDir?: string;
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
