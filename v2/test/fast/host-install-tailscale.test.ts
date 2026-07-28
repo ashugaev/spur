@@ -1,5 +1,5 @@
 import type * as ChildProcess from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +23,7 @@ vi.mock("node:child_process", async () => {
 });
 
 const { runNpmInit } = await import("../../src/host-install.js");
+const { npmPinConfigPath } = await import("../../src/npm-prefix.js");
 
 async function writeFakeCliTree(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "spur-host-install-tailscale-"));
@@ -41,13 +42,12 @@ describe("runNpmInit --tailscale forwarding", () => {
 
   beforeEach(async () => {
     cliEntrypoint = await writeFakeCliTree();
-    // Pin HOME to a controlled temp home whose `.npmrc` already carries a
-    // matching `prefix=` line, so `ensureNpmGlobalPrefixConfigured` skips the
-    // heal write here and these tests keep asserting only the `--tailscale`
-    // forwarding, independent of this host's real `~/.npmrc`.
+    // Pin HOME to a controlled temp home. The heal now only ever writes the
+    // Spur-owned pin file (no `npm` child), so these tests just need a real
+    // temp dir for the file writes to land in, independent of this host's
+    // real `~/.spur/npmrc`/`~/.npmrc`.
     fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-tailscale-home-"));
     process.env["HOME"] = fakeHome;
-    await writeFile(join(fakeHome, ".npmrc"), `prefix=${join(fakeHome, ".local")}\n`, "utf8");
   });
 
   afterEach(async () => {
@@ -103,36 +103,19 @@ describe("runNpmInit npm-prefix heal ordering", () => {
     await rm(fakeHome, { recursive: true, force: true });
   });
 
-  it("issues npm config set prefix before bash <script> when .npmrc has no prefix= line", async () => {
+  it("issues only the bash call — the heal is a pure filesystem write, never an npm child", async () => {
     await writeFile(join(fakeHome, ".npmrc"), "//registry.npmjs.org/:_authToken=fake\n", "utf8");
-    runNpmInit(cliEntrypoint, {});
-    expect(execFileSyncCalls).toHaveLength(2);
-    expect(execFileSyncCalls[0]).toMatchObject({
-      command: "npm",
-      args: [
-        "config",
-        "set",
-        "prefix",
-        join(fakeHome, ".local"),
-        "--userconfig",
-        join(fakeHome, ".npmrc"),
-      ],
-    });
-    expect(execFileSyncCalls[1]?.command).toBe("bash");
-  });
-
-  it("issues only the bash call when .npmrc already has a prefix= line", async () => {
-    await writeFile(join(fakeHome, ".npmrc"), `prefix=${join(fakeHome, ".local")}\n`, "utf8");
     runNpmInit(cliEntrypoint, {});
     expect(execFileSyncCalls).toHaveLength(1);
     expect(execFileSyncCalls[0]?.command).toBe("bash");
   });
 
-  it("issues only the bash call when npm_config_prefix is pinned to a different install prefix", async () => {
+  it("writes no pin file when npm_config_prefix is pinned to a different install prefix", async () => {
     await writeFile(join(fakeHome, ".npmrc"), "//registry.npmjs.org/:_authToken=fake\n", "utf8");
     process.env["npm_config_prefix"] = "/some/other/install/prefix";
     runNpmInit(cliEntrypoint, {});
     expect(execFileSyncCalls).toHaveLength(1);
     expect(execFileSyncCalls[0]?.command).toBe("bash");
+    await expect(readFile(npmPinConfigPath(fakeHome), "utf8")).rejects.toThrow(/ENOENT/);
   });
 });

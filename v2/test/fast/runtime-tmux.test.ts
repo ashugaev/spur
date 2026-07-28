@@ -351,11 +351,54 @@ describe("runtime-tmux", () => {
 
     const respawnArgs = calls[respawnIndex]?.[1] ?? [];
     const respawnCommand = respawnArgs.at(-1);
-    expect(respawnCommand).toBe("sh -lc 'cd front && yarn start'");
+    // The sanitize wrap strips every env name either of nvm's own
+    // incompatibility guards reacts to before the pane ever sources
+    // `~/.nvm/nvm.sh` — see nvm-guard-sanitize.test.ts for the repro.
+    expect(respawnCommand).toBe(
+      "env -u NPM_CONFIG_PREFIX -u npm_config_prefix -u NPM_CONFIG_GLOBALCONFIG -u npm_config_globalconfig -u PREFIX sh -lc 'cd front && yarn start'",
+    );
     // Regression: `exec cd ...` in dash fails with "exec: cd: not found".
     expect(respawnCommand).not.toContain("exec cd");
     expect(respawnCommand).not.toMatch(/sh -lc '?exec /);
     expect(respawnArgs).toContain("-k");
+  });
+
+  it("never sanitizes the npm prefix/globalconfig env names out of the createTmuxSession launch payload", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
+    });
+
+    // Only the launch payload itself (the literal text sent via
+    // `send-keys -l`) must be unwrapped — unlike the earlier
+    // `-e KEY=VALUE` new-session args, which legitimately carry the
+    // session's own env (including the pin) and are exempt from this
+    // assertion.
+    const literalSendKeys = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "send-keys" && args.includes("-l"),
+    );
+    expect(literalSendKeys?.[1]?.at(-1)).toBe("claude --dangerously-skip-permissions");
+
+    const sanitizedNames = [
+      "NPM_CONFIG_PREFIX",
+      "npm_config_prefix",
+      "NPM_CONFIG_GLOBALCONFIG",
+      "npm_config_globalconfig",
+      "PREFIX",
+    ];
+    const payload = String(literalSendKeys?.[1]?.at(-1));
+    for (const name of sanitizedNames) {
+      expect(payload).not.toContain(name);
+    }
   });
 
   it("keeps interrupt behavior before codex atomic send", async () => {

@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
 import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
@@ -522,6 +523,26 @@ export async function createTmuxSession(input: {
   }
 }
 
+// Non-agent panes (sidecars, project services, the Claude OAuth login pane)
+// go through `createTmuxCommandSession`, never `createTmuxSession` (the
+// agent pane) — so this sanitize must never move there: agent sessions keep
+// receiving the npm prefix/globalconfig pin, non-agent panes lose it so a
+// pane that sources `~/.nvm/nvm.sh` doesn't trip nvm's own incompatibility
+// guards. `env -u` (not stripping the keys out of `input.env`/`buildEnvArgs`)
+// because `buildEnvArgs` merges the daemon's whole `process.env` — which can
+// itself carry the pin (`update.ts`'s in-process reinit pin,
+// `install-and-restart.sh`'s exported one) — ahead of any per-call `env`, and
+// tmux `-e` can only set a variable, never unset one already in the pane's
+// environment.
+export function buildCommandSessionShellCommand(launchCommand: string): string {
+  const unsetFlags = NPM_PIN_SANITIZE_ENV_KEYS.flatMap((key) => ["-u", key]);
+  // Wrap in `sh -lc` without `exec` so shell builtins (cd, set, export, ...)
+  // in the project's sidecar command work. With `exec`, sh tries to exec the
+  // first token as a binary and a builtin-led command like `cd front && ...`
+  // dies instantly with "exec: cd: not found".
+  return `env ${unsetFlags.join(" ")} sh -lc ${shellEscape(launchCommand)}`;
+}
+
 export async function createTmuxCommandSession(input: {
   sessionName: string;
   cwd: string;
@@ -529,11 +550,7 @@ export async function createTmuxCommandSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const paneTarget = exactPaneTarget(input.sessionName);
-  // Wrap in `sh -lc` without `exec` so shell builtins (cd, set, export, ...)
-  // in the project's sidecar command work. With `exec`, sh tries to exec the
-  // first token as a binary and a builtin-led command like `cd front && ...`
-  // dies instantly with "exec: cd: not found".
-  const shellCommand = `sh -lc ${shellEscape(input.launchCommand)}`;
+  const shellCommand = buildCommandSessionShellCommand(input.launchCommand);
 
   // Two-step launch so `remain-on-exit on` is set BEFORE the user command
   // runs. If we pass the shell-command directly to `new-session`, a command

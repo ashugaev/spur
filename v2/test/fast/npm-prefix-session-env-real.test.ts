@@ -2,20 +2,20 @@
 // this file exercises the real `npm` binary end to end, using the exact env
 // object `buildSessionEnv` (session-service.ts) hands to every spawned agent
 // session, to catch the class of bug where a session's uppercase
-// `NPM_CONFIG_PREFIX` pin is silently defeated by an inherited lowercase
-// `npm_config_prefix` npm considers equivalent (npm lowercases every
-// `npm_config_*` key before matching it to a config option, so both casings
-// collide and whichever key iterates last inside npm wins). Never touches
-// this host's real `$HOME` or `~/.npmrc`: everything runs against a
-// disposable temp dir with a token-only `.npmrc` (the observed clobber
-// shape).
+// `NPM_CONFIG_GLOBALCONFIG` pin is silently defeated by an inherited
+// lowercase `npm_config_globalconfig` npm considers equivalent (npm
+// lowercases every `npm_config_*` key before matching it to a config option,
+// so both casings collide and whichever key iterates last inside npm wins).
+// Never touches this host's real `$HOME` or `~/.npmrc`: everything runs
+// against a disposable temp dir with a token-only `.npmrc` (the observed
+// clobber shape).
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { npmGlobalPrefix } from "../../src/npm-prefix.js";
+import { npmGlobalPrefix, npmPinConfigPath } from "../../src/npm-prefix.js";
 import { _buildSessionEnvForTests } from "../../src/session-service.js";
 
 const TOKEN_ONLY_NPMRC = "//registry.npmjs.org/:_authToken=fake-token\n";
@@ -42,7 +42,7 @@ describe("buildSessionEnv's npm prefix pin (real npm, conflicting inherited lowe
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  it("resolves to <HOME>/.local even when an inherited lowercase npm_config_prefix points elsewhere", () => {
+  it("carries the globalconfig pin under both env casings, both pointing at npmPinConfigPath()", () => {
     const sessionEnv = _buildSessionEnvForTests({
       agent: "claude",
       projectId: "api",
@@ -52,29 +52,40 @@ describe("buildSessionEnv's npm prefix pin (real npm, conflicting inherited lowe
       repoPath: join(dataDir, "repo"),
       symlinks: [],
     });
-    // buildSessionEnv derives the pin from the real host home (`os.homedir()`),
-    // never from the session's own `$HOME`/worktree — `tmpHome` below only
-    // stands in for the session's `$HOME` so the spawned `npm` reads a
-    // disposable `.npmrc`, unrelated to the pinned target path.
-    const expected = npmGlobalPrefix();
-    expect(sessionEnv["NPM_CONFIG_PREFIX"]).toBe(expected);
+    // buildSessionEnv derives the pin path from the real host home
+    // (`os.homedir()`), never from the session's own `$HOME`/worktree.
+    const expectedPinPath = npmPinConfigPath();
+    expect(sessionEnv["NPM_CONFIG_GLOBALCONFIG"]).toBe(expectedPinPath);
+    expect(sessionEnv["npm_config_globalconfig"]).toBe(expectedPinPath);
+    expect(sessionEnv["NPM_CONFIG_PREFIX"]).toBeUndefined();
+    expect(sessionEnv["npm_config_prefix"]).toBeUndefined();
+  });
+
+  it("resolves to <HOME>/.local even with a conflicting inherited lowercase npm_config_globalconfig inserted first", async () => {
+    // `tmpHome` stands in for the session's `$HOME` so the spawned `npm`
+    // reads a disposable `.npmrc`, and the pin is re-pointed at a temp pin
+    // file rather than the real host's `~/.spur/npmrc` — never touches this
+    // host's real pin file.
+    const expected = npmGlobalPrefix(tmpHome);
+    const pinFile = join(tmpHome, "pin-npmrc");
+    await writeFile(pinFile, `prefix=${expected}\n`, "utf8");
 
     // Matches the exact ordering the reviewer's shell experiment showed
-    // defeats a single-case pin: the uppercase key declared/inserted before a
-    // conflicting lowercase one loses, because npm's own config resolution
-    // processes whichever `npm_config_*` casing it encounters last. This is
-    // the ordering a session's env can end up in once tmux (not this
+    // defeats a single-case pin: an inherited lowercase `npm_config_*` key
+    // set before the uppercase one is overwritten by it, because npm's own
+    // config resolution processes whichever casing it encounters last. This
+    // is the ordering a session's env can end up in once tmux (not this
     // process's own env, which is untouched) merges the daemon's inherited
     // `process.env` — see session-service.ts's buildSessionEnv comment.
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: tmpHome };
     delete env["NPM_CONFIG_PREFIX"];
     delete env["npm_config_prefix"];
+    delete env["NPM_CONFIG_GLOBALCONFIG"];
+    delete env["npm_config_globalconfig"];
     delete env["npm_config_userconfig"];
-    env["NPM_CONFIG_PREFIX"] = sessionEnv["NPM_CONFIG_PREFIX"];
-    env["npm_config_prefix"] = "/usr";
-    if (sessionEnv["npm_config_prefix"] !== undefined) {
-      env["npm_config_prefix"] = sessionEnv["npm_config_prefix"];
-    }
+    env["npm_config_globalconfig"] = "/nonexistent/decoy-globalconfig";
+    env["NPM_CONFIG_GLOBALCONFIG"] = pinFile;
+    env["npm_config_globalconfig"] = pinFile;
 
     expect(resolvedGlobalRoot(env)).toBe(join(expected, "lib", "node_modules"));
   });

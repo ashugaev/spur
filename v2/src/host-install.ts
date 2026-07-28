@@ -6,7 +6,12 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
-import { NPM_PREFIX_ENV, ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
+import {
+  NPM_PIN_SANITIZE_ENV_KEYS,
+  ensureNpmGlobalPrefixConfigured,
+  npmGlobalPrefix,
+  npmPinConfigPath,
+} from "./npm-prefix.js";
 import {
   probe,
   probeInfo,
@@ -683,21 +688,31 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   // an inherited `npm_config_userconfig` outranks `HOME` as npm's userconfig
   // source, so without `--userconfig` the probe could read a different file
   // than the `<home>/.npmrc` `expectedPrefix` above is derived from.
+  // `--globalconfig` points the probe at the persisted pin: Spur writes it to
+  // its own `<home>/.spur/npmrc`, not `<home>/.npmrc` (nvm greps the latter
+  // for a `prefix=`/`globalconfig=` line and refuses to load when it finds
+  // one).
   //
-  // Spur pins `NPM_CONFIG_PREFIX` (and npm's lowercase `npm_config_prefix`
-  // mirror) into every agent session's env (see `session-service.ts`), so a
-  // `spur doctor` run from inside a session would otherwise read back its own
-  // env pin instead of the persisted `~/.npmrc` state this check exists to
-  // detect drift in. Strip both so the probe reports the file, not the
-  // session.
-  const {
-    [NPM_PREFIX_ENV]: _pinnedUpper,
-    npm_config_prefix: _pinnedLower,
-    ...restEnv
-  } = process.env;
+  // Spur pins the globalconfig keys (both casings) into every agent session's
+  // env (see `session-service.ts`), so a `spur doctor` run from inside a
+  // session would otherwise read back its own env pin instead of the
+  // persisted state this check exists to detect drift in. Strip every
+  // sanitized key so the probe reports the files, not the session.
+  const sanitizeKeys: ReadonlySet<string> = new Set(NPM_PIN_SANITIZE_ENV_KEYS);
+  const restEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !sanitizeKeys.has(key)),
+  );
   const npmPrefix = tryExec(
     "npm",
-    ["config", "get", "prefix", "--userconfig", join(home, ".npmrc")],
+    [
+      "config",
+      "get",
+      "prefix",
+      "--userconfig",
+      join(home, ".npmrc"),
+      "--globalconfig",
+      npmPinConfigPath(home),
+    ],
     { env: { ...restEnv, HOME: home } },
   );
   checks.push({
@@ -706,6 +721,34 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     severity: "warn",
     detail: npmPrefix ? `npm prefix is ${npmPrefix}` : "npm prefix unavailable",
     fix: "npm config set prefix ~/.local",
+  });
+
+  // Read-only diagnostic (doctor never mutates): a `prefix=`/`globalconfig=`
+  // line in `<home>/.npmrc` — Spur's own or an operator's — trips nvm's
+  // `nvm_npmrc_bad_news_bears` guard for every shell that sources
+  // `~/.nvm/nvm.sh`, independent of the env pin above. Fires on an
+  // operator-set value too (nvm breaks either way); the `fix` string covers
+  // that case since Spur must never remove a line it didn't author.
+  let npmrcContents: string | undefined;
+  try {
+    npmrcContents = readFileSync(join(home, ".npmrc"), "utf8");
+  } catch {
+    npmrcContents = undefined;
+  }
+  const npmrcHasNvmIncompatibleLine =
+    npmrcContents !== undefined && /^\s*(prefix|globalconfig)\s*=/m.test(npmrcContents);
+  checks.push({
+    id: "npmrc-nvm-conflict",
+    ok: !npmrcHasNvmIncompatibleLine,
+    severity: "warn",
+    detail: npmrcHasNvmIncompatibleLine
+      ? `${join(home, ".npmrc")} has a prefix=/globalconfig= line — nvm refuses to load in any shell that sources it`
+      : `${join(home, ".npmrc")} has no prefix=/globalconfig= line`,
+    ...(npmrcHasNvmIncompatibleLine
+      ? {
+          fix: "spur reinit (removes Spur's prefix= line; an operator-set prefix= must be removed by hand)",
+        }
+      : {}),
   });
 
   // F1/C1/C2/E1/E2 share this single read-only, non-bootstrapping instance-

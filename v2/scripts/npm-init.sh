@@ -61,8 +61,11 @@ require_cmd loginctl
 # `--userconfig` pins the exact file this gate means to read: an inherited
 # `npm_config_userconfig` (npx/`npm exec`/`npm run` all set one) outranks
 # `$HOME` as npm's userconfig source and would otherwise read a different
-# file than the one Spur's prefix heal writes to.
-npm_prefix="$(npm config get prefix --userconfig "$HOME/.npmrc")"
+# file than `$HOME/.npmrc`. `--globalconfig` reads the persisted prefix pin:
+# it lives in Spur's own `$HOME/.spur/npmrc`, not `$HOME/.npmrc` — nvm greps
+# `~/.npmrc` for a `prefix=`/`globalconfig=` line and refuses to load when it
+# finds one, so Spur never writes the pin there.
+npm_prefix="$(npm config get prefix --userconfig "$HOME/.npmrc" --globalconfig "$HOME/.spur/npmrc")"
 if [[ "$npm_prefix" != "$HOME/.local" ]]; then
   die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local"
 fi
