@@ -280,6 +280,7 @@ async function runSpawnTrigger(
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),
+          ...(block.mode !== undefined ? { mode: block.mode } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
