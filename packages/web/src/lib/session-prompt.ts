@@ -4,6 +4,22 @@ const HANDOFF_HEADER_RE = /^Task handoff from session (\S+) \((\w+)\)\./m;
 const HANDOFF_NOTES_RE = /Additional handoff notes:\n([\s\S]*)$/;
 const SHEPHERD_HEADER = "You are Spur Shepherd:";
 const OPERATOR_REQUEST_MARKER = "Operator request:\n";
+const TELEGRAM_REPLY_SUFFIX = [
+  "",
+  "",
+  "Source: telegram. The requester only sees messages you send with:",
+  'spur source reply "<message>"',
+  "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
+].join("\n");
+const BOOTSTRAP_GOAL =
+  "Goal: write a spur.yaml at the project root that registers this project, then ask Spur to connect it.";
+const BOOTSTRAP_CONSTRAINTS = [
+  "Constraints:",
+  "- Do not modify any file other than spur.yaml.",
+  "- Do not run package managers, build tools, or tests.",
+  "- Do not create branches, commits, or pushes.",
+  "- Keep total output under 40 lines.",
+] as const;
 const SPUR_TRAILING_SECTION_MARKERS = [
   "\n\nSession metadata:",
   "\n\nTask tags:",
@@ -39,6 +55,49 @@ function stripTrailingSpurSections(text: string): string {
   return text.slice(0, end).trimEnd();
 }
 
+function stripTelegramReplySuffix(text: string): string {
+  return text.endsWith(TELEGRAM_REPLY_SUFFIX)
+    ? text.slice(0, -TELEGRAM_REPLY_SUFFIX.length).trimEnd()
+    : text;
+}
+
+function isBootstrapPrompt(text: string): boolean {
+  const lines = text.split("\n");
+  if (!/^You are configuring a new Spur project named "[^"\n]+"[.]$/.test(lines[0] ?? "")) {
+    return false;
+  }
+  if (
+    lines[1] !== "" ||
+    lines[2] !== "Inputs (do not change these values):" ||
+    !/^- project id: .+$/.test(lines[3] ?? "") ||
+    !/^- sessionPrefix: .+$/.test(lines[4] ?? "") ||
+    !/^- project path: .+$/.test(lines[5] ?? "") ||
+    lines[6] !== "" ||
+    lines[7] !== BOOTSTRAP_GOAL ||
+    lines[8] !== "" ||
+    lines[9] !== "Steps:"
+  ) {
+    return false;
+  }
+
+  const constraintsIndex = lines.lastIndexOf(BOOTSTRAP_CONSTRAINTS[0]);
+  return (
+    constraintsIndex !== -1 &&
+    constraintsIndex + BOOTSTRAP_CONSTRAINTS.length === lines.length &&
+    BOOTSTRAP_CONSTRAINTS.every(
+      (constraint, offset) => lines[constraintsIndex + offset] === constraint,
+    )
+  );
+}
+
+function canonicalizeTask(text: string): string {
+  const trimmed = text.trim();
+  if (isBootstrapPrompt(trimmed)) {
+    return "";
+  }
+  return stripTelegramReplySuffix(trimmed);
+}
+
 function parseHandoffNotes(prompt: string): string | null {
   const match = prompt.match(HANDOFF_NOTES_RE);
   return match?.[1]?.trim() || null;
@@ -71,19 +130,19 @@ function extractDisplayTaskFromHandoff(prompt: string): string {
 function resolveDisplayTask(session: DashboardSession, prompt: string): string {
   const storedTask = session.originalTaskPrompt?.trim();
   if (storedTask) {
-    return storedTask;
+    return canonicalizeTask(storedTask);
   }
 
   if (HANDOFF_HEADER_RE.test(prompt)) {
-    return extractDisplayTaskFromHandoff(prompt);
+    return canonicalizeTask(extractDisplayTaskFromHandoff(prompt));
   }
 
   const shepherdTask = extractShepherdOperatorRequest(prompt);
   if (shepherdTask) {
-    return shepherdTask;
+    return canonicalizeTask(shepherdTask);
   }
 
-  return stripTrailingSpurSections(prompt).trim();
+  return canonicalizeTask(stripTrailingSpurSections(prompt));
 }
 
 export function parseSessionPromptView(session: DashboardSession): SessionPromptView {

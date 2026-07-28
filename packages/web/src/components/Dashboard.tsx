@@ -26,6 +26,7 @@ import {
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { JiraIcon } from "@/lib/link-icons";
+import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
@@ -1154,15 +1155,9 @@ export function Dashboard() {
   }, [projectSessions, activeTagFilters]);
 
   const sessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return tagFilteredSessions;
-    const narrowed = tagFilteredSessions.filter(
-      (s) =>
-        s.id.toLowerCase().includes(q) ||
-        (s.title ?? "").toLowerCase().includes(q) ||
-        s.prompt.toLowerCase().includes(q) ||
-        s.projectName.toLowerCase().includes(q) ||
-        (s.branch ?? "").toLowerCase().includes(q),
+    if (!searchQuery.trim()) return tagFilteredSessions;
+    const narrowed = tagFilteredSessions.filter((session) =>
+      matchesSessionSearch(session, searchQuery),
     );
     const keys = new Set(narrowed.map((s) => s.deskKey));
     return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
