@@ -1082,6 +1082,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
@@ -1437,6 +1439,8 @@ describe("SessionService", () => {
           sidecarName: "dev",
           env: expect.objectContaining({
             SPUR_RESERVED_PORT_DEV: "3000",
+            NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+            npm_config_prefix: join(homedir(), ".local"),
           }),
         }),
       );
@@ -2567,6 +2571,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(result.branch).toBe("main");
@@ -9045,6 +9051,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
@@ -11624,6 +11632,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -11876,6 +11886,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -12216,6 +12228,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
+        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
+        npm_config_prefix: join(homedir(), ".local"),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(

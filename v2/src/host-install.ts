@@ -6,6 +6,7 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { NPM_PREFIX_ENV, ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
 import {
   probe,
   probeInfo,
@@ -42,13 +43,14 @@ export interface SystemdScope {
 function tryExec(
   command: string,
   args: string[],
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
 ): string | undefined {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+      ...(options?.env !== undefined ? { env: options.env } : {}),
     }).trim();
   } catch {
     return undefined;
@@ -675,9 +677,29 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
 export async function collectHostInstallChecks(home = homedir()): Promise<HostInstallCheck[]> {
   const checks: HostInstallCheck[] = [];
   const scope = resolveSystemdScope(home);
-  const expectedPrefix = join(home, ".local");
+  const expectedPrefix = npmGlobalPrefix(home);
 
-  const npmPrefix = tryExec("npm", ["config", "get", "prefix"]);
+  // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
+  // an inherited `npm_config_userconfig` outranks `HOME` as npm's userconfig
+  // source, so without `--userconfig` the probe could read a different file
+  // than the `<home>/.npmrc` `expectedPrefix` above is derived from.
+  //
+  // Spur pins `NPM_CONFIG_PREFIX` (and npm's lowercase `npm_config_prefix`
+  // mirror) into every agent session's env (see `session-service.ts`), so a
+  // `spur doctor` run from inside a session would otherwise read back its own
+  // env pin instead of the persisted `~/.npmrc` state this check exists to
+  // detect drift in. Strip both so the probe reports the file, not the
+  // session.
+  const {
+    [NPM_PREFIX_ENV]: _pinnedUpper,
+    npm_config_prefix: _pinnedLower,
+    ...restEnv
+  } = process.env;
+  const npmPrefix = tryExec(
+    "npm",
+    ["config", "get", "prefix", "--userconfig", join(home, ".npmrc")],
+    { env: { ...restEnv, HOME: home } },
+  );
   checks.push({
     id: "npm-prefix",
     ok: npmPrefix === expectedPrefix,
@@ -903,6 +925,7 @@ export function runNpmInit(
   if (!existsSync(script)) {
     throw new Error(`npm init script not found: ${script}`);
   }
+  ensureNpmGlobalPrefixConfigured();
   const args: string[] = [];
   if (options.noStart) {
     args.push("--no-start");

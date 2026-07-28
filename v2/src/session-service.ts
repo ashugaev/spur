@@ -117,6 +117,7 @@ import {
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { NPM_PREFIX_ENV, NPM_PREFIX_ENV_LOWER, npmGlobalPrefix } from "./npm-prefix.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
@@ -1049,6 +1050,18 @@ function buildSessionEnv(args: {
     // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
     SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
+    // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
+    // `~/.npmrc` has been clobbered down to just a registry `_authToken`
+    // line. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
+    // `process.env` before this pin, and npm lowercases every `npm_config_*`
+    // key when resolving its `prefix` option — so an inherited lowercase
+    // `npm_config_prefix` (e.g. from update.ts's reinit pin, or pnpm's own
+    // env when it launched the daemon) collides with this uppercase key and
+    // whichever one iterates last wins. Setting both keys to the identical
+    // value removes that ordering dependence instead of relying on either
+    // casing being authoritative.
+    [NPM_PREFIX_ENV]: npmGlobalPrefix(),
+    [NPM_PREFIX_ENV_LOWER]: npmGlobalPrefix(),
   };
   if (
     args.symlinks.includes("node_modules") &&
@@ -1062,6 +1075,12 @@ function buildSessionEnv(args: {
     ...(args.extraEnv ?? {}),
   };
 }
+
+// Test-only: lets the real-npm regression test exercise the exact env
+// buildSessionEnv produces without standing up a full SessionService mock
+// harness (all other assertions on it go through the SessionService.spawn/
+// restore/send call sites instead, per the rest of this file's tests).
+export const _buildSessionEnvForTests = buildSessionEnv;
 
 function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,

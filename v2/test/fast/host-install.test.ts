@@ -252,6 +252,53 @@ describe("collectHostInstallChecks", () => {
     expect(ids).not.toContain("spur-direct-terminal");
   });
 
+  // MUST FIX 1 regression guard: Spur pins `NPM_CONFIG_PREFIX`/
+  // `npm_config_prefix` into every agent session's env (see
+  // `session-service.ts`) — the `npm-prefix` probe must strip both from its
+  // own child env so a `spur doctor` run inside a session reads the
+  // persisted `~/.npmrc` state, not its own session env pin.
+  it("strips NPM_CONFIG_PREFIX/npm_config_prefix from the npm-prefix probe's child env", async () => {
+    const originalUpper = process.env["NPM_CONFIG_PREFIX"];
+    const originalLower = process.env["npm_config_prefix"];
+    process.env["NPM_CONFIG_PREFIX"] = "/some/session/pin";
+    process.env["npm_config_prefix"] = "/some/session/pin";
+    try {
+      const fakeHome = "/tmp/spur-host-install-test-npm-prefix-env";
+      await collectHostInstallChecks(fakeHome);
+      const npmCall = execFileSyncMock.mock.calls.find(([file]) => file === "npm") as
+        | [string, string[], { env?: NodeJS.ProcessEnv }]
+        | undefined;
+      expect(npmCall).toBeDefined();
+      const options = npmCall?.[2];
+      expect(options?.env?.["HOME"]).toBe(fakeHome);
+      expect(options?.env?.["NPM_CONFIG_PREFIX"]).toBeUndefined();
+      expect(options?.env?.["npm_config_prefix"]).toBeUndefined();
+    } finally {
+      if (originalUpper === undefined) delete process.env["NPM_CONFIG_PREFIX"];
+      else process.env["NPM_CONFIG_PREFIX"] = originalUpper;
+      if (originalLower === undefined) delete process.env["npm_config_prefix"];
+      else process.env["npm_config_prefix"] = originalLower;
+    }
+  });
+
+  // Regression guard: an inherited `npm_config_userconfig` (npx/`npm
+  // exec`/`npm run` all set one) outranks `HOME` as npm's userconfig source
+  // and would steer the probe at a different `.npmrc` than `home`/.npmrc,
+  // which `expectedPrefix` is derived from — `--userconfig` must be passed
+  // explicitly so the probe can never diverge from it.
+  it("passes an explicit --userconfig pointing at <home>/.npmrc to the npm-prefix probe", async () => {
+    const fakeHome = "/tmp/spur-host-install-test-npm-prefix-userconfig";
+    await collectHostInstallChecks(fakeHome);
+    const npmCall = execFileSyncMock.mock.calls.find(([file]) => file === "npm") as
+      | [string, string[]]
+      | undefined;
+    expect(npmCall).toBeDefined();
+    const args = npmCall?.[1] ?? [];
+    const flagIndex = args.indexOf("--userconfig");
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(args[flagIndex + 1]).toBe(join(fakeHome, ".npmrc"));
+  });
+
   it("keeps a fresh, never-initialized host exit-safe (no error severity)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
     expect(hasErrorSeverity(checks)).toBe(false);

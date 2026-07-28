@@ -11,6 +11,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `docs/configuration.md` and `docs/install-from-npm.md`.
+- `spur init` / `spur update` / `spur reinit` re-apply `npm config set prefix ~/.local` when `~/.npmrc` lost the line (never overwrites an operator-set `prefix=` line or an explicit non-`~/.local` pin). Every agent session also runs with `NPM_CONFIG_PREFIX=~/.local` so `claude`/`codex` self-update lands there regardless of `~/.npmrc`'s current state.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:

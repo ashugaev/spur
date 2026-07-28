@@ -58,7 +58,11 @@ require_cmd npm
 require_cmd systemctl
 require_cmd loginctl
 
-npm_prefix="$(npm config get prefix)"
+# `--userconfig` pins the exact file this gate means to read: an inherited
+# `npm_config_userconfig` (npx/`npm exec`/`npm run` all set one) outranks
+# `$HOME` as npm's userconfig source and would otherwise read a different
+# file than the one Spur's prefix heal writes to.
+npm_prefix="$(npm config get prefix --userconfig "$HOME/.npmrc")"
 if [[ "$npm_prefix" != "$HOME/.local" ]]; then
   die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local"
 fi
