@@ -11,6 +11,6 @@ Session matches:
 - canonical user task
 - visible GitHub pull request (`#123`), GitLab merge request (`!123`), and Jira-style tracker (`PROJ-123`) identifiers
 
-A matched session shows its full desk. Runtime prompt instructions, link URLs, link labels, and unrecognized work-item links are excluded.
+A matched session shows its full desk. Runtime prompt instructions, generated bootstrap prompts, link URLs, link labels, and unrecognized work-item links are excluded.
 
 Available backlog rows match their key, title, or project ID.
