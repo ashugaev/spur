@@ -43,5 +43,4 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 
 ## License
 
-[Apache License 2.0](LICENSE). See [NOTICE](NOTICE). The
-[historical MIT license](LICENSE-MIT) is retained.
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE).

@@ -25,7 +25,6 @@
     "deploy",
     "scripts/install-and-restart.sh",
     "scripts/npm-init.sh",
-    "LICENSE-MIT",
     "NOTICE",
     "spur.yaml.example",
     "tmux.conf"
