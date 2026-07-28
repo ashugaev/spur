@@ -65,9 +65,9 @@ Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'
 
 ### HTTPS
 
-With the tailnet up, terminate TLS on the tailnet hostname and check the URL answers `200`: [https-tailscale.md](https-tailscale.md). Do it as part of the install — a browser refuses microphone access over plain HTTP, so skipping it leaves voice input dead.
+Tailnet up → terminate TLS on the tailnet hostname, verify `200`: [https-tailscale.md](https-tailscale.md). Part of the install: without it voice input is dead.
 
-Skip it when another service already owns 443 on the host; displacing that service is never the right move. If it fails, report the voice-input blocker verbatim from that doc and leave the rest of the install as it stands.
+Skip when another service holds 443 — never displace it. On failure report that doc's blocker message; the rest of the install stands.
 
 ## Identity steps (operator TODO)
 

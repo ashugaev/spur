@@ -1,17 +1,17 @@
 # HTTPS over Tailscale
 
-Browsers gate microphone access (`getUserMedia`) behind HTTPS. Over a tailnet hostname or IP, plain HTTP means voice input stays dead — see [voice.md](voice.md). Everything else in the UI is fine over HTTP, and `localhost` is exempt.
+Browsers block microphone access (`getUserMedia`) over plain HTTP, `localhost` excepted. Tailnet hostname over HTTP → [voice input](voice.md) dead. Rest of the UI unaffected.
 
-`tailscale serve` terminates TLS with a Let's Encrypt cert issued through your tailnet and renews it itself. No cert files, no timer, no reverse proxy.
+`tailscale serve` terminates TLS with a Let's Encrypt cert issued through the tailnet and renews itself. No cert files, no timer, no reverse proxy.
 
-Reachable inside the tailnet only. `serve` is not `funnel`.
+Tailnet-only. `serve` is not `funnel`.
 
 ## Prerequisites
 
 - Tailnet up — [install-from-npm.md](install-from-npm.md#private-access-tailscale-default-on).
-- HTTPS Certificates enabled for the tailnet: admin console → DNS → HTTPS Certificates → Enable. Once per tailnet, needs an owner/admin. Without it no cert is ever issued.
+- HTTPS Certificates enabled for the tailnet: admin console → DNS → HTTPS Certificates → Enable. Once per tailnet, owner/admin only. Without it no cert issues, ever.
 
-The tailnet hostname, used below:
+Hostname for the commands below:
 
 ```bash
 FQDN=$(tailscale status --json | jq -r .Self.DNSName | sed 's/\.$//')   # needs jq
@@ -19,14 +19,14 @@ FQDN=$(tailscale status --json | jq -r .Self.DNSName | sed 's/\.$//')   # needs 
 
 ## Skip check
 
-Run first. Never take 443 from another service.
+Run first. 443 belongs to whoever holds it.
 
 ```bash
 tailscale serve status              # expect: No serve config
 sudo ss -tlnp | grep -E ':443\b'    # expect: no output
 ```
 
-Either one non-empty → this host already terminates HTTPS. Stop here, change nothing, and use that proxy instead (below).
+Either one non-empty → host already terminates HTTPS. Stop. Change nothing. Use that proxy instead (below).
 
 ## Enable
 
@@ -34,9 +34,9 @@ Either one non-empty → this host already terminates HTTPS. Stop here, change n
 sudo tailscale serve --bg --https=443 http://127.0.0.1:4311
 ```
 
-`4311` is the default web port — substitute yours (`--web-port`), or `5555` on a source install fronted by nginx.
+`4311` is the default web port — substitute `--web-port`, or `5555` on a source install behind nginx.
 
-`--bg` is required. Without it `serve` runs in the foreground and dies with the shell. The config persists in tailscaled state and comes back after reboot.
+`--bg` mandatory: foreground `serve` dies with the shell. Config lives in tailscaled state, survives reboot.
 
 ## Verify
 
@@ -44,30 +44,30 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:4311
 curl -fsS -o /dev/null -w '%{http_code}\n' "https://$FQDN/"
 ```
 
-Expect `200`. First request takes up to ~15s while the cert is issued. No `-k` — the point is a cert the browser trusts, so a TLS failure here is a real failure.
+Expect `200`, first request up to ~15s while the cert issues. No `-k` — an untrusted cert is a failed setup, browsers reject it too.
 
-Then open the URL on a tailnet device and check the mic button in the web UI.
+Then open the URL on a tailnet device and hit the mic button.
 
-## Disable
+## Failure blocks voice input
+
+Cert never issues or `serve` won't start: no workarounds, no touching other services. Hand the operator:
+
+> HTTPS on the tailnet host is not set up. Voice input (microphone) will not work in the web UI — browsers require HTTPS for `getUserMedia`. The rest of Spur is unaffected.
+
+Causes: HTTPS Certificates off for the tailnet; tailnet down; 443 taken.
+
+## Off
 
 ```bash
 tailscale serve --https=443 off
 ```
 
-## Failure is a voice-input blocker
+## Existing proxy on 443
 
-If the cert never issues or `serve` won't start, do not work around it and do not touch other services. Tell the operator:
-
-> HTTPS on the tailnet host is not set up. Voice input (microphone) will not work in the web UI — browsers require HTTPS for `getUserMedia`. The rest of Spur is unaffected.
-
-Causes, in order of likelihood: HTTPS Certificates not enabled for the tailnet; tailnet not up; 443 owned by another service.
-
-## Existing reverse proxy on 443
-
-Keep it — do not replace it with `serve`. Issue the cert to disk instead:
+Keep it. Cert to disk instead:
 
 ```bash
 sudo tailscale cert --cert-file <path>.crt --key-file <path>.key "$FQDN"
 ```
 
-Add a vhost for that hostname pointing at the web port. `tailscale cert` does not renew on its own — re-run it on a weekly timer and reload the proxy, or the cert expires after 90 days.
+Add a vhost for `$FQDN` onto the web port. `tailscale cert` never renews itself — weekly timer re-runs it and reloads the proxy, else dead at 90 days.
