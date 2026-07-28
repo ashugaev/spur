@@ -1257,6 +1257,23 @@ projects:
     });
   });
 
+  it("parses a mode literally named __proto__ as a genuine own key, not a prototype mutation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      __proto__:
+        skill: manager
+`);
+
+    const config = loadConfig(configPath);
+    const modes = config.projects["backend"]?.modes;
+
+    expect(Object.hasOwn(modes ?? {}, "__proto__")).toBe(true);
+    expect(Object.entries(modes ?? {})).toEqual([["__proto__", { skill: "manager" }]]);
+  });
+
   it("rejects a modes registry with more than one default", async () => {
     const configPath = await writeConfig(`
 projects:

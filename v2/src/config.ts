@@ -1237,7 +1237,10 @@ function parseModes(
   if (value === undefined) return undefined;
   const label = `projects.${projectId}.modes`;
   const raw = asObject(value, label);
-  const modes: Record<string, SessionModeConfig> = {};
+  // Object.create(null): a mode literally named "__proto__" must land as a
+  // genuine own key, not silently mutate the prototype and vanish from
+  // Object.entries below.
+  const modes: Record<string, SessionModeConfig> = Object.create(null);
   let defaultName: string | undefined;
   for (const [name, entry] of Object.entries(raw)) {
     if (!VALID_ID_RE.test(name)) {
