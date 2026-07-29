@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -78,12 +78,24 @@ function explicitPrefixOverridden(home: string): boolean {
 // arbitrary/real `$HOME`) wraps this call in its own try/catch instead of
 // throwing through it: a read-only filesystem or a permissions error writing
 // into `<home>/.spur/` must never abort daemon boot.
+//
+// This pin file governs where every agent session's `npm install -g` lands,
+// so a world-writable copy lets any local user redirect the agent's install
+// target onto their own code. `writeFileSync`'s `mode` option only applies
+// when the call creates the file — it silently no-ops on an existing file
+// with a looser mode (restored from a backup, copied, created under a
+// permissive umask by an older build, ...). The explicit `chmodSync` calls
+// below enforce 0600/0700 unconditionally, on both the create and the
+// refresh path.
 export function ensureNpmPinFile(home = homedir()): void {
   if (explicitPrefixOverridden(home)) return;
   const expected = npmGlobalPrefix(home);
   const pinPath = npmPinConfigPath(home);
-  mkdirSync(dirname(pinPath), { recursive: true });
+  const pinDir = dirname(pinPath);
+  mkdirSync(pinDir, { recursive: true, mode: 0o700 });
+  chmodSync(pinDir, 0o700);
   writeFileSync(pinPath, `prefix=${expected}\n`, { mode: 0o600 });
+  chmodSync(pinPath, 0o600);
 }
 
 // Surgically removes a Spur-authored `prefix=` line this module previously

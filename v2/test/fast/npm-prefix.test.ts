@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -113,6 +113,19 @@ describe("npm-prefix pin file + .npmrc heal", () => {
       // The heal half never ran — the .npmrc byte content is unchanged.
       const npmrcContents = await readFile(join(tmpHome, ".npmrc"), "utf8");
       expect(npmrcContents).toBe(npmrcWithSpurLine);
+    });
+
+    it("tightens a pre-existing pin file's mode to 0600 even when it was created loose (0666)", async () => {
+      const expected = npmGlobalPrefix(tmpHome);
+      const pinPath = npmPinConfigPath(tmpHome);
+      await mkdir(dirname(pinPath), { recursive: true });
+      await writeFile(pinPath, `prefix=${expected}\n`, { mode: 0o666 });
+
+      ensureNpmPinFile(tmpHome);
+
+      expect(statSync(pinPath).mode & 0o777).toBe(0o600);
+      const pinContents = await readFile(pinPath, "utf8");
+      expect(pinContents).toBe(`prefix=${expected}\n`);
     });
 
     it("is idempotent across repeated calls (safe to call on every daemon restart)", async () => {
