@@ -103,6 +103,23 @@ Sidecar `ports` are reserved and probed on the host at start and injected into t
 
 Commands run through `bash -lc`, so a sidecar command may start with `VAR=value ...` and rely on login-shell init. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home, e.g. `source "$SPUR_REAL_HOME/.nvm/nvm.sh"`.
 
+### Built-in MCP sidecars
+
+A sidecar entry can carry MCP wiring, injecting its reserved port into the launching agent's MCP
+config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright`
+is the one built-in: a Spur-owned HTTP playwright MCP sidecar (headless browser tooling) for
+claude/codex sessions, never cursor, off by default. Opt a project in with:
+
+```yaml
+sidecars:
+  playwright:
+    autoStart: true
+```
+
+Command, ports, and MCP wiring are code-only defaults (see `v2/src/sidecars/`); YAML only overrides
+`autoStart`/`dependsOn`. Enablement re-resolves from config at every spawn/restore/recover — no
+per-session toggle, no `spur playwright` command.
+
 ## build, daemon
 
 ```bash

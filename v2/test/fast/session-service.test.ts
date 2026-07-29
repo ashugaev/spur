@@ -78,7 +78,6 @@ const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
-const buildPlaywrightSidecarConfigMock = vi.fn();
 const sweepLeakedPlaywrightMock = vi.fn();
 const waitForPlaywrightReadyMock = vi.fn();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
@@ -408,13 +407,23 @@ vi.mock("../../src/agents/codex.js", () => ({
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
-vi.mock("../../src/agents/playwright-mcp.js", () => ({
-  PLAYWRIGHT_SIDECAR_NAME: "playwright",
-  SPUR_RESERVED_PORT_PLAYWRIGHT: "SPUR_RESERVED_PORT_PLAYWRIGHT",
-  SPUR_PLAYWRIGHT_SESSION_ENV: "SPUR_PLAYWRIGHT_SESSION",
-  buildPlaywrightSidecarConfig: buildPlaywrightSidecarConfigMock,
-  sweepLeakedPlaywright: sweepLeakedPlaywrightMock,
-  waitForPlaywrightReady: waitForPlaywrightReadyMock,
+vi.mock("../../src/sidecars/builtins.js", () => ({
+  BUILTIN_SIDECARS: {
+    playwright: {
+      config: {
+        command:
+          "node /abs/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+        autoStart: false,
+        agents: ["claude", "codex"],
+        ports: {
+          http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 },
+        },
+        mcp: { server: "playwright", portId: "http", path: "/mcp", clientHost: "localhost" },
+      },
+      sweepLeaked: sweepLeakedPlaywrightMock,
+      readiness: waitForPlaywrightReadyMock,
+    },
+  },
 }));
 
 vi.mock("../../src/port-probe.js", () => ({
@@ -956,7 +965,6 @@ describe("SessionService", () => {
     createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
-    buildPlaywrightSidecarConfigMock.mockReset().mockReturnValue(undefined);
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
     waitForPlaywrightReadyMock.mockReset().mockResolvedValue(true);
     clearPortListenerMock.mockReset().mockResolvedValue(undefined);
@@ -1761,19 +1769,32 @@ describe("SessionService", () => {
     );
   });
 
-  describe("playwright MCP sidecar", () => {
-    const playwrightConfig = {
+  describe("MCP sidecar (built-in playwright, config-driven)", () => {
+    const playwrightSidecarEntry = {
       command:
         "node /abs/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
       autoStart: true,
-      env: { SPUR_PLAYWRIGHT_SESSION: "api-1" },
+      agents: ["claude", "codex"],
       ports: {
         http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 },
       },
+      mcp: { server: "playwright", portId: "http", path: "/mcp", clientHost: "localhost" },
     };
 
-    it("reserves a port in 8730-8799 and starts the playwright tmux sidecar for claude spawns", async () => {
-      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+    function withPlaywrightSidecar() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { playwright: playwrightSidecarEntry },
+          },
+        },
+      };
+    }
+
+    it("reserves a port in 8730-8799, starts the tmux sidecar, and injects an MCP binding for claude spawns", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
       setupAgentHooksMock.mockResolvedValue({ claudeMcpConfigPath: "/tools/mcp-config.json" });
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
@@ -1790,7 +1811,10 @@ describe("SessionService", () => {
         expect.objectContaining({ sidecarName: "playwright" }),
       );
       expect(setupAgentHooksMock).toHaveBeenCalledWith(
-        expect.objectContaining({ agent: "claude", playwrightPort: reservedPort }),
+        expect.objectContaining({
+          agent: "claude",
+          mcpBindings: [{ server: "playwright", url: `http://localhost:${reservedPort}/mcp` }],
+        }),
       );
       expect(waitForPlaywrightReadyMock).toHaveBeenCalledWith(reservedPort);
       // claudeMcpConfigPath from setup() must thread into the launch plan options.
@@ -1800,12 +1824,19 @@ describe("SessionService", () => {
       expect(launchOptions.claudeMcpConfigPath).toBe("/tools/mcp-config.json");
     });
 
-    it("starts the playwright sidecar before the agent hooks run", async () => {
-      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+    it("starts the sidecar before the agent hooks run", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
       const order: string[] = [];
+      let sidecarAlive = false;
       createTmuxSidecarSessionMock.mockImplementation(async (input: { sidecarName: string }) => {
-        if (input.sidecarName === "playwright") order.push("sidecar");
+        if (input.sidecarName === "playwright") {
+          order.push("sidecar");
+          sidecarAlive = true;
+        }
       });
+      // Post-launch startAutoStartSidecars re-scans the same autoStart entry;
+      // idempotent-skip on an already-alive tmux pane, matching production.
+      sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
       setupAgentHooksMock.mockImplementation(async () => {
         order.push("hooks");
         return {};
@@ -1819,40 +1850,36 @@ describe("SessionService", () => {
       expect(order).toEqual(["sidecar", "hooks"]);
     });
 
-    it("passes the reserved playwright port into codex hook config setup", async () => {
-      buildPlaywrightSidecarConfigMock.mockReturnValue({
-        ...playwrightConfig,
-        env: { SPUR_PLAYWRIGHT_SESSION: "api-1" },
-      });
+    it("passes the reserved port as an mcpBinding into codex hook config setup", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.spawn({ project: "api", prompt: "hello", agent: "codex" });
 
       const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "codex");
-      expect(setupCall?.[0]?.playwrightPort).toBeGreaterThanOrEqual(8730);
-      expect(setupCall?.[0]?.playwrightPort).toBeLessThanOrEqual(8799);
+      const bindings = setupCall?.[0]?.mcpBindings as { server: string; url: string }[] | undefined;
+      expect(bindings).toHaveLength(1);
+      expect(bindings?.[0]?.server).toBe("playwright");
+      expect(bindings?.[0]?.url).toMatch(/^http:\/\/localhost:87\d\d\/mcp$/);
     });
 
-    it("does not start a playwright sidecar for cursor spawns", async () => {
-      // sessionPlaywrightSidecar gates by agent; buildPlaywrightSidecarConfig is
-      // never consulted for cursor.
-      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+    it("does not start the sidecar for cursor spawns even though it is configured on", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.spawn({ project: "api", prompt: "hello", agent: "cursor" });
 
-      expect(buildPlaywrightSidecarConfigMock).not.toHaveBeenCalled();
       expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
         expect.objectContaining({ sidecarName: "playwright" }),
       );
       const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "cursor");
-      expect(setupCall?.[0]?.playwrightPort).toBeUndefined();
+      expect(setupCall?.[0]?.mcpBindings).toBeUndefined();
     });
 
-    it("keeps the reserved playwright port on the persisted record when restoring", async () => {
-      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+    it("keeps the reserved port on the persisted record when restoring", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       // A stateful store (not a static readSessionMock) so the write made by
@@ -1889,6 +1916,109 @@ describe("SessionService", () => {
         persistedRestored?.sidecarPorts?.playwright?.SPUR_RESERVED_PORT_PLAYWRIGHT;
       expect(reservedPort).toBeGreaterThanOrEqual(8730);
       expect(reservedPort).toBeLessThanOrEqual(8799);
+    });
+
+    it("skips the sidecar at spawn when the project has not configured it (default off)", async () => {
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+      const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "claude");
+      expect(setupCall?.[0]?.mcpBindings).toBeUndefined();
+    });
+
+    it("skips the sidecar at background spawn when the project has not configured it", async () => {
+      mockClaudeJsonlState("waiting");
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const placeholder = await service.spawnInBackground({ project: "api", prompt: "hello" });
+      expect(placeholder.id).toBe("api-1");
+
+      await vi.waitFor(() => {
+        expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+          id: "api-1",
+          status: "running",
+        });
+      });
+
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+    });
+
+    it("skips the sidecar on recover when the project has not configured it", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        agentSessionId: "session-uuid",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "manual_pause",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      listSessionsMock.mockReturnValue([]);
+      tmuxSessionExistsMock
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true);
+
+      const service = await createDisposedSessionService();
+
+      const result = await service.send("api-1", { message: "resume work" });
+
+      expect(result.status).toBe("running");
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+    });
+
+    it("skips the sidecar at restore when the project has not configured it", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      mockExitedThenRestoredProcess();
+
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+      const persistedRestored = writeSessionMock.mock.calls
+        .map(([, session]) => session)
+        .filter((session) => session.id === "api-1" && session.status === "running")
+        .at(-1);
+      expect(persistedRestored?.sidecarPorts?.playwright).toBeUndefined();
     });
   });
 
@@ -2003,10 +2133,7 @@ describe("SessionService", () => {
     });
     expect(spawned.id).toBe("api-1");
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
-    expect(spawned.sidecars).toEqual([
-      { name: "dev", alive: false, ports: [] },
-      { name: "playwright", alive: false, ports: [] },
-    ]);
+    expect(spawned.sidecars).toEqual([{ name: "dev", alive: false, ports: [] }]);
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.autostart.failed",
     );
@@ -6082,6 +6209,26 @@ describe("SessionService", () => {
   });
 
   it("tears down the playwright sidecar exactly once when reconciling a dead runtime to stopped", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            playwright: {
+              command:
+                "node /abs/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+              autoStart: false,
+              agents: ["claude", "codex"],
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 },
+              },
+              mcp: { server: "playwright", portId: "http", path: "/mcp", clientHost: "localhost" },
+            },
+          },
+        },
+      },
+    });
     readSessionMock.mockReturnValue(runningSession());
     tmuxSessionExistsMock.mockResolvedValue(false);
 
@@ -11023,7 +11170,24 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
   });
 
+  const playwrightSidecarEntry = {
+    command:
+      "node /abs/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+    autoStart: true,
+    agents: ["claude", "codex"],
+    ports: {
+      http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 },
+    },
+    mcp: { server: "playwright", portId: "http", path: "/mcp", clientHost: "localhost" },
+  };
+
   it("reaps the playwright sidecar when completing a claude session that lacks persisted sidecarNames", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: { ...baseConfig().projects.api, sidecars: { playwright: playwrightSidecarEntry } },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -11050,6 +11214,12 @@ describe("SessionService", () => {
   });
 
   it("reaps the playwright sidecar when killing a codex session that lacks persisted sidecarNames", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: { ...baseConfig().projects.api, sidecars: { playwright: playwrightSidecarEntry } },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -11075,7 +11245,13 @@ describe("SessionService", () => {
     expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
   });
 
-  it("does not reap a playwright sidecar when completing a cursor session", async () => {
+  it("does not reap a playwright sidecar when completing a cursor session even though it is configured on", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: { ...baseConfig().projects.api, sidecars: { playwright: playwrightSidecarEntry } },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -11133,7 +11309,9 @@ describe("SessionService", () => {
     expect(ownedPorts.has(8741)).toBe(true);
     expect(
       logSpurEventMock.mock.calls.some(
-        ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
+        ([, entry]) =>
+          entry.event === "daemon.startup.sidecar_sweep" &&
+          entry.details?.sidecarName === "playwright",
       ),
     ).toBe(true);
   });
@@ -14630,7 +14808,6 @@ describe("SessionService", () => {
         alive: false,
         ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010 }],
       },
-      { name: "playwright", alive: false, ports: [] },
     ]);
   });
 
