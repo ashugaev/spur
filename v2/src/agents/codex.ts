@@ -834,19 +834,8 @@ function codexRolloutStateRecord(
   };
 }
 
-function extractCodexTurnContextModel(line: string): string | undefined {
-  // Rollout files are scanned line by line on every dashboard poll and only a
-  // handful of lines are turn_context, so skip the parse for the rest.
-  if (!line.includes('"turn_context"')) {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed) || parsed["type"] !== "turn_context") {
+function extractCodexTurnContextModel(parsed: Record<string, unknown>): string | undefined {
+  if (parsed["type"] !== "turn_context") {
     return undefined;
   }
   const payload = parsed["payload"];
@@ -857,17 +846,8 @@ function extractCodexTurnContextModel(line: string): string | undefined {
 }
 
 function extractCodexRolloutStateLine(
-  line: string,
+  parsed: Record<string, unknown>,
 ): Omit<CodexRolloutStateRecord, "filePath"> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
   const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
   if (!timestamp) {
     return null;
@@ -964,14 +944,8 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-function extractCodexRateLimitsLine(line: string): unknown {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
+  if (parsed["type"] !== "event_msg") {
     return null;
   }
   const payload = parsed["payload"];
@@ -987,15 +961,25 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
+    // Rollout files are re-scanned on every dashboard poll, so each line is
+    // parsed once here and shared by all three extractors below.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index] ?? "");
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
     if (rateLimit === null) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
       if (detection) {
         rateLimit = detection;
       }
     }
     if (rollout === null) {
-      const state = extractCodexRolloutStateLine(line);
+      const state = extractCodexRolloutStateLine(parsed);
       if (state && !(state.callId && matchedCallIds.has(state.callId))) {
         rollout = {
           ...state,
@@ -1004,7 +988,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
       }
     }
     if (model === undefined) {
-      model = extractCodexTurnContextModel(line);
+      model = extractCodexTurnContextModel(parsed);
     }
     if (rollout && rateLimit && model !== undefined) {
       break;
