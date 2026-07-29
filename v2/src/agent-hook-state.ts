@@ -3,6 +3,10 @@ import { join } from "node:path";
 
 export interface AgentHookStateRecord {
   state: "working" | "waiting" | "needs_input";
+  // Guaranteed Date-parseable by readAgentHookState, not merely a string: every
+  // consumer does age math on it (`new Date(updatedAt).getTime()`), and a NaN
+  // there silently poisons whatever it feeds — codex rollout-vs-hook ranking,
+  // the hung-turn threshold, the activity signal, the hookAge log.
   updatedAt: string;
   hookEvent?: string;
   turnId?: string;
@@ -28,7 +32,8 @@ export function readAgentHookState(
       (parsed.state === "working" ||
         parsed.state === "waiting" ||
         parsed.state === "needs_input") &&
-      typeof parsed.updatedAt === "string"
+      typeof parsed.updatedAt === "string" &&
+      Number.isFinite(Date.parse(parsed.updatedAt))
     ) {
       return {
         state: parsed.state,

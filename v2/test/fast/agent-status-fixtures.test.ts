@@ -348,4 +348,42 @@ describe("Codex hook state fixture classification", () => {
       await rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("rejects a hook record whose updatedAt is not Date-parseable", async () => {
+    // updatedAt was only checked with `typeof === "string"`, so a garbage value
+    // passed the boundary and every consumer's `new Date(updatedAt).getTime()`
+    // became NaN. NaN then poisons Math.max silently: the codex hung-turn
+    // threshold never fires, the activity signal falls back to tmux, and the
+    // hookAge log prints NaN. Rejecting here keeps the guarantee in one place
+    // instead of making three call sites re-validate.
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const tmpDir = await mkdtemp(join(tmpdir(), "hook-bad-updatedat-"));
+    const stateDir = join(tmpDir, "session-agent-state");
+    mkdirSync(stateDir, { recursive: true });
+
+    try {
+      for (const updatedAt of ["not-a-date", "", "NaN"]) {
+        writeFileSync(
+          join(stateDir, "spur-bad.json"),
+          JSON.stringify({ state: "working", updatedAt, hookEvent: "PreToolUse" }),
+          "utf8",
+        );
+        expect(readAgentHookState(tmpDir, "spur-bad"), `updatedAt=${updatedAt}`).toBeNull();
+      }
+
+      // A valid timestamp still parses, and stays Date-parseable for consumers.
+      writeFileSync(
+        join(stateDir, "spur-good.json"),
+        JSON.stringify({ state: "working", updatedAt: "2026-04-14T19:20:00.000Z" }),
+        "utf8",
+      );
+      const good = readAgentHookState(tmpDir, "spur-good");
+      expect(good?.updatedAt).toBe("2026-04-14T19:20:00.000Z");
+      expect(Number.isFinite(new Date(good?.updatedAt ?? "").getTime())).toBe(true);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

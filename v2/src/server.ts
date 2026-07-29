@@ -1066,6 +1066,19 @@ export async function startServer(
         return;
       }
 
+      const answerSessionId = path.match(/^\/sessions\/([^/]+)\/answer$/)?.[1];
+      if (method === "POST" && answerSessionId) {
+        const body = await readJsonBody<{ optionIndex?: unknown }>(request);
+        const optionIndex = body.optionIndex;
+        if (typeof optionIndex !== "number" || !Number.isInteger(optionIndex) || optionIndex < 0) {
+          sendError(response, 400, "optionIndex must be a non-negative integer");
+          return;
+        }
+        await service.answerQuestion(answerSessionId, optionIndex);
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);

@@ -26,6 +26,7 @@ import {
   createAgentSubmitAckBinding,
   findAgentSessionId,
   parseAgentName,
+  readAgentConversation,
   setupAgentHooks,
   type SubmitAckBinding,
   type SubmitAckScanResult,
@@ -175,6 +176,7 @@ import {
   killTmuxSession,
   listTmuxSessionNames,
   sendSubmitKeyToTmux,
+  sendMenuSelectionKeys,
   setTmuxSocketName,
   sendMessageToTmux,
   tmuxPaneDead,
@@ -242,6 +244,7 @@ import {
   type BranchSource,
   type CompleteDeskResponse,
   type CompleteSessionRequest,
+  type ConversationMessage,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
@@ -297,6 +300,7 @@ import {
   type SpawnSessionRequest,
   type StateSource,
   type TagDefinition,
+  type TranscriptEntry,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -342,7 +346,7 @@ const STATE_HOLD_MS = 4_000;
 // signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
 // incrementally within a single response, so a hung inference produces no new records at all. tmux
 // activity is rejected as a corroborating signal because codex's TUI repaints a per-second
-// "Working (… • esc to interrupt)" timer, advancing #{session_activity} every second even while the
+// "Working (… • esc to interrupt)" timer, advancing #{window_activity} every second even while the
 // turn is genuinely hung — it would mask exactly this bug. Pending tool calls are excluded (a long
 // exec_command is legitimately silent), so this threshold only needs to exceed the longest plausible
 // single model inference between tool batches (large context + high reasoning, observed ~tens of
@@ -548,6 +552,11 @@ interface SessionStateResult {
   historySourcePath?: string | null;
   workspacePresent: boolean;
   serverError: boolean;
+  // When the agent last wrote to its own structured artifact (claude transcript
+  // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
+  // when the agent has no such artifact yet. Every value here is a byproduct of
+  // reads classification already performed, so it costs no extra I/O.
+  agentActivityAt: Date | null;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -1242,12 +1251,56 @@ function buildWorkspaceAccess(
   return items.length > 0 ? { items } : undefined;
 }
 
+// Activity means "the agent did something", so it must be identical whether or
+// not a browser has the session open.
+//
+// The agent's own structured artifact is the only source that satisfies that.
+// Both tmux clocks are polluted by merely attaching a terminal, measured on
+// tmux 3.4: `#{session_activity}` is a pure client-attach clock (it jumps to
+// now on `attach-session` and never moves for pane output), and
+// `#{window_activity}` jumps too because attaching resizes the window and the
+// agent's TUI repaints on SIGWINCH — genuine pane output triggered by the act
+// of opening. A silent (non-TUI) pane shows no window_activity bump on attach,
+// which is what pins the cause on the redraw.
+//
+// So tmux activity is the fallback only, for a session whose agent has not yet
+// produced a structured artifact. That matches the standing repo rule: detect
+// session state from structured agent sources first, tmux only as a fallback.
+// 0 means "no structured artifact": codex reports it when it has neither a
+// rollout nor hook state. The claude/cursor readers cannot produce it in
+// practice — they return either a real stat mtime or null — so for them this is
+// only a floor against a nonsense epoch timestamp. Either way 0 is never a real
+// activity time, so it must not pin activity to 1970; let the tmux fallback
+// stand instead.
+function activityAtFromMs(activityMs: number): Date | null {
+  return activityMs > 0 ? new Date(activityMs) : null;
+}
+
+// Single source of truth for "when did the agent last do something", shared by
+// the dashboard's lastActivityAt and the delivery idle gate so the two can
+// never disagree about what counts as activity.
+//
+// Strictly `??`, never `max(agentActivityAt, tmuxActivityAt)`. A max would let
+// the attach-driven tmux bump win again whenever it is newer than the last
+// transcript write, which is exactly the bug this resolver exists to fix. The
+// accepted cost is that activity lags within a long single tool call, since
+// claude only appends at tool boundaries — a stale-looking timestamp next to a
+// "working" badge. Nothing treats that staleness as death: the stop/stale
+// reconcilers read runtimeAlive/paneUsable/processAlive, never this value.
+function resolveAgentActivityAt(
+  classified: Pick<SessionStateResult, "runtime" | "agentActivityAt">,
+): Date | null {
+  return classified.agentActivityAt ?? classified.runtime.tmuxActivityAt;
+}
+
 function buildLastActivityAt(
   session: Pick<SessionRecord, "updatedAt">,
-  runtime: Pick<SessionRuntimeSnapshot, "tmuxActivityAt">,
+  classified: Pick<SessionStateResult, "runtime" | "agentActivityAt">,
 ): string {
   const updatedAt = new Date(session.updatedAt);
-  return (latestActivityAt(updatedAt, runtime.tmuxActivityAt) ?? updatedAt).toISOString();
+  return (
+    latestActivityAt(updatedAt, resolveAgentActivityAt(classified)) ?? updatedAt
+  ).toISOString();
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -3972,10 +4025,13 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
 
-    await this.enrich(session);
-    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    // Only lastOpenedAt is stamped: updatedAt is carried through untouched so
+    // opening a session never counts as activity or moves it in the dashboard
+    // sort. The trailing enrich() classifies (and persists any genuine state
+    // change) off the record just read, so no separate pre-enrich pass is
+    // needed to avoid a lost update.
     const lastOpenedAt = nowIso();
-    const updated: SessionRecord = { ...latest, lastOpenedAt };
+    const updated: SessionRecord = { ...session, lastOpenedAt };
     writeSession(this.config.dataDir, updated);
     await this.refreshDashboardCacheEntry(updated);
     this.logEvent("session.opened", {
@@ -4006,12 +4062,37 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const fallback: ConversationResponse = {
       messages: [],
+      entries: [],
       durationMs,
       state: statusFallbackState(session),
     };
-    if (session.agent !== "claude") return fallback;
-    const result = await readClaudeConversation(session.worktreePath);
-    return result ? { ...result, durationMs } : fallback;
+
+    const entries =
+      (await readAgentConversation(session.agent, {
+        worktreePath: session.worktreePath,
+        ...(session.agent === "codex"
+          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
+          : {}),
+        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      })) ?? [];
+
+    if (session.agent === "claude") {
+      const result = await readClaudeConversation(session.worktreePath);
+      return result
+        ? { messages: result.messages, entries, durationMs, state: result.state }
+        : { ...fallback, entries };
+    }
+
+    const messages: ConversationMessage[] = entries
+      .filter(
+        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+      )
+      .map((entry) => ({
+        role: entry.role,
+        text: entry.text,
+        timestampMs: entry.timestampMs ?? 0,
+      }));
+    return { messages, entries, durationMs, state: statusFallbackState(session) };
   }
 
   async getProjectSuggestions(
@@ -6072,6 +6153,23 @@ export class SessionService {
     }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
+  }
+
+  async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.agent !== "claude") {
+      throw new Error("Interactive answering is only supported for claude sessions");
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) {
+      throw new Error("optionIndex must be a non-negative integer");
+    }
+    await sendMenuSelectionKeys(session.tmuxSession, optionIndex);
   }
 
   async deliver(
@@ -8233,7 +8331,13 @@ export class SessionService {
     if (classified.state !== "waiting" && !classified.serverError) {
       return false;
     }
-    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
+    // Gate on the agent's own structured artifact, not raw tmux activity. Raw
+    // tmux activity is the session-wide max across every window, so a user's
+    // split running a dev server would stall delivery indefinitely, and merely
+    // attaching the web terminal (which makes the TUI repaint) would delay it
+    // by another full window. The agent's transcript is inherently scoped to
+    // the agent and is untouched by both.
+    if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
       return false;
     }
 
@@ -8689,6 +8793,7 @@ export class SessionService {
     hookState: ReturnType<typeof readAgentHookState>;
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
+    activityMs: number;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
@@ -8701,12 +8806,18 @@ export class SessionService {
       source = "jsonl";
     }
 
+    // When codex last did something, from its own structured sources: the
+    // in-content rollout timestamp (rollout mtime is unusable — `codex resume`'s
+    // poison-id heal rewrites every file at once) and the hook state. 0 means
+    // neither source exists yet. The single derivation for both the hung-turn
+    // check below and the caller's activity/idle-gate signal.
+    const activityMs = Math.max(
+      rolloutState?.timestampMs ?? 0,
+      hookState ? new Date(hookState.updatedAt).getTime() : 0,
+    );
+
     if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
-      const lastActivityMs = Math.max(
-        rolloutState.timestampMs,
-        hookState ? new Date(hookState.updatedAt).getTime() : 0,
-      );
-      if (Date.now() - lastActivityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
+      if (Date.now() - activityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
         state = "waiting";
         source = "codex_stale";
       }
@@ -8718,6 +8829,7 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      activityMs,
     };
   }
 
@@ -9012,7 +9124,7 @@ export class SessionService {
       await sleep(PIPELINE_POLL_INTERVAL_MS);
       // fresh:true — an independent re-sample, not a replay of the same
       // ~2s-TTL cached snapshot the first check above just read. Otherwise a
-      // single transient tmux/list-sessions blip would agree with itself on
+      // single transient tmux/list-windows blip would agree with itself on
       // both reads and mark a genuinely live session stopped.
       confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
@@ -9206,6 +9318,7 @@ export class SessionService {
         historySourcePath: null,
         workspacePresent: probeWorkspace(session.worktreePath).exists,
         serverError: false,
+        agentActivityAt: null,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -9245,6 +9358,8 @@ export class SessionService {
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
     let serverErrorJsonlPath: string | null = null;
+    // Set from whichever structured artifact the branches below already read.
+    let agentActivityAt: Date | null = null;
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -9265,6 +9380,8 @@ export class SessionService {
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
           serverErrorJsonlPath = jsonlResult.reader.filePath;
+          // The reader already stat()ed the pinned transcript; reuse its mtime.
+          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9307,17 +9424,14 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
+        agentActivityAt = activityAtFromMs(codexState.activityMs);
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          const lastActivityMs = Math.max(
-            codexState.rolloutState.timestampMs,
-            codexState.hookState ? new Date(codexState.hookState.updatedAt).getTime() : 0,
-          );
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (codex stale, idle=${Date.now() - lastActivityMs}ms)`,
+            message: `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`,
           });
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
@@ -9355,6 +9469,7 @@ export class SessionService {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
+          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
@@ -9514,6 +9629,7 @@ export class SessionService {
       // instead of arming it — the two markers stay independently owned.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
+      agentActivityAt,
     };
   }
 
@@ -9532,7 +9648,7 @@ export class SessionService {
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
-    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
       session,
@@ -9572,7 +9688,7 @@ export class SessionService {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
-    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
     const history = await this.updateStateHistory(
       session,

@@ -73,6 +73,7 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
 import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
@@ -550,6 +551,94 @@ describe("Spur web API routes", () => {
       "/sessions/api-a1/send",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  // ── POST /api/sessions/:id/answer ──────────────────────────────────────
+
+  it("POST /api/sessions/:id/answer rejects a non-integer optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 1.5 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer rejects a negative optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: -1 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer rejects a missing optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer proxies a valid optionIndex to the daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 2 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/answer",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 2 }),
+      }),
+    );
+  });
+
+  it("answer forwards a non-2xx status and body verbatim", async () => {
+    const conflict = { error: "Session is not running: api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 0 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(conflict);
   });
 
   // ── POST /api/sessions/:id/tags ────────────────────────────────────────

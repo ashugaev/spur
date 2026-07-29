@@ -19,6 +19,7 @@ import {
   codexCommand,
   ensureCodexHooksConfig,
   findCodexSessionId,
+  readCodexTranscriptEntries,
   scanCodexRolloutForMessage,
 } from "./codex.js";
 import {
@@ -33,7 +34,9 @@ import {
   findCursorSessionId,
 } from "./cursor.js";
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
-import type { AgentName } from "../types.js";
+import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
+import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
+import type { AgentName, TranscriptEntry } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -91,6 +94,12 @@ export interface SubmitAckBinding {
   scan(text: string): Promise<SubmitAckScanResult>;
 }
 
+export interface ConversationReadContext {
+  worktreePath: string;
+  codexSessionsDir?: string;
+  agentSessionId?: string;
+}
+
 interface AgentAdapter {
   command(): string;
   buildLaunchPlan(prompt: string, options?: AgentPlanOptions): AgentLaunchPlan;
@@ -105,6 +114,7 @@ interface AgentAdapter {
     options?: AgentPlanOptions,
   ): AgentResumePlan;
   findSessionId(worktreePath: string, options?: AgentSessionLookupOptions): Promise<string | null>;
+  readConversation(ctx: ConversationReadContext): Promise<TranscriptEntry[] | null>;
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
@@ -263,6 +273,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
+    readConversation: (ctx) => readClaudeTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({
       worktreePath,
       sessionToolDir,
@@ -325,6 +336,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
+    readConversation: (ctx) =>
+      ctx.codexSessionsDir
+        ? readCodexTranscriptEntries(ctx.codexSessionsDir)
+        : Promise.resolve(null),
     setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
@@ -360,6 +375,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
+    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (restrictWrites && cursorConfigDir) {
@@ -473,6 +489,13 @@ export async function findAgentSessionId(
   options?: AgentSessionLookupOptions,
 ): Promise<string | null> {
   return agentAdapter(agent).findSessionId(worktreePath, options);
+}
+
+export async function readAgentConversation(
+  agent: AgentName,
+  ctx: ConversationReadContext,
+): Promise<TranscriptEntry[] | null> {
+  return agentAdapter(agent).readConversation(ctx);
 }
 
 export async function setupAgentHooks(args: {
