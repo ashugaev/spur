@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const MANAGED_PLACEHOLDER = "0.0.0-managed";
@@ -21,11 +21,27 @@ function readPackageVersion(url: URL): string | undefined {
 // "<tag>-<commits>-g<sha>" past one, which self-evidently isn't a published
 // version. --always covers a checkout with no release tags fetched at all.
 export function readGitDescribedVersion(repoRoot: URL): string | undefined {
+  const cwd = fileURLToPath(repoRoot);
   try {
+    // `git` walks up to the nearest ancestor `.git`, which is only this repo
+    // by convention. If the managed placeholder ever shipped in a published
+    // package.json, `repoRoot` (npm install: node_modules/@shugaev/) would sit
+    // inside whatever host project the package was installed into, and this
+    // would silently describe THAT project's tags as Spur's version. Refuse
+    // unless the repo git actually finds is the one we were asked about.
+    const toplevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    const normalize = (p: string): string => realpathSync(p).replace(/[/\\]+$/, "");
+    if (normalize(toplevel) !== normalize(cwd)) return undefined;
+
     const described = execFileSync(
       "git",
       ["describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*", "--always"],
-      { cwd: fileURLToPath(repoRoot), stdio: ["ignore", "pipe", "ignore"] },
+      { cwd, stdio: ["ignore", "pipe", "ignore"] },
     )
       .toString()
       .trim();

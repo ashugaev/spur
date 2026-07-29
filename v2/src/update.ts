@@ -292,10 +292,16 @@ export async function runUpdate(
 
   const startedAt = new Date(deps.now()).toISOString();
   // Only a fully healthy preflight may (re)record the rollback anchor; a forced
-  // update on an unhealthy host keeps the previous known-good version.
-  const lastKnownGood = allHealthy
-    ? { version: deps.currentVersion, healthyAt: startedAt }
-    : state.lastKnownGood;
+  // update on an unhealthy host keeps the previous known-good version. Also
+  // require a real release version: `assertNotSourceCheckout` normally rules
+  // out a git-describe-shaped `currentVersion` reaching here, but under
+  // SPUR_UPDATE_FORCE=1 it wouldn't be -- and a non-release anchor can never
+  // be reinstalled by `installVersion` on rollback, so keep the previous
+  // known-good instead of recording one that would break rollback.
+  const lastKnownGood =
+    allHealthy && isReleaseVersion(deps.currentVersion)
+      ? { version: deps.currentVersion, healthyAt: startedAt }
+      : state.lastKnownGood;
   const inProgress: UpdateInProgress = {
     fromVersion: deps.currentVersion,
     toVersion: target,

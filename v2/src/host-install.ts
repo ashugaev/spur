@@ -7,6 +7,7 @@ import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { NPM_PREFIX_ENV, ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
+import { isReleaseVersion } from "./releases-cache.js";
 import {
   probe,
   probeInfo,
@@ -664,6 +665,11 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
   const drifted = daemonVersion !== installedVersion;
   // Static severity (see `checkSpurOnPath`): always "warn" — drift is never
   // exit-code-affecting, whether or not it is currently present.
+  // `spur update` only works against a real npm release (see
+  // `assertNotSourceCheckout` in update.ts); a `git describe`-shaped version
+  // means this is a source checkout, where that fix is a dead end -- point
+  // at the repo deploy flow instead.
+  const fix = isReleaseVersion(installedVersion) ? "spur update" : "pull latest and redeploy";
   return {
     id: "version-drift",
     ok: !drifted,
@@ -671,7 +677,7 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
     detail: drifted
       ? `daemon reports version ${daemonVersion}, installed package is ${installedVersion}`
       : `daemon version ${daemonVersion} matches the installed package`,
-    ...(drifted ? { fix: "spur update" } : {}),
+    ...(drifted ? { fix } : {}),
   };
 }
 
