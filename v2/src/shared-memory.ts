@@ -68,6 +68,7 @@ export function listSharedMemoryKeys(dataDir: string, scope: string, storeId: st
   return readdirSync(dir)
     .filter((name) => name.endsWith(".md"))
     .map((name) => name.slice(0, -3))
+    .filter((name) => MEMORY_KEY_PATTERN.test(name))
     .sort((left, right) => left.localeCompare(right));
 }
 

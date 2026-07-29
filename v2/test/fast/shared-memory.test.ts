@@ -102,6 +102,21 @@ describe("shared memory storage", () => {
     expect(existsSync(join(dir, "foo.md.tmp.1.2"))).toBe(true);
   });
 
+  it("excludes a hand-placed file whose stripped name fails the key pattern, without hiding legal dotted keys", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "memory", "task", "desk-1");
+
+    setSharedMemory(dataDir, "task", "desk-1", "build.tmp.notes", "n");
+    // Hand-placed, not written through setSharedMemory: uppercase fails
+    // MEMORY_KEY_PATTERN, so get() would 400 on it — list must agree with get.
+    writeFileSync(join(dir, "Foo.md"), "illegal");
+
+    const keys = listSharedMemoryKeys(dataDir, "task", "desk-1");
+    expect(keys).toContain("build.tmp.notes");
+    expect(keys).not.toContain("Foo");
+    expect(() => getSharedMemory(dataDir, "task", "desk-1", "Foo")).toThrow(/key/);
+  });
+
   it("overwrites a key last-writer-wins", async () => {
     const dataDir = await newDataDir();
 
