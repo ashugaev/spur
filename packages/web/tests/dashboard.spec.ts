@@ -16,6 +16,7 @@ import {
   type ProjectInfo,
   type SpurSessionView,
 } from "./fixtures.js";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
@@ -2782,7 +2783,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(conditionsField).toHaveValue("");
     await expect(conditionsField).toHaveAttribute(
       "placeholder",
-      "Leave empty for default: every objective in the task prompt is done",
+      `Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`,
     );
 
     await page.getByRole("button", { name: /^spawn$/i }).click();
