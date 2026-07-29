@@ -123,12 +123,8 @@ export function withSharedMemoryInstructions(prompt: string): string {
   return `${prompt}
 
 Shared memory:
-- \`spur memory set|get|list|rm [key] [body] --scope task|project|global\`. One markdown cell per key. \`set\` overwrites. Multiline body via \`--file <path>\`. Every agent in the scope sees the same cells.
-- On start: \`spur memory list --scope task\` and \`spur memory list --scope project\`. Read the cells relevant to your work before acting.
-- Write when you learn something durable. High-value only, no noise:
-  - task: business requirements, decisions, and constraints of THIS task — what a sibling desk agent must know.
-  - project: critical project knowledge that cost you time until you understood it — gotchas, invariants, non-obvious behavior.
-  - global: user preferences and rules that hold across every project.
-- Cell style: caveman. Terse, exact, no filler. State the fact and why it matters. Overwrite stale cells, \`rm\` dead ones.
-- Do not store: session-local scratch, anything derivable from the repo, restated docs, logs.`;
+- \`spur memory set|get|list|rm [key] [body] --scope task|project|global\`. One cell per key; \`set\` overwrites; \`--file <path>\` for multiline.
+- On start: \`spur memory list --scope task\` and \`--scope project\`. Read what applies before acting.
+- Write durable facts only: task = this task's requirements/decisions for sibling desk agents; project = hard-won gotchas/invariants; global = user prefs across projects.
+- Cell body: caveman, terse, exact. No scratch, derivable info, or logs.`;
 }
