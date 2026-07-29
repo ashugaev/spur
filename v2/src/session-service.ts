@@ -204,6 +204,15 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  assertValidSharedMemoryScope,
+  getSharedMemory as getSharedMemoryEntry,
+  listSharedMemoryKeys,
+  removeSharedMemory as removeSharedMemoryEntry,
+  setSharedMemory as setSharedMemoryEntry,
+  validateSharedMemoryKey,
+  withSharedMemoryInstructions,
+} from "./shared-memory.js";
+import {
   closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
@@ -269,6 +278,10 @@ import {
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -642,6 +655,32 @@ function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
   }
 }
 
+function assertValidSharedMemoryRequest(
+  scope: string,
+  key?: string,
+): asserts scope is SharedMemoryScope {
+  try {
+    assertValidSharedMemoryScope(scope);
+    if (key !== undefined) {
+      validateSharedMemoryKey(key);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMemoryInputError(message);
+  }
+}
+
+// task = desk-group anchor (matches listDeskSessions); project = session.project; global = constant.
+function resolveSharedMemoryStoreId(session: SessionRecord, scope: SharedMemoryScope): string {
+  if (scope === "task") {
+    return session.deskId ?? session.id;
+  }
+  if (scope === "project") {
+    return session.project;
+  }
+  return "global";
+}
+
 function hasUnseenAttention(
   session: Pick<SessionRecord, "lastOpenedAt">,
   state: SessionState,
@@ -889,7 +928,9 @@ function buildInitialMessage(
 ): string {
   if (!initialMessage.trim()) return "";
   let base = withSelfDestructInstructions(
-    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    withSharedMemoryInstructions(
+      withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    ),
     selfDestruct,
   );
   if (branchNamingRegex) {
@@ -3978,6 +4019,59 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
     }
     return { record };
+  }
+
+  listSharedMemory(sessionId: string, scope: string): SharedMemoryListResponse {
+    assertValidSharedMemoryRequest(scope);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    return { scope, keys: listSharedMemoryKeys(this.config.dataDir, scope, storeId) };
+  }
+
+  getSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = getSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!entry) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, entry };
+  }
+
+  setSharedMemory(
+    sessionId: string,
+    scope: string,
+    key: string,
+    request: unknown,
+  ): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    if (!isRecord(request)) {
+      throw new InvalidSessionMemoryInputError("request body must be a JSON object");
+    }
+    const body = request["body"];
+    if (typeof body !== "string") {
+      throw new InvalidSessionMemoryInputError("body must be a string");
+    }
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = setSharedMemoryEntry(this.config.dataDir, scope, storeId, key, body);
+    return { scope, entry };
+  }
+
+  removeSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryRemoveResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const removed = removeSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!removed) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, key };
   }
 
   async markOpened(sessionId: string): Promise<SessionView> {

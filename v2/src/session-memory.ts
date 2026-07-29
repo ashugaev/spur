@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import type { SessionMemoryKind, SessionMemoryRecord } from "./types.js";
 
-const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-const MEMORY_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+export const MEMORY_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 interface SessionMemoryFile {
   records: SessionMemoryRecord[];

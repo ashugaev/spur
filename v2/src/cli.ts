@@ -8,7 +8,7 @@ import {
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +16,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   connectProjectConfig,
+  deleteJson,
   disconnectProjectConfig,
   getJson,
   listProjects,
@@ -85,11 +86,17 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SharedMemoryEntry,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
+  type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
 } from "./types.js";
@@ -288,6 +295,35 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSharedMemoryList(
+  scope: SharedMemoryScope,
+  response: SharedMemoryListResponse,
+): string {
+  if (response.keys.length === 0) {
+    return dimText(`No ${scope} memory.`);
+  }
+  return response.keys.map((key) => `- ${key}`).join("\n");
+}
+
+function renderSharedMemoryEntry(entry: SharedMemoryEntry): string {
+  return `${boldText(entry.key)}\n${entry.body}`;
+}
+
+function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
+  return renderSharedMemoryEntry(response.entry);
+}
+
+function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
+  return dimText(`scope ${response.scope}`);
+}
+
+function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
+  if (value === "task" || value === "project" || value === "global") {
+    return value;
+  }
+  throw new Error("--scope must be task, project, or global");
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -2374,6 +2410,121 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("memory")
+    .description("Manage shared markdown memory across task, project, and global scopes.")
+    .usage("<set|get|list|rm> [key] [body] --scope <task|project|global>")
+    .argument("<action>", "set, get, list, or rm")
+    .argument("[key]", "Memory key")
+    .argument("[body]", "Body for set (or use --file)")
+    .requiredOption("--scope <scope>", "task, project, or global")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--file <path>", "Read the set body from a file instead of the body argument")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        action: string,
+        key: string | undefined,
+        body: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const scope = parseSharedMemoryScope(options.scope);
+        const sessionId = options.session?.trim() || runningSessionId();
+        if (!sessionId) {
+          throw new Error("memory requires --session or SPUR_SESSION");
+        }
+
+        if (action === "list") {
+          if (key !== undefined || body !== undefined) {
+            throw new Error("memory list does not accept extra arguments");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading ${scope} memory`,
+            action: () =>
+              getJson<SharedMemoryListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}`,
+                configPath,
+              ),
+            render: (response) => renderSharedMemoryList(scope, response),
+          });
+          return;
+        }
+
+        if (!key) {
+          throw new Error(`memory ${action} requires a key`);
+        }
+
+        if (action === "get") {
+          if (body !== undefined) {
+            throw new Error("memory get accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading memory ${key}`,
+            action: () =>
+              getJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "set") {
+          const filePath = options.file?.trim();
+          if (body !== undefined && filePath) {
+            throw new Error("memory set accepts a body argument or --file, not both");
+          }
+          if (body === undefined && !filePath) {
+            throw new Error("memory set requires a body argument or --file");
+          }
+          const resolvedBody = filePath ? readFileSync(filePath, "utf-8") : (body as string);
+          const payload: SetSharedMemoryRequest = { body: resolvedBody };
+          await outputResult({
+            json: Boolean(options.json),
+            label: `saving memory ${key}`,
+            action: () =>
+              postJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                payload,
+                configPath,
+              ),
+            success: (response) => `Saved ${response.entry.key}.`,
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "rm") {
+          if (body !== undefined) {
+            throw new Error("memory rm accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `removing memory ${key}`,
+            action: () =>
+              deleteJson<SharedMemoryRemoveResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            success: (response) => `Removed ${response.key}.`,
+            render: renderSharedMemoryRemoveResponse,
+          });
+          return;
+        }
+
+        throw new Error("memory action must be set, get, list, or rm");
+      },
+    );
 
   program
     .command("actions")

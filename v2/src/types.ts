@@ -89,6 +89,32 @@ export interface SessionMemoryRecordResponse {
   record: SessionMemoryRecord;
 }
 
+export type SharedMemoryScope = "task" | "project" | "global";
+
+export interface SharedMemoryEntry {
+  key: string;
+  body: string;
+}
+
+export interface SetSharedMemoryRequest {
+  body: string;
+}
+
+export interface SharedMemoryListResponse {
+  scope: SharedMemoryScope;
+  keys: string[];
+}
+
+export interface SharedMemoryEntryResponse {
+  scope: SharedMemoryScope;
+  entry: SharedMemoryEntry;
+}
+
+export interface SharedMemoryRemoveResponse {
+  scope: SharedMemoryScope;
+  key: string;
+}
+
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
