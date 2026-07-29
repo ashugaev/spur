@@ -1,14 +1,6 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { MEMORY_KEY_PATTERN, SESSION_ID_PATTERN } from "./session-memory.js";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { MEMORY_KEY_PATTERN, SESSION_ID_PATTERN, writeFileAtomic } from "./session-memory.js";
 import type { SharedMemoryEntry, SharedMemoryScope } from "./types.js";
 
 // Three shared markdown-memory scopes, one .md file per key:
@@ -99,10 +91,7 @@ export function setSharedMemory(
   validateSharedMemoryStoreId(storeId);
   validateSharedMemoryKey(key);
   const path = sharedMemoryFilePath(dataDir, scope, storeId, key);
-  mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmpPath, body, "utf-8");
-  renameSync(tmpPath, path);
+  writeFileAtomic(path, body);
   return { key, body };
 }
 

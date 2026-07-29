@@ -25,6 +25,16 @@ function sessionMemoryFilePath(dataDir: string, sessionId: string): string {
   return join(dataDir, "session-memory", `${sessionId}.json`);
 }
 
+// Shared tmp-then-rename atomic write, used by session-memory (JSON) and
+// shared-memory (markdown). Tmp-name scheme is load-bearing: it must stay
+// distinguishable from a real key file so directory listings can skip residue.
+export function writeFileAtomic(path: string, contents: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, contents, "utf-8");
+  renameSync(tmpPath, path);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -77,10 +87,7 @@ function readSessionMemoryFile(path: string): SessionMemoryFile {
 
 function writeSessionMemoryFile(path: string, file: SessionMemoryFile): void {
   const records = [...file.records].sort((left, right) => left.key.localeCompare(right.key));
-  mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmpPath, `${JSON.stringify({ records }, null, 2)}\n`, "utf-8");
-  renameSync(tmpPath, path);
+  writeFileAtomic(path, `${JSON.stringify({ records }, null, 2)}\n`);
 }
 
 export function normalizeSessionMemoryTags(tags: unknown): string[] {
