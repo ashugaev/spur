@@ -3187,6 +3187,60 @@ projects:
     );
   });
 
+  it("rejects dependsOn on a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: pnpm dev
+      playwright:
+        autoStart: true
+        dependsOn: [dev]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: dependsOn)',
+    );
+  });
+
+  it("rejects a built-in sidecar entry that also carries command/env/ports/agents", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+        command: pnpm exec playwright test
+        ports:
+          http:
+            env: MY_PORT
+            start: 9000
+            end: 9010
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: command, ports)',
+    );
+  });
+
+  it("does not resolve prototype-chain keys like 'constructor' as a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      constructor:
+        autoStart: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.sidecars.constructor.command must be a non-empty string",
+    );
+  });
+
   it("rejects non-string project preflight prompts", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -963,15 +963,26 @@ function parseSidecars(
     const entryRaw = asObject(entry, entryLabel);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
     const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
-    const builtin = BUILTIN_SIDECARS[name];
+    // Object.hasOwn guards against a sidecar name like "constructor"/"toString"
+    // (VALID_ID_RE allows them) resolving to Object.prototype's own members
+    // instead of falling through to the normal "unknown built-in" path below.
+    const builtin = Object.hasOwn(BUILTIN_SIDECARS, name) ? BUILTIN_SIDECARS[name] : undefined;
     if (builtin) {
       // Built-ins carry a code-only command/ports/mcp/agents (bundle-resolved
-      // bin, MCP wiring); YAML only ever overrides autoStart/dependsOn.
-      result[name] = {
-        ...builtin.config,
-        autoStart,
-        ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
-      };
+      // bin, MCP wiring). YAML only ever overrides "autoStart": MCP sidecars
+      // start pre-agent-launch, ahead of the dependency-aware autostart pass,
+      // so "dependsOn" (and any other override) can't be honored — reject it
+      // at the boundary instead of silently dropping it.
+      const extraKeys = Object.keys(entryRaw).filter((key) => key !== "autoStart");
+      if (extraKeys.length > 0) {
+        throw new Error(
+          `${entryLabel} is a built-in sidecar; only "autoStart" may be set here (got: ${extraKeys.join(", ")}). ` +
+            `Its command/env/ports/mcp/agents are fixed in code, and "dependsOn" is not supported because MCP ` +
+            `sidecars start before the agent launches, ahead of the dependency-aware autostart pass. ` +
+            `Use a different sidecar name to define your own.`,
+        );
+      }
+      result[name] = { ...builtin.config, autoStart };
       continue;
     }
     const command = asString(entryRaw["command"], `${entryLabel}.command`);

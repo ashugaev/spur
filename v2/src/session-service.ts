@@ -33,7 +33,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
-import { collectMcpBindings, resolveSessionSidecars } from "./sidecars/index.js";
+import {
+  collectMcpBindings,
+  manualSidecarNames,
+  resolveSessionSidecars,
+} from "./sidecars/index.js";
 import {
   deleteAgentHookState,
   readAgentHookState,
@@ -1831,8 +1835,16 @@ export class SessionService {
     this.sidecarReaperRunning = true;
     try {
       const builtinNames = Object.keys(BUILTIN_SIDECARS);
+      // Also protect a session mid restore/recover: its on-disk status stays
+      // stopped/errored until the restore completes, but startMcpSidecars may
+      // already have started its sidecar tmux pane (see restore() and
+      // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
+      // call for exactly this gap).
       const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) => session.status === "running" || session.status === "spawning",
+        (session) =>
+          session.status === "running" ||
+          session.status === "spawning" ||
+          this.isInRestoreWarmup(session.id),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -3466,6 +3478,11 @@ export class SessionService {
         return args.session;
       }
 
+      // Built-ins may defer command resolution (e.g. a bundle-resolved bin
+      // path) to this point instead of config load — see BuiltinSidecarDef.
+      const resolvedCommand =
+        BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
+
       const agentConfig = this.sessionAgentConfig(args.session);
       const reservedSession = await this.ensureSidecarReservation(
         args.session,
@@ -3498,7 +3515,7 @@ export class SessionService {
           sessionId: reservedSession.id,
           sidecarName: args.sidecarName,
           cwd: reservedSession.worktreePath,
-          command: args.sidecar.command,
+          command: resolvedCommand,
           env: buildSidecarRuntimeEnv(
             sessionEnv,
             reservedSession,
@@ -4871,7 +4888,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const composedInitialMessage = [...startupAttachmentLines, initialMessage]
         .filter((line) => line.trim())
         .join("\n");
@@ -5692,7 +5709,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
@@ -6833,6 +6850,11 @@ export class SessionService {
     if (!sidecar) {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
+    if (!resolveSessionSidecars(session, project)[sidecarName]) {
+      throw new Error(
+        `Sidecar "${sidecarName}" is not available to agent "${session.agent}" for session ${sessionId}`,
+      );
+    }
 
     const updated = await this.startSidecarWithDependencies({
       session,
@@ -7060,7 +7082,6 @@ export class SessionService {
     if (targetStatus === "stopped") {
       delete record.error;
     }
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7166,7 +7187,6 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.retainInList;
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7295,7 +7315,21 @@ export class SessionService {
     }
 
     const project = this.getProject(session.project);
-    const recovered = await this.relaunchSessionInPlace(session, project);
+    // Same restore-warmup protection as restore() above: relaunchSessionInPlace
+    // starts the MCP sidecar before this session's status is guaranteed
+    // running|spawning on disk, and the reaper's default filter would not
+    // otherwise protect that window. Cleared immediately after (not left for
+    // the usual RESTORE_WARMUP_MS) — callers of ensureSessionReadyForSend
+    // (send, tryDeliverQueuedMessage, switchAuth) classify the session's real
+    // state right after this returns and must not have that forced to
+    // "working" the way a genuine post-restore warmup intentionally does.
+    this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    let recovered: SessionRecord;
+    try {
+      recovered = await this.relaunchSessionInPlace(session, project);
+    } finally {
+      this.restoreWarmupUntil.delete(session.id);
+    }
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -7532,6 +7566,12 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    // Set before startMcpSidecars below: the on-disk status stays
+    // stopped/errored until the restore completes (~50 lines down), so the
+    // sidecar reaper's normal running|spawning filter would not protect the
+    // MCP sidecar tmux pane this starts. The reaper additionally checks this
+    // warmup window (see reapDeadSessionSidecars) for exactly this gap.
+    this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
 
@@ -7640,7 +7680,9 @@ export class SessionService {
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(resolveSessionSidecars(current, restoreProject));
+      const restoreSidecarNames = manualSidecarNames(
+        resolveSessionSidecars(current, restoreProject),
+      );
       const env = buildSessionEnv({
         agent: current.agent,
         projectId: current.project,
@@ -9033,9 +9075,19 @@ export class SessionService {
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
+    // Neither "stopped" nor "errored" is a terminal status (isTerminalSessionStatus
+    // is completed|killed only), so any sidecarPorts left on the record would be
+    // treated as still owned by a live session forever — release them here the
+    // same way pause/kill already do, or the leak sweep can never reclaim the
+    // port and the pool eventually exhausts.
+    const latestNoPorts = copySessionWithoutSidecarPorts(latest);
     let updated: SessionRecord;
     if (terminalUnavailable) {
-      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      const {
+        error: _ignoredError,
+        stopReason: _ignoredStopReason,
+        ...stoppedBase
+      } = latestNoPorts;
       updated = {
         ...stoppedBase,
         status: "stopped",
@@ -9043,7 +9095,7 @@ export class SessionService {
       };
     } else {
       updated = {
-        ...latest,
+        ...latestNoPorts,
         status: "errored",
         error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
         updatedAt,

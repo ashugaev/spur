@@ -17,6 +17,18 @@ export function resolveSessionSidecars(
   return resolved;
 }
 
+// Sidecar names an agent could sensibly be told to start manually (the
+// initial-message "Available: ..." hint, see buildInitialMessage in
+// session-service.ts). MCP-bound sidecars are excluded: those are started
+// automatically pre-launch by startMcpSidecars, so listing them there would
+// invite either a no-op (already running) or, once a session's agent doesn't
+// carry it, a rejected manual start.
+export function manualSidecarNames(sidecars: Record<string, SidecarConfig>): string[] {
+  return Object.entries(sidecars)
+    .filter(([, sidecar]) => !sidecar.mcp)
+    .map(([name]) => name);
+}
+
 // Build the SidecarMcpBinding[] to hand to an agent's launch plan: one entry
 // per resolved sidecar that carries `mcp` and has a reserved port for it.
 export function collectMcpBindings(
