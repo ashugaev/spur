@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
 import { withSelfDestructInstructions } from "../../src/self-destruct.js";
+import { withSharedMemoryInstructions } from "../../src/shared-memory.js";
 import { renderShepherdPrompt } from "../../src/shepherd.js";
 
 describe("extractBareUserTask", () => {
@@ -74,6 +75,21 @@ describe("extractBareUserTask", () => {
     );
 
     expect(extractBareUserTask(prompt)).toBe("Add agent handoff button");
+  });
+
+  it("strips a trailing shared memory section from a plain wrapped prompt", () => {
+    // Idempotency markers already present so the slot/artifacts blocks are
+    // suppressed, leaving only branch naming and shared memory appended.
+    const prompt = withSharedMemoryInstructions(
+      "Add agent handoff button" +
+        "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already." +
+        "\n\nBranch naming:\n- Use `spur-branch create <name>`.",
+    );
+
+    expect(extractBareUserTask(prompt)).toBe(
+      "Add agent handoff button" +
+        "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already.",
+    );
   });
 
   it("unwraps shepherd prompts nested inside handoff original tasks", () => {

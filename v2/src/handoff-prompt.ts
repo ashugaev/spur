@@ -9,6 +9,7 @@ const SPUR_TRAILING_SECTION_MARKERS = [
   "\n\nBranch naming:",
   "\n\nSidecars:",
   "\n\nSelf-destruct:",
+  "\n\nShared memory:",
 ] as const;
 
 const HANDOFF_TASK_STOP_PATTERN =
