@@ -835,6 +835,11 @@ function codexRolloutStateRecord(
 }
 
 function extractCodexTurnContextModel(line: string): string | undefined {
+  // Rollout files are scanned line by line on every dashboard poll and only a
+  // handful of lines are turn_context, so skip the parse for the rest.
+  if (!line.includes('"turn_context"')) {
+    return undefined;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
