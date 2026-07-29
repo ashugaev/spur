@@ -152,7 +152,7 @@ if [[ "$NO_START" -eq 1 ]]; then
 fi
 
 web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
-[[ -n "$web_port" ]] || web_port=4311
+[[ -n "$web_port" ]] || web_port=5555
 
 # Poll instead of sampling is-active once immediately after `start` returns
 # (F2: a racy immediate check reported false-positive "active" before a

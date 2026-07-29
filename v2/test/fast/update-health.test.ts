@@ -64,8 +64,8 @@ describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)",
 });
 
 describe("resolveWebPort", () => {
-  it("defaults to 4311 when no PORT environment line is present", () => {
-    expect(resolveWebPort("[Service]\nExecStart=/usr/bin/node server.js\n")).toBe(4311);
+  it("defaults to 5555 when no PORT environment line is present", () => {
+    expect(resolveWebPort("[Service]\nExecStart=/usr/bin/node server.js\n")).toBe(5555);
   });
 
   it("reads a single Environment=PORT line", () => {
@@ -84,9 +84,9 @@ describe("resolveWebPort", () => {
 });
 
 describe("parseWebUnitOptions", () => {
-  it("returns the default loopback:4311 config for a bare unit", () => {
+  it("returns the default loopback:5555 config for a bare unit", () => {
     expect(parseWebUnitOptions("[Service]\nExecStart=/usr/bin/node server.js\n")).toEqual({
-      webPort: 4311,
+      webPort: 5555,
       exposeWeb: false,
       tailscale: false,
     });

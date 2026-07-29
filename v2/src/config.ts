@@ -49,6 +49,7 @@ import {
   DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
   DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
 } from "./user-action-log.js";
+import { DEFAULT_UI_PORT } from "./ports.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -61,7 +62,6 @@ const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;
 const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
-const DEFAULT_UI_PORT = 5555;
 const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_VOICE_LANGUAGE = "auto";

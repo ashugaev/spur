@@ -1625,7 +1625,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
-    .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--web-port <port>", "Web listen port (default 5555)")
     .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {

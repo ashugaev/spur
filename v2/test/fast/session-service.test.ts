@@ -40,6 +40,7 @@ const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
 const findAgentSessionIdMock = vi.fn();
+const readAgentConversationMock = vi.fn();
 const agentProcessMatchersMock = vi.fn();
 const agentBusyQueuedSendAwaitsPromptMock = vi.fn();
 const agentQueuedSendPromptGraceMsMock = vi.fn();
@@ -93,6 +94,7 @@ const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
+const sendMenuSelectionKeysMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const tmuxPaneDeadMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -271,6 +273,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentRestorePlan: buildAgentRestorePlanMock,
   buildAgentResumePlan: buildAgentResumePlanMock,
   findAgentSessionId: findAgentSessionIdMock,
+  readAgentConversation: readAgentConversationMock,
   agentProcessMatchers: agentProcessMatchersMock,
   agentBusyQueuedSendAwaitsPrompt: agentBusyQueuedSendAwaitsPromptMock,
   agentQueuedSendPromptGraceMs: agentQueuedSendPromptGraceMsMock,
@@ -406,6 +409,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: sendMessageToTmuxMock,
   sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
+  sendMenuSelectionKeys: sendMenuSelectionKeysMock,
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
@@ -810,6 +814,7 @@ describe("SessionService", () => {
         }),
       );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
+    readAgentConversationMock.mockReset().mockResolvedValue(null);
     agentProcessMatchersMock
       .mockReset()
       .mockImplementation((agent: string, launchCommand: string) => {
@@ -939,6 +944,7 @@ describe("SessionService", () => {
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
     tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
@@ -3681,6 +3687,49 @@ describe("SessionService", () => {
     expect(readFileSync(txtPath, "utf8")).toBe("hello");
   });
 
+  it("answerQuestion sends the keystroke for a running claude session", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.answerQuestion("api-1", 2);
+
+    expect(sendMenuSelectionKeysMock).toHaveBeenCalledWith("api-1", 2);
+  });
+
+  it("answerQuestion rejects non-claude sessions", async () => {
+    readSessionMock.mockReturnValue(runningSession({ agent: "cursor" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(
+      "Interactive answering is only supported for claude sessions",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+  });
+
+  it("answerQuestion rejects a missing session", async () => {
+    readSessionMock.mockReturnValue(undefined);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("missing", 0)).rejects.toThrow(
+      "Session not found: missing",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+  });
+
+  it("answerQuestion rejects a non-running session", async () => {
+    readSessionMock.mockReturnValue(runningSession({ status: "killed" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(
+      "Session is not running: api-1",
+    );
+    expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+  });
+
   it("classifies working state from Claude session status before JSONL", async () => {
     readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("waiting");
@@ -4046,6 +4095,145 @@ describe("SessionService", () => {
     const later = await service.get("api-1");
     expect(later.state).toBe("needs_input");
     expect(later.hasUnseenAttention).toBe(true);
+  });
+
+  it("takes lastActivityAt from the agent transcript, so an attach-driven tmux bump cannot move it", async () => {
+    // Opening the web terminal runs `attach-session`, which resizes the window
+    // and makes the agent's TUI repaint on SIGWINCH. That repaint is genuine
+    // pane output, so BOTH tmux clocks jump to the attach instant (measured on
+    // tmux 3.4). Activity therefore has to come from the agent's own structured
+    // artifact — here the pinned claude transcript's mtime — which no attach,
+    // resize or capture-pane can touch.
+    const transcriptWrittenAt = "2026-03-18T10:02:00.000Z";
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: {
+        filePath: "test.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: Date.parse(transcriptWrittenAt),
+        tailRecords: [],
+      },
+    });
+    // The attach instant: "now". Pre-fix this won the max and became
+    // lastActivityAt, which is exactly the reported bug.
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:05:00.000Z"));
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+
+    expect(view.lastActivityAt).toBe(transcriptWrittenAt);
+    service.dispose();
+  });
+
+  it("falls back to tmux activity only while the agent has produced no structured artifact", async () => {
+    // A just-spawned session whose transcript does not exist yet: there is no
+    // structured signal to prefer, so tmux window activity is all we have and
+    // must still be reported rather than collapsing to updatedAt.
+    readClaudeJsonlStateMock.mockResolvedValue(null);
+    readClaudeSessionStatusMock.mockResolvedValue(null);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+
+    expect(view.lastActivityAt).toBe("2026-03-18T10:04:00.000Z");
+    service.dispose();
+  });
+
+  it("delivers a queued message while a sibling window keeps emitting, since the idle gate follows the agent transcript", async () => {
+    // tmux activity is the max across every window of the session, so a user's
+    // split running a dev server (or an attached web terminal repainting) would
+    // hold the delivery idle gate open forever. The gate must measure the
+    // agent's own transcript instead: idle since 10:02, well past the 30s wait.
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: {
+        filePath: "test.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: Date.parse("2026-03-18T10:02:00.000Z"),
+        tailRecords: [],
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    // The noisy sibling window: emitting right now, continuously.
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:05:00.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+        interrupt: false,
+        agent: "claude",
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("leaves updatedAt and lastActivityAt untouched when a session is merely viewed and opened", async () => {
+    // Opening an agent in the web UI must record only that it was opened. Any
+    // bump to updatedAt (or to the derived lastActivityAt) would reorder the
+    // dashboard's activity sort purely because someone looked at the session.
+    let stored: SessionRecord = runningSession({ id: "api-1" });
+    readSessionMock.mockImplementation(() => stored);
+    writeSessionMock.mockImplementation((_dataDir, next) => {
+      stored = next;
+    });
+    // The agent last printed at 10:04:30 and has been silent since.
+    const lastOutputAt = new Date("2026-03-18T10:04:30.000Z");
+    getTmuxSessionActivityMock.mockResolvedValue(lastOutputAt);
+    mockClaudeJsonlState("needs_input");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const before = await service.get("api-1");
+    expect(before.lastActivityAt).toBe(lastOutputAt.toISOString());
+    const updatedAtBefore = stored.updatedAt;
+
+    // The page's 4s poll (a full enrich with the capture-pane scan) — the only
+    // path that runs per-session tmux commands against the viewed session.
+    vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    const polled = await service.get("api-1");
+    expect(polled.lastActivityAt).toBe(lastOutputAt.toISOString());
+    expect(stored.updatedAt).toBe(updatedAtBefore);
+
+    // The explicit "I opened it" marker.
+    vi.setSystemTime(new Date("2026-03-18T10:06:00.000Z"));
+    const opened = await service.markOpened("api-1");
+    expect(stored.lastOpenedAt).toBe("2026-03-18T10:06:00.000Z");
+    expect(stored.updatedAt).toBe(updatedAtBefore);
+    expect(opened.lastActivityAt).toBe(lastOutputAt.toISOString());
+
+    vi.setSystemTime(new Date("2026-03-18T10:07:00.000Z"));
+    const after = await service.get("api-1");
+    expect(after.lastActivityAt).toBe(lastOutputAt.toISOString());
+    expect(stored.updatedAt).toBe(updatedAtBefore);
   });
 
   it("renders needs_input sessions unseen after a restart when no lastOpenedAt has been recorded", async () => {
@@ -5127,8 +5315,79 @@ describe("SessionService", () => {
     const classifiedCall = logSpurEventMock.mock.calls.find(
       ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "spur-hung",
     );
-    expect(classifiedCall?.[1].message).toContain("codex stale, idle=");
+    // Exact idle value, not just the prefix: the staleness decision and this
+    // log line read one shared activityMs off classifyCodexState, so pinning
+    // the number guards them against drifting apart again.
+    expect(classifiedCall?.[1].message).toContain(`codex stale, idle=${10 * 60_000}ms`);
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
+  });
+
+  it("delivers a queued message to a codex_stale session, since typing is what un-wedges a hung turn", async () => {
+    // Deliberate, not an accident of the activity switch. CODEX_HUNG_AFTER_TOOLS_MS
+    // is documented as being set well above any realistic single inference
+    // precisely so "the working->waiting edge lets a queued interrupt:false
+    // message be typed in after a further idle gate". Pre-fix that further gate
+    // never opened, because codex's per-second "Working…" repaint kept tmux
+    // activity at now — so a hung turn stayed hung with the un-wedge message
+    // stuck in the queue. Reading the rollout/hook timestamps instead makes the
+    // documented intent actually happen: a turn idle for 10min is past the 30s
+    // gate, so the queued message goes in.
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    const sessions = createSessionStore();
+    sessions.set("spur-hung", {
+      id: "spur-hung",
+      project: "sp",
+      agent: "codex",
+      prompt: "hung after tools",
+      branch: "feature/hung",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-hung",
+      tmuxSession: "spur-hung",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+      queuedMessages: {
+        messages: ["please continue"],
+        awaitingPrompt: false,
+      },
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf6",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-hung/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf6",
+      },
+      rateLimit: null,
+    });
+    // A codex TUI repainting its "Working…" timer right now: pre-fix this alone
+    // held the gate shut forever.
+    getTmuxSessionActivityMock.mockResolvedValue(now);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("spur-hung", "please continue", {
+        interrupt: false,
+        agent: "codex",
+      });
+      expect(sessions.get("spur-hung")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
   });
 
   it("keeps codex working while a long exec_command tool call is still pending", async () => {
@@ -11584,6 +11843,28 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("relaunches a restored session on its persisted spawn-time model, not the agent default", async () => {
+    // normalizeSessionRecord used to drop SessionRecord.model on every write, so
+    // restore()'s resolveAgentLaunchModel(current.agent, current.model) always
+    // saw undefined and silently relaunched on the agent default. With the
+    // field persisted, a session spawned on sonnet comes back on sonnet.
+    mockClaudeJsonlState("waiting");
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1", model: "sonnet" }));
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      "/tmp/spur-worktrees/api/api-1",
+      expect.any(String),
+      expect.objectContaining({ model: "sonnet" }),
+    );
+  });
+
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
     mockClaudeJsonlState("waiting");
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
@@ -16105,6 +16386,54 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("waiting");
+    });
+
+    it("derives messages and entries from the codex transcript reader", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+      readAgentConversationMock.mockResolvedValue([
+        { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+        { kind: "tool", name: "exec_command", callId: "call_1" },
+        { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "codex",
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          codexSessionsDir: expect.stringContaining("api-1"),
+        }),
+      );
+      expect(result.messages).toEqual([
+        { role: "user", text: "hi", timestampMs: 1 },
+        { role: "assistant", text: "hello back", timestampMs: 2 },
+      ]);
+      expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "message"]);
+    });
+
+    it("derives messages and entries from the cursor transcript reader", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "cursor", status: "running" }));
+      readAgentConversationMock.mockResolvedValue([
+        { kind: "message", role: "user", text: "fix the bug" },
+        { kind: "tool", name: "Grep" },
+        { kind: "question", header: "", prompt: "" },
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "cursor",
+        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+      );
+      expect(result.messages).toEqual([{ role: "user", text: "fix the bug", timestampMs: 0 }]);
+      expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "question"]);
     });
   });
 

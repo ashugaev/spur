@@ -1825,21 +1825,21 @@ describe("SessionDetail voice input", () => {
     expect(dialogScrollContainer).not.toBeNull();
     expect(dialogScrollContainer).toHaveClass("overflow-y-auto");
 
-    const codeElement = within(dialogSection as HTMLElement).getByText(longToken, {
+    const codeElement = await within(dialogSection as HTMLElement).findByText(longToken, {
       selector: "code",
     });
     expect(codeElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
     expect(codeElement.closest("div")).toHaveClass("min-w-0");
     expect(codeElement.closest("div")).toHaveClass("break-words");
 
-    const linkElement = within(dialogSection as HTMLElement).getByRole("link", {
+    const linkElement = await within(dialogSection as HTMLElement).findByRole("link", {
       name: linkToken,
     });
     expect(linkElement.closest("p")).toHaveClass("[overflow-wrap:anywhere]");
     expect(linkElement.closest("div")).toHaveClass("min-w-0");
     expect(linkElement.closest("div")).toHaveClass("break-words");
 
-    const imageElement = within(dialogSection as HTMLElement).getByRole("img", {
+    const imageElement = await within(dialogSection as HTMLElement).findByRole("img", {
       name: imageAlt,
     });
     expect(imageElement.closest("div")).toHaveClass("[&_img]:max-w-full");

@@ -52,6 +52,7 @@ export function readSpurInstanceRuntimeConfig(): SpurInstanceRuntimeConfig {
   const serverHost = readString(parsed?.server?.host, "127.0.0.1");
   const serverPort = readNumber(parsed?.server?.port, 4310);
   const tmuxSocketName = readString(parsed?.tmux?.socketName, `spur-${serverPort}`);
+  // Mirrors DEFAULT_UI_PORT in v2/src/ports.ts (no cross-package import).
   const uiPort = readNumber(parsed?.ui?.port, 5555);
   return {
     configPath,

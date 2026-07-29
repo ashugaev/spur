@@ -443,4 +443,40 @@ describe("runtime-tmux", () => {
     ).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
+
+  it("sends a bare digit keystroke to select a menu option within the first nine", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMenuSelectionKeys } = await import("../../src/runtime-tmux.js");
+
+    await sendMenuSelectionKeys("api-1", 1);
+
+    expect(execFileAsyncMock.mock.calls).toHaveLength(1);
+    const [file, args] = execFileAsyncMock.mock.calls[0] ?? [];
+    expect(file).toBe("tmux");
+    expect(args).toEqual(["send-keys", "-t", "=api-1:", "2"]);
+  });
+
+  it("navigates with Down then Enter for menu options past the ninth", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMenuSelectionKeys } = await import("../../src/runtime-tmux.js");
+
+    await sendMenuSelectionKeys("api-1", 10);
+
+    const keys = execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0]);
+    expect(keys).toEqual([...Array(10).fill("Down"), "Enter"]);
+  });
+
+  it("never issues a copy-mode cancel, C-u, or literal flag for menu selection", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMenuSelectionKeys } = await import("../../src/runtime-tmux.js");
+
+    await sendMenuSelectionKeys("api-1", 10);
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-X"))).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+  });
 });
