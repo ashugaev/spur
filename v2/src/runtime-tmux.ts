@@ -344,12 +344,35 @@ async function runTmuxNewSession(args: string[]): Promise<void> {
   }
 }
 
+// Claude Code identity markers. The spur daemon (or whatever shell spawned
+// it) is frequently itself running inside a Claude Code session — e.g. a
+// Spur/shepherd agent that starts an isolated dev daemon as a sidecar to
+// test a fix. If these leak into a brand-new tmux pane's env, the `claude`
+// process launched there inherits a stale session identity: it sees
+// CLAUDE_CODE_CHILD_SESSION=1 and a foreign CLAUDE_CODE_SESSION_ID and
+// treats itself as a *child* of that unrelated ancestor session instead of
+// a fresh top-level interactive session. That breaks Spur's transcript
+// resolution two ways at once: no `<our-session-id>.jsonl` is ever created
+// under the new worktree's project dir (so `sessionFileForId` finds
+// nothing), and Claude Code never writes a `~/.claude/sessions/<pid>.json`
+// status file for it either (that registry is for top-level sessions),
+// starving `readClaudeSessionStatus` too. Every new tmux session must start
+// with a clean identity regardless of what the daemon process inherited.
+const CLAUDE_IDENTITY_ENV_KEYS = new Set([
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+]);
+
 function buildEnvArgs(env?: Record<string, string>): string[] {
   const envArgs: string[] = [];
   const sessionEnv = {
     ...Object.fromEntries(
       Object.entries(process.env).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
+        (entry): entry is [string, string] =>
+          typeof entry[1] === "string" &&
+          entry[1].length > 0 &&
+          !CLAUDE_IDENTITY_ENV_KEYS.has(entry[0]),
       ),
     ),
     ...(env ?? {}),

@@ -70,6 +70,56 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
+  // Regression (status-verifier shp-a4bc, spur-9813): the spur daemon is
+  // often itself a subprocess of a Claude Code session (e.g. an isolated
+  // dev daemon a Spur agent spins up as a test sidecar). If that session's
+  // CLAUDECODE/CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION env vars leak
+  // into a brand-new tmux pane, the `claude` process launched there treats
+  // itself as a *child* of that unrelated ancestor session — Claude Code
+  // then writes neither a `<new-session-id>.jsonl` transcript at the
+  // expected path nor a `~/.claude/sessions/<pid>.json` status file for it,
+  // leaving Spur with no signal at all and stuck reporting `working` forever.
+  it("never inherits the daemon's own Claude Code identity env vars into a new session", async () => {
+    const originalClaudecode = process.env["CLAUDECODE"];
+    const originalSessionId = process.env["CLAUDE_CODE_SESSION_ID"];
+    const originalChildSession = process.env["CLAUDE_CODE_CHILD_SESSION"];
+    process.env["CLAUDECODE"] = "1";
+    process.env["CLAUDE_CODE_SESSION_ID"] = "stale-ancestor-session-id";
+    process.env["CLAUDE_CODE_CHILD_SESSION"] = "1";
+    try {
+      execFileAsyncMock.mockImplementation(async (_file, args) => ({
+        stdout: args.includes("new-session") ? "" : "ok",
+        stderr: "",
+      }));
+
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+      await createTmuxSession({
+        sessionName: "api-1",
+        cwd: "/tmp/worktree",
+        launchCommand: "claude --dangerously-skip-permissions",
+        agent: "claude",
+      });
+
+      const firstCall = execFileAsyncMock.mock.calls[0];
+      if (!firstCall) {
+        throw new Error("Expected createTmuxSession to invoke tmux");
+      }
+      const [, args] = firstCall;
+      expect(args).not.toContain("-e CLAUDECODE=1");
+      expect(args.some((arg) => arg.startsWith("CLAUDECODE="))).toBe(false);
+      expect(args.some((arg) => arg.startsWith("CLAUDE_CODE_SESSION_ID="))).toBe(false);
+      expect(args.some((arg) => arg.startsWith("CLAUDE_CODE_CHILD_SESSION="))).toBe(false);
+    } finally {
+      if (originalClaudecode === undefined) delete process.env["CLAUDECODE"];
+      else process.env["CLAUDECODE"] = originalClaudecode;
+      if (originalSessionId === undefined) delete process.env["CLAUDE_CODE_SESSION_ID"];
+      else process.env["CLAUDE_CODE_SESSION_ID"] = originalSessionId;
+      if (originalChildSession === undefined) delete process.env["CLAUDE_CODE_CHILD_SESSION"];
+      else process.env["CLAUDE_CODE_CHILD_SESSION"] = originalChildSession;
+    }
+  });
+
   it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {
     process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
     execFileAsyncMock.mockImplementation(async (_file, args) => ({
