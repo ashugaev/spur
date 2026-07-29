@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { DataRow, RowIconButton } from "@/components/DataRow";
@@ -901,12 +901,19 @@ function EditProjectModal({
 }
 
 export function Dashboard() {
-  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
+  // Initialized empty rather than read from `window.location.search` at render
+  // time: the server always renders "", so a non-empty client-side first
+  // render would be a hydration text mismatch. The layout effect below is the
+  // only path that populates these, restoring both together pre-paint. This
+  // removes the mismatch these two states used to contribute — it is not a
+  // whole-component guarantee: `readCollapsedCategories` and the
+  // `activeTagFilters` initializer further below still read localStorage
+  // during render. Both are unreachable pre-paint today only because they're
+  // gated behind fetched-session state, not because render-time storage reads
+  // are safe in general.
+  const [locationSearch, setLocationSearch] = useState("");
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(readLocationSearch());
-    return params.get("project")?.trim() ?? "";
-  });
+  const [projectId, setProjectId] = useState("");
   const { toasts, showErrorToast, dismissToast } = useToasts();
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
@@ -1011,13 +1018,28 @@ export function Dashboard() {
   const [editProjectDeleting, setEditProjectDeleting] = useState(false);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Restore locationSearch + projectId from the URL in a layout effect, not a
+  // passive effect: layout effects flush before the browser paints, so the
+  // project name is correct on the first paint AFTER hydration, instead of
+  // one extra frame of "All Projects" while a passive effect chain catches
+  // up. (The very first frame — the raw SSR HTML before hydration runs — is
+  // always "All Projects" regardless; that's an accepted, out-of-scope SSR
+  // characteristic, not something this effect can change.) The render-time
+  // initial state stays "" (above) so the server's first render and the
+  // client's first render still agree — no hydration mismatch — and this
+  // effect only runs after that hydration has already committed
+  // successfully.
+  useLayoutEffect(() => {
     if (typeof window === "undefined") return;
-    const syncSearch = () => setLocationSearch(readLocationSearch());
-    syncSearch();
-    window.addEventListener("popstate", syncSearch);
+    const syncFromLocation = () => {
+      const search = readLocationSearch();
+      setLocationSearch(search);
+      setProjectId(new URLSearchParams(search).get("project")?.trim() ?? "");
+    };
+    syncFromLocation();
+    window.addEventListener("popstate", syncFromLocation);
     return () => {
-      window.removeEventListener("popstate", syncSearch);
+      window.removeEventListener("popstate", syncFromLocation);
     };
   }, []);
 
@@ -1033,18 +1055,10 @@ export function Dashboard() {
     return () => window.removeEventListener("keydown", handler);
   }, [spawnOpen]);
 
-  const requestedProject = useMemo(
-    () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
-    [locationSearch],
-  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-
-  useEffect(() => {
-    setProjectId(requestedProject);
-  }, [requestedProject]);
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
