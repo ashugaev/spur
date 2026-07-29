@@ -235,6 +235,22 @@ describe("shared memory CLI", () => {
     );
   });
 
+  it("rejects an invalid --scope with a CLI-quality message", async () => {
+    await expect(
+      parseMemory(["memory", "list", "--scope", "bogus", "--session", "api-1", "--json"]),
+    ).rejects.toThrow(/--scope must be task, project, or global/);
+    expect(getJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("prints exactly one line for a non-json remove, no redundant scope line", async () => {
+    deleteJsonMock.mockResolvedValue({ scope: "task", key: "decision.api" });
+
+    await parseMemory(["memory", "rm", "decision.api", "--scope", "task", "--session", "api-1"]);
+
+    expect(writeStdoutMock).toHaveBeenCalledTimes(1);
+    expect(writeStdoutMock).toHaveBeenCalledWith("Removed decision.api.");
+  });
+
   it("registers a memory command", async () => {
     const { createProgram } = await import("../../src/cli.js");
 

@@ -62,6 +62,7 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
@@ -86,7 +87,6 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
-  type SharedMemoryEntry,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -307,23 +307,22 @@ function renderSharedMemoryList(
   return response.keys.map((key) => `- ${key}`).join("\n");
 }
 
-function renderSharedMemoryEntry(entry: SharedMemoryEntry): string {
-  return `${boldText(entry.key)}\n${entry.body}`;
-}
-
 function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
-  return renderSharedMemoryEntry(response.entry);
+  return `${boldText(response.entry.key)}\n${response.entry.body}`;
 }
 
 function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
-  return dimText(`scope ${response.scope}`);
+  return `Removed ${response.key}.`;
 }
 
 function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
-  if (value === "task" || value === "project" || value === "global") {
-    return value;
+  const scope = typeof value === "string" ? value : "";
+  try {
+    assertValidSharedMemoryScope(scope);
+  } catch {
+    throw new Error("--scope must be task, project, or global");
   }
-  throw new Error("--scope must be task, project, or global");
+  return scope;
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -964,7 +963,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -2516,7 +2515,6 @@ export function createProgram(cliEntrypoint: string): Command {
                 `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
                 configPath,
               ),
-            success: (response) => `Removed ${response.key}.`,
             render: renderSharedMemoryRemoveResponse,
           });
           return;
