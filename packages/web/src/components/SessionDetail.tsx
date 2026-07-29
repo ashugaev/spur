@@ -1091,9 +1091,7 @@ function ArtifactLightbox({
                     ? isMarkdownArtifact(artifact)
                       ? "bg-[var(--color-bg-elevated)]"
                       : ""
-                    : textPreviewState === "oversize"
-                      ? ""
-                      : "pointer-events-none"
+                    : "pointer-events-none"
                 }`}
                 data-artifact-lightbox-interactive
               >
