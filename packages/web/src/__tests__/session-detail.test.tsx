@@ -3283,6 +3283,72 @@ describe("SessionDetail artifacts", () => {
     expect(artifactFetchCount).toBe(1);
   });
 
+  it("keeps the text scroller non-interactive until content renders", async () => {
+    let resolveArtifactFetch: ((response: Response) => void) | null = null;
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "pending.txt",
+                  name: "pending.txt",
+                  size: 18,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/artifacts/pending.txt") {
+        return new Promise<Response>((resolve) => {
+          resolveArtifactFetch = resolve;
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("pending.txt")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview pending.txt" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Artifact preview pending.txt" });
+    const scroller = dialog.querySelector<HTMLElement>("[data-artifact-lightbox-interactive]");
+    expect(scroller).not.toBeNull();
+    expect(scroller).toHaveClass("pointer-events-none");
+
+    resolveArtifactFetch?.(
+      new Response("line one", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
+    );
+
+    await screen.findByText("line one");
+
+    expect(scroller).not.toHaveClass("pointer-events-none");
+  });
+
   it("previews json, markdown, and download-only files", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

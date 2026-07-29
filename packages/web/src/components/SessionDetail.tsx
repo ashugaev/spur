@@ -1086,7 +1086,15 @@ function ArtifactLightbox({
               />
             ) : artifact.kind === "text" ? (
               <div
-                className="absolute inset-0 overflow-auto overscroll-contain p-3 text-[var(--color-text-primary)] [-webkit-overflow-scrolling:touch] sm:p-4"
+                className={`absolute inset-0 overflow-auto overscroll-contain p-3 text-[var(--color-text-primary)] [-webkit-overflow-scrolling:touch] sm:p-4 ${
+                  textPreviewState === "ready" && textContent
+                    ? isMarkdownArtifact(artifact)
+                      ? "bg-[var(--color-bg-elevated)]"
+                      : ""
+                    : textPreviewState === "oversize"
+                      ? ""
+                      : "pointer-events-none"
+                }`}
                 data-artifact-lightbox-interactive
               >
                 {textPreviewState === "oversize" ? (
@@ -1098,9 +1106,7 @@ function ArtifactLightbox({
                   isMarkdownArtifact(artifact) ? (
                     <MarkdownMessage text={textContent} />
                   ) : (
-                    <pre className="whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                      {textContent}
-                    </pre>
+                    <pre className="whitespace-pre-wrap break-words font-mono">{textContent}</pre>
                   )
                 ) : null}
               </div>
