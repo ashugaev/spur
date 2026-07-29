@@ -282,6 +282,7 @@ Port map:
 - Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
 - Terminal WS shares the web server on path `/ws` (no separate port). Any reverse proxy that forwards `/` covers it; no `DIRECT_TERMINAL_*` env to keep in sync.
+- Voice input needs HTTPS; browsers block `getUserMedia` over plain HTTP. Tailnet host: `tailscale serve --bg --https=443` terminates TLS and self-renews. Skip when another service holds 443. Failure is a voice-only blocker. Doc: `docs/https-tailscale.md`
 - Full deploy doc: `docs/install-from-source.md`
 
 ## Validation

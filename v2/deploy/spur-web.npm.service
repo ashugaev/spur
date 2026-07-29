@@ -17,7 +17,7 @@ Type=simple
 WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=PORT=4311
+Environment=PORT=5555
 Environment=WEB_HOST=127.0.0.1
 Environment=NODE_ENV=production
 EnvironmentFile=-%h/.spur/daemon.env

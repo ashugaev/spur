@@ -25,6 +25,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/voice.md](docs/voice.md) — voice input setup
+- [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
 - [docs/install-from-source.md](docs/install-from-source.md) — install from source
 - [SETUP.md](SETUP.md) — contributor bootstrap and local web UI development

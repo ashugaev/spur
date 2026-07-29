@@ -9,6 +9,7 @@ Deploy from a GitHub checkout (dev / maintainers). `v2/` is the runtime source o
 - Daemon on loopback `127.0.0.1:4310`.
 - Web UI on loopback `127.0.0.1:3012` — serves the terminal WebSocket on the same port at `/ws`.
 - `nginx` is the only externally-bound surface: loopback by default, optionally a private interface (VM/Tailscale/VPN IP) on `5555`. Never bind `0.0.0.0` unless the VM is intentionally public.
+- `ui.port` tracks the web unit's `PORT` (`3012` here), not the nginx front port — a mismatch is what `spur doctor`'s `web-ui-port-drift` reports.
 
 Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env to coordinate.
 
@@ -53,7 +54,7 @@ defaultAgent: claude
 tmux:
   socketName: spur-4310
 ui:
-  port: 5555
+  port: 3012
 ```
 
 Spur uses a dedicated tmux socket (`spur-4310`), so plain `tmux ls` shows nothing — use `tmux -L spur-4310 ls`.

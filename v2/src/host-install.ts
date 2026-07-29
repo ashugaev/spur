@@ -304,7 +304,7 @@ function activeButUnreachableCheck(
 // request that already failed above; a slow-but-live Spur daemon would fail
 // that second request exactly the same way as the first). `daemon` and `web`
 // are both host-global fallback ports (the daemon defaults to 4310 with no
-// instance config, the web unit to 4311 with no unit file), so the unit's own
+// instance config, the web unit to 5555 with no unit file), so the unit's own
 // process bound there — even before systemd reports it fully "active" — must
 // not be reported as a foreign port conflict.
 function getUnitMainPid(ctl: string[], unit: string): number | undefined {
