@@ -7197,9 +7197,7 @@ export class SessionService {
       );
       if (processAlive) {
         if (options.strictClaudeResume) {
-          throw new Error(
-            `Claude auth switch cannot reuse the process that survived replacement`,
-          );
+          throw new Error(`Claude auth switch cannot reuse the process that survived replacement`);
         }
         return this.captureAgentSessionId(session, 0);
       }
@@ -7430,7 +7428,10 @@ export class SessionService {
     return recovered;
   }
 
-  private async waitForStrictClaudeResume(session: SessionRecord, launchedAt: number): Promise<void> {
+  private async waitForStrictClaudeResume(
+    session: SessionRecord,
+    launchedAt: number,
+  ): Promise<void> {
     if (!session.agentSessionId) {
       throw new Error("Claude auth switch requires a native session id");
     }
@@ -7975,10 +7976,7 @@ export class SessionService {
     setupToken: string;
   }): Promise<PublicClaudeAccount> {
     await validateClaudeSetupToken(opts.setupToken);
-    return publicAccount(
-      this.config.dataDir,
-      addSetupTokenAccount(this.config.dataDir, opts),
-    );
+    return publicAccount(this.config.dataDir, addSetupTokenAccount(this.config.dataDir, opts));
   }
 
   async enrollClaudeAccount(accountId: string, setupToken: string): Promise<PublicClaudeAccount> {
@@ -8241,9 +8239,9 @@ export class SessionService {
     if (pending.length === 0) return;
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
-        void Promise.allSettled(pending.map((session) => this.recoverClaudeAuthIntent(session))).then(
-          () => resolve(),
-        );
+        void Promise.allSettled(
+          pending.map((session) => this.recoverClaudeAuthIntent(session)),
+        ).then(() => resolve());
       });
     });
     this.backgroundSpawnRuns.add(run);

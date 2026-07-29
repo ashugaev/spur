@@ -106,9 +106,7 @@ describe("claude-accounts store", () => {
       setupToken: "secret",
       validatedAt: new Date("2025-01-01T00:00:00.000Z"),
     });
-    expect(accountStatus(dataDir, account, Date.parse("2026-01-02T00:00:00.000Z"))).toBe(
-      "expired",
-    );
+    expect(accountStatus(dataDir, account, Date.parse("2026-01-02T00:00:00.000Z"))).toBe("expired");
   });
 
   it("re-enrolls in place and removes all account files", () => {

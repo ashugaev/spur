@@ -142,12 +142,11 @@ export function listAccounts(dataDir: string): ClaudeAccount[] {
   } catch {
     return [];
   }
-  const entries =
-    Array.isArray(parsed)
-      ? parsed
-      : isRecord(parsed) && parsed.version === STORE_VERSION && Array.isArray(parsed.accounts)
-        ? parsed.accounts
-        : [];
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : isRecord(parsed) && parsed.version === STORE_VERSION && Array.isArray(parsed.accounts)
+      ? parsed.accounts
+      : [];
   return entries.map(parseAccount).filter((account): account is ClaudeAccount => !!account);
 }
 

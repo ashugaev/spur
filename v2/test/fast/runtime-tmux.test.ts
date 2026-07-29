@@ -129,12 +129,7 @@ describe("runtime-tmux", () => {
         ([file, args]) =>
           file === "tmux" &&
           args.join("\0") ===
-            [
-              "set-option",
-              "-ag",
-              "update-environment",
-              "CLAUDE_CODE_OAUTH_TOKEN",
-            ].join("\0"),
+            ["set-option", "-ag", "update-environment", "CLAUDE_CODE_OAUTH_TOKEN"].join("\0"),
       ),
     ).toBe(true);
   });
@@ -170,9 +165,9 @@ describe("runtime-tmux", () => {
     await expect(
       assertTmuxClaudeTokenFingerprint("api-auth", "sha256:d7cbbb688b2e506c"),
     ).resolves.toBeUndefined();
-    await expect(
-      assertTmuxClaudeTokenFingerprint("api-auth", "sha256:wrong"),
-    ).rejects.toThrow("selected setup-token");
+    await expect(assertTmuxClaudeTokenFingerprint("api-auth", "sha256:wrong")).rejects.toThrow(
+      "selected setup-token",
+    );
   });
 
   it("never exposes a selected token through failed tmux argv or errors", async () => {
@@ -221,9 +216,7 @@ describe("runtime-tmux", () => {
         unsetEnv: ["ANTHROPIC_API_KEY"],
       }),
     ).rejects.toThrow("unset failed");
-    expect(
-      execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "kill-session"),
-    ).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "kill-session")).toBe(true);
   });
 
   it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {

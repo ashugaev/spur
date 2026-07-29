@@ -12,10 +12,7 @@ export async function POST(request: Request, context: RouteContext) {
     const body = (await request.json().catch(() => ({}))) as { setupToken?: unknown };
     const setupToken = typeof body.setupToken === "string" ? body.setupToken.trim() : "";
     if (!setupToken) {
-      return NextResponse.json(
-        { error: "setupToken must be a non-empty string" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "setupToken must be a non-empty string" }, { status: 400 });
     }
     const result = await spurRequestJson<{ account: ClaudeAccountSummary }>(
       `/claude-accounts/${encodeURIComponent(id)}/enroll`,

@@ -18370,8 +18370,8 @@ describe("SessionService", () => {
         ["api-1", true],
         ["api-2", true],
       ]);
-      tmuxSessionExistsMock.mockImplementation(async (sessionName: string) =>
-        runtimeAlive.get(sessionName) ?? false,
+      tmuxSessionExistsMock.mockImplementation(
+        async (sessionName: string) => runtimeAlive.get(sessionName) ?? false,
       );
       killTmuxSessionMock.mockImplementation(async (sessionName: string) => {
         runtimeAlive.set(sessionName, false);

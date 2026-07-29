@@ -28,8 +28,7 @@ export function claudeManagedAuthEnv(setupToken: string): NodeJS.ProcessEnv {
   const denied = new Set<string>(CLAUDE_MANAGED_AUTH_UNSET_ENV);
   const env: NodeJS.ProcessEnv = Object.fromEntries(
     Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        typeof entry[1] === "string" && !denied.has(entry[0]),
+      (entry): entry is [string, string] => typeof entry[1] === "string" && !denied.has(entry[0]),
     ),
   );
   env["CLAUDE_CODE_OAUTH_TOKEN"] = setupToken;
@@ -125,7 +124,11 @@ export async function validateClaudeSetupToken(
       throw probeError(error);
     }
     const inference = parseJson(inferenceStdout);
-    if (!isRecord(inference) || inference.is_error === true || typeof inference.result !== "string") {
+    if (
+      !isRecord(inference) ||
+      inference.is_error === true ||
+      typeof inference.result !== "string"
+    ) {
       throw new Error("Claude setup token was rejected, expired, or rate limited");
     }
   } finally {

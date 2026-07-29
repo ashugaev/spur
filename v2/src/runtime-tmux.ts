@@ -310,10 +310,7 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 // the service user, while `required` propagates the failure. Either way,
 // KillMode=process on the daemon unit remains the actual guarantee that a
 // daemon restart does not stop the session.
-async function runTmuxNewSession(
-  args: string[],
-  environment?: NodeJS.ProcessEnv,
-): Promise<void> {
+async function runTmuxNewSession(args: string[], environment?: NodeJS.ProcessEnv): Promise<void> {
   const options = environment ? { env: environment } : undefined;
   const mode = systemdScopeMode();
   if (mode === "direct") {
@@ -321,14 +318,11 @@ async function runTmuxNewSession(
     return;
   }
   try {
-    await execFileAsync("systemd-run", [
-      "--user",
-      "--scope",
-      "--quiet",
-      "--collect",
-      "tmux",
-      ...args,
-    ], options);
+    await execFileAsync(
+      "systemd-run",
+      ["--user", "--scope", "--quiet", "--collect", "tmux", ...args],
+      options,
+    );
   } catch (error) {
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
       if (!warnedSystemdScopeFallback) {
@@ -561,18 +555,21 @@ export async function createTmuxSession(input: {
     await ensureClaudeTokenImport();
   }
 
-  await runTmuxNewSession([
-    ...withTmuxSocketArgs([]),
-    "-f",
-    TMUX_CONFIG_PATH,
-    "new-session",
-    "-d",
-    "-s",
-    input.sessionName,
-    "-c",
-    input.cwd,
-    ...envArgs,
-  ], launchEnvironment);
+  await runTmuxNewSession(
+    [
+      ...withTmuxSocketArgs([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      input.sessionName,
+      "-c",
+      input.cwd,
+      ...envArgs,
+    ],
+    launchEnvironment,
+  );
   invalidateFleetProbeCaches();
 
   try {

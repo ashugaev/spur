@@ -1436,9 +1436,9 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const listAccountsSpy = vi.spyOn(SessionService.prototype, "listClaudeAccounts").mockReturnValue([
-      { id: "default", label: "default", status: "legacy" },
-    ]);
+    const listAccountsSpy = vi
+      .spyOn(SessionService.prototype, "listClaudeAccounts")
+      .mockReturnValue([{ id: "default", label: "default", status: "legacy" }]);
     const server = await startServer(configPath, {
       info: () => undefined,
       warn: () => undefined,

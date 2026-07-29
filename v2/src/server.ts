@@ -621,8 +621,7 @@ export async function startServer(
       if (method === "POST" && path === "/claude-accounts/add") {
         const body = await readJsonBody<{ label?: unknown; setupToken?: unknown }>(request);
         const label = typeof body.label === "string" ? body.label.trim() : "";
-        const setupToken =
-          typeof body.setupToken === "string" ? body.setupToken.trim() : "";
+        const setupToken = typeof body.setupToken === "string" ? body.setupToken.trim() : "";
         if (!setupToken) {
           sendJson(response, 400, { error: "setupToken must be a non-empty string" });
           return;
@@ -661,8 +660,7 @@ export async function startServer(
       const enrollAccountId = path.match(/^\/claude-accounts\/([^/]+)\/enroll$/)?.[1];
       if (method === "POST" && enrollAccountId) {
         const body = await readJsonBody<{ setupToken?: unknown }>(request);
-        const setupToken =
-          typeof body.setupToken === "string" ? body.setupToken.trim() : "";
+        const setupToken = typeof body.setupToken === "string" ? body.setupToken.trim() : "";
         if (!setupToken) {
           sendJson(response, 400, { error: "setupToken must be a non-empty string" });
           return;

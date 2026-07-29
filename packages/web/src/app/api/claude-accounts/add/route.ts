@@ -18,10 +18,7 @@ export async function POST(request: Request) {
     const label = typeof body.label === "string" ? body.label.trim() : "";
     const setupToken = typeof body.setupToken === "string" ? body.setupToken.trim() : "";
     if (!setupToken) {
-      return NextResponse.json(
-        { error: "setupToken must be a non-empty string" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "setupToken must be a non-empty string" }, { status: 400 });
     }
     if (label) payload.label = label;
     payload.setupToken = setupToken;

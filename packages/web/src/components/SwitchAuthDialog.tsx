@@ -31,9 +31,8 @@ export function SwitchAuthDialog({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [selected, setSelected] = useState(
     () =>
-      accounts.find(
-        (account) => account.status === "ready" && account.id !== activeAccountId,
-      )?.id ?? "",
+      accounts.find((account) => account.status === "ready" && account.id !== activeAccountId)
+        ?.id ?? "",
   );
   const [force, setForce] = useState(false);
 

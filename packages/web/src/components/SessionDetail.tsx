@@ -2545,7 +2545,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {session.agent === "claude" &&
             (session.claudeAccounts?.filter((account) => account.status === "ready").length ?? 0) >
-            0 ? (
+              0 ? (
               <button
                 type="button"
                 disabled={busyAction !== null}
