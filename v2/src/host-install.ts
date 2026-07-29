@@ -9,6 +9,7 @@ import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
+  hasNvm,
   healNpmrcPrefixLine,
   npmGlobalPrefix,
   npmPinConfigPath,
@@ -722,20 +723,28 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     ok: npmPrefix === expectedPrefix,
     severity: "warn",
     detail: npmPrefix ? `npm prefix is ${npmPrefix}` : "npm prefix unavailable",
-    fix: "npm config set prefix ~/.local --location=global --globalconfig ~/.spur/npmrc",
+    // `spur init` re-derives this exact pin via `ensureNpmPinFile` and is the
+    // preferred fix; the manual fallback must chmod its own target —
+    // `npm config set --location=global` chmods the file it writes to 0666
+    // regardless of umask (verified empirically), which is world-writable
+    // and lets any local user redirect where agent sessions install global
+    // packages.
+    fix: "spur init (or: npm config set prefix ~/.local --location=global --globalconfig ~/.spur/npmrc && chmod 600 ~/.spur/npmrc)",
   });
 
   // Read-only diagnostic (doctor never mutates): a `prefix=`/`globalconfig=`
   // line in `<home>/.npmrc` — Spur's own or an operator's — trips nvm's
-  // `nvm_npmrc_bad_news_bears` guard for every shell that sources
-  // `~/.nvm/nvm.sh`, independent of the env pin above. Gated on nvm actually
-  // being installed: the line is harmless on any host that never sources
-  // `nvm.sh`, so this stays silent there instead of warning about a conflict
-  // that can't occur. Fires on an operator-set value too (nvm breaks either
-  // way); the `fix` is a manual edit rather than `spur reinit` (deliberately
-  // — `runNpmInit`'s `~/.npmrc` surgery only runs there, and `spur reinit`
-  // itself is unsupported on system-unit hosts, see install-from-npm.md).
-  if (existsSync(join(home, ".nvm", "nvm.sh"))) {
+  // `nvm_npmrc_bad_news_bears` guard for every shell that sources nvm's
+  // `nvm.sh`, independent of the env pin above. Gated on nvm actually being
+  // installed (shared `hasNvm` predicate with `healNpmrcPrefixLine`, so the
+  // two conditions can never diverge): the line is harmless on any host that
+  // never sources `nvm.sh`, so this stays silent there instead of warning
+  // about a conflict that can't occur. Fires on an operator-set value too
+  // (nvm breaks either way); the `fix` is a manual edit rather than `spur
+  // reinit` (deliberately — `runNpmInit`'s `~/.npmrc` surgery only runs
+  // there, and `spur reinit` itself is unsupported on system-unit hosts, see
+  // install-from-npm.md).
+  if (hasNvm(home)) {
     let npmrcContents: string | undefined;
     try {
       npmrcContents = readFileSync(join(home, ".npmrc"), "utf8");

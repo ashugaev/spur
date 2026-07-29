@@ -65,9 +65,16 @@ require_cmd loginctl
 # it lives in Spur's own `$HOME/.spur/npmrc`, not `$HOME/.npmrc` — nvm greps
 # `~/.npmrc` for a `prefix=`/`globalconfig=` line and refuses to load when it
 # finds one, so Spur never writes the pin there.
+# This check runs inside `spur init`/`update`/`reinit` itself (`runNpmInit`
+# already called `ensureNpmPinFile` before invoking this script), so a
+# failure here means an explicit prefix pin or a userconfig conflict is
+# overriding it — the fix is the manual command below, not another `spur
+# init` (which would just repeat the same write). Match host-install.ts's
+# `npm-prefix` doctor fix in intent: `--location=global` chmods its target
+# 0666 regardless of umask, so the fix must chmod it back to 0600.
 npm_prefix="$(npm config get prefix --userconfig "$HOME/.npmrc" --globalconfig "$HOME/.spur/npmrc")"
 if [[ "$npm_prefix" != "$HOME/.local" ]]; then
-  die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local"
+  die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local --location=global --globalconfig \"\$HOME/.spur/npmrc\" && chmod 600 \"\$HOME/.spur/npmrc\""
 fi
 
 for f in deploy/spur-daemon.npm.service deploy/spur-web.npm.service dist/cli.js web/dist-server/web-server.js; do

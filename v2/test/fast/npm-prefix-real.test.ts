@@ -9,7 +9,7 @@
 // HOME points elsewhere" side of the scenario is a second, disposable temp
 // dir, not the real account home.
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,12 +29,19 @@ describe("ensureNpmPinFile + healNpmrcPrefixLine (real npm, HOME divergence)", (
   const originalHome = process.env["HOME"];
   const originalLower = process.env["npm_config_prefix"];
   const originalUpper = process.env[NPM_PREFIX_ENV];
+  const originalNvmDir = process.env["NVM_DIR"];
 
   beforeEach(async () => {
     targetHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-target-"));
     ambientHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-ambient-"));
     delete process.env["npm_config_prefix"];
     Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+    // `healNpmrcPrefixLine` is now gated on `hasNvm`, which checks `$NVM_DIR`
+    // before `<home>/.nvm` — clear any ambient nvm install (common on a dev
+    // box) and give `targetHome` its own fake `nvm.sh`, so this spec's
+    // "strips the line" assertion holds independent of the machine running
+    // the suite.
+    Reflect.deleteProperty(process.env, "NVM_DIR");
     // Simulates a caller passing a `home` other than the process's own —
     // never the real account $HOME.
     process.env["HOME"] = ambientHome;
@@ -47,11 +54,16 @@ describe("ensureNpmPinFile + healNpmrcPrefixLine (real npm, HOME divergence)", (
     else process.env["npm_config_prefix"] = originalLower;
     if (originalUpper === undefined) Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
     else process.env[NPM_PREFIX_ENV] = originalUpper;
+    if (originalNvmDir === undefined) Reflect.deleteProperty(process.env, "NVM_DIR");
+    else process.env["NVM_DIR"] = originalNvmDir;
     await rm(targetHome, { recursive: true, force: true });
     await rm(ambientHome, { recursive: true, force: true });
   });
 
   it("writes <targetHome>/.spur/npmrc and edits <targetHome>/.npmrc, never the ambient $HOME's files", async () => {
+    // The heal half only strips the line on nvm hosts (see npm-prefix.ts).
+    await mkdir(join(targetHome, ".nvm"), { recursive: true });
+    await writeFile(join(targetHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
     const tokenLine = "//registry.npmjs.org/:_authToken=fake-token\n";
     await writeFile(
       join(targetHome, ".npmrc"),

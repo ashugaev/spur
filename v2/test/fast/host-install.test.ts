@@ -309,19 +309,45 @@ describe("collectHostInstallChecks", () => {
 
   describe("npmrc-nvm-conflict check", () => {
     let tmpHome: string;
+    // MUST FIX 6: `collectHostInstallChecks` shares `hasNvm` with
+    // `healNpmrcPrefixLine`, which checks `$NVM_DIR` before `<home>/.nvm` —
+    // an ambient `NVM_DIR` on the machine running this suite (common on any
+    // dev box with nvm installed) would otherwise leak into every spec below
+    // and desync them from `tmpHome`. Clear it for the default case; the
+    // dedicated custom-`$NVM_DIR` spec below sets its own.
+    const originalNvmDir = process.env["NVM_DIR"];
 
     beforeEach(async () => {
       tmpHome = await mkdtemp(join(tmpdir(), "spur-host-install-npmrc-conflict-"));
+      Reflect.deleteProperty(process.env, "NVM_DIR");
     });
 
     afterEach(async () => {
       await rm(tmpHome, { recursive: true, force: true });
+      if (originalNvmDir === undefined) Reflect.deleteProperty(process.env, "NVM_DIR");
+      else process.env["NVM_DIR"] = originalNvmDir;
     });
 
     it("is absent entirely when the host has no ~/.nvm/nvm.sh (nvm irrelevant, stays quiet)", async () => {
       await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
       const checks = await collectHostInstallChecks(tmpHome);
       expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toBeUndefined();
+    });
+
+    // MUST FIX 6 regression guard: nvm installed to a custom $NVM_DIR (e.g.
+    // container images) must still trip this check — the old bare
+    // `<home>/.nvm/nvm.sh` existsSync check never fired there.
+    it("fires when nvm is installed to a custom $NVM_DIR outside <home>/.nvm", async () => {
+      const customNvmDir = join(tmpHome, "custom-nvm-location");
+      await mkdir(customNvmDir, { recursive: true });
+      await writeFile(join(customNvmDir, "nvm.sh"), "# fake nvm\n", "utf8");
+      process.env["NVM_DIR"] = customNvmDir;
+      await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
+        ok: false,
+        severity: "warn",
+      });
     });
 
     it("is ok:true when <home>/.npmrc is absent", async () => {

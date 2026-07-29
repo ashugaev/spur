@@ -23,7 +23,7 @@ vi.mock("node:child_process", async () => {
 });
 
 const { runNpmInit } = await import("../../src/host-install.js");
-const { npmPinConfigPath } = await import("../../src/npm-prefix.js");
+const { npmGlobalPrefix, npmPinConfigPath } = await import("../../src/npm-prefix.js");
 
 async function writeFakeCliTree(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "spur-host-install-tailscale-"));
@@ -110,12 +110,19 @@ describe("runNpmInit npm-prefix heal ordering", () => {
     expect(execFileSyncCalls[0]?.command).toBe("bash");
   });
 
-  it("writes no pin file when npm_config_prefix is pinned to a different install prefix", async () => {
+  // MUST FIX 2 regression guard: `ensureNpmPinFile` no longer skips its write
+  // behind an explicit prefix pin — `buildSessionEnv` points
+  // `NPM_CONFIG_GLOBALCONFIG` at this file unconditionally, so skipping the
+  // write left it dangling at a missing file. The write still resolves to
+  // `<home>/.local` (never the overridden value); npm's env layer outranks
+  // it regardless.
+  it("still writes the pin file (content <home>/.local) when npm_config_prefix is pinned to a different install prefix", async () => {
     await writeFile(join(fakeHome, ".npmrc"), "//registry.npmjs.org/:_authToken=fake\n", "utf8");
     process.env["npm_config_prefix"] = "/some/other/install/prefix";
     runNpmInit(cliEntrypoint, {});
     expect(execFileSyncCalls).toHaveLength(1);
     expect(execFileSyncCalls[0]?.command).toBe("bash");
-    await expect(readFile(npmPinConfigPath(fakeHome), "utf8")).rejects.toThrow(/ENOENT/);
+    const pinContents = await readFile(npmPinConfigPath(fakeHome), "utf8");
+    expect(pinContents).toBe(`prefix=${npmGlobalPrefix(fakeHome)}\n`);
   });
 });
