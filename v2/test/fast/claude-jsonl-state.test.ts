@@ -715,4 +715,33 @@ describe("readClaudeJsonlState live model derivation", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("never reports the <synthetic> placeholder model", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/waiting-stop-sequence.jsonl",
+    );
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "live-model-synthetic-"));
+    const tempFile = join(tempDir, "waiting-stop-sequence.jsonl");
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      // The only assistant record is a `<synthetic>` stub, so the header falls
+      // back to the persisted spawn-time model instead of showing the stub.
+      expect(result.liveModel).toBeUndefined();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });

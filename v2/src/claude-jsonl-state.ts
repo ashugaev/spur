@@ -19,7 +19,7 @@ export interface ParsedRecord {
   rateLimited?: boolean;
   /** True when the record is a synthetic `error: "server_error"` API error. */
   serverError?: boolean;
-  /** Model reported by the assistant message, when present. */
+  /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
   timestampMs: number;
 }
@@ -32,6 +32,9 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+// Claude stamps locally-generated placeholder assistant records (API errors,
+// stop-sequence stubs) with this instead of a model id.
+const SYNTHETIC_MODEL = "<synthetic>";
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
 
@@ -39,7 +42,7 @@ export const ACTIVITY_WINDOW_MS = 60_000;
 export function deriveClaudeLiveModel(records: ParsedRecord[]): string | undefined {
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
-    if (record && record.role === "assistant" && typeof record.model === "string") {
+    if (record && record.role === "assistant" && record.model) {
       return record.model;
     }
   }
@@ -253,7 +256,9 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
-      ...(typeof message["model"] === "string" ? { model: message["model"] } : {}),
+      ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
+        ? { model: message["model"] }
+        : {}),
       timestampMs: recordTimestampMs,
     };
   }

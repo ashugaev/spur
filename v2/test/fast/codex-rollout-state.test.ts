@@ -213,6 +213,52 @@ describe("readCodexRolloutState", () => {
     expect(result.model).toBe("gpt-5.5");
   });
 
+  it("reports the model of a fresh rollout file whose only signal is turn_context", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:00.000Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.5-codex" },
+      }),
+      "rollout-turn-context-only.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toEqual({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
+  });
+
+  it("keeps a sibling's rate limit when the newest file carries only a turn_context model", async () => {
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "fresh-model-only.jsonl",
+        content: JSON.stringify({
+          timestamp: "2026-05-10T10:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.5-codex" },
+        }),
+        mtimeMs: 2_000_000_000_000,
+      },
+      {
+        filename: "rate-limited.jsonl",
+        content: JSON.stringify({
+          timestamp: "2026-05-10T09:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: { rate_limit_reached_type: "primary" },
+          },
+        }),
+        mtimeMs: 1_000_000_000_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.model).toBe("gpt-5.5-codex");
+  });
+
   it("ignores turn_aborted events when the reason is not interrupted", async () => {
     const sessionsDir = await makeSessionsDir(
       [

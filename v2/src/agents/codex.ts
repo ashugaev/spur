@@ -807,6 +807,11 @@ export interface CodexRolloutReadResult {
   model?: string;
 }
 
+interface CodexRolloutCandidate {
+  result: CodexRolloutReadResult;
+  mtimeMs: number;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -1024,7 +1029,7 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
-      if (!result.rollout && !result.rateLimit) {
+      if (!result.rollout && !result.rateLimit && !result.model) {
         return null;
       }
       let mtimeMs: number;
@@ -1037,13 +1042,24 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
     }),
   );
   const existing = candidates.filter(
-    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
-      candidate !== null,
+    (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
   if (existing.length === 0) {
     return { rollout: null, rateLimit: null };
   }
-  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  // A just-started rollout file can carry a `turn_context` model before it has
+  // any state or rate-limit line, so it loses both selections below. Rank the
+  // model on its own to keep the live model available from the first turn.
+  const model = existing
+    .filter((candidate) => candidate.result.model)
+    .reduce<CodexRolloutCandidate | null>(
+      (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+      null,
+    )?.result.model;
+  const stateful = existing.filter(
+    (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
+  );
+  const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
   if (withRollout.length > 0) {
     const best = withRollout.reduce((left, right) => {
       const leftTs = left.result.rollout?.timestampMs ?? 0;
@@ -1053,15 +1069,16 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
-    return best.result;
+    return { ...best.result, ...(model ? { model } : {}) };
   }
-  const newestByMtime = existing.reduce((left, right) =>
-    right.mtimeMs > left.mtimeMs ? right : left,
+  const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
+    (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+    null,
   );
   return {
     rollout: null,
-    rateLimit: newestByMtime.result.rateLimit,
-    ...(newestByMtime.result.model ? { model: newestByMtime.result.model } : {}),
+    rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(model ? { model } : {}),
   };
 }
 
