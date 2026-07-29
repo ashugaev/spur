@@ -95,7 +95,10 @@ describe("shared memory storage", () => {
       "build.tmp.notes",
       "zeta",
     ]);
-    expect(hasTmpResidue(dir)).toBe(true);
+    // The legal key "build.tmp.notes" itself contains ".tmp." so
+    // hasTmpResidue(dir) alone would be true even without the planted
+    // residue file. Assert the specific planted filename survived instead.
+    expect(existsSync(join(dir, "foo.md.tmp.1.2"))).toBe(true);
   });
 
   it("overwrites a key last-writer-wins", async () => {

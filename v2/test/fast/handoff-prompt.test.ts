@@ -78,13 +78,16 @@ describe("extractBareUserTask", () => {
   });
 
   it("strips a trailing shared memory section from a plain wrapped prompt", () => {
-    // Idempotency markers already present so the slot/artifacts blocks are
-    // suppressed, leaving only branch naming and shared memory appended.
-    const prompt = withSharedMemoryInstructions(
-      "Add agent handoff button" +
-        "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already." +
-        "\n\nBranch naming:\n- Use `spur-branch create <name>`.",
-    );
+    // Production order: slot/artifacts blocks are suppressed via idempotency
+    // markers, then shared memory is appended, then branch naming is
+    // appended last (session-service.ts composes shared memory before
+    // branch naming). Shared memory must precede branch naming here so the
+    // marker at handoff-prompt.ts's shared-memory section is what strips it.
+    const prompt =
+      withSharedMemoryInstructions(
+        "Add agent handoff button" +
+          "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already.",
+      ) + "\n\nBranch naming:\n- Use `spur-branch create <name>`.";
 
     expect(extractBareUserTask(prompt)).toBe(
       "Add agent handoff button" +
