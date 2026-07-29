@@ -16,7 +16,13 @@ import type { SharedMemoryEntry, SharedMemoryScope } from "./types.js";
 //   <dataDir>/memory/project/<projectId>/<key>.md           — all sessions of a project
 //   <dataDir>/memory/global/<key>.md                        — whole Spur instance
 // Concurrency contract: last-writer-wins per key. No locking by design.
-const SHARED_MEMORY_MARKER = "spur memory set|get|list|rm";
+//
+// This is the block's own section heading, not the CLI usage string — a task prompt
+// that happens to quote `spur memory set|get|list|rm` must not be mistaken for a
+// prompt that already carries the block. handoff-prompt.ts strips the same block by
+// this exact marker, so the two must never drift; it imports this constant rather
+// than redefining the string.
+export const SHARED_MEMORY_SECTION_MARKER = "\n\nShared memory:";
 
 export function assertValidSharedMemoryScope(scope: string): asserts scope is SharedMemoryScope {
   if (scope !== "task" && scope !== "project" && scope !== "global") {
@@ -117,12 +123,10 @@ export function removeSharedMemory(
 }
 
 export function withSharedMemoryInstructions(prompt: string): string {
-  if (prompt.includes(SHARED_MEMORY_MARKER)) {
+  if (prompt.includes(SHARED_MEMORY_SECTION_MARKER)) {
     return prompt;
   }
-  return `${prompt}
-
-Shared memory:
+  return `${prompt}${SHARED_MEMORY_SECTION_MARKER}
 - \`spur memory set|get|list|rm [key] [body] --scope task|project|global\`. One cell per key; \`set\` overwrites; \`--file <path>\` for multiline.
 - On start: \`spur memory list --scope task\` and \`--scope project\`. Read what applies before acting.
 - Write durable facts only: task = this task's requirements/decisions for sibling desk agents; project = hard-won gotchas/invariants; global = user prefs across projects.

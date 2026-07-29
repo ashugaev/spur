@@ -1,6 +1,7 @@
 import type { AgentName, SessionLink, SessionPrBinding } from "./types.js";
 import { HANDOFF_SCREENSHOT_NAME } from "./handoff-screenshot.js";
 import { renderShepherdPrompt } from "./shepherd.js";
+import { SHARED_MEMORY_SECTION_MARKER } from "./shared-memory.js";
 
 const SPUR_TRAILING_SECTION_MARKERS = [
   "\n\nSession metadata:",
@@ -9,7 +10,7 @@ const SPUR_TRAILING_SECTION_MARKERS = [
   "\n\nBranch naming:",
   "\n\nSidecars:",
   "\n\nSelf-destruct:",
-  "\n\nShared memory:",
+  SHARED_MEMORY_SECTION_MARKER,
 ] as const;
 
 const HANDOFF_TASK_STOP_PATTERN =

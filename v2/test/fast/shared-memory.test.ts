@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  SHARED_MEMORY_SECTION_MARKER,
   getSharedMemory,
   listSharedMemoryKeys,
   removeSharedMemory,
@@ -177,5 +178,27 @@ describe("withSharedMemoryInstructions", () => {
     const once = withSharedMemoryInstructions("Ship the feature");
     const twice = withSharedMemoryInstructions(once);
     expect(twice).toBe(once);
+  });
+
+  it("still appends the block when the prompt merely quotes the CLI usage string", () => {
+    // Regression: the guard used to be the literal usage string
+    // "spur memory set|get|list|rm", so a task prompt that happens to quote
+    // that syntax (e.g. asking to implement the command, or to edit the
+    // memory section of docs/commands.md) made the guard match and silently
+    // skipped appending the block.
+    const prompt = withSharedMemoryInstructions(
+      "implement `spur memory set|get|list|rm ...` in the CLI",
+    );
+
+    expect(prompt.split("Shared memory:").length - 1).toBe(1);
+    expect(prompt).toContain("On start: `spur memory list --scope task`");
+  });
+
+  it("does not append a second block when the prompt already carries the section heading", () => {
+    const alreadyWrapped = `Ship the feature${SHARED_MEMORY_SECTION_MARKER}\n- custom notes`;
+    const prompt = withSharedMemoryInstructions(alreadyWrapped);
+
+    expect(prompt).toBe(alreadyWrapped);
+    expect(prompt.split("Shared memory:").length - 1).toBe(1);
   });
 });
