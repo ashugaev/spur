@@ -157,6 +157,15 @@ describe("ensureDefaultAccount", () => {
     expect(listAccounts(dataDir)).toHaveLength(1);
   });
 
+  it("does not append legacy default when default was re-enrolled as setup-token", () => {
+    writeFileSync(join(defaultConfigDir, ".credentials.json"), "{}", "utf-8");
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+    const account = enrollSetupToken(dataDir, "default", "replacement-token");
+    ensureDefaultAccount(dataDir, defaultConfigDir);
+
+    expect(listAccounts(dataDir)).toEqual([account]);
+  });
+
   it("absent-noop: no credentials, store stays empty", () => {
     ensureDefaultAccount(dataDir, defaultConfigDir);
     expect(listAccounts(dataDir)).toEqual([]);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { isSpurDaemonError, spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import type { ClaudeAccountSummary } from "@/lib/types";
 
 interface RouteContext {
@@ -24,6 +24,9 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to enroll Claude account";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return NextResponse.json(
+      { error: message },
+      { status: isSpurDaemonError(error) ? error.status : 502 },
+    );
   }
 }

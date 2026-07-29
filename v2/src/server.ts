@@ -612,7 +612,9 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/claude-accounts") {
-        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        sendJson(response, 200, {
+          accounts: service.listClaudeAccounts({ adoptDefault: true }),
+        });
         return;
       }
 

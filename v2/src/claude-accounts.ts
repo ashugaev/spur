@@ -408,7 +408,15 @@ export function ensureDefaultAccount(
 ): void {
   if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
   const existing = listAccounts(dataDir);
-  if (existing.some((account) => account.kind === "legacy_profile" && account.configDir === defaultConfigDir)) return;
+  if (
+    existing.some(
+      (account) =>
+        account.id === "default" ||
+        (account.kind === "legacy_profile" && account.configDir === defaultConfigDir),
+    )
+  ) {
+    return;
+  }
   const account: LegacyClaudeAccount = {
     kind: "legacy_profile",
     id: "default",

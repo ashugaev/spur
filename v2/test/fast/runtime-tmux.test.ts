@@ -109,6 +109,72 @@ describe("runtime-tmux", () => {
     expect(newSessionCall?.[2]?.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
   });
 
+  it("appends Claude token import without flattening tmux update-environment", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args[0] === "show-options" ? "DISPLAY SSH_AUTH_SOCK" : "",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-auth",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude",
+      agent: "claude",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "selected" },
+    });
+
+    expect(
+      execFileAsyncMock.mock.calls.some(
+        ([file, args]) =>
+          file === "tmux" &&
+          args.join("\0") ===
+            [
+              "set-option",
+              "-ag",
+              "update-environment",
+              "CLAUDE_CODE_OAUTH_TOKEN",
+            ].join("\0"),
+      ),
+    ).toBe(true);
+  });
+
+  it("fails launch when Claude token import cannot be configured", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "show-options") throw new Error("tmux option unavailable");
+      return { stdout: "", stderr: "" };
+    });
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxSession({
+        sessionName: "api-auth",
+        cwd: "/tmp/worktree",
+        launchCommand: "claude",
+        agent: "claude",
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "selected" },
+      }),
+    ).rejects.toThrow("tmux option unavailable");
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("new-session"))).toBe(
+      false,
+    );
+  });
+
+  it("asserts the imported Claude token by fingerprint without exposing the token", async () => {
+    execFileAsyncMock.mockResolvedValue({
+      stdout: "CLAUDE_CODE_OAUTH_TOKEN=selected",
+      stderr: "",
+    });
+    const { assertTmuxClaudeTokenFingerprint } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      assertTmuxClaudeTokenFingerprint("api-auth", "sha256:d7cbbb688b2e506c"),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertTmuxClaudeTokenFingerprint("api-auth", "sha256:wrong"),
+    ).rejects.toThrow("selected setup-token");
+  });
+
   it("never exposes a selected token through failed tmux argv or errors", async () => {
     const sentinel = "setup-token-argv-sentinel";
     execFileAsyncMock.mockImplementation(async (_file, args) => {

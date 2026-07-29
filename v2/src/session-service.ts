@@ -164,6 +164,7 @@ import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
+  assertTmuxClaudeTokenFingerprint,
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
@@ -7750,6 +7751,7 @@ export class SessionService {
           },
           { persist: false, allowFreshFallback: false, strictClaudeResume: true },
         );
+        await assertTmuxClaudeTokenFingerprint(candidate.tmuxSession, account.tokenFingerprint);
         const { claudeAuthSwitch: _intent, ...candidateWithoutIntent } = candidate;
         const committed: SessionRecord = {
           ...candidateWithoutIntent,
@@ -7861,8 +7863,10 @@ export class SessionService {
     return true;
   }
 
-  listClaudeAccounts(): PublicClaudeAccount[] {
-    ensureDefaultAccount(this.config.dataDir);
+  listClaudeAccounts(opts: { adoptDefault?: boolean } = {}): PublicClaudeAccount[] {
+    if (opts.adoptDefault === true) {
+      ensureDefaultAccount(this.config.dataDir);
+    }
     return listAccounts(this.config.dataDir).map((account) =>
       publicAccount(this.config.dataDir, account),
     );
@@ -7880,6 +7884,7 @@ export class SessionService {
   }
 
   async enrollClaudeAccount(accountId: string, setupToken: string): Promise<PublicClaudeAccount> {
+    ensureDefaultAccount(this.config.dataDir);
     this.assertClaudeAccountNotLive(accountId, "re-enroll");
     await validateClaudeSetupToken(setupToken);
     return publicAccount(

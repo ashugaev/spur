@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -341,18 +341,31 @@ function buildEnvArgs(env?: Record<string, string>): string[] {
 }
 
 async function ensureClaudeTokenImport(): Promise<void> {
-  try {
-    const current = await tmux("show-options", "-gv", "update-environment");
-    if (!current.split(/\s+/).includes("CLAUDE_CODE_OAUTH_TOKEN")) {
-      await tmux(
-        "set-option",
-        "-g",
-        "update-environment",
-        `${current} CLAUDE_CODE_OAUTH_TOKEN`.trim(),
-      );
-    }
-  } catch {
-    // A new tmux server will load the same setting from tmux.conf.
+  const current = await tmux("show-options", "-gv", "update-environment");
+  if (!current.split(/\s+/).includes("CLAUDE_CODE_OAUTH_TOKEN")) {
+    await tmux("set-option", "-ag", "update-environment", "CLAUDE_CODE_OAUTH_TOKEN");
+  }
+}
+
+function setupTokenFingerprint(setupToken: string): string {
+  return `sha256:${createHash("sha256").update(setupToken).digest("hex").slice(0, 16)}`;
+}
+
+export async function assertTmuxClaudeTokenFingerprint(
+  sessionName: string,
+  expectedFingerprint: string,
+): Promise<void> {
+  const value = await tmux(
+    "show-environment",
+    "-t",
+    exactSessionTarget(sessionName),
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  );
+  const token = value.startsWith("CLAUDE_CODE_OAUTH_TOKEN=")
+    ? value.slice("CLAUDE_CODE_OAUTH_TOKEN=".length)
+    : "";
+  if (!token || setupTokenFingerprint(token) !== expectedFingerprint) {
+    throw new Error("Claude auth switch did not import the selected setup-token into tmux");
   }
 }
 

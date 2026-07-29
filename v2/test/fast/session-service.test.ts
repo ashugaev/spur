@@ -96,6 +96,7 @@ const setTmuxSocketNameMock = vi.fn();
 const tmuxPaneDeadMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const waitForTmuxReadyMock = vi.fn();
+const assertTmuxClaudeTokenFingerprintMock = vi.fn();
 const createWorktreeMock = vi.fn();
 const findWorktreePathForBranchMock = vi.fn();
 const hasUncommittedChangesMock = vi.fn();
@@ -419,6 +420,7 @@ vi.mock("../../src/port-probe.js", () => ({
 }));
 
 vi.mock("../../src/runtime-tmux.js", () => ({
+  assertTmuxClaudeTokenFingerprint: assertTmuxClaudeTokenFingerprintMock,
   captureTmuxPane: captureTmuxPaneMock,
   createTmuxSession: createTmuxSessionMock,
   createTmuxCommandSession: createTmuxCommandSessionMock,
@@ -970,6 +972,7 @@ describe("SessionService", () => {
     tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
+    assertTmuxClaudeTokenFingerprintMock.mockReset().mockResolvedValue(undefined);
     createWorktreeMock.mockReset().mockResolvedValue("/tmp/spur-worktrees/api/api-1");
     findWorktreePathForBranchMock.mockReset().mockResolvedValue(null);
     hasUncommittedChangesMock.mockReset().mockResolvedValue(false);
@@ -3851,6 +3854,7 @@ describe("SessionService", () => {
 
       expect(view.activeClaudeAccountId).toBe("backup");
       expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+      expect(assertTmuxClaudeTokenFingerprintMock).toHaveBeenCalledWith("api-1", "sha256:backup");
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
@@ -3944,6 +3948,34 @@ describe("SessionService", () => {
       await expect(
         service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
       ).rejects.toThrow(/previous Claude account restored/);
+      expect(sessions.get("api-1")).toMatchObject({
+        claudeAccountId: "primary",
+        claudeAccountFingerprint: "sha256:primary",
+      });
+      expect(sessions.get("api-1")?.claudeAuthSwitch).toBeUndefined();
+    });
+
+    it("rolls back when the relaunched tmux session does not import the selected token", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          claudeAccountId: "primary",
+          claudeAccountFingerprint: "sha256:primary",
+        }),
+      );
+      seedAccounts();
+      mockStrictResume();
+      assertTmuxClaudeTokenFingerprintMock.mockRejectedValueOnce(new Error("wrong token"));
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+      ).rejects.toThrow(/previous Claude account restored/);
+      expect(assertTmuxClaudeTokenFingerprintMock).toHaveBeenCalledWith("api-1", "sha256:backup");
       expect(sessions.get("api-1")).toMatchObject({
         claudeAccountId: "primary",
         claudeAccountFingerprint: "sha256:primary",
@@ -4205,11 +4237,12 @@ describe("SessionService", () => {
   });
 
   describe("listClaudeAccounts", () => {
-    it("calls ensureDefaultAccount before listing", async () => {
+    it("keeps internal reads read-only and adopts default only when requested", async () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      ensureDefaultAccountMock.mockClear();
       service.listClaudeAccounts();
+      expect(ensureDefaultAccountMock).not.toHaveBeenCalled();
+      service.listClaudeAccounts({ adoptDefault: true });
       expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
       service.dispose();
     });

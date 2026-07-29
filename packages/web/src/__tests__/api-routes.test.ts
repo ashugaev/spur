@@ -2574,6 +2574,20 @@ describe("Spur web API routes", () => {
       expect(await response.text()).not.toContain("replacement-token");
     });
 
+    it("POST /api/claude-accounts/:id/enroll preserves daemon conflict status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("account is in use", 409));
+      const response = await enrollClaudeAccount(
+        new Request("http://localhost:3000/api/claude-accounts/acc-1/enroll", {
+          method: "POST",
+          body: JSON.stringify({ setupToken: "replacement-token" }),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "account is in use" });
+    });
+
     it("rejects an empty setup token before contacting the daemon", async () => {
       const response = await addClaudeAccount(
         new Request("http://localhost:3000/api/claude-accounts/add", {

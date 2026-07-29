@@ -1413,6 +1413,50 @@ describe("startServer", () => {
     }
   });
 
+  it("GET /claude-accounts adopts the default account before listing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const listAccountsSpy = vi.spyOn(SessionService.prototype, "listClaudeAccounts").mockReturnValue([
+      { id: "default", label: "default", status: "legacy" },
+    ]);
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts`);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        accounts: [{ id: "default", label: "default", status: "legacy" }],
+      });
+      expect(listAccountsSpy).toHaveBeenCalledWith({ adoptDefault: true });
+    } finally {
+      listAccountsSpy.mockRestore();
+      await server.stop();
+    }
+  });
+
   it("POST /claude-accounts/add returns a summary account without the absolute configDir", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
