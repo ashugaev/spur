@@ -56,6 +56,7 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFileTolerant } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
@@ -2761,6 +2762,13 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: `ensureNpmGlobalPrefixConfigured`'s only caller was `spur
+      // init`/`update`/`reinit` (`runNpmInit`) — a source-install / main-
+      // deploy host that never runs those never gets the pin file every
+      // agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it unconditionally instead (see npm-prefix.ts).
+      ensureNpmPinFileTolerant((message) => writeStderr(`spur: ${message}`));
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",

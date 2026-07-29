@@ -318,7 +318,15 @@ describe("collectHostInstallChecks", () => {
       await rm(tmpHome, { recursive: true, force: true });
     });
 
+    it("is absent entirely when the host has no ~/.nvm/nvm.sh (nvm irrelevant, stays quiet)", async () => {
+      await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toBeUndefined();
+    });
+
     it("is ok:true when <home>/.npmrc is absent", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
       const checks = await collectHostInstallChecks(tmpHome);
       expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
         ok: true,
@@ -327,6 +335,8 @@ describe("collectHostInstallChecks", () => {
     });
 
     it("is ok:true when <home>/.npmrc has no prefix=/globalconfig= line", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
       await writeFile(join(tmpHome, ".npmrc"), "//registry.npmjs.org/:_authToken=fake\n", "utf8");
       const checks = await collectHostInstallChecks(tmpHome);
       expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
@@ -335,16 +345,20 @@ describe("collectHostInstallChecks", () => {
       });
     });
 
-    it("is ok:false when <home>/.npmrc has a prefix= line, including an operator-set one", async () => {
+    it("is ok:false when <home>/.npmrc has a prefix= line, including an operator-set one, with a manual fix (not spur reinit)", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
       await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
       const checks = await collectHostInstallChecks(tmpHome);
-      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
-        ok: false,
-        severity: "warn",
-      });
+      const check = checks.find((c) => c.id === "npmrc-nvm-conflict");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain(join(tmpHome, ".npmrc"));
+      expect(check?.fix).not.toContain("spur reinit");
     });
 
     it("is ok:false when <home>/.npmrc has a globalconfig= line", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
       await writeFile(join(tmpHome, ".npmrc"), "globalconfig=/some/other/npmrc\n", "utf8");
       const checks = await collectHostInstallChecks(tmpHome);
       expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({

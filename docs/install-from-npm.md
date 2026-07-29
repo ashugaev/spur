@@ -21,9 +21,9 @@ spur init                           # installs + starts the systemd user units
 
 Two non-obvious points:
 
-- Prefix must be `~/.local`. A system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH and persist it for new logins so bare `spur` resolves. The manual `npm config set prefix ~/.local` above is only needed once, before the first `npm install -g @shugaev/spur`. The persisted pin lives in Spur's own `~/.spur/npmrc` (not `~/.npmrc` — `nvm` refuses to load whenever it sees a `prefix=`/`globalconfig=` line there), set as npm's `--globalconfig`; `spur init`/`update`/`reinit` write it and strip any Spur-authored `prefix=` line back out of `~/.npmrc` so `nvm`-sourcing shells keep working.
+- Prefix must be `~/.local`. A system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH and persist it for new logins so bare `spur` resolves. The manual `npm config set prefix ~/.local` above (which writes into `~/.npmrc`) is only needed once, to get the very first `npm install -g @shugaev/spur` itself to land in `~/.local` before Spur exists to pin anything. Once the daemon has started at least once (every `daemon start` — `spur init`/`update`/`reinit`, a plain reboot, or a `systemctl restart` all trigger one), the persisted pin lives in Spur's own `~/.spur/npmrc` instead (not `~/.npmrc` — `nvm` refuses to load whenever it sees a `prefix=`/`globalconfig=` line there), set as npm's `--globalconfig`. `spur init`/`update`/`reinit` additionally strip a Spur-authored `prefix=` line back out of `~/.npmrc` so `nvm`-sourcing shells keep working; a plain daemon boot does not touch `~/.npmrc` (mutating a shared file on every restart is unacceptable) — `spur doctor`'s `npmrc-nvm-conflict` check flags a leftover line and gives the manual one-liner to remove it on hosts that can't run `spur reinit` (system-unit hosts, see below).
 - `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger.
-- Every agent session carries `NPM_CONFIG_GLOBALCONFIG=~/.spur/npmrc` (both env casings) in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session, independent of whatever `~/.npmrc` currently says. Sidecars, project services, and the Claude OAuth login pane do NOT inherit this pin — Spur strips it (along with `NPM_CONFIG_PREFIX`/`PREFIX`) so those panes can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards; a bare `npm install -g` in one of those panes falls back to npm's system prefix.
+- Every agent session carries `NPM_CONFIG_GLOBALCONFIG=~/.spur/npmrc` (both env casings) in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session, independent of whatever `~/.npmrc` currently says. Sidecars, project services, and the Claude OAuth login pane do NOT inherit this pin — Spur strips it (along with `NPM_CONFIG_PREFIX`/`PREFIX`) so those panes can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards; a bare `npm install -g` in one of those panes falls back to npm's system prefix. `~/.npmrc` itself no longer carries the prefix once Spur has run — a bare `npm install -g` in a plain login shell (not an agent session) needs an explicit `--prefix ~/.local`, or use `spur update` (below), which derives it automatically.
 
 Units installed:
 
@@ -35,8 +35,8 @@ Units installed:
 Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
 
 ```bash
-command -v claude >/dev/null || npm install -g @anthropic-ai/claude-code
-command -v codex  >/dev/null || npm install -g @openai/codex
+command -v claude >/dev/null || npm install -g --prefix ~/.local @anthropic-ai/claude-code
+command -v codex  >/dev/null || npm install -g --prefix ~/.local @openai/codex
 ```
 
 Each still needs a login under your own account (`claude`, or `codex login`) before it can spawn sessions — interactive, not scriptable. A setup agent or unattended install can't log you in, so it leaves every login to the operator TODO below.
@@ -92,11 +92,10 @@ spur spawn <project-id> --branch <branch> "smoke test" --json
 ## Upgrade
 
 ```bash
-npm install -g @shugaev/spur@latest
-spur init      # or: spur update
+spur update
 ```
 
-Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). `install-and-restart.sh` and `POST /deploy/switch` restart only — they don't refresh units.
+`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). `install-and-restart.sh` and `POST /deploy/switch` restart only — they don't refresh units.
 
 ## Security
 
@@ -115,7 +114,7 @@ Re-run `spur init` / `spur update`, not a bare `systemctl restart`: restart reus
 
 ## System-wide units (advanced)
 
-`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon; restart the system units directly, and re-copy the templates when a version changes the unit contract.
+`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon; restart the system units directly, and re-copy the templates when a version changes the unit contract. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
 
 ## Reference
 

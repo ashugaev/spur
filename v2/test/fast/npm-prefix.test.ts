@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,6 +11,9 @@ import {
   npmGlobalPrefix,
   npmPinConfigPath,
   ensureNpmGlobalPrefixConfigured,
+  ensureNpmPinFile,
+  ensureNpmPinFileTolerant,
+  healNpmrcPrefixLine,
 } from "../../src/npm-prefix.js";
 
 const TOKEN_ONLY_NPMRC = "//registry.npmjs.org/:_authToken=fake-token\n";
@@ -102,8 +106,12 @@ describe("ensureNpmGlobalPrefixConfigured", () => {
     await writeFile(join(tmpHome, ".npmrc"), TOKEN_ONLY_NPMRC, "utf8");
     ensureNpmGlobalPrefixConfigured(tmpHome);
 
-    const pinContents = await readFile(npmPinConfigPath(tmpHome), "utf8");
+    const pinPath = npmPinConfigPath(tmpHome);
+    const pinContents = await readFile(pinPath, "utf8");
     expect(pinContents).toBe(`prefix=${npmGlobalPrefix(tmpHome)}\n`);
+    // AC1: pin file must be mode 0600 — it is Spur-owned config outside the
+    // user's own `~/.npmrc`, no reason for group/other access.
+    expect(statSync(pinPath).mode & 0o777).toBe(0o600);
 
     const npmrcContents = await readFile(join(tmpHome, ".npmrc"), "utf8");
     expect(npmrcContents).toBe(TOKEN_ONLY_NPMRC);
@@ -167,5 +175,138 @@ describe("ensureNpmGlobalPrefixConfigured", () => {
 
     const pinContents = await readFile(npmPinConfigPath(tmpHome), "utf8");
     expect(pinContents).toBe(`prefix=${npmGlobalPrefix(tmpHome)}\n`);
+  });
+});
+
+// MUST FIX 1: `ensureNpmGlobalPrefixConfigured` split so the pin-file write
+// (boot-safe, called on every daemon start) and the `~/.npmrc` heal
+// (`runNpmInit`-only, never on every boot) are independently callable.
+describe("ensureNpmPinFile (boot-safe half)", () => {
+  let tmpHome: string;
+  const originalLower = process.env["npm_config_prefix"];
+  const originalUpper = process.env[NPM_PREFIX_ENV];
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-pinfile-"));
+    delete process.env["npm_config_prefix"];
+    Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+  });
+
+  afterEach(async () => {
+    await rm(tmpHome, { recursive: true, force: true });
+    if (originalLower === undefined) delete process.env["npm_config_prefix"];
+    else process.env["npm_config_prefix"] = originalLower;
+    if (originalUpper === undefined) Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+    else process.env[NPM_PREFIX_ENV] = originalUpper;
+  });
+
+  it("writes the pin file and never touches .npmrc, even when .npmrc carries a Spur-authored prefix= line", async () => {
+    const npmrcWithSpurLine = `//registry.npmjs.org/:_authToken=fake-token\nprefix=${npmGlobalPrefix(tmpHome)}\n`;
+    await writeFile(join(tmpHome, ".npmrc"), npmrcWithSpurLine, "utf8");
+
+    ensureNpmPinFile(tmpHome);
+
+    const pinContents = await readFile(npmPinConfigPath(tmpHome), "utf8");
+    expect(pinContents).toBe(`prefix=${npmGlobalPrefix(tmpHome)}\n`);
+    // The heal half never ran — the .npmrc byte content is unchanged.
+    const npmrcContents = await readFile(join(tmpHome, ".npmrc"), "utf8");
+    expect(npmrcContents).toBe(npmrcWithSpurLine);
+  });
+
+  it("is idempotent across repeated calls (safe to call on every daemon restart)", async () => {
+    ensureNpmPinFile(tmpHome);
+    ensureNpmPinFile(tmpHome);
+    ensureNpmPinFile(tmpHome);
+
+    const pinContents = await readFile(npmPinConfigPath(tmpHome), "utf8");
+    expect(pinContents).toBe(`prefix=${npmGlobalPrefix(tmpHome)}\n`);
+  });
+
+  it("writes nothing when an explicit prefix override points elsewhere", async () => {
+    process.env["npm_config_prefix"] = "/different/install/prefix";
+    ensureNpmPinFile(tmpHome);
+    await expect(readFile(npmPinConfigPath(tmpHome), "utf8")).rejects.toThrow(/ENOENT/);
+  });
+});
+
+// `daemon start` calls `ensureNpmPinFileTolerant`, never `ensureNpmPinFile`
+// directly, so a read-only-FS/permissions failure reports instead of
+// crashing boot.
+describe("ensureNpmPinFileTolerant", () => {
+  let tmpHome: string;
+  const originalLower = process.env["npm_config_prefix"];
+  const originalUpper = process.env[NPM_PREFIX_ENV];
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-tolerant-"));
+    delete process.env["npm_config_prefix"];
+    Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+  });
+
+  afterEach(async () => {
+    await rm(tmpHome, { recursive: true, force: true });
+    if (originalLower === undefined) delete process.env["npm_config_prefix"];
+    else process.env["npm_config_prefix"] = originalLower;
+    if (originalUpper === undefined) Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+    else process.env[NPM_PREFIX_ENV] = originalUpper;
+  });
+
+  it("writes the pin file and never calls onError on success", async () => {
+    const messages: string[] = [];
+    ensureNpmPinFileTolerant((message) => messages.push(message), tmpHome);
+    expect(messages).toEqual([]);
+    const pinContents = await readFile(npmPinConfigPath(tmpHome), "utf8");
+    expect(pinContents).toBe(`prefix=${npmGlobalPrefix(tmpHome)}\n`);
+  });
+
+  it("reports a write failure via onError instead of throwing", async () => {
+    // Collide the pin directory with a plain file so `mkdirSync(..., { recursive: true })` fails.
+    await writeFile(join(tmpHome, ".spur"), "not a directory", "utf8");
+    const messages: string[] = [];
+    expect(() =>
+      ensureNpmPinFileTolerant((message) => messages.push(message), tmpHome),
+    ).not.toThrow();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("failed to write npm global-prefix pin file");
+  });
+});
+
+describe("healNpmrcPrefixLine (runNpmInit-only half)", () => {
+  let tmpHome: string;
+  const originalLower = process.env["npm_config_prefix"];
+  const originalUpper = process.env[NPM_PREFIX_ENV];
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), "spur-npm-prefix-heal-only-"));
+    // Ambient shell env can carry NPM_CONFIG_PREFIX/npm_config_prefix pinned
+    // at the real host home (this repo's own dev-shell fix for #618) — clear
+    // it so `explicitPrefixOverridden` compares against `tmpHome`, not the
+    // real host's `~/.local`.
+    delete process.env["npm_config_prefix"];
+    Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+  });
+
+  afterEach(async () => {
+    await rm(tmpHome, { recursive: true, force: true });
+    if (originalLower === undefined) delete process.env["npm_config_prefix"];
+    else process.env["npm_config_prefix"] = originalLower;
+    if (originalUpper === undefined) Reflect.deleteProperty(process.env, NPM_PREFIX_ENV);
+    else process.env[NPM_PREFIX_ENV] = originalUpper;
+  });
+
+  it("removes a Spur-authored prefix= line without needing the pin file to exist first", async () => {
+    const tokenLine = "//registry.npmjs.org/:_authToken=fake-token\n";
+    await writeFile(
+      join(tmpHome, ".npmrc"),
+      `${tokenLine}prefix=${npmGlobalPrefix(tmpHome)}\n`,
+      "utf8",
+    );
+
+    healNpmrcPrefixLine(tmpHome);
+
+    const npmrcContents = await readFile(join(tmpHome, ".npmrc"), "utf8");
+    expect(npmrcContents).toBe(tokenLine);
+    // The pin-file half never ran.
+    await expect(readFile(npmPinConfigPath(tmpHome), "utf8")).rejects.toThrow(/ENOENT/);
   });
 });

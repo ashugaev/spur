@@ -15,7 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { npmGlobalPrefix, npmPinConfigPath } from "../../src/npm-prefix.js";
+import {
+  NPM_GLOBALCONFIG_ENV,
+  NPM_GLOBALCONFIG_ENV_LOWER,
+  npmGlobalPrefix,
+  npmPinConfigPath,
+} from "../../src/npm-prefix.js";
 import { _buildSessionEnvForTests } from "../../src/session-service.js";
 
 const TOKEN_ONLY_NPMRC = "//registry.npmjs.org/:_authToken=fake-token\n";
@@ -61,7 +66,7 @@ describe("buildSessionEnv's npm prefix pin (real npm, conflicting inherited lowe
     expect(sessionEnv["npm_config_prefix"]).toBeUndefined();
   });
 
-  it("resolves to <HOME>/.local even with a conflicting inherited lowercase npm_config_globalconfig inserted first", async () => {
+  it("resolves to <HOME>/.local even with a conflicting decoy pre-seeded in both casings, positioned to win under npm's last-casing-wins rule unless buildSessionEnv actually pins both", async () => {
     // `tmpHome` stands in for the session's `$HOME` so the spawned `npm`
     // reads a disposable `.npmrc`, and the pin is re-pointed at a temp pin
     // file rather than the real host's `~/.spur/npmrc` — never touches this
@@ -70,22 +75,45 @@ describe("buildSessionEnv's npm prefix pin (real npm, conflicting inherited lowe
     const pinFile = join(tmpHome, "pin-npmrc");
     await writeFile(pinFile, `prefix=${expected}\n`, "utf8");
 
-    // Matches the exact ordering the reviewer's shell experiment showed
-    // defeats a single-case pin: an inherited lowercase `npm_config_*` key
-    // set before the uppercase one is overwritten by it, because npm's own
-    // config resolution processes whichever casing it encounters last. This
-    // is the ordering a session's env can end up in once tmux (not this
-    // process's own env, which is untouched) merges the daemon's inherited
-    // `process.env` — see session-service.ts's buildSessionEnv comment.
+    const sessionEnv = _buildSessionEnvForTests({
+      agent: "claude",
+      projectId: "api",
+      sessionId: "api-1",
+      sessionToolDir: join(dataDir, "tools"),
+      dataDir,
+      repoPath: join(dataDir, "repo"),
+      symlinks: [],
+    });
+
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: tmpHome };
     delete env["NPM_CONFIG_PREFIX"];
     delete env["npm_config_prefix"];
     delete env["NPM_CONFIG_GLOBALCONFIG"];
     delete env["npm_config_globalconfig"];
     delete env["npm_config_userconfig"];
-    env["npm_config_globalconfig"] = "/nonexistent/decoy-globalconfig";
-    env["NPM_CONFIG_GLOBALCONFIG"] = pinFile;
-    env["npm_config_globalconfig"] = pinFile;
+
+    // Pre-seed BOTH casings with an identical decoy, uppercase inserted
+    // before lowercase — the exact ordering the reviewer's shell experiment
+    // showed defeats a single-casing pin (npm's own config resolution takes
+    // whichever casing it encounters last; here, lowercase). Reassigning an
+    // already-present object key never moves its enumeration position, so
+    // this relative order survives the overwrite below regardless of what
+    // `sessionEnv` does to each key.
+    env[NPM_GLOBALCONFIG_ENV] = "/nonexistent/decoy-globalconfig";
+    env[NPM_GLOBALCONFIG_ENV_LOWER] = "/nonexistent/decoy-globalconfig";
+
+    // Overwrite each key IN PLACE with `buildSessionEnv`'s real output for
+    // that same name, gated on `sessionEnv` actually setting it — deriving
+    // from the real session env instead of hardcoding both names, so this
+    // test fails if `buildSessionEnv` regresses to pinning only one of the
+    // two casings (the other casing's decoy is left standing instead of
+    // silently disappearing).
+    if (sessionEnv[NPM_GLOBALCONFIG_ENV] !== undefined) {
+      env[NPM_GLOBALCONFIG_ENV] = pinFile;
+    }
+    if (sessionEnv[NPM_GLOBALCONFIG_ENV_LOWER] !== undefined) {
+      env[NPM_GLOBALCONFIG_ENV_LOWER] = pinFile;
+    }
 
     expect(resolvedGlobalRoot(env)).toBe(join(expected, "lib", "node_modules"));
   });

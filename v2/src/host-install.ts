@@ -726,30 +726,36 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   // Read-only diagnostic (doctor never mutates): a `prefix=`/`globalconfig=`
   // line in `<home>/.npmrc` — Spur's own or an operator's — trips nvm's
   // `nvm_npmrc_bad_news_bears` guard for every shell that sources
-  // `~/.nvm/nvm.sh`, independent of the env pin above. Fires on an
-  // operator-set value too (nvm breaks either way); the `fix` string covers
-  // that case since Spur must never remove a line it didn't author.
-  let npmrcContents: string | undefined;
-  try {
-    npmrcContents = readFileSync(join(home, ".npmrc"), "utf8");
-  } catch {
-    npmrcContents = undefined;
+  // `~/.nvm/nvm.sh`, independent of the env pin above. Gated on nvm actually
+  // being installed: the line is harmless on any host that never sources
+  // `nvm.sh`, so this stays silent there instead of warning about a conflict
+  // that can't occur. Fires on an operator-set value too (nvm breaks either
+  // way); the `fix` is a manual edit rather than `spur reinit` (deliberately
+  // — `runNpmInit`'s `~/.npmrc` surgery only runs there, and `spur reinit`
+  // itself is unsupported on system-unit hosts, see install-from-npm.md).
+  if (existsSync(join(home, ".nvm", "nvm.sh"))) {
+    let npmrcContents: string | undefined;
+    try {
+      npmrcContents = readFileSync(join(home, ".npmrc"), "utf8");
+    } catch {
+      // Absent .npmrc: npmrcContents stays undefined, no conflict possible.
+    }
+    const npmrcHasNvmIncompatibleLine =
+      npmrcContents !== undefined && /^\s*(prefix|globalconfig)\s*=/m.test(npmrcContents);
+    checks.push({
+      id: "npmrc-nvm-conflict",
+      ok: !npmrcHasNvmIncompatibleLine,
+      severity: "warn",
+      detail: npmrcHasNvmIncompatibleLine
+        ? `${join(home, ".npmrc")} has a prefix=/globalconfig= line — nvm refuses to load in any shell that sources it`
+        : `${join(home, ".npmrc")} has no prefix=/globalconfig= line`,
+      ...(npmrcHasNvmIncompatibleLine
+        ? {
+            fix: `remove the prefix=/globalconfig= line from ${join(home, ".npmrc")} by hand (nvm refuses to load while one is present); a line reading "prefix=${expectedPrefix}" is Spur's own stray pin — the persisted pin now lives in ${npmPinConfigPath(home)} instead`,
+          }
+        : {}),
+    });
   }
-  const npmrcHasNvmIncompatibleLine =
-    npmrcContents !== undefined && /^\s*(prefix|globalconfig)\s*=/m.test(npmrcContents);
-  checks.push({
-    id: "npmrc-nvm-conflict",
-    ok: !npmrcHasNvmIncompatibleLine,
-    severity: "warn",
-    detail: npmrcHasNvmIncompatibleLine
-      ? `${join(home, ".npmrc")} has a prefix=/globalconfig= line — nvm refuses to load in any shell that sources it`
-      : `${join(home, ".npmrc")} has no prefix=/globalconfig= line`,
-    ...(npmrcHasNvmIncompatibleLine
-      ? {
-          fix: "spur reinit (removes Spur's prefix= line; an operator-set prefix= must be removed by hand)",
-        }
-      : {}),
-  });
 
   // F1/C1/C2/E1/E2 share this single read-only, non-bootstrapping instance-
   // config read (never triggers `ensureInstanceConfig`'s bootstrap write). A
