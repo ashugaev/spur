@@ -36,7 +36,7 @@ import {
   type RollbackState,
   type UpdateInProgress,
 } from "./update-state.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
@@ -203,7 +203,7 @@ export function createRealUpdateDeps(
       }
       reinitUnits(cliEntrypoint);
     },
-    currentVersion: version,
+    currentVersion: getVersion(),
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),
     writeState: (state) => writeState(statePath, state),

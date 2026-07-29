@@ -68,7 +68,9 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
-import { version } from "../../src/version.js";
+import { getVersion } from "../../src/version.js";
+
+const version = getVersion();
 
 // Resolved once, up front — used as `writeFileSyncMock`'s default
 // passthrough implementation every test, independent of whether

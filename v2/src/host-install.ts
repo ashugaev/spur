@@ -15,7 +15,7 @@ import {
   type ProbeReason,
   type ServiceId,
 } from "./update-health.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 
 // C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
@@ -660,7 +660,8 @@ export async function checkServiceHealth(
 // was unreachable (no version to compare).
 export function checkVersionDrift(daemonVersion: string | undefined): HostInstallCheck | undefined {
   if (!daemonVersion) return undefined;
-  const drifted = daemonVersion !== version;
+  const installedVersion = getVersion();
+  const drifted = daemonVersion !== installedVersion;
   // Static severity (see `checkSpurOnPath`): always "warn" — drift is never
   // exit-code-affecting, whether or not it is currently present.
   return {
@@ -668,7 +669,7 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
     ok: !drifted,
     severity: "warn",
     detail: drifted
-      ? `daemon reports version ${daemonVersion}, installed package is ${version}`
+      ? `daemon reports version ${daemonVersion}, installed package is ${installedVersion}`
       : `daemon version ${daemonVersion} matches the installed package`,
     ...(drifted ? { fix: "spur update" } : {}),
   };
