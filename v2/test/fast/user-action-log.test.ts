@@ -203,6 +203,16 @@ describe("buildUserActionRecord decoder", () => {
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
   });
 
+  it("decodes shared-memory writes and removals with sessionId, not falling into session-memory", () => {
+    const set = build({ path: "/sessions/demo-1/shared-memory/task/decision.api" });
+    expect(set).toMatchObject({ action: "shared.memory_set", sessionId: "demo-1" });
+    const remove = build({
+      method: "DELETE",
+      path: "/sessions/demo-1/shared-memory/project/gotcha.env",
+    });
+    expect(remove).toMatchObject({ action: "shared.memory_remove", sessionId: "demo-1" });
+  });
+
   it("sub-decodes /slots by body keys", () => {
     expect(build({ path: "/sessions/demo-1/slots", body: { tags: ["a"] } })?.action).toBe(
       "session.retag",
