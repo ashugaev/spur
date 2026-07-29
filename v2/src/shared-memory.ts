@@ -60,7 +60,7 @@ export function listSharedMemoryKeys(dataDir: string, scope: string, storeId: st
     return [];
   }
   return readdirSync(dir)
-    .filter((name) => name.endsWith(".md") && !name.includes(".tmp."))
+    .filter((name) => name.endsWith(".md"))
     .map((name) => name.slice(0, -3))
     .sort((left, right) => left.localeCompare(right));
 }

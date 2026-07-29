@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,16 +78,24 @@ describe("shared memory storage", () => {
     expect(existsSync(join(dataDir, "memory", "global", "irrelevant-store-id"))).toBe(false);
   });
 
-  it("lists keys sorted, strips .md, hides .tmp.* and returns [] for a missing dir", async () => {
+  it("lists keys sorted, strips .md, hides leftover .tmp.* write residue and returns [] for a missing dir", async () => {
     const dataDir = await newDataDir();
 
     expect(listSharedMemoryKeys(dataDir, "task", "desk-1")).toEqual([]);
 
     setSharedMemory(dataDir, "task", "desk-1", "zeta", "z");
     setSharedMemory(dataDir, "task", "desk-1", "alpha", "a");
+    setSharedMemory(dataDir, "task", "desk-1", "build.tmp.notes", "n");
+    // Simulate a crash mid-rename that left the temp write file behind.
+    const dir = join(dataDir, "memory", "task", "desk-1");
+    writeFileSync(join(dir, "foo.md.tmp.1.2"), "residue");
 
-    expect(listSharedMemoryKeys(dataDir, "task", "desk-1")).toEqual(["alpha", "zeta"]);
-    expect(hasTmpResidue(join(dataDir, "memory", "task", "desk-1"))).toBe(false);
+    expect(listSharedMemoryKeys(dataDir, "task", "desk-1")).toEqual([
+      "alpha",
+      "build.tmp.notes",
+      "zeta",
+    ]);
+    expect(hasTmpResidue(dir)).toBe(true);
   });
 
   it("overwrites a key last-writer-wins", async () => {
