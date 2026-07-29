@@ -3205,6 +3205,25 @@ projects:
     );
   });
 
+  // dependsOn is parsed only on the non-built-in path, so a malformed value on a
+  // built-in still reports the informative built-in rejection rather than a
+  // generic "must be an array of strings" type error.
+  it("reports the built-in rejection for a malformed dependsOn on a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+        dependsOn: nope
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: dependsOn)',
+    );
+  });
+
   it("rejects a built-in sidecar entry that also carries command/env/ports/agents", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -3214,15 +3233,18 @@ projects:
       playwright:
         autoStart: true
         command: pnpm exec playwright test
+        env:
+          MY_VAR: value
         ports:
           http:
             env: MY_PORT
             start: 9000
             end: 9010
+        agents: [cursor]
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: command, ports)',
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: command, env, ports, agents)',
     );
   });
 

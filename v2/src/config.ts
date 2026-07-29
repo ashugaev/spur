@@ -962,7 +962,6 @@ function parseSidecars(
     const entryLabel = `${label}.${name}`;
     const entryRaw = asObject(entry, entryLabel);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
-    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
     // Object.hasOwn guards against a sidecar name like "constructor"/"toString"
     // (VALID_ID_RE allows them) resolving to Object.prototype's own members
     // instead of falling through to the normal "unknown built-in" path below.
@@ -985,6 +984,7 @@ function parseSidecars(
       result[name] = { ...builtin.config, autoStart };
       continue;
     }
+    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
     const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
