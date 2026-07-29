@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getDisplayTaskLine, parseSessionPromptView } from "@/lib/session-prompt";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import type { DashboardSession } from "@/lib/types";
 
 function makeSession(overrides: Partial<DashboardSession>): DashboardSession {
@@ -86,6 +87,17 @@ describe("parseSessionPromptView", () => {
     );
 
     expect(view.selfDestructLabel).toBe("the summary is posted");
+  });
+
+  it("falls back to the default self-destruct condition when none is set", () => {
+    const view = parseSessionPromptView(
+      makeSession({
+        originalTaskPrompt: "ship it",
+        selfDestruct: { enabled: true },
+      }),
+    );
+
+    expect(view.selfDestructLabel).toBe(DEFAULT_SELF_DESTRUCT_CONDITION);
   });
 });
 
