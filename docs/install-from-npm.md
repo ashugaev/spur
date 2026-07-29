@@ -118,7 +118,7 @@ spur update
 | web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
 | `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
 | web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
-| mic button dead on the tailnet URL                     | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                       |
+| mic button dead on the tailnet URL                     | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
 
 ## System-wide units (advanced)
 
