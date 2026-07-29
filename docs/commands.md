@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`, `memory`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -84,6 +84,24 @@ spur service status api-a1b2
 ```
 
 `service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar, and stores metadata under the data dir. Stop/restart is not managed yet — the service stays bound while the session is alive. Pass `--port` so `list` can surface it. Sidecar/service output also lands in the session event log for `spur service logs` and `/sessions/:id/logs`.
+
+## memory
+
+```bash
+spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]
+```
+
+Shared markdown memory: one `.md` file per key, body only, no tags/status/timestamps. `set` creates or overwrites. `list`/`get`/`rm` read or remove. Session id defaults to `SPUR_SESSION`; pass `--session` from outside a live session. `set` takes the body positional or `--file <path>` for multiline content — never both, never neither.
+
+Scopes resolve server-side from the caller's session, never from client input:
+
+- `task` — `<dataDir>/memory/task/<deskId ?? sessionId>/<key>.md`, shared across desk-group siblings.
+- `project` — `<dataDir>/memory/project/<projectId>/<key>.md`, shared across all sessions of a project.
+- `global` — `<dataDir>/memory/global/<key>.md`, one cell set for the whole Spur instance.
+
+Writes are atomic (tmp file + rename) but unlocked — concurrent `set` on the same key is last-writer-wins.
+
+Spawn prompt tells agents to read `task`/`project` on start and write durable, high-value facts only (business decisions, gotchas, user preferences) — not scratch, logs, or restated docs.
 
 ## Sidecars
 

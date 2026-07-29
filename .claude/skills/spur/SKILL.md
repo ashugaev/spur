@@ -246,6 +246,7 @@ cron source
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
 - Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
+- Cross-agent coordination: `spur memory set|get|list|rm --scope task|project|global` gives sibling desk agents, all sessions of a project, and the whole instance a shared markdown cell store (one `.md` file per key, server-derived store id, last-writer-wins). See `docs/commands.md`.
 
 ## CLI Convention
 
