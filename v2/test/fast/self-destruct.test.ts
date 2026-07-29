@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_SELF_DESTRUCT_CONDITION,
   SELF_DESTRUCT_TOOL_NAME,
   normalizeSelfDestructConfig,
   withSelfDestructInstructions,
@@ -37,7 +39,7 @@ describe("self destruct", () => {
 
     const defaultPrompt = withSelfDestructInstructions("Do work", { enabled: true });
     expect(defaultPrompt).toContain(SELF_DESTRUCT_TOOL_NAME);
-    expect(defaultPrompt).toContain("the assigned task is complete");
+    expect(defaultPrompt).toContain(DEFAULT_SELF_DESTRUCT_CONDITION);
 
     const customPrompt = withSelfDestructInstructions("Do work", {
       enabled: true,
@@ -45,5 +47,19 @@ describe("self destruct", () => {
     });
     expect(customPrompt).toContain("tests pass and changes are committed");
     expect(withSelfDestructInstructions(customPrompt, { enabled: true })).toBe(customPrompt);
+  });
+
+  // DEFAULT_SELF_DESTRUCT_CONDITION is hand-mirrored in
+  // packages/web/src/lib/self-destruct.ts (web cannot import from v2). The
+  // placeholder text and selfDestructLabel fallback are only correct if both
+  // copies stay identical.
+  it("stays byte-identical to the web mirror", () => {
+    const source = readFileSync(
+      new URL("../../../packages/web/src/lib/self-destruct.ts", import.meta.url),
+      "utf8",
+    );
+    const match = source.match(/export const DEFAULT_SELF_DESTRUCT_CONDITION = "([^"]*)";/);
+    if (!match) throw new Error("DEFAULT_SELF_DESTRUCT_CONDITION not found in web mirror");
+    expect(match[1]).toBe(DEFAULT_SELF_DESTRUCT_CONDITION);
   });
 });

@@ -2748,6 +2748,56 @@ test.describe("D7c: Background spawn lifecycle", () => {
     );
   });
 
+  test("self-destruct conditions textarea shows the default as a placeholder and omits it from the payload when left blank", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-self-destruct-default-1",
+      project: "my-project",
+      prompt: "Ship it",
+      tmuxSession: "spawn-self-destruct-default-1",
+      worktreePath: "/tmp/worktrees/spawn-self-destruct-default-1",
+    });
+    const requests: unknown[] = [];
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      requests.push(route.request().postDataJSON());
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {
+      project: "my-project",
+      prompt: placeholder.prompt,
+      selfDestruct: true,
+    });
+
+    const conditionsField = page.getByLabel("Self-destruct conditions");
+    await expect(conditionsField).toHaveValue("");
+    await expect(conditionsField).toHaveAttribute(
+      "placeholder",
+      "Leave empty for default: every objective in the task prompt is done",
+    );
+
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requests).toEqual([
+      {
+        projectId: "my-project",
+        prompt: placeholder.prompt,
+        agent: "claude",
+        selfDestruct: { enabled: true },
+      },
+    ]);
+  });
+
   test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
     page,
   }) => {

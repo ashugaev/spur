@@ -28,6 +28,7 @@ import {
 import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import type { AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
@@ -2251,7 +2252,7 @@ export function Dashboard() {
                   aria-label="Self-destruct conditions"
                   className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
                   onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
-                  placeholder="Self-destruct conditions"
+                  placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
                   value={spawnSelfDestructConditions}
                 />
               ) : null,
