@@ -2813,10 +2813,10 @@ export class SessionService {
   // Safety net: a terminal (killed/completed/stopped) session's tmux is
   // supposed to already be gone, but restarts, crashes mid-teardown, or races
   // can leave it running. This periodically sweeps for that and kills the
-  // orphan — but only after re-confirming, with a fresh (uncached) probe,
-  // that no agent process is actually alive in it. A live agent under a
-  // terminal record is left untouched and flagged instead of killed: killing
-  // a live session is the one mistake this loop must never make.
+  // orphan — but only after two probes, a second apart, both agree no agent
+  // process is alive in it. A live agent under a terminal record is left
+  // untouched (tmux and its sidecars alike) and flagged instead of killed:
+  // killing a live session is the one mistake this loop must never make.
   private async reapOrphanedTmux(): Promise<void> {
     if (this.reaperRunning) {
       return;
@@ -2830,12 +2830,15 @@ export class SessionService {
       let reaped = 0;
       let liveUnderTerminal = 0;
       for (const session of sessions) {
+        let agentAlive = false;
         if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
-          const agentAlive = await isProcessRunningInTmux(
-            session.tmuxSession,
-            sessionProcessMatchers(session),
-            { fresh: true },
-          );
+          // A lone "process gone" read is inconclusive, not a verdict: a
+          // transient tmux/ps failure reads exactly like an exited agent.
+          // confirmAgentExited re-samples with fresh:true after a delay, so only
+          // two probes agreeing authorize a kill — the same bar the pipeline
+          // poller uses before erroring a session. The fresh existence check
+          // above has already refilled the fleet snapshot its first read sees.
+          agentAlive = !(await this.confirmAgentExited(session));
           if (agentAlive) {
             liveUnderTerminal += 1;
             this.logEvent("session.reaper.live_under_terminal", {
@@ -2848,6 +2851,11 @@ export class SessionService {
             await killTmuxSession(session.tmuxSession);
             reaped += 1;
           }
+        }
+        if (agentAlive) {
+          // Sidecars serve the agent still running in this tmux. Reaping them
+          // under it breaks a live session as surely as killing its tmux would.
+          continue;
         }
         for (const sidecarName of session.sidecarNames ?? []) {
           if (await sidecarTmuxAlive(session.id, sidecarName)) {

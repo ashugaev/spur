@@ -16967,6 +16967,7 @@ describe("SessionService", () => {
       seedReaperSession({ status: "completed" });
       tmuxSessionExistsMock.mockResolvedValue(true);
       isProcessRunningInTmuxMock.mockResolvedValue(false);
+      timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -16977,6 +16978,31 @@ describe("SessionService", () => {
       expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
         fresh: true,
       });
+      // Never on one read: the kill is authorized by two probes split by a delay.
+      expect(isProcessRunningInTmuxMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(timerPromisesSleepMock).toHaveBeenCalledWith(1000);
+      service.dispose();
+    });
+
+    it("does not kill on a single false-negative process probe when the re-sample finds the agent alive", async () => {
+      seedReaperSession({ status: "killed" });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      // Probe 1 glitches (tmux/ps hiccup, or a pane snapshot predating the
+      // session); probe 2 sees the truth. The agent must survive.
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValueOnce(false).mockResolvedValue(true);
+      timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
+        ),
+      ).toBe(true);
       service.dispose();
     });
 
@@ -17041,6 +17067,38 @@ describe("SessionService", () => {
 
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      service.dispose();
+    });
+
+    it("leaves sidecars alone when a live agent runs under the terminal session", async () => {
+      seedReaperSession({ status: "killed", sidecarNames: ["proxy"] });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      // Sidecars serve that live agent — reaping them breaks it too.
+      expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("still reaps sidecars after confirming the agent exited in an existing tmux", async () => {
+      seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
       service.dispose();
     });
