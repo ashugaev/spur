@@ -3205,6 +3205,28 @@ projects:
     );
   });
 
+  // startSidecarWithDependencies recurses over the raw project sidecars, so a
+  // user sidecar depending on the built-in would start it for a cursor session
+  // (and despite autoStart: false), bypassing the agent scope.
+  it("rejects a user sidecar whose dependsOn points at a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: false
+      dev:
+        command: pnpm dev
+        autoStart: true
+        dependsOn: [playwright]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.dev.dependsOn must not reference the built-in sidecar "playwright"',
+    );
+  });
+
   // dependsOn is parsed only on the non-built-in path, so a malformed value on a
   // built-in still reports the informative built-in rejection rather than a
   // generic "must be an array of strings" type error.

@@ -268,6 +268,16 @@ async function killProcessTree(pid: number): Promise<void> {
  * roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
+  // Nothing this daemon started can be running if the package cannot be
+  // resolved, so there is nothing to sweep. Bail before isLeakedManagedPlaywright
+  // resolves it per process and throws: this runs from the boot sweep (whose
+  // caller would leave driftedSessions empty and silently skip
+  // restoreAfterReboot) and from every 60s reaper tick.
+  try {
+    resolvePlaywrightMcpBin();
+  } catch {
+    return 0;
+  }
   const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {

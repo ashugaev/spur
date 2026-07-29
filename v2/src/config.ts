@@ -1088,6 +1088,19 @@ function validateSidecarDependencies(label: string, sidecars: Record<string, Sid
       if (!sidecars[dependency]) {
         throw new Error(`${dependencyLabel} references unknown sidecar "${dependency}"`);
       }
+      // startSidecarWithDependencies recurses over the raw project sidecars, so
+      // a dependency on an agent-scoped built-in would start it for an agent it
+      // is not scoped to (and regardless of its own autoStart). Built-in MCP
+      // sidecars also start before the agent launches, ahead of this
+      // dependency-aware pass, so the ordering could not be honored anyway.
+      if (Object.hasOwn(BUILTIN_SIDECARS, dependency)) {
+        throw new Error(
+          `${dependencyLabel} must not reference the built-in sidecar "${dependency}": ` +
+            `built-in MCP sidecars start before the agent launches and are agent-scoped, ` +
+            `so they cannot be used as a dependency. Enable it with ` +
+            `sidecars.${dependency}.autoStart instead.`,
+        );
+      }
       seen.add(dependency);
     }
   }

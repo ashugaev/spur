@@ -121,6 +121,27 @@ describe("lazy bin resolution (MUST-FIX 1)", () => {
       vi.resetModules();
     }
   });
+
+  // The boot sweep's caller leaves driftedSessions empty when this throws, which
+  // silently skips restoreAfterReboot; the 60s reaper tick would also log a
+  // failure forever. Nothing we started can be alive if the package is gone.
+  it("sweeps nothing instead of throwing when @playwright/mcp is unresolvable", async () => {
+    vi.resetModules();
+    vi.doMock("node:module", () => ({
+      createRequire: () => ({
+        resolve: () => {
+          throw new Error("Cannot find module '@playwright/mcp/package.json'");
+        },
+      }),
+    }));
+    try {
+      const mod = await import("../../../src/sidecars/playwright.js");
+      await expect(mod.sweepLeakedPlaywright(new Set<number>())).resolves.toBe(0);
+    } finally {
+      vi.doUnmock("node:module");
+      vi.resetModules();
+    }
+  });
 });
 
 describe("isLeakedManagedPlaywright", () => {

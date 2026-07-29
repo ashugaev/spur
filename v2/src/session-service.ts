@@ -7732,6 +7732,12 @@ export class SessionService {
         }
       }
     } catch (error) {
+      // Drop the warmup set before startMcpSidecars: every exit from here
+      // either killed the pane below or returns an already-live session, so
+      // leaving it would make classifySessionRecord report "working" with
+      // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
+      // path after this block intentionally keeps its own warmup.
+      this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
         const recovered: SessionRecord = this.applyReservedSidecars(
