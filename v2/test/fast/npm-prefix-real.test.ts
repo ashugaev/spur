@@ -1,11 +1,11 @@
 // Deliberately does NOT mock "node:child_process": the real-npm assertion at
 // the end exercises the real `npm` binary end to end, resolving the
 // globalconfig pin the way a sidecar/agent session actually would. The heal
-// itself (`ensureNpmGlobalPrefixConfigured`) is a pure filesystem write
-// (no `npm` child) — this file's remaining job is to prove it writes under
-// the `home` argument, never the ambient `$HOME`, since that used to be the
-// class of bug this file existed to catch back when the heal shelled out to
-// `npm config set`. Never touches this host's real `$HOME`: the "ambient
+// itself (`ensureNpmPinFile` + `healNpmrcPrefixLine`) is a pure filesystem
+// write (no `npm` child) — this file's remaining job is to prove it writes
+// under the `home` argument, never the ambient `$HOME`, since that used to be
+// the class of bug this file existed to catch back when the heal shelled out
+// to `npm config set`. Never touches this host's real `$HOME`: the "ambient
 // HOME points elsewhere" side of the scenario is a second, disposable temp
 // dir, not the real account home.
 import { execFileSync } from "node:child_process";
@@ -17,12 +17,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   NPM_GLOBALCONFIG_ENV,
   NPM_PREFIX_ENV,
-  ensureNpmGlobalPrefixConfigured,
+  ensureNpmPinFile,
+  healNpmrcPrefixLine,
   npmGlobalPrefix,
   npmPinConfigPath,
 } from "../../src/npm-prefix.js";
 
-describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
+describe("ensureNpmPinFile + healNpmrcPrefixLine (real npm, HOME divergence)", () => {
   let targetHome: string;
   let ambientHome: string;
   const originalHome = process.env["HOME"];
@@ -58,7 +59,8 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
       "utf8",
     );
 
-    ensureNpmGlobalPrefixConfigured(targetHome);
+    ensureNpmPinFile(targetHome);
+    healNpmrcPrefixLine(targetHome);
 
     const pinContents = await readFile(npmPinConfigPath(targetHome), "utf8");
     expect(pinContents).toBe(`prefix=${npmGlobalPrefix(targetHome)}\n`);
@@ -77,7 +79,8 @@ describe("ensureNpmGlobalPrefixConfigured (real npm, HOME divergence)", () => {
       "utf8",
     );
 
-    ensureNpmGlobalPrefixConfigured(targetHome);
+    ensureNpmPinFile(targetHome);
+    healNpmrcPrefixLine(targetHome);
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,

@@ -51,7 +51,7 @@ export function npmGlobalPrefix(home = homedir()): string {
 // Path to the Spur-owned npm config file that carries the persisted prefix
 // pin. Never `<home>/.npmrc` — nvm greps that file for a `prefix=`/
 // `globalconfig=` line and refuses to load when it finds one (see
-// `ensureNpmGlobalPrefixConfigured`'s doc comment).
+// `ensureNpmPinFile`'s doc comment).
 export function npmPinConfigPath(home = homedir()): string {
   return join(home, ".spur", "npmrc");
 }
@@ -73,31 +73,17 @@ function explicitPrefixOverridden(home: string): boolean {
 // init.sh`'s gate, the doctor probe) — a pure `writeFileSync` into Spur's own
 // `<home>/.spur/`, safe to call unconditionally on every daemon boot: it
 // never reads or writes `<home>/.npmrc`, so calling it repeatedly never
-// mutates a shared user file.
+// mutates a shared user file. `daemon start` (the sole real boot path —
+// never the exported `startServer` fast tests call directly against
+// arbitrary/real `$HOME`) wraps this call in its own try/catch instead of
+// throwing through it: a read-only filesystem or a permissions error writing
+// into `<home>/.spur/` must never abort daemon boot.
 export function ensureNpmPinFile(home = homedir()): void {
   if (explicitPrefixOverridden(home)) return;
   const expected = npmGlobalPrefix(home);
   const pinPath = npmPinConfigPath(home);
   mkdirSync(dirname(pinPath), { recursive: true });
   writeFileSync(pinPath, `prefix=${expected}\n`, { mode: 0o600 });
-}
-
-// `daemon start` (the sole real boot path — never the exported `startServer`
-// fast tests call directly against arbitrary/real `$HOME`) calls this instead
-// of `ensureNpmPinFile` directly: a read-only filesystem or a permissions
-// error writing into `<home>/.spur/` must never abort daemon boot, so any
-// failure is reported through `onError` and swallowed instead of thrown.
-export function ensureNpmPinFileTolerant(
-  onError: (message: string) => void,
-  home = homedir(),
-): void {
-  try {
-    ensureNpmPinFile(home);
-  } catch (error) {
-    onError(
-      `failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
 }
 
 // Surgically removes a Spur-authored `prefix=` line this module previously
@@ -129,13 +115,4 @@ export function healNpmrcPrefixLine(home = homedir()): void {
   if (kept.length !== lines.length) {
     writeFileSync(join(home, ".npmrc"), kept.join("\n"), { mode: 0o600 });
   }
-}
-
-// Full repair: `runNpmInit` (`spur init`/`update`/`reinit`) is the one caller
-// allowed to do both the pin-file write and the `~/.npmrc` surgery in one
-// shot. Every other consumer (daemon boot) calls `ensureNpmPinFile` alone —
-// see that function's doc comment for why the heal half is boot-unsafe.
-export function ensureNpmGlobalPrefixConfigured(home = homedir()): void {
-  ensureNpmPinFile(home);
-  healNpmrcPrefixLine(home);
 }

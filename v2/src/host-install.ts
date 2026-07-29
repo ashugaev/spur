@@ -8,7 +8,8 @@ import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
-  ensureNpmGlobalPrefixConfigured,
+  ensureNpmPinFile,
+  healNpmrcPrefixLine,
   npmGlobalPrefix,
   npmPinConfigPath,
 } from "./npm-prefix.js";
@@ -684,8 +685,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   const scope = resolveSystemdScope(home);
   const expectedPrefix = npmGlobalPrefix(home);
 
-  // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
-  // an inherited `npm_config_userconfig` outranks `HOME` as npm's userconfig
+  // Same `$HOME`-at-spawn-time divergence as `ensureNpmPinFile`/
+  // `healNpmrcPrefixLine`: an inherited `npm_config_userconfig` outranks
+  // `HOME` as npm's userconfig
   // source, so without `--userconfig` the probe could read a different file
   // than the `<home>/.npmrc` `expectedPrefix` above is derived from.
   // `--globalconfig` points the probe at the persisted pin: Spur writes it to
@@ -720,7 +722,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     ok: npmPrefix === expectedPrefix,
     severity: "warn",
     detail: npmPrefix ? `npm prefix is ${npmPrefix}` : "npm prefix unavailable",
-    fix: "npm config set prefix ~/.local",
+    fix: "npm config set prefix ~/.local --location=global --globalconfig ~/.spur/npmrc",
   });
 
   // Read-only diagnostic (doctor never mutates): a `prefix=`/`globalconfig=`
@@ -974,7 +976,12 @@ export function runNpmInit(
   if (!existsSync(script)) {
     throw new Error(`npm init script not found: ${script}`);
   }
-  ensureNpmGlobalPrefixConfigured();
+  // Full repair: `runNpmInit` (`spur init`/`update`/`reinit`) is the one
+  // caller allowed to do both the pin-file write and the `~/.npmrc` surgery
+  // in one shot. Every other consumer (daemon boot) calls `ensureNpmPinFile`
+  // alone — see its doc comment for why the heal half is boot-unsafe.
+  ensureNpmPinFile();
+  healNpmrcPrefixLine();
   const args: string[] = [];
   if (options.noStart) {
     args.push("--no-start");
