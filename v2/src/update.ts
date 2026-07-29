@@ -165,7 +165,7 @@ export function resolveInstallPrefix(entrypoint: string): string | null {
 
 // Reinstall the user systemd units, preserving the live web port / external
 // exposure / Tailscale bind the operator deployed instead of resetting the
-// units to loopback:4311. Shared by `spur update`'s reinit dep and the
+// units to loopback:5555. Shared by `spur update`'s reinit dep and the
 // `spur reinit` CLI command so every migration path (CLI update, UI/deploy
 // switch, install-and-restart.sh) converges on the same unit-reinstall logic.
 export function reinitUnits(cliEntrypoint: string): void {

@@ -61,10 +61,4 @@ Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` and uses `int8` by d
 
 ## HTTPS
 
-Browsers require HTTPS for microphone access (`getUserMedia`); `localhost` works over plain HTTP. For remote access via Tailscale (substitute your tailnet):
-
-```bash
-sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
-# https://<hostname>.<your-tailnet>.ts.net/ — reachable only within the tailnet
-# disable: tailscale serve --https=443 off
-```
+Browsers require HTTPS for microphone access (`getUserMedia`), `localhost` excepted. Tailnet hostname needs TLS or the mic button stays dead: [https-tailscale.md](https-tailscale.md).

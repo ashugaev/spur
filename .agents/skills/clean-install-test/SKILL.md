@@ -40,7 +40,7 @@ gcloud compute instances create "spur-itest-$TS" \
   --metadata-from-file ssh-keys=<ssh-keys-metadata-file>
 ```
 
-Fetch the external IP (ephemeral — re-fetch after any restart) and record VM name + IP in your recipe. Confirm the default firewall exposes only SSH; app ports (4310/4311) must not answer from the public IP.
+Fetch the external IP (ephemeral — re-fetch after any restart) and record VM name + IP in your recipe. Confirm the default firewall exposes only SSH; app ports (4310/5555) must not answer from the public IP.
 
 ## 2. Connect (cloud-CLI-independent)
 
@@ -103,11 +103,11 @@ Confirm the agent's install actually works. Expected topology after `spur init`:
 ```bash
 systemctl --user is-active spur-daemon.service spur-web.service          # both active
 curl -sf -o /dev/null -w 'daemon %{http_code}\n' http://127.0.0.1:4310/sessions   # 200
-curl -sf -o /dev/null -w 'web %{http_code}\n'    http://127.0.0.1:4311/           # 200
+curl -sf -o /dev/null -w 'web %{http_code}\n'    http://127.0.0.1:5555/           # 200
 curl -s -o /dev/null -w 'ws %{http_code}\n' --max-time 5 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
   -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" -H 'Sec-WebSocket-Version: 13' \
-  'http://127.0.0.1:4311/ws?session=none'                                 # 101
+  'http://127.0.0.1:5555/ws?session=none'                                 # 101
 ss -ltn | grep 14801 || echo 'no :14801 (good)'
 ```
 
