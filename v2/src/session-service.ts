@@ -32,13 +32,8 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
-import {
-  PLAYWRIGHT_SIDECAR_NAME,
-  SPUR_RESERVED_PORT_PLAYWRIGHT,
-  buildPlaywrightSidecarConfig,
-  sweepLeakedPlaywright,
-  waitForPlaywrightReady,
-} from "./agents/playwright-mcp.js";
+import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
+import { collectMcpBindings, resolveSessionSidecars } from "./sidecars/index.js";
 import {
   deleteAgentHookState,
   readAgentHookState,
@@ -265,7 +260,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
-  type SidecarConfig,
+  type SidecarMcpBinding,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
@@ -730,7 +725,7 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
-  playwrightPort?: number;
+  mcpBindings?: SidecarMcpBinding[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
   // .claude.json instead of the host ~/.claude.json when merging MCP
@@ -745,7 +740,7 @@ async function setupSessionAgentHooks(args: {
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
-    ...(args.playwrightPort !== undefined ? { playwrightPort: args.playwrightPort } : {}),
+    ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -1170,33 +1165,14 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
-function agentUsesPlaywrightSidecar(agent: AgentName): boolean {
-  return agent === "claude" || agent === "codex";
-}
-
-// Built-in implicit playwright sidecar config for claude/codex sessions. Built
-// per session so the marker env carries the concrete session id. Cursor is out
-// of scope.
-function sessionPlaywrightSidecar(
-  session: Pick<SessionRecord, "agent" | "id">,
-): SidecarConfig | undefined {
-  if (!agentUsesPlaywrightSidecar(session.agent)) {
-    return undefined;
-  }
-  return buildPlaywrightSidecarConfig(session.id);
-}
-
-function sessionSidecarNames(
+// Exported for unit testing. Names come solely from project config, filtered
+// to the session's agent (a built-in scoped away from an agent, e.g. cursor,
+// is never enumerated) — there is no per-session sidecar override state.
+export function sessionSidecarNames(
   session: Pick<SessionRecord, "sidecarNames" | "agent">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
-  const names = session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
-  // Belt-and-suspenders: ensure teardown enumerates "playwright" for claude/codex
-  // even if a persisted record predates startSidecarInternal persisting it.
-  if (agentUsesPlaywrightSidecar(session.agent) && !names.includes(PLAYWRIGHT_SIDECAR_NAME)) {
-    return [...names, PLAYWRIGHT_SIDECAR_NAME];
-  }
-  return names;
+  return session.sidecarNames ?? Object.keys(resolveSessionSidecars(session, project));
 }
 
 function buildWorkspaceAccess(
@@ -1816,23 +1792,23 @@ export class SessionService {
     }
   }
 
-  // Periodic sweep for playwright sidecar tmux sessions whose owning session
-  // record is gone or terminal. Keyed on tmux ownership (not process ppid)
-  // so a transient empty listSessions read can never reap a live sidecar.
-  // Guarded against re-entrancy: a slow pass (large tmux fleet) must not
-  // overlap the next interval tick.
+  // Periodic sweep for built-in sidecar (registry-driven over BUILTIN_SIDECARS)
+  // tmux sessions whose owning session record is gone or terminal. Keyed on
+  // tmux ownership (not process ppid) so a transient empty listSessions read
+  // can never reap a live sidecar. Guarded against re-entrancy: a slow pass
+  // (large tmux fleet) must not overlap the next interval tick.
   private async reapDeadSessionSidecars(): Promise<void> {
     if (this.sidecarReaperRunning) {
       return;
     }
     this.sidecarReaperRunning = true;
     try {
-      const suffix = `--${PLAYWRIGHT_SIDECAR_NAME}`;
+      const builtinNames = Object.keys(BUILTIN_SIDECARS);
       const liveSessions = listSessions(this.config.dataDir).filter(
         (session) => session.status === "running" || session.status === "spawning",
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
-      // playwright sidecar plus any project-declared user sidecar), and also
+      // built-in sidecars plus any project-declared user sidecar), and also
       // the raw `${id}--` prefix as a belt-and-suspenders guard against
       // config drift where a live session's sidecar name isn't enumerated by
       // sessionSidecarNames.
@@ -1853,7 +1829,8 @@ export class SessionService {
 
       const names = await listTmuxSessionNames();
       for (const name of names) {
-        if (!name.endsWith(suffix)) {
+        const builtinName = builtinNames.find((n) => name.endsWith(`--${n}`));
+        if (!builtinName) {
           continue;
         }
         if (protectedTmux.has(name)) {
@@ -1869,10 +1846,10 @@ export class SessionService {
         if (ownedByLiveSession) {
           continue;
         }
-        const sessionId = name.slice(0, -suffix.length);
-        await killSidecarTmux(sessionId, PLAYWRIGHT_SIDECAR_NAME).catch(() => {});
+        const sessionId = name.slice(0, -`--${builtinName}`.length);
+        await killSidecarTmux(sessionId, builtinName).catch(() => {});
       }
-      await this.sweepLeakedPlaywrightProcesses("reaper");
+      await this.sweepLeakedBuiltinSidecars("reaper");
     } finally {
       this.sidecarReaperRunning = false;
     }
@@ -3457,53 +3434,59 @@ export class SessionService {
     });
   }
 
-  // Start the Spur-owned playwright MCP sidecar (claude/codex only). Reserves a
-  // loopback port, launches the tracked tmux sidecar (idempotent), best-effort
-  // waits for readiness, and returns the reserved port for agent config plus the
-  // session record carrying the reserved sidecar fields. Logs and returns the
-  // input session with no port on failure so spawn continues without it.
-  private async startPlaywrightSidecar(
+  // Pre-launch pass for sidecars that must exist before the agent's launch
+  // plan is built (their reserved port feeds launch-time MCP config). Starts
+  // every project-configured, agent-eligible, autoStart sidecar carrying
+  // `mcp` (reserves a loopback port, launches the tracked tmux sidecar,
+  // idempotent), best-effort waits for the built-in's own readiness probe,
+  // and returns the SidecarMcpBinding[] to hand to the agent's launch plan.
+  // Logs and continues (no binding for that sidecar) on start failure.
+  private async startMcpSidecars(
     session: SessionRecord,
     project: ProjectConfig,
-  ): Promise<{ session: SessionRecord; port?: number }> {
-    const sidecar = sessionPlaywrightSidecar(session);
-    if (!sidecar) {
-      return { session };
+  ): Promise<{ session: SessionRecord; mcpBindings: SidecarMcpBinding[] }> {
+    const mcpSidecars = Object.fromEntries(
+      Object.entries(resolveSessionSidecars(session, project)).filter(
+        ([, sidecar]) => sidecar.mcp && sidecar.autoStart,
+      ),
+    );
+    let updated = session;
+    for (const [name, sidecar] of Object.entries(mcpSidecars)) {
+      try {
+        updated = await this.startSidecarInternal({
+          session: updated,
+          project,
+          sidecarName: name,
+          sidecar,
+          sidecarDepth: ROOT_SIDECAR_DEPTH,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.sidecar.autostart.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-start sidecar ${name} failed for ${session.id}: ${message}`,
+        });
+        continue;
+      }
+      const readiness = BUILTIN_SIDECARS[name]?.readiness;
+      const portConfig = sidecar.mcp && sidecar.ports?.[sidecar.mcp.portId];
+      const port = portConfig ? updated.sidecarPorts?.[name]?.[portConfig.env] : undefined;
+      if (readiness && typeof port === "number") {
+        const ready = await readiness(port);
+        if (!ready) {
+          this.logEvent("session.sidecar.mcp_not_ready", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `MCP sidecar ${name} not ready on port ${port} for ${session.id}; continuing`,
+            details: { sidecarName: name, port },
+          });
+        }
+      }
     }
-    let updated: SessionRecord;
-    try {
-      updated = await this.startSidecarInternal({
-        session,
-        project,
-        sidecarName: PLAYWRIGHT_SIDECAR_NAME,
-        sidecar,
-        sidecarDepth: ROOT_SIDECAR_DEPTH,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.sidecar.autostart.failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Auto-start sidecar ${PLAYWRIGHT_SIDECAR_NAME} failed for ${session.id}: ${message}`,
-      });
-      return { session };
-    }
-    const port = updated.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
-    if (typeof port !== "number") {
-      return { session: updated };
-    }
-    const ready = await waitForPlaywrightReady(port);
-    if (!ready) {
-      this.logEvent("session.sidecar.playwright_not_ready", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Playwright MCP not ready on port ${port} for ${session.id}; continuing`,
-        details: { port },
-      });
-    }
-    return { session: updated, port };
+    return { session: updated, mcpBindings: collectMcpBindings(mcpSidecars, updated.sidecarPorts) };
   }
 
   /**
@@ -4116,7 +4099,7 @@ export class SessionService {
     project: ProjectConfig,
   ): Promise<SessionRecord> {
     let updatedRecord = session;
-    for (const [name, sidecar] of Object.entries(project.sidecars)) {
+    for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
       if (!sidecar.autoStart) continue;
       const sidecarDepth = ROOT_SIDECAR_DEPTH;
       try {
@@ -4208,38 +4191,44 @@ export class SessionService {
       }
     }
 
-    await this.sweepLeakedPlaywrightProcesses("boot");
+    await this.sweepLeakedBuiltinSidecars("boot");
 
     return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
 
-  // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
-  // port not reserved by any live session). Best-effort; logs the killed count.
-  private async sweepLeakedPlaywrightProcesses(context: "boot" | "reaper"): Promise<void> {
-    const ownedPorts = new Set<number>();
+  // Reap orphaned Spur-owned built-in sidecar processes (reparented to init,
+  // our bin, port not reserved by any live session). Registry-driven over
+  // BUILTIN_SIDECARS; best-effort, logs the killed count per sidecar name.
+  private async sweepLeakedBuiltinSidecars(context: "boot" | "reaper"): Promise<void> {
+    const ownedPortsByName = new Map<string, Set<number>>();
     for (const session of listSessions(this.config.dataDir)) {
       if (isTerminalSessionStatus(session.status)) continue;
-      const port = session.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
-      if (typeof port === "number") {
-        ownedPorts.add(port);
+      for (const [name, ports] of Object.entries(session.sidecarPorts ?? {})) {
+        if (!(name in BUILTIN_SIDECARS)) continue;
+        const set = ownedPortsByName.get(name) ?? new Set<number>();
+        for (const port of Object.values(ports)) {
+          set.add(port);
+        }
+        ownedPortsByName.set(name, set);
       }
     }
-    const killed = await sweepLeakedPlaywright(ownedPorts);
-    if (killed <= 0) {
-      return;
-    }
-    if (context === "boot") {
-      this.logEvent("daemon.startup.playwright_sweep", {
-        level: "info",
-        message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
-        details: { killed },
-      });
-    } else {
-      this.logEvent("session.sidecar_reaper.swept", {
-        level: "info",
-        message: `Reaped ${killed} leaked playwright MCP process tree(s)`,
-        details: { killed },
-      });
+    for (const [name, builtin] of Object.entries(BUILTIN_SIDECARS)) {
+      if (!builtin.sweepLeaked) continue;
+      const killed = await builtin.sweepLeaked(ownedPortsByName.get(name) ?? new Set<number>());
+      if (killed <= 0) continue;
+      if (context === "boot") {
+        this.logEvent("daemon.startup.sidecar_sweep", {
+          level: "info",
+          message: `Reaped ${killed} leaked ${name} sidecar process tree(s) on boot`,
+          details: { sidecarName: name, killed },
+        });
+      } else {
+        this.logEvent("session.sidecar_reaper.swept", {
+          level: "info",
+          message: `Reaped ${killed} leaked ${name} sidecar process tree(s)`,
+          details: { sidecarName: name, killed },
+        });
+      }
     }
   }
 
@@ -4689,8 +4678,8 @@ export class SessionService {
         createdAt,
         updatedAt: createdAt,
         ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
-        ...(Object.keys(project.sidecars).length > 0
-          ? { sidecarNames: Object.keys(project.sidecars) }
+        ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
+          ? { sidecarNames: Object.keys(resolveSessionSidecars({ agent }, project)) }
           : {}),
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
@@ -4773,7 +4762,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(project.sidecars);
+      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
       const composedInitialMessage = [...startupAttachmentLines, initialMessage]
         .filter((line) => line.trim())
         .join("\n");
@@ -4786,8 +4775,10 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
           );
-      const { session: sessionForPlaywright, port: playwrightPort } =
-        await this.startPlaywrightSidecar({ ...placeholder, worktreePath: workspacePath }, project);
+      const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
+        { ...placeholder, worktreePath: workspacePath },
+        project,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -4795,7 +4786,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
-        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+        ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -4836,7 +4827,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...sessionForPlaywright,
+        ...sessionForMcp,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -5284,8 +5275,8 @@ export class SessionService {
         createdAt,
         updatedAt: createdAt,
         ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
-        ...(Object.keys(project.sidecars).length > 0
-          ? { sidecarNames: Object.keys(project.sidecars) }
+        ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
+          ? { sidecarNames: Object.keys(resolveSessionSidecars({ agent }, project)) }
           : {}),
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
@@ -5592,7 +5583,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(project.sidecars);
+      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
@@ -5600,11 +5591,10 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      const { session: sessionForPlaywright, port: playwrightPort } =
-        await this.startPlaywrightSidecar(
-          { ...spawnPlaceholder, worktreePath: workspacePath },
-          project,
-        );
+      const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
+        { ...spawnPlaceholder, worktreePath: workspacePath },
+        project,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -5612,7 +5602,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
-        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+        ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
@@ -5639,7 +5629,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...sessionForPlaywright,
+        ...sessionForMcp,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -6756,6 +6746,24 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  // Kills a sidecar's tmux pane, unlinks its slot, and persists the result.
+  // Used by stopSidecar before its own event-logged write.
+  private async killSidecarAndUnlinkSlot(
+    session: SessionRecord,
+    sidecarName: string,
+  ): Promise<SessionRecord> {
+    this.abortSidecarUrlProbe(session.id, sidecarName);
+    await killSidecarTmux(session.id, sidecarName);
+
+    const afterKill = readSession(this.config.dataDir, session.id) ?? session;
+    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
+    const baseRecord: SessionRecord =
+      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
+    const updated: SessionRecord = { ...baseRecord, updatedAt: nowIso() };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -6774,18 +6782,7 @@ export class SessionService {
       return this.enrich(session);
     }
 
-    this.abortSidecarUrlProbe(sessionId, sidecarName);
-    await killSidecarTmux(sessionId, sidecarName);
-
-    const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
-    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
-    const baseRecord: SessionRecord =
-      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
-    const updated: SessionRecord = {
-      ...baseRecord,
-      updatedAt: nowIso(),
-    };
-    writeSession(this.config.dataDir, updated);
+    const updated = await this.killSidecarAndUnlinkSlot(session, sidecarName);
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -7183,13 +7180,40 @@ export class SessionService {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
     }
 
+    const project = this.getProject(session.project);
+    const recovered = await this.relaunchSessionInPlace(session, project);
+    writeSession(this.config.dataDir, recovered);
+    await this.refreshDashboardCacheEntry(recovered);
+    this.logEvent("session.recover.completed", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Recovered ${session.id}`,
+      details: {
+        agent: session.agent,
+        agentSessionId: recovered.agentSessionId ?? null,
+        tmuxSession: session.tmuxSession,
+      },
+    });
+    return recovered;
+  }
+
+  // Kills the live tmux pane and relaunches the agent in place, preserving its
+  // native transcript id (claude --session-id pin / codex rollout resume).
+  // Used by the recover path above (dead process, live session) — the recover
+  // guard there will not touch an already-healthy session.
+  private async relaunchSessionInPlace(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<SessionRecord> {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
-    const project = this.getProject(session.project);
-    const { session: playwrightSidecarUpdate, port: playwrightPort } =
-      await this.startPlaywrightSidecar(session, project);
+    const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
+      session,
+      project,
+    );
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       dataDir: this.config.dataDir,
@@ -7197,7 +7221,7 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
-      ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+      ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
@@ -7237,7 +7261,7 @@ export class SessionService {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Recovering ${session.id}`,
+      message: `Relaunching ${session.id}`,
       details: {
         agent: session.agent,
         recoveryMode: recoveryPlan ? "native_resume" : "fresh_launch",
@@ -7340,7 +7364,7 @@ export class SessionService {
 
     this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    const recovered: SessionRecord = this.applyReservedSidecars(
+    return this.applyReservedSidecars(
       {
         ...recoveredBase,
         planMode,
@@ -7350,22 +7374,8 @@ export class SessionService {
         status: "running",
         updatedAt: nowIso(),
       },
-      playwrightSidecarUpdate,
+      mcpSidecarUpdate,
     );
-    writeSession(this.config.dataDir, recovered);
-    await this.refreshDashboardCacheEntry(recovered);
-    this.logEvent("session.recover.completed", {
-      level: "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Recovered ${session.id}`,
-      details: {
-        agent: session.agent,
-        agentSessionId: recovered.agentSessionId ?? null,
-        tmuxSession: session.tmuxSession,
-      },
-    });
-    return recovered;
   }
 
   async restore(sessionId: string): Promise<SessionView> {
@@ -7409,14 +7419,14 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand = current.launchCommand;
-    let playwrightSidecarUpdate: SessionRecord = current;
+    let mcpSidecarUpdate: SessionRecord = current;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
       const restoreProjectConfig = this.getProject(current.project);
-      const playwrightStart = await this.startPlaywrightSidecar(current, restoreProjectConfig);
-      playwrightSidecarUpdate = playwrightStart.session;
-      const playwrightPort = playwrightStart.port;
+      const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig);
+      mcpSidecarUpdate = mcpStart.session;
+      const mcpBindings = mcpStart.mcpBindings;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
         dataDir: this.config.dataDir,
@@ -7424,7 +7434,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
-        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+        ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
@@ -7516,7 +7526,7 @@ export class SessionService {
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
+      const restoreSidecarNames = Object.keys(resolveSessionSidecars(current, restoreProject));
       const env = buildSessionEnv({
         agent: current.agent,
         projectId: current.project,
@@ -7577,7 +7587,7 @@ export class SessionService {
             status: "running",
             updatedAt: nowIso(),
           },
-          playwrightSidecarUpdate,
+          mcpSidecarUpdate,
         );
         delete recovered.stopReason;
         const persistedRecovered = await this.captureAgentSessionId(
@@ -7630,7 +7640,7 @@ export class SessionService {
         status: "running",
         updatedAt: nowIso(),
       },
-      playwrightSidecarUpdate,
+      mcpSidecarUpdate,
     );
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
