@@ -5321,9 +5321,10 @@ export class SessionService {
           project: request.project,
           ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         };
-        const failedSpawnDeskAlive = reuseCtx
-          ? this.hasLiveDeskSiblings(failedSpawnSession)
-          : false;
+        // Checked even when this spawn reused no workspace: a child can have
+        // attached to this session while it was still spawning, which makes
+        // this record the desk anchor whose panes that child is using.
+        const failedSpawnDeskAlive = this.hasLiveDeskSiblings(failedSpawnSession);
         for (const [scName, sidecar] of Object.entries(project.sidecars)) {
           if (!sidecar.mcp && failedSpawnDeskAlive) {
             continue;
@@ -5431,9 +5432,7 @@ export class SessionService {
     await killTmuxSession(prepared.sessionId);
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
-    const deskAlive = prepared.placeholder.deskId
-      ? this.hasLiveDeskSiblings(prepared.placeholder)
-      : false;
+    const deskAlive = this.hasLiveDeskSiblings(prepared.placeholder);
     for (const [sidecarName, sidecar] of Object.entries(prepared.project.sidecars)) {
       if (!sidecar.mcp && deskAlive) {
         continue;
@@ -7268,6 +7267,10 @@ export class SessionService {
 
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
+    // Resolved once for the whole teardown: re-reading it per sidecar would
+    // both cost a listSessions each time and let a sibling transitioning
+    // mid-loop leave the desk's sidecars half torn down.
+    const deskSiblingsRunning = this.hasLiveDeskSiblings(session);
     for (const scName of sessionSidecarNames(session, project)) {
       const sidecar = project?.sidecars[scName];
       // Non-mcp project sidecars are desk-shared: while another desk member's
@@ -7277,7 +7280,7 @@ export class SessionService {
       // own teardown too, where the owner id is its own id. MCP sidecars are
       // always per-session and tear down unconditionally.
       const isDeskSharedSidecar = sidecar !== undefined && !sidecar.mcp;
-      if (isDeskSharedSidecar && this.hasLiveDeskSiblings(session)) {
+      if (isDeskSharedSidecar && deskSiblingsRunning) {
         continue;
       }
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
@@ -7350,13 +7353,28 @@ export class SessionService {
     }
     // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
     // are still in use by any other live desk member (an anchor-owned
-    // project sidecar in M2 runs with the anchor's SPUR_SESSION_TOOL_DIR), so
-    // only the last member's teardown may remove them.
-    if (this.hasActiveDeskSiblings(session)) {
+    // project sidecar runs with the anchor's SPUR_SESSION_TOOL_DIR), so only
+    // the last member's teardown may remove them. One snapshot serves both the
+    // guard and the keep-list below.
+    const deskMembers = listSessions(this.config.dataDir).filter(
+      (s) => s.id !== sessionId && s.project === session.project && deskAnchorId(s) === anchorId,
+    );
+    if (deskMembers.some((s) => !isTerminalSessionStatus(s.status))) {
       return;
     }
-    if (options?.preserveStartup && session.startupAttachmentIds?.length) {
-      deleteSessionArtifactsExcept(this.config.dataDir, anchorId, session.startupAttachmentIds);
+    // Startup attachments of EVERY member live in this one shared dir, and
+    // respawn re-clones them, so a member's keep-list is not enough: deleting
+    // another member's ids here would make its respawn fail permanently.
+    const preservedStartupIds = new Set(
+      deskMembers.flatMap((member) => member.startupAttachmentIds ?? []),
+    );
+    if (options?.preserveStartup) {
+      for (const id of session.startupAttachmentIds ?? []) {
+        preservedStartupIds.add(id);
+      }
+    }
+    if (preservedStartupIds.size > 0) {
+      deleteSessionArtifactsExcept(this.config.dataDir, anchorId, [...preservedStartupIds]);
     } else {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }

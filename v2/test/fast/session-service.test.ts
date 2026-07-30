@@ -9296,6 +9296,54 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).not.toHaveBeenCalled();
   });
 
+  it("keeps every desk member's startup attachments when the last member tears the shared dir down", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "killed" as const,
+      startupAttachmentIds: ["anchor-shot.png"],
+    });
+    store.set("api-2", {
+      ...base,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "running" as const,
+      startupAttachmentIds: ["sibling-shot.png"],
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    // The dir is shared, so a keep-list built from the closing member alone
+    // would delete the already-killed anchor's attachments and make its
+    // respawn fail permanently.
+    const keepCall = deleteSessionArtifactsExceptMock.mock.calls.at(-1);
+    expect(keepCall?.[1]).toBe("api-1");
+    expect([...(keepCall?.[2] ?? [])].sort()).toEqual(["anchor-shot.png", "sibling-shot.png"]);
+    // A wholesale dir delete really removes it, so its survival proves the
+    // keep-list path ran instead.
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+  });
+
   it("removes the shared artifacts dir and anchor tool dir when completing the last non-terminal desk member", async () => {
     const store = createSessionStore();
     const base = {
