@@ -1642,6 +1642,24 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function buildSubscriptionRequest(
+  targetSessionId: string,
+  rawStates: string[] | undefined,
+  rawMessage: string | undefined,
+  emptyStatesError: string,
+): SubscribeSessionStatesRequest {
+  const states = (rawStates ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error(emptyStatesError);
+  }
+  const message = rawMessage?.trim();
+  return {
+    targetSessionId,
+    states,
+    ...(message ? { message } : {}),
+  };
+}
+
 function resolveCliSpawnSubscriptions(options: {
   subscribeTo?: string;
   subscribeState?: string[];
@@ -1654,17 +1672,13 @@ function resolveCliSpawnSubscriptions(options: {
     }
     return undefined;
   }
-  const states = (options.subscribeState ?? []).map(parseSubscriptionState);
-  if (states.length === 0) {
-    throw new Error("--subscribe-to requires at least one --subscribe-state");
-  }
-  const message = options.subscribeMessage?.trim();
   return [
-    {
-      targetSessionId: target,
-      states,
-      ...(message ? { message } : {}),
-    },
+    buildSubscriptionRequest(
+      target,
+      options.subscribeState,
+      options.subscribeMessage,
+      "--subscribe-to requires at least one --subscribe-state",
+    ),
   ];
 }
 
@@ -2191,16 +2205,12 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!target) {
           throw new Error("subscribe requires a targetSessionId, --list, or --remove");
         }
-        const states = (options.state ?? []).map(parseSubscriptionState);
-        if (states.length === 0) {
-          throw new Error("subscribe requires at least one --state");
-        }
-        const message = options.message?.trim();
-        const payload: SubscribeSessionStatesRequest = {
-          targetSessionId: target,
-          states,
-          ...(message ? { message } : {}),
-        };
+        const payload = buildSubscriptionRequest(
+          target,
+          options.state,
+          options.message,
+          "subscribe requires at least one --state",
+        );
         await outputResult({
           json: Boolean(options.json),
           label: "subscribing",

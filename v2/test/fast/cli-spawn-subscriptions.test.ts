@@ -117,4 +117,20 @@ describe("spawn CLI state subscriptions", () => {
     ).rejects.toThrow(/--subscribe-to requires at least one --subscribe-state/);
     expect(postJsonMock).not.toHaveBeenCalled();
   });
+
+  it("rejects an unknown --subscribe-state value, no spawn", async () => {
+    await expect(
+      parseSpawn([
+        "spawn",
+        "demo",
+        "do the thing",
+        "--subscribe-to",
+        "demo-1",
+        "--subscribe-state",
+        "bogus",
+        "--json",
+      ]),
+    ).rejects.toThrow(/state must be one of:/);
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
 });
