@@ -5,35 +5,27 @@ description: Author and export a UI design via Claude Design (claude.ai/design) 
 
 # Design
 
-This skill is the authoritative export contract. For workflow rationale and gate wiring, see `docs/design-workflow.md`.
+Authoritative export contract. Rationale + gate wiring: `docs/design-workflow.md` (edit it under the `docs` skill).
 
-## DesignSync flow
+## DesignSync
 
-- Tool: `DesignSync` (loaded via ToolSearch). Order: list/read -> `finalize_plan` -> write/delete.
-- Bundled skills (Claude runtime, not in this repo): `/design-login` bootstraps design-system scope; `/design-sync` drives incremental local<->project sync, one component at a time — never wholesale replace.
-- Reuse the existing design-system project "Spur Design System"; update components incrementally, don't create new projects per task.
+- Tool `DesignSync`, load via `ToolSearch(select:DesignSync)`. Order: list/read -> `finalize_plan` -> write/delete.
+- Claude runtime, main session only — a Task subagent does not inherit it (verified). Bundled skills: `/design-login` grants design scope; `/design-sync` syncs local<->project one component at a time, never wholesale.
+- Reuse project "Spur Design System". Update components incrementally; never one project per task.
 
-## Export contract
+## Export bundle
 
-Location: `$SPUR_SESSION_ARTIFACTS_DIR/design/` — session-scoped, renders inline in Spur UI, not committed from the worktree.
+`$SPUR_SESSION_ARTIFACTS_DIR/design/` — session-scoped, renders inline in Spur UI, not committed.
 
 | File | Contents |
 |---|---|
-| `design-spec.md` | Handoff doc, see below |
-| `*.html` (one or more) | Self-contained component previews, first line `<!-- @dsCard group="..." -->`, renderable inline in Spur UI and readable by any agent |
+| `design-spec.md` | Handoff doc (below) |
+| `*.html` | Self-contained previews, first line `<!-- @dsCard group="..." -->`, readable by any agent |
 
-`design-spec.md` sections:
-- Design summary
-- Claude Design project (name + URL)
-- Components: each with states + variants
-- Design tokens: reference `packages/web` tokens by name, no hardcoded HEX/RGB (`frontend-codestyle` skill)
-- Layout / responsive notes
-- UI states: loading, empty, error, disabled, focus
-- Acceptance criteria: visual, testable
-- Approval status: `pending` | `approved by user @ <ISO-timestamp>`
+`design-spec.md`: summary; project name + URL; components (states + variants); tokens (reference `packages/web` names, no hardcoded HEX — `frontend-codestyle`); layout/responsive; UI states (loading/empty/error/disabled/focus); acceptance criteria (visual, testable); approval status (`pending` | `approved by user @ <ISO>`).
 
-## Approval protocol
+## Approval
 
-`design-author` exports and returns `PENDING_APPROVAL` — it never waits on the user itself. The manager owns the hard-stop: ping the user with the project URL + summary, await input, and only resume architect/developer once `design-spec.md` approval status flips to `approved`.
+`design-author` exports, returns `PENDING_APPROVAL`, never waits itself. Manager hard-stops: ping user with project URL + summary, await input, resume only when approval status is `approved`.
 
-Handoff: architect, developer, and designer read `design-spec.md` directly from the known path above and honor its Approval status field — no dependency on curator or task-memory. On Tier 2/3, curator may additionally note an "Accepted design" entry in `task-memory.md`.
+Downstream (architect, developer, designer) read `design-spec.md` from the path above and honor its approval status — no curator dependency. Tier 2/3: curator may add an "Accepted design" note in `task-memory.md`.
