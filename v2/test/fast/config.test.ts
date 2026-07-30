@@ -2392,10 +2392,15 @@ projects:
     );
   });
 
-  it("does not enable codex fast mode for the sp project", async () => {
+  it("pins codex non-fast service_tier and high reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'model_reasoning_effort="high"']);
+    expect(config.projects["sp"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'service_tier="default"',
+    ]);
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
