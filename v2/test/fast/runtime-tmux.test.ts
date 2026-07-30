@@ -574,6 +574,34 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
+  it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
+    let now = 0;
+    let captureCount = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        captureCount += 1;
+        now += 10_000;
+        return {
+          stdout: captureCount === 5 ? "Claude Code\n❯" : "Starting Claude Code...",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+      await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, { agent: "claude" });
+
+      expect(captureCount).toBe(5);
+      expect(sleepMock.mock.calls.slice(0, 4)).toEqual([[728], [1_228], [2_228], [2_228]]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("sends a bare digit keystroke to select a menu option within the first nine", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 

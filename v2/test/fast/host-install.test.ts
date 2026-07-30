@@ -475,11 +475,9 @@ describe("satisfiesNodeEngineRange", () => {
       readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
     ) as { engines?: { node?: string } };
     const range = pkg.engines?.node;
-    expect(
-      range,
-      "engines.node must be present so node-version never silently no-ops",
-    ).toBeTruthy();
-    if (!range) throw new Error("engines.node must be present");
+    if (!range) {
+      throw new Error("engines.node must be present");
+    }
     const supported = /^\^\d+\.\d+\.\d+$|^>=\d+(?:\.\d+){0,2}$/;
     for (const clause of range.split("||").map((c) => c.trim())) {
       expect(

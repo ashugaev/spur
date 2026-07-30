@@ -369,6 +369,7 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
+const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
@@ -5718,7 +5719,12 @@ export class SessionService {
       });
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
-      await waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent });
+      await waitForTmuxReady(
+        sessionId,
+        launchPlan.readyMarkers,
+        attempt === 1 ? BACKGROUND_SPAWN_READY_TIMEOUT_MS : undefined,
+        { agent },
+      );
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,

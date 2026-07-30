@@ -252,6 +252,11 @@ const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
+const AGENT_READY_TIMEOUT_MS = 30_000;
+const AGENT_READY_POLL_INITIAL_MS = 500;
+const AGENT_READY_POLL_MAX_MS = 2_000;
+const AGENT_READY_POLL_JITTER_MAX_MS = 250;
+const AGENT_READY_POLL_BACKOFF_AFTER_MS = 5_000;
 // Warn at most once per process lifetime when `auto` mode silently falls back
 // to direct tmux, so the log isn't spammed once per session launch.
 let warnedSystemdScopeFallback = false;
@@ -743,10 +748,18 @@ export async function sendMenuSelectionKeys(
   await tmux("send-keys", "-t", target, "Enter");
 }
 
+function tmuxReadyPollJitterMs(sessionName: string): number {
+  let hash = 0;
+  for (const char of sessionName) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash % AGENT_READY_POLL_JITTER_MAX_MS;
+}
+
 export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
-  timeoutMs = 30_000,
+  timeoutMs = AGENT_READY_TIMEOUT_MS,
   options?: { agent?: AgentName },
 ): Promise<void> {
   if (readyMarkers.length === 0) {
@@ -754,18 +767,24 @@ export async function waitForTmuxReady(
     return;
   }
 
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   let lastCapture = "";
   let lastCursorTrustConfirmAt = 0;
   let cursorTrustConfirmAttempts = 0;
+  let pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
+  const pollJitterMs = tmuxReadyPollJitterMs(sessionName);
   while (Date.now() < deadline) {
-    // fresh: this loop polls every 500ms expecting genuinely current pane
-    // text (readiness detection, and the cursor trust-confirm retry gate at
-    // CURSOR_TRUST_CONFIRM_DELAY_MS=1000ms) — well under the probe cache's
-    // 2s TTL, so a cached read here would stall detection and could resend
-    // a trust-confirm Enter against stale (already-confirmed) text.
+    // fresh: this loop expects genuinely current pane text for readiness and
+    // Cursor trust-confirm retries. Back off to reduce pressure on the shared
+    // tmux server when several agents start concurrently, with per-session
+    // jitter so batch spawns don't stay phase-aligned.
     const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
+    const paneChanged = capture !== lastCapture;
     lastCapture = capture;
+    if (paneChanged) {
+      pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
+    }
     if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
       if (cursorTrustConfirmAttempts > 0) {
         await sleep(CURSOR_READY_SETTLE_DELAY_MS);
@@ -788,10 +807,14 @@ export async function waitForTmuxReady(
       cursorTrustConfirmAttempts += 1;
       lastCursorTrustConfirmAt = Date.now();
       await sendSubmitKeyToTmux(sessionName);
-      await sleep(500);
+      pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
+      await sleep(AGENT_READY_POLL_INITIAL_MS);
       continue;
     }
-    await sleep(500);
+    await sleep(pollDelayMs + pollJitterMs);
+    if (Date.now() - startedAt >= AGENT_READY_POLL_BACKOFF_AFTER_MS) {
+      pollDelayMs = Math.min(pollDelayMs * 2, AGENT_READY_POLL_MAX_MS);
+    }
   }
 
   const detail = lastCapture.trim()
