@@ -3456,6 +3456,186 @@ describe("SessionDetail artifacts", () => {
     );
   });
 
+  it("previews html artifacts in a sandboxed frame with a standalone open link", async () => {
+    const artifactProbes: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/artifacts/report.html") {
+        artifactProbes.push(String(init?.method));
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "report.html",
+                  name: "report.html",
+                  size: 15,
+                  mimeType: "text/html; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.html")).toBeInTheDocument();
+    });
+
+    const cardFrame = await screen.findByTitle("report.html preview");
+    expect(cardFrame).toHaveAttribute("src", "/api/sessions/api-a1/artifacts/report.html");
+    expect(cardFrame).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-forms allow-popups allow-modals",
+    );
+    // The frame is only mounted after a status probe, since iframes report success
+    // for error bodies too.
+    expect(artifactProbes).toEqual(["HEAD"]);
+
+    const cardOpenLink = screen.getByRole("link", {
+      name: "Open report.html in a new tab",
+    });
+    expect(cardOpenLink).toHaveAttribute("href", "/api/sessions/api-a1/artifacts/report.html");
+    expect(cardOpenLink).toHaveAttribute("target", "_blank");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview report.html" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Artifact preview report.html" });
+    const dialogFrame = await within(dialog).findByTitle("report.html preview");
+    expect(dialogFrame).toHaveAttribute("src", "/api/sessions/api-a1/artifacts/report.html");
+    expect(
+      within(dialog).getByRole("link", { name: "Open report.html in a new tab" }),
+    ).toBeVisible();
+    expect(
+      within(dialog).queryByRole("button", { name: "Copy report.html" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps oversized html artifacts out of the grid until previewed", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/artifacts/huge.html") {
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "huge.html",
+                  name: "huge.html",
+                  size: 4 * 1024 * 1024,
+                  mimeType: "text/html; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("huge.html")).toBeInTheDocument();
+    });
+
+    const card = screen.getByLabelText("text artifact huge.html");
+    expect(within(card).queryByTitle("huge.html preview")).not.toBeInTheDocument();
+    expect(within(card).getByText("HTML")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview huge.html" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Artifact preview huge.html" });
+    expect(await within(dialog).findByTitle("huge.html preview")).toBeInTheDocument();
+  });
+
+  it("marks html artifacts unavailable when the artifact response fails", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/artifacts/gone.html") {
+        return new Response("Artifact not found", { status: 404 });
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "gone.html",
+                  name: "gone.html",
+                  size: 15,
+                  mimeType: "text/html; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("gone.html")).toBeInTheDocument();
+    });
+
+    expect(await screen.findByText("Preview unavailable")).toBeInTheDocument();
+    expect(screen.queryByTitle("gone.html preview")).not.toBeInTheDocument();
+  });
+
   it("locks page scroll while an artifact preview is open", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
