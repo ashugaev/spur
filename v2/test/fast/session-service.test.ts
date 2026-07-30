@@ -82,6 +82,7 @@ const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
 const sweepLeakedPlaywrightMock = vi.fn();
 const waitForPlaywrightReadyMock = vi.fn();
+const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const sidecarTmuxAliveMock = vi.fn();
@@ -397,6 +398,7 @@ vi.mock("../../src/sidecars/builtins.js", () => ({
         },
         mcp: { server: "playwright", portId: "http", path: "/mcp", clientHost: "localhost" },
       },
+      resolveCommand: resolvePlaywrightSidecarCommandMock,
       sweepLeaked: sweepLeakedPlaywrightMock,
       readiness: waitForPlaywrightReadyMock,
     },
@@ -960,6 +962,7 @@ describe("SessionService", () => {
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
     waitForPlaywrightReadyMock.mockReset().mockResolvedValue(true);
+    resolvePlaywrightSidecarCommandMock.mockReset().mockReturnValue(undefined);
     clearPortListenerMock.mockReset().mockResolvedValue(undefined);
     isHostPortFreeMock.mockReset().mockResolvedValue(true);
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
@@ -2052,6 +2055,51 @@ describe("SessionService", () => {
         .filter((session) => session.id === "api-1" && session.status === "running")
         .at(-1);
       expect(persistedRestored?.sidecarPorts?.playwright).toBeUndefined();
+    });
+
+    it("launches the built-in's lazily-resolved command instead of the config placeholder (MUST-FIX 1)", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
+      resolvePlaywrightSidecarCommandMock.mockReturnValue(
+        "node /real/resolved/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+      );
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(resolvePlaywrightSidecarCommandMock).toHaveBeenCalled();
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sidecarName: "playwright",
+          command: expect.stringContaining("/real/resolved/cli.js"),
+        }),
+      );
+    });
+
+    it("degrades gracefully (autostart failure, not a spawn failure) when the built-in's command cannot be resolved", async () => {
+      loadConfigMock.mockReturnValue(withPlaywrightSidecar());
+      resolvePlaywrightSidecarCommandMock.mockImplementation(() => {
+        throw new Error("Playwright MCP sidecar unavailable: @playwright/mcp is not installed");
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(spawned.id).toBe("api-1");
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.sidecar.autostart.failed" &&
+            typeof entry.message === "string" &&
+            entry.message.includes("@playwright/mcp is not installed"),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -5966,6 +6014,27 @@ describe("SessionService", () => {
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
+  });
+
+  it("releases sidecarPorts when reconciling a dead runtime to stopped, like pause/kill already do", async () => {
+    // Neither "stopped" nor "errored" is terminal (isTerminalSessionStatus is
+    // completed|killed only), so a leftover sidecarPorts here would be treated
+    // as still owned by a live session forever, and the leak sweep could never
+    // reclaim the port.
+    readSessionMock.mockReturnValue(
+      runningSession({ sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } } }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.status).toBe("stopped");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
   });
 
   it("tears down the playwright sidecar exactly once when reconciling a dead runtime to stopped", async () => {
@@ -11202,6 +11271,42 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("does not reap a sidecar for a stopped/errored session inside its restore warmup window", async () => {
+    // restore()/ensureSessionReadyForSend() start the MCP sidecar while the
+    // on-disk status is still stopped/errored (flipped to running only once
+    // restore completes), so without this gate the reaper would kill the
+    // just-started sidecar pane mid-restore.
+    const sessions = createSessionStore();
+    sessions.set("restoring-1", {
+      id: "restoring-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "restoring-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/restoring-1",
+      tmuxSession: "restoring-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listTmuxSessionNamesMock.mockResolvedValue(new Set(["restoring-1--playwright"]));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      reapDeadSessionSidecars(): Promise<void>;
+      restoreWarmupUntil: Map<string, number>;
+      dispose(): void;
+    };
+    service.restoreWarmupUntil.set("restoring-1", Date.now() + 30_000);
+
+    await service.reapDeadSessionSidecars();
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("restoring-1", "playwright");
+    service.dispose();
+  });
+
   it("skips a running reaper pass instead of overlapping it", async () => {
     createSessionStore();
     const { SessionService } = await loadSessionServiceModule();
@@ -13014,6 +13119,46 @@ describe("SessionService", () => {
 
     await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
       'Project api has no sidecar "dev" configured',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startSidecar rejects a manual start when the sidecar is not applicable to the session's agent", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            preview: {
+              command: "pnpm preview",
+              autoStart: false,
+              agents: ["claude", "codex"],
+            },
+          },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "cursor-agent",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "preview")).rejects.toThrow(
+      'Sidecar "preview" is not available to agent "cursor" for session api-1',
     );
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });

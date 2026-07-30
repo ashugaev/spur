@@ -55,10 +55,14 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route builds a diagnostic prompt server-side and spawns the built-in Shepherd through daemon `POST /shepherd/spawn`, which is project-independent and works on a clean install with no configured projects.
 - Built-in MCP sidecars: a `sidecars.<name>` entry can carry code-only MCP wiring (command/ports/
   MCP injection) that YAML cannot express; a built-in name (currently only `playwright`) needs no
-  `command` — YAML only overrides `autoStart`/`dependsOn`. `sidecars.playwright.autoStart: true`
-  gates the built-in, Spur-owned playwright MCP sidecar for `claude`/`codex` sessions; `cursor`
-  never gets it (agent-scoped via `SidecarConfig.agents`). Enablement is config-only, re-resolved
-  fresh at every spawn/restore/recover — no per-session toggle, no `spur playwright` command.
+  `command` and rejects any key besides `autoStart` (`dependsOn` included — MCP sidecars start
+  ahead of the dependency-aware autostart pass, so a dependency on one could never be satisfied).
+  `sidecars.playwright.autoStart: true` gates the built-in, Spur-owned playwright MCP sidecar for
+  `claude`/`codex` sessions; `cursor` never gets it (agent-scoped via `SidecarConfig.agents`).
+  Enablement is config-only, re-resolved fresh at every spawn/restore/recover — no per-session
+  toggle, no `spur playwright` command. Enabling it for claude launches with `--mcp-config
+  --strict-mcp-config`, dropping any MCP server not already merged into that generated config. See
+  `docs/commands.md#built-in-mcp-sidecars` for the merge sources and the fresh-worktree gap.
 
 ## Current config shape
 

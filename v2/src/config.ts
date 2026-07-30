@@ -962,18 +962,29 @@ function parseSidecars(
     const entryLabel = `${label}.${name}`;
     const entryRaw = asObject(entry, entryLabel);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
-    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
-    const builtin = BUILTIN_SIDECARS[name];
+    // Object.hasOwn guards against a sidecar name like "constructor"/"toString"
+    // (VALID_ID_RE allows them) resolving to Object.prototype's own members
+    // instead of falling through to the normal "unknown built-in" path below.
+    const builtin = Object.hasOwn(BUILTIN_SIDECARS, name) ? BUILTIN_SIDECARS[name] : undefined;
     if (builtin) {
       // Built-ins carry a code-only command/ports/mcp/agents (bundle-resolved
-      // bin, MCP wiring); YAML only ever overrides autoStart/dependsOn.
-      result[name] = {
-        ...builtin.config,
-        autoStart,
-        ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
-      };
+      // bin, MCP wiring). YAML only ever overrides "autoStart": MCP sidecars
+      // start pre-agent-launch, ahead of the dependency-aware autostart pass,
+      // so "dependsOn" (and any other override) can't be honored — reject it
+      // at the boundary instead of silently dropping it.
+      const extraKeys = Object.keys(entryRaw).filter((key) => key !== "autoStart");
+      if (extraKeys.length > 0) {
+        throw new Error(
+          `${entryLabel} is a built-in sidecar; only "autoStart" may be set here (got: ${extraKeys.join(", ")}). ` +
+            `Its command/env/ports/mcp/agents are fixed in code, and "dependsOn" is not supported because MCP ` +
+            `sidecars start before the agent launches, ahead of the dependency-aware autostart pass. ` +
+            `Use a different sidecar name to define your own.`,
+        );
+      }
+      result[name] = { ...builtin.config, autoStart };
       continue;
     }
+    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
     const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
@@ -1076,6 +1087,19 @@ function validateSidecarDependencies(label: string, sidecars: Record<string, Sid
       }
       if (!sidecars[dependency]) {
         throw new Error(`${dependencyLabel} references unknown sidecar "${dependency}"`);
+      }
+      // startSidecarWithDependencies recurses over the raw project sidecars, so
+      // a dependency on an agent-scoped built-in would start it for an agent it
+      // is not scoped to (and regardless of its own autoStart). Built-in MCP
+      // sidecars also start before the agent launches, ahead of this
+      // dependency-aware pass, so the ordering could not be honored anyway.
+      if (Object.hasOwn(BUILTIN_SIDECARS, dependency)) {
+        throw new Error(
+          `${dependencyLabel} must not reference the built-in sidecar "${dependency}": ` +
+            `built-in MCP sidecars start before the agent launches and are agent-scoped, ` +
+            `so they cannot be used as a dependency. Enable it with ` +
+            `sidecars.${dependency}.autoStart instead.`,
+        );
       }
       seen.add(dependency);
     }
