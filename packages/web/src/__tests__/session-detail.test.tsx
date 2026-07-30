@@ -4331,6 +4331,40 @@ describe("SessionDetail links", () => {
     expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
   });
 
+  it("refetches the session after a failed action, so the page never shows a stale view", async () => {
+    let sessionGets = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1" && (!init?.method || init.method === "GET")) {
+        sessionGets += 1;
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/reopen" && init?.method === "POST") {
+        return new Response(JSON.stringify({ error: "Session api-a1 cannot be reopened" }), {
+          status: 409,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await screen.findByRole("button", { name: "Reopen" });
+    const getsBeforeClick = sessionGets;
+
+    fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+
+    await screen.findByText("Session api-a1 cannot be reopened");
+    await waitFor(() => {
+      expect(sessionGets).toBeGreaterThan(getsBeforeClick);
+    });
+  });
+
   it("force kills the session from the recover dialog", async () => {
     let killBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {

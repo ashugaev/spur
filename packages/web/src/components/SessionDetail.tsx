@@ -1757,6 +1757,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return true;
     } catch (actionError) {
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      // The server may have already moved (e.g. reopen's rollback flips the
+      // record back to completed on a failed restore) — refetch so the page
+      // never shows a stale view after a failed action.
+      await loadSession();
       return false;
     } finally {
       setBusyAction(null);

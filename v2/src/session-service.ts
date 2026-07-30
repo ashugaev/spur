@@ -336,6 +336,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
+  worktreePathFor,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -1775,6 +1776,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // Session ids this process is actively reopening. Guards against two
+  // overlapping reopen() calls both passing the completed-status check and
+  // racing into restore() for the same tmux session and worktree.
+  private readonly reopensInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
@@ -7940,6 +7945,22 @@ export class SessionService {
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
   async reopen(sessionId: string): Promise<SessionView> {
+    // Refuse a second concurrent reopen outright instead of narrowing the
+    // read-check-then-write window: two overlapping calls that both pass the
+    // `status !== "completed"` guard would otherwise race into restore() for
+    // the same tmux session and worktree.
+    if (this.reopensInFlight.has(sessionId)) {
+      throw new SessionNotReopenableError(`Session ${sessionId} is already being reopened`);
+    }
+    this.reopensInFlight.add(sessionId);
+    try {
+      return await this.reopenLocked(sessionId);
+    } finally {
+      this.reopensInFlight.delete(sessionId);
+    }
+  }
+
+  private async reopenLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -7953,21 +7974,46 @@ export class SessionService {
     const needsWorktree = session.worktree && !workspaceExists(session.worktreePath);
     if (needsWorktree) {
       const project = this.getProject(session.project);
+      // createWorktree always rebuilds at
+      // worktreePathFor(worktreeDir, projectId, sessionId). A desk member's
+      // record can carry the anchor's worktreePath instead (deskId set), so
+      // check the two paths BEFORE touching git — otherwise a mismatch would
+      // leave a stray worktree registered in git that blocks every later
+      // reopen/respawn on the branch.
+      const expectedWorktreePath = worktreePathFor(
+        this.config.worktreeDir,
+        session.project,
+        session.id,
+      );
+      if (expectedWorktreePath !== session.worktreePath) {
+        const deskNote = session.deskId ? " it belonged to this session's desk anchor;" : "";
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: its worktree at ${session.worktreePath} is gone and cannot be rebuilt at that path;${deskNote} use respawn`,
+        );
+      }
       const refs = await branchRefsExist(project.path, session.branch);
       if (!refs.exists && !refs.remote) {
         throw new SessionNotReopenableError(
           `Session ${sessionId} cannot be reopened: branch ${session.branch} no longer exists locally or on origin — use respawn`,
         );
       }
-      const created = await createWorktree({
-        repoPath: project.path,
-        worktreeBaseDir: this.config.worktreeDir,
-        projectId: session.project,
-        sessionId: session.id,
-        defaultBranch: project.defaultBranch,
-        branch: session.branch,
-        symlinks: project.symlinks,
-      });
+      let created: string;
+      try {
+        created = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: session.project,
+          sessionId: session.id,
+          defaultBranch: project.defaultBranch,
+          branch: session.branch,
+          symlinks: project.symlinks,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: failed to rebuild its worktree (${message}) — use respawn`,
+        );
+      }
       if (created !== session.worktreePath) {
         throw new SessionNotReopenableError(
           `Session ${sessionId} cannot be reopened: rebuilt worktree at ${created}, expected ${session.worktreePath}`,
@@ -7994,6 +8040,13 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.error;
+    // A completed record can still carry a queued message or a running
+    // pipeline step from before completion (applyManualStatus's completed
+    // branch does not clear either). Once restore() below flips status to
+    // "running", shouldRunDelivery would otherwise replay them — resending
+    // exactly the text this feature promises not to resend.
+    delete record.queuedMessages;
+    delete record.pipeline;
     writeSession(this.config.dataDir, record);
     this.stateCache.delete(sessionId);
     await this.refreshDashboardCacheEntry(record);
@@ -8002,6 +8055,29 @@ export class SessionService {
       return await this.restore(sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // The completed record's Telegram binding, artifacts, and work-item
+      // completion are already destroyed, so leaving the flipped
+      // stopped/manual_pause record in place would make send/kill/sidecars
+      // legal on a gutted session. Roll back to completed instead.
+      //
+      // restore() itself kills the tmux pane it created before rethrowing
+      // for every failure inside its own try/catch (including the fresh
+      // pane created by createTmuxSession). But a throw from the small
+      // uncaught tail of restore() after that catch block exits (writeSession,
+      // captureAgentSessionId, refreshDashboardCacheEntry, ...) would leave a
+      // live, ready agent pane with nothing tearing it down. Tear down
+      // defensively in both cases — killTmuxSession/cleanupSessionServices
+      // are best-effort and safe to call on an already-dead pane.
+      await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(session);
+      const rolledBack: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "completed",
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, rolledBack);
+      this.stateCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(rolledBack);
       this.logEvent("session.reopen.failed", {
         level: "error",
         sessionId,
