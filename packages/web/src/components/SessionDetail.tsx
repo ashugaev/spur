@@ -2612,7 +2612,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("reopen")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                title="Restart this completed session in place, keeping its id and history. Its Telegram topic, artifacts, and sidecar ports stay gone."
+                title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
               >
                 {busyAction === "reopen" ? "Reopening..." : "Reopen"}
               </button>
