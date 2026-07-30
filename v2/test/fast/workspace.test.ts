@@ -86,6 +86,8 @@ import {
   checkProjectWorkspace,
   createWorktree,
   findWorktreePathForBranch,
+  hasUncommittedChanges,
+  hasUnpushedCommits,
   readDoctorBranchHint,
   resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
@@ -805,5 +807,73 @@ describe("resolveDoctorRepoRoot", () => {
     mockGitFailure("not a git repo");
 
     await expect(resolveDoctorRepoRoot("/tmp/scratch")).resolves.toBe("/tmp/scratch");
+  });
+});
+
+describe("hasUncommittedChanges", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("returns true when git status reports changes", async () => {
+    mockGitSuccess(" M src/foo.ts");
+
+    await expect(hasUncommittedChanges("/wt")).resolves.toBe(true);
+  });
+
+  it("returns false when git status is empty", async () => {
+    mockGitSuccess("");
+
+    await expect(hasUncommittedChanges("/wt")).resolves.toBe(false);
+  });
+
+  it("forwards ignoredPaths as :(exclude) pathspecs", async () => {
+    mockGitSuccess("");
+
+    await hasUncommittedChanges("/wt", ["node_modules", "dist"]);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["status", "--short", "--", ".", ":(exclude)node_modules", ":(exclude)dist"],
+      { cwd: "/wt" },
+    );
+  });
+});
+
+describe("hasUnpushedCommits", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("returns false when HEAD is an ancestor of the upstream", async () => {
+    mockGitSuccess("origin/feat");
+    mockGitSuccess("");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(false);
+  });
+
+  it("returns true when HEAD is not an ancestor of the upstream", async () => {
+    mockGitSuccess("origin/feat");
+    mockGitFailure("not ancestor", 1);
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(true);
+  });
+
+  it("returns true when there is no upstream and no remote contains HEAD", async () => {
+    mockGitFailure("no upstream", 128);
+    mockGitSuccess("");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(true);
+  });
+
+  it("returns false when there is no upstream but a remote contains HEAD", async () => {
+    mockGitFailure("no upstream", 128);
+    mockGitSuccess("  origin/feat");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(false);
   });
 });

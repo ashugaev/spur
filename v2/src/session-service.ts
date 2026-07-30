@@ -322,7 +322,7 @@ import {
   probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const RATE_LIMIT_REACTIVATION_PROMPT =
@@ -820,7 +820,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
-    version,
+    version: getVersion(),
     pid: process.pid,
     host: config.server.host,
     port: config.server.port,

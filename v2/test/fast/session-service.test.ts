@@ -1555,7 +1555,7 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
     });
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
-      'When the assigned task is complete, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
+      'When every objective in the task prompt is done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       selfDestruct: {

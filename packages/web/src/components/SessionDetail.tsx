@@ -35,6 +35,7 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -430,6 +431,10 @@ function artifactUrl(sessionId: string, artifactId: string): string {
 function artifactExtension(name: string): string {
   const ext = name.split(".").pop();
   return ext ? ext.toUpperCase() : "FILE";
+}
+
+function isMarkdownArtifact(artifact: SessionArtifact): boolean {
+  return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/markdown";
 }
 
 function artifactKindLabel(artifact: SessionArtifact): string {
@@ -890,6 +895,17 @@ function ArtifactLightbox({
     };
   }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
 
+  const isOpen = Boolean(artifact && artifactHref);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
+
   if (!artifact || !artifactHref) return null;
 
   const previewStatusMessage =
@@ -1069,18 +1085,29 @@ function ArtifactLightbox({
                 src={artifactHref}
               />
             ) : artifact.kind === "text" ? (
-              <>
+              <div
+                className={`absolute inset-0 overflow-auto overscroll-contain p-3 text-[var(--color-text-primary)] [-webkit-overflow-scrolling:touch] sm:p-4 ${
+                  textPreviewState === "ready" && textContent
+                    ? isMarkdownArtifact(artifact)
+                      ? "bg-[var(--color-bg-elevated)]"
+                      : ""
+                    : "pointer-events-none"
+                }`}
+                data-artifact-lightbox-interactive
+              >
                 {textPreviewState === "oversize" ? (
-                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                     File exceeds 1 MiB preview limit. Download to view the full content.
                   </div>
                 ) : null}
                 {textPreviewState === "ready" && textContent ? (
-                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                    {textContent}
-                  </pre>
+                  isMarkdownArtifact(artifact) ? (
+                    <MarkdownMessage text={textContent} />
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-mono">{textContent}</pre>
+                  )
                 ) : null}
-              </>
+              </div>
             ) : (
               <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
                 <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
