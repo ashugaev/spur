@@ -444,7 +444,10 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 type SessionArtifact = DashboardSession["artifacts"][number];
 
 // Agent-authored markup runs without allow-same-origin, so it never reaches the
-// dashboard origin. The daemon sets the matching CSP sandbox on the raw response.
+// dashboard origin. Mirrors the flag list of ARTIFACT_HTML_SANDBOX in v2/src/server.ts,
+// which sets the same sandbox as a CSP header on the raw response (no cross-package
+// import). Both sandboxes apply to a framed artifact; the header alone covers the
+// standalone tab.
 const ARTIFACT_HTML_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
 
 function artifactUrl(sessionId: string, artifactId: string): string {
@@ -488,6 +491,72 @@ function overlayButtonClass(primary = false): string {
       ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
       : "border-[var(--color-border-strong)] bg-[var(--color-bg-base)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]",
   ].join(" ");
+}
+
+function ArtifactHtmlFrame({
+  artifact,
+  artifactHref,
+  className,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  className: string;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  // An iframe fires onLoad for any delivered body, including an error page, so a
+  // failed artifact would otherwise read as a successful preview. Probe the status
+  // first and only frame the artifact once the response is good.
+  const [reachable, setReachable] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReachable(false);
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, {
+          method: "HEAD",
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!response.ok) {
+          onPreviewError(artifact.id);
+          return;
+        }
+        setReachable(true);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact.id, artifactHref]);
+
+  if (!reachable) {
+    return null;
+  }
+
+  return (
+    <iframe
+      className={className}
+      data-artifact-lightbox-interactive
+      onError={() => onPreviewError(artifact.id)}
+      onLoad={() => onPreviewReady(artifact.id)}
+      sandbox={ARTIFACT_HTML_SANDBOX}
+      src={artifactHref}
+      title={`${artifact.name} preview`}
+    />
+  );
 }
 
 function ArtifactCard({
@@ -569,13 +638,12 @@ function ArtifactCard({
         ) : null}
         {html ? (
           <>
-            <iframe
+            <ArtifactHtmlFrame
+              artifact={artifact}
+              artifactHref={artifactHref}
               className={`pointer-events-none absolute left-0 top-0 h-[200%] w-[200%] origin-top-left scale-50 border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              onError={() => onPreviewError(artifact.id)}
-              onLoad={() => onPreviewReady(artifact.id)}
-              sandbox={ARTIFACT_HTML_SANDBOX}
-              src={artifactHref}
-              title={`${artifact.name} preview`}
+              onPreviewError={onPreviewError}
+              onPreviewReady={onPreviewReady}
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -1156,14 +1224,12 @@ function ArtifactLightbox({
                 src={artifactHref}
               />
             ) : html ? (
-              <iframe
+              <ArtifactHtmlFrame
+                artifact={artifact}
+                artifactHref={artifactHref}
                 className={`absolute inset-0 h-full w-full border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-                data-artifact-lightbox-interactive
-                onError={() => onPreviewError(artifact.id)}
-                onLoad={() => onPreviewReady(artifact.id)}
-                sandbox={ARTIFACT_HTML_SANDBOX}
-                src={artifactHref}
-                title={`${artifact.name} preview`}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
               />
             ) : artifact.kind === "text" ? (
               <div

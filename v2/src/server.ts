@@ -119,6 +119,7 @@ const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
 // Sandbox flags for served HTML artifacts. allow-same-origin is deliberately absent:
 // scripts run, but in an opaque origin with no access to Spur's cookies or storage.
+// The preview iframes mirror this flag list in packages/web/src/components/SessionDetail.tsx.
 const ARTIFACT_HTML_SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals";
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
