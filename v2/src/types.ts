@@ -725,6 +725,17 @@ export interface SidecarPortView {
   port: number;
 }
 
+// A desk-shared (non-mcp) project sidecar's `tmuxSession` is
+// `${anchorId}--${name}`; a per-session (mcp) sidecar's is
+// `${sessionId}--${name}` — this is the sole source of the pane name outside
+// the daemon (web terminal attach, CLI `spur sidecar` commands).
+export interface SessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports: SidecarPortView[];
+  tmuxSession: string;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -734,7 +745,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
+  sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];

@@ -2318,7 +2318,9 @@ describe("SessionService", () => {
     });
     expect(spawned.id).toBe("api-1");
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
-    expect(spawned.sidecars).toEqual([{ name: "dev", alive: false, ports: [] }]);
+    expect(spawned.sidecars).toEqual([
+      { name: "dev", alive: false, ports: [], tmuxSession: "api-1--dev" },
+    ]);
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.autostart.failed",
     );
@@ -9318,6 +9320,500 @@ describe("SessionService", () => {
     expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
   });
 
+  describe("M2: desk-shared project sidecars", () => {
+    function daemonSidecarProjectConfig() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: true,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    function daemonAndPlaywrightProjectConfig() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+              playwright: {
+                command: "pnpm playwright",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8730 } },
+                mcp: {
+                  server: "playwright",
+                  portId: "http",
+                  path: "/mcp",
+                  clientHost: "localhost",
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    it("gives a desk sibling spawn no second project-sidecar tmux and no project-sidecar ports on its own record, and returns the sibling's own view", async () => {
+      loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          sidecarNames: ["daemon"],
+          sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+        }),
+      );
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      sidecarTmuxAliveMock.mockImplementation(async (sessionId: string) => sessionId === "api-1");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+      });
+
+      expect(result.id).toBe("api-2");
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-2")?.sidecarPorts).toBeUndefined();
+      expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+        daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+      });
+    });
+
+    it("starts a project sidecar requested from a desk sibling on the anchor's tmux and returns the sibling's own view", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { daemon: { command: "pnpm daemon", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+      sessions.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", deskId: "api-1" });
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.startSidecar("api-2", "daemon");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "daemon" }),
+      );
+      expect(result.id).toBe("api-2");
+      expect(sessions.get("api-2")?.sidecarNames).toBeUndefined();
+    });
+
+    it("stops a project sidecar requested from a desk sibling on the anchor's tmux and unlinks the anchor's slot", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { daemon: { command: "pnpm daemon", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarNames: ["daemon"],
+        slots: { links: [{ label: "daemon", url: "http://localhost:4100/" }] },
+      });
+      sessions.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", deskId: "api-1" });
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.stopSidecar("api-2", "daemon");
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(sessions.get("api-1")?.slots).toBeUndefined();
+      expect(result.id).toBe("api-2");
+    });
+
+    it("pausing the anchor with a live sibling keeps the shared sidecar tmux and port, and still kills and drops the anchor's own playwright", async () => {
+      loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        status: "running" as const,
+        sidecarNames: ["daemon", "playwright"],
+        sidecarPorts: {
+          daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+          playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8730 },
+        },
+        slots: {
+          links: [
+            { label: "daemon", url: "http://localhost:4100/" },
+            { label: "playwright", url: "http://localhost:8730/" },
+          ],
+        },
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "running" as const,
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.pause("api-1");
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+      expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("api-1", "daemon");
+      expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+        daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+      });
+      expect(sessions.get("api-1")?.slots?.links).toEqual([
+        { label: "daemon", url: "http://localhost:4100/" },
+      ]);
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+    });
+
+    it("completing the anchor with an errored sibling keeps the shared sidecar tmux and port, and still kills and drops the anchor's own playwright", async () => {
+      loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        status: "running" as const,
+        sidecarNames: ["daemon", "playwright"],
+        sidecarPorts: {
+          daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+          playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8730 },
+        },
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "errored" as const,
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.complete("api-1");
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+      expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("api-1", "daemon");
+      expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+        daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+      });
+      expect(sessions.get("api-1")?.status).toBe("completed");
+    });
+
+    it("completing the last desk member kills every sidecar and clears sidecarPorts", async () => {
+      loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        status: "running" as const,
+        sidecarNames: ["daemon", "playwright"],
+        sidecarPorts: {
+          daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+          playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8730 },
+        },
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "completed" as const,
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.complete("api-1");
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+      expect(sessions.get("api-1")?.sidecarPorts).toBeUndefined();
+      expect(sessions.get("api-1")?.status).toBe("completed");
+    });
+
+    it("refuses a fresh reservation on a completed anchor's shared port while a member is live, and accepts it once every member is terminal", async () => {
+      loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        launchCommand: "claude --dangerously-skip-permissions",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "completed" as const,
+        sidecarNames: ["daemon"],
+        sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        deskId: "api-1",
+        status: "running" as const,
+      });
+      sessions.set("api-3", {
+        ...base,
+        id: "api-3",
+        tmuxSession: "api-3",
+        worktreePath: "/tmp/spur-worktrees/api/api-3",
+        status: "running" as const,
+      });
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const conflict = await service
+        .startSidecar("api-3", "daemon")
+        .catch((error: unknown) => error);
+      expect(conflict).toBeInstanceOf(SidecarPortConflictError);
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        deskId: "api-1",
+        status: "completed" as const,
+      });
+
+      await service.startSidecar("api-3", "daemon");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-3", sidecarName: "daemon" }),
+      );
+    });
+
+    it("enrich reports the anchor's tmuxSession/ports for a desk-shared sidecar and the session's own id for its mcp sidecar", async () => {
+      loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarNames: ["daemon", "playwright"],
+        sidecarPorts: {
+          daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+          playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8730 },
+        },
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        sidecarNames: ["daemon", "playwright"],
+      });
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-2");
+
+      expect(result.sidecars).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "daemon",
+            alive: true,
+            tmuxSession: "api-1--daemon",
+            ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100 }],
+          }),
+          expect.objectContaining({
+            name: "playwright",
+            alive: true,
+            tmuxSession: "api-2--playwright",
+          }),
+        ]),
+      );
+      expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-2", "playwright");
+    });
+
+    it("lists a desk-shared sidecar as running for every member in the dashboard view", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { daemon: { command: "pnpm daemon", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarNames: ["daemon"],
+      });
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        sidecarNames: ["daemon"],
+      });
+      sidecarTmuxAliveMock.mockImplementation(async (sessionId: string) => sessionId === "api-1");
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const dashboardViews = await service.list({ view: "dashboard" });
+
+      for (const id of ["api-1", "api-2"]) {
+        const view = dashboardViews.find((v) => v.id === id);
+        expect(view).toMatchObject({ runningSidecarNames: ["daemon"] });
+      }
+    });
+  });
+
   it("completes a renamed-project session by resolving the repo from its worktree", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -15532,11 +16028,12 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.sidecars).toEqual([
-      { name: "daemon", alive: false, ports: [] },
+      { name: "daemon", alive: false, ports: [], tmuxSession: "api-1--daemon" },
       {
         name: "ui",
         alive: false,
         ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010 }],
+        tmuxSession: "api-1--ui",
       },
     ]);
   });

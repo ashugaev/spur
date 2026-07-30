@@ -162,6 +162,8 @@ triggers:
 
 `spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`; mixed workspace overrides are rejected.
 
+Desk members share slots (title/links/tags/PR), session artifacts, and non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one shared instance per desk, addressable by any member. Each member still keeps its own transcript, agent process, status, MCP sidecar (`playwright`), and session tool dir. A shared project sidecar tears down and releases its ports only when the last non-terminal member (`errored`/`stopped`/`paused` all count as holding) goes `completed` or `killed`.
+
 ## Telegram binding
 
 Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker; `/watch <sessionId>` binds directly. Bound messages reach the agent with `Source: telegram` and are answered with `spur source reply "message"` from inside the session — Telegram-spawned sessions get that contract in their prompt. `/watch@otherbot` is ignored in group chats.

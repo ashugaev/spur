@@ -95,6 +95,16 @@ export interface SpurSidecarPort {
   port: number;
 }
 
+// `tmuxSession` is optional because cached/legacy payloads (persisted before
+// this field existed) lack it; SessionDetail falls back to the old
+// `${session.id}--${name}` construction for those.
+export interface SpurSessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports?: SpurSidecarPort[];
+  tmuxSession?: string;
+}
+
 export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
@@ -265,7 +275,7 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars?: SpurSessionSidecarView[];
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
@@ -432,7 +442,7 @@ export interface DashboardSession {
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
-  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars: SpurSessionSidecarView[];
   runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
