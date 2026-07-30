@@ -228,12 +228,12 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
+- `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, `gitlab:merge_conflict`.
+- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`.
-- `github-ci`: `github-ci:run.completed`.
-- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it and it exists to back `projects.<id>.backlog`.
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals; state persists under `dataDir`. When `query` is set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids in an append-only registry. GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 

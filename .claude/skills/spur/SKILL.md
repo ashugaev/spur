@@ -11,7 +11,7 @@ Sections through `## Safety` describe Spur anywhere and depend on no repo path. 
 
 - CLI plus a local HTTP daemon, default `127.0.0.1:4310`. Any CLI command auto-starts the daemon.
 - Web UI is a thin client over the daemon API, no runtime logic of its own. Default port 5555 (`ui.port`).
-- Agents are `claude`, `codex`, `cursor` only, each launched full-access in a detached tmux pane: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `agent --force --sandbox disabled` (cursor's binary is `agent`).
+- Agents are `claude`, `codex`, `cursor` only, each launched full-access in a detached tmux pane: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, cursor's `agent --force --sandbox disabled`.
 - Workspace setup is only `git worktree` + configured symlinks + detached `tmux` + agent launch.
 
 ## Interfaces
