@@ -33,6 +33,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — fixes for common local failures
 - [SECURITY.md](SECURITY.md) — reporting and network posture
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
+- [docs/design-workflow.md](docs/design-workflow.md) — Claude Design pre-implementation gate
 
 ## Repo layout
 
