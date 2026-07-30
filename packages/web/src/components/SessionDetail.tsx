@@ -70,6 +70,7 @@ import {
   canHandoff,
   canPause,
   canRecover,
+  canReopen,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
@@ -1701,7 +1702,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [session]);
 
   const handleAction = async (
-    action: "send" | "pause" | "restore" | "complete" | "kill",
+    action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
@@ -2603,6 +2604,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canReopen(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("reopen")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title="Restart this completed session in place, keeping its id and history. Its Telegram topic, artifacts, and sidecar ports stay gone."
+              >
+                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
               </button>
             ) : null}
             {canRecover(session) ? (

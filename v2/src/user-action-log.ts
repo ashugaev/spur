@@ -231,6 +231,8 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (kill?.[1]) return { action: "session.kill", sessionId: kill[1] };
     const restore = path.match(/^\/sessions\/([^/]+)\/restore$/);
     if (restore?.[1]) return { action: "session.restore", sessionId: restore[1] };
+    const reopen = path.match(/^\/sessions\/([^/]+)\/reopen$/);
+    if (reopen?.[1]) return { action: "session.reopen", sessionId: reopen[1] };
     const handoff = path.match(/^\/sessions\/([^/]+)\/handoff$/);
     if (handoff?.[1]) return { action: "session.handoff", sessionId: handoff[1] };
     const respawn = path.match(/^\/sessions\/([^/]+)\/respawn$/);

@@ -324,6 +324,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchRefsExist,
   branchStatus,
   createWorktree,
   findWorktreePathForBranch,
@@ -514,6 +515,10 @@ export class SessionNotRestorableError extends Error {
 }
 
 export class SessionRateLimitedError extends Error {
+  readonly statusCode = 409;
+}
+
+export class SessionNotReopenableError extends Error {
   readonly statusCode = 409;
 }
 
@@ -7926,6 +7931,85 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  // Brings a `completed` session back to life on the same id: rebuild the
+  // worktree if it was reclaimed, flip the record to a restorable
+  // stopped/manual_pause state (so restore() below resumes the agent's own
+  // conversation without resending the original prompt), then delegate the
+  // whole launch transaction to restore(). Nothing completion destroyed
+  // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
+  async reopen(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.status !== "completed") {
+      throw new SessionNotReopenableError(
+        `Session ${sessionId} is ${session.status}, not completed — use restore or respawn`,
+      );
+    }
+
+    const needsWorktree = session.worktree && !workspaceExists(session.worktreePath);
+    if (needsWorktree) {
+      const project = this.getProject(session.project);
+      const refs = await branchRefsExist(project.path, session.branch);
+      if (!refs.exists && !refs.remote) {
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: branch ${session.branch} no longer exists locally or on origin — use respawn`,
+        );
+      }
+      const created = await createWorktree({
+        repoPath: project.path,
+        worktreeBaseDir: this.config.worktreeDir,
+        projectId: session.project,
+        sessionId: session.id,
+        defaultBranch: project.defaultBranch,
+        branch: session.branch,
+        symlinks: project.symlinks,
+      });
+      if (created !== session.worktreePath) {
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: rebuilt worktree at ${created}, expected ${session.worktreePath}`,
+        );
+      }
+      this.logEvent("session.reopen.worktree_rebuilt", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Rebuilt worktree for ${sessionId}`,
+        details: {
+          worktreePath: created,
+          branch: session.branch,
+          localRef: refs.exists,
+          remoteRef: refs.remote,
+        },
+      });
+    }
+
+    const record: SessionRecord = {
+      ...copySessionWithoutSidecarPorts(session),
+      status: "stopped",
+      stopReason: "manual_pause",
+      updatedAt: nowIso(),
+    };
+    delete record.error;
+    writeSession(this.config.dataDir, record);
+    this.stateCache.delete(sessionId);
+    await this.refreshDashboardCacheEntry(record);
+
+    try {
+      return await this.restore(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.reopen.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to reopen ${sessionId}: ${message}`,
+      });
+      throw error;
+    }
   }
 
   async switchAuth(

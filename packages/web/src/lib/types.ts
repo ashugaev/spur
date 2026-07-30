@@ -589,6 +589,10 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canReopen(session: DashboardSession): boolean {
+  return session.status === "completed" && !session.runtimeAlive;
+}
+
 export function canHandoff(session: DashboardSession): boolean {
   return (
     !isTerminalSession(session) &&

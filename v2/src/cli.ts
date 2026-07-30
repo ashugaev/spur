@@ -556,7 +556,7 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill",
+  action: "pause" | "complete" | "kill" | "reopen",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -2279,6 +2279,22 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("reopen")
+    .description("Restart a completed session in place, keeping its id and history.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "reopening session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        success: (session) => `Reopened ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program

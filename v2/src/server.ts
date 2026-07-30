@@ -34,6 +34,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
@@ -1209,6 +1210,12 @@ export async function startServer(
         return;
       }
 
+      const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
+      if (method === "POST" && reopenSessionId) {
+        sendJson(response, 200, await service.reopen(reopenSessionId));
+        return;
+      }
+
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
@@ -1330,7 +1337,8 @@ export async function startServer(
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
-        error instanceof SessionRateLimitedError
+        error instanceof SessionRateLimitedError ||
+        error instanceof SessionNotReopenableError
       ) {
         logEvent("http.request.failed", {
           level: "warn",

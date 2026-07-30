@@ -79,6 +79,7 @@ import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
+import { POST as reopenSession } from "@/app/api/sessions/[id]/reopen/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as handoffSession } from "@/app/api/sessions/[id]/handoff/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
@@ -696,6 +697,7 @@ describe("Spur web API routes", () => {
       [completeSession, "complete"],
       [killSession, "kill"],
       [restoreSession, "restore"],
+      [reopenSession, "reopen"],
     ] as const;
 
     for (const [route, action] of routes) {
@@ -724,6 +726,32 @@ describe("Spur web API routes", () => {
     );
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("reopen forwards a 409 not-reopenable conflict body and status verbatim", async () => {
+    const conflict = { error: "Session api-a1 is running, not completed — use restore or respawn" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await reopenSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/reopen", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
       expect.objectContaining({ method: "POST" }),
     );
   });
