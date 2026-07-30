@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
@@ -1096,8 +1097,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
@@ -1459,8 +1460,8 @@ describe("SessionService", () => {
           sidecarName: "dev",
           env: expect.objectContaining({
             SPUR_RESERVED_PORT_DEV: "3000",
-            NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-            npm_config_prefix: join(homedir(), ".local"),
+            NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+            npm_config_globalconfig: npmPinConfigPath(),
           }),
         }),
       );
@@ -2746,8 +2747,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(result.branch).toBe("main");
@@ -9499,8 +9500,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
@@ -12133,8 +12134,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -12387,8 +12388,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -12729,8 +12730,8 @@ describe("SessionService", () => {
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
-        NPM_CONFIG_PREFIX: join(homedir(), ".local"),
-        npm_config_prefix: join(homedir(), ".local"),
+        NPM_CONFIG_GLOBALCONFIG: npmPinConfigPath(),
+        npm_config_globalconfig: npmPinConfigPath(),
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(

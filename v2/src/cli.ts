@@ -56,6 +56,7 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
@@ -2761,6 +2762,20 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: a source-install / main-deploy host that never runs
+      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
+      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // permissions error writing into `<home>/.spur/` must never abort
+      // daemon boot, so failures are reported and swallowed, not thrown.
+      try {
+        ensureNpmPinFile();
+      } catch (error) {
+        writeStderr(
+          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",

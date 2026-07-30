@@ -93,7 +93,9 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
 
-Commands run through `bash -lc`, so a sidecar command may start with `VAR=value ...` and rely on login-shell init. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home, e.g. `source "$SPUR_REAL_HOME/.nvm/nvm.sh"`.
+Commands run through `sh -lc` (login-shell init still applies, so a sidecar command may start with `VAR=value ...`). `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
+
+Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
 ### Built-in MCP sidecars
 

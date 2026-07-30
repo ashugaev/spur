@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
@@ -69,6 +69,7 @@ import {
   type SystemdScope,
 } from "../../src/host-install.js";
 import { getVersion } from "../../src/version.js";
+import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
 
 const version = getVersion();
 
@@ -254,16 +255,16 @@ describe("collectHostInstallChecks", () => {
     expect(ids).not.toContain("spur-direct-terminal");
   });
 
-  // MUST FIX 1 regression guard: Spur pins `NPM_CONFIG_PREFIX`/
-  // `npm_config_prefix` into every agent session's env (see
-  // `session-service.ts`) — the `npm-prefix` probe must strip both from its
-  // own child env so a `spur doctor` run inside a session reads the
-  // persisted `~/.npmrc` state, not its own session env pin.
-  it("strips NPM_CONFIG_PREFIX/npm_config_prefix from the npm-prefix probe's child env", async () => {
-    const originalUpper = process.env["NPM_CONFIG_PREFIX"];
-    const originalLower = process.env["npm_config_prefix"];
-    process.env["NPM_CONFIG_PREFIX"] = "/some/session/pin";
-    process.env["npm_config_prefix"] = "/some/session/pin";
+  // MUST FIX 1 regression guard: Spur pins the globalconfig keys (both
+  // casings) into every agent session's env (see `session-service.ts`) — the
+  // `npm-prefix` probe must strip every sanitized key from its own child env
+  // so a `spur doctor` run inside a session reads the persisted `~/.npmrc`/
+  // pin-file state, not its own session env pin.
+  it("strips every NPM_PIN_SANITIZE_ENV_KEYS name from the npm-prefix probe's child env", async () => {
+    const originalValues = NPM_PIN_SANITIZE_ENV_KEYS.map((key) => process.env[key]);
+    for (const key of NPM_PIN_SANITIZE_ENV_KEYS) {
+      process.env[key] = "/some/session/pin";
+    }
     try {
       const fakeHome = "/tmp/spur-host-install-test-npm-prefix-env";
       await collectHostInstallChecks(fakeHome);
@@ -273,13 +274,15 @@ describe("collectHostInstallChecks", () => {
       expect(npmCall).toBeDefined();
       const options = npmCall?.[2];
       expect(options?.env?.["HOME"]).toBe(fakeHome);
-      expect(options?.env?.["NPM_CONFIG_PREFIX"]).toBeUndefined();
-      expect(options?.env?.["npm_config_prefix"]).toBeUndefined();
+      for (const key of NPM_PIN_SANITIZE_ENV_KEYS) {
+        expect(options?.env?.[key]).toBeUndefined();
+      }
     } finally {
-      if (originalUpper === undefined) delete process.env["NPM_CONFIG_PREFIX"];
-      else process.env["NPM_CONFIG_PREFIX"] = originalUpper;
-      if (originalLower === undefined) delete process.env["npm_config_prefix"];
-      else process.env["npm_config_prefix"] = originalLower;
+      NPM_PIN_SANITIZE_ENV_KEYS.forEach((key, index) => {
+        const original = originalValues[index];
+        if (original === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = original;
+      });
     }
   });
 
@@ -287,8 +290,10 @@ describe("collectHostInstallChecks", () => {
   // exec`/`npm run` all set one) outranks `HOME` as npm's userconfig source
   // and would steer the probe at a different `.npmrc` than `home`/.npmrc,
   // which `expectedPrefix` is derived from — `--userconfig` must be passed
-  // explicitly so the probe can never diverge from it.
-  it("passes an explicit --userconfig pointing at <home>/.npmrc to the npm-prefix probe", async () => {
+  // explicitly so the probe can never diverge from it. `--globalconfig`
+  // points the probe at the persisted pin file, which lives outside
+  // `~/.npmrc` (nvm greps that file for a `prefix=`/`globalconfig=` line).
+  it("passes an explicit --userconfig and --globalconfig to the npm-prefix probe", async () => {
     const fakeHome = "/tmp/spur-host-install-test-npm-prefix-userconfig";
     await collectHostInstallChecks(fakeHome);
     const npmCall = execFileSyncMock.mock.calls.find(([file]) => file === "npm") as
@@ -296,9 +301,99 @@ describe("collectHostInstallChecks", () => {
       | undefined;
     expect(npmCall).toBeDefined();
     const args = npmCall?.[1] ?? [];
-    const flagIndex = args.indexOf("--userconfig");
-    expect(flagIndex).toBeGreaterThanOrEqual(0);
-    expect(args[flagIndex + 1]).toBe(join(fakeHome, ".npmrc"));
+    const userconfigIndex = args.indexOf("--userconfig");
+    expect(userconfigIndex).toBeGreaterThanOrEqual(0);
+    expect(args[userconfigIndex + 1]).toBe(join(fakeHome, ".npmrc"));
+    const globalconfigIndex = args.indexOf("--globalconfig");
+    expect(globalconfigIndex).toBeGreaterThanOrEqual(0);
+    expect(args[globalconfigIndex + 1]).toBe(npmPinConfigPath(fakeHome));
+  });
+
+  describe("npmrc-nvm-conflict check", () => {
+    let tmpHome: string;
+    // MUST FIX 6: `collectHostInstallChecks` shares `hasNvm` with
+    // `healNpmrcPrefixLine`, which checks `$NVM_DIR` before `<home>/.nvm` —
+    // an ambient `NVM_DIR` on the machine running this suite (common on any
+    // dev box with nvm installed) would otherwise leak into every spec below
+    // and desync them from `tmpHome`. Clear it for the default case; the
+    // dedicated custom-`$NVM_DIR` spec below sets its own.
+    const originalNvmDir = process.env["NVM_DIR"];
+
+    beforeEach(async () => {
+      tmpHome = await mkdtemp(join(tmpdir(), "spur-host-install-npmrc-conflict-"));
+      Reflect.deleteProperty(process.env, "NVM_DIR");
+    });
+
+    afterEach(async () => {
+      await rm(tmpHome, { recursive: true, force: true });
+      if (originalNvmDir === undefined) Reflect.deleteProperty(process.env, "NVM_DIR");
+      else process.env["NVM_DIR"] = originalNvmDir;
+    });
+
+    it("is absent entirely when the host has no ~/.nvm/nvm.sh (nvm irrelevant, stays quiet)", async () => {
+      await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toBeUndefined();
+    });
+
+    // MUST FIX 6 regression guard: nvm installed to a custom $NVM_DIR (e.g.
+    // container images) must still trip this check — the old bare
+    // `<home>/.nvm/nvm.sh` existsSync check never fired there.
+    it("fires when nvm is installed to a custom $NVM_DIR outside <home>/.nvm", async () => {
+      const customNvmDir = join(tmpHome, "custom-nvm-location");
+      await mkdir(customNvmDir, { recursive: true });
+      await writeFile(join(customNvmDir, "nvm.sh"), "# fake nvm\n", "utf8");
+      process.env["NVM_DIR"] = customNvmDir;
+      await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
+        ok: false,
+        severity: "warn",
+      });
+    });
+
+    it("is ok:true when <home>/.npmrc is absent", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
+        ok: true,
+        severity: "warn",
+      });
+    });
+
+    it("is ok:true when <home>/.npmrc has no prefix=/globalconfig= line", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
+      await writeFile(join(tmpHome, ".npmrc"), "//registry.npmjs.org/:_authToken=fake\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
+        ok: true,
+        severity: "warn",
+      });
+    });
+
+    it("is ok:false when <home>/.npmrc has a prefix= line, including an operator-set one, with a manual fix (not spur reinit)", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
+      await writeFile(join(tmpHome, ".npmrc"), "prefix=/operator/elsewhere\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      const check = checks.find((c) => c.id === "npmrc-nvm-conflict");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain(join(tmpHome, ".npmrc"));
+      expect(check?.fix).not.toContain("spur reinit");
+    });
+
+    it("is ok:false when <home>/.npmrc has a globalconfig= line", async () => {
+      await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+      await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fake nvm\n", "utf8");
+      await writeFile(join(tmpHome, ".npmrc"), "globalconfig=/some/other/npmrc\n", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "npmrc-nvm-conflict")).toMatchObject({
+        ok: false,
+        severity: "warn",
+      });
+    });
   });
 
   it("keeps a fresh, never-initialized host exit-safe (no error severity)", async () => {

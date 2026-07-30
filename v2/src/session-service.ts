@@ -113,7 +113,11 @@ import {
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
-import { NPM_PREFIX_ENV, NPM_PREFIX_ENV_LOWER, npmGlobalPrefix } from "./npm-prefix.js";
+import {
+  NPM_GLOBALCONFIG_ENV,
+  NPM_GLOBALCONFIG_ENV_LOWER,
+  npmPinConfigPath,
+} from "./npm-prefix.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
@@ -1063,16 +1067,25 @@ function buildSessionEnv(args: {
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
     // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
     // `~/.npmrc` has been clobbered down to just a registry `_authToken`
-    // line. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
-    // `process.env` before this pin, and npm lowercases every `npm_config_*`
-    // key when resolving its `prefix` option — so an inherited lowercase
-    // `npm_config_prefix` (e.g. from update.ts's reinit pin, or pnpm's own
-    // env when it launched the daemon) collides with this uppercase key and
-    // whichever one iterates last wins. Setting both keys to the identical
-    // value removes that ordering dependence instead of relying on either
-    // casing being authoritative.
-    [NPM_PREFIX_ENV]: npmGlobalPrefix(),
-    [NPM_PREFIX_ENV_LOWER]: npmGlobalPrefix(),
+    // line. Points at the Spur-owned globalconfig file (`ensureNpmPinFile` in
+    // npm-prefix.ts writes it on every daemon boot) rather than setting
+    // npm's plain (non-globalconfig) prefix env var directly:
+    // nvm refuses to load whenever it sees that var set (any casing) or a
+    // `prefix=`/`globalconfig=` line in `~/.npmrc`, and a session pane that
+    // sources `~/.nvm/nvm.sh` (e.g. a sidecar) would hit that guard on every
+    // launch. A `*_GLOBALCONFIG` env var is invisible to both of nvm's
+    // guards. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
+    // `process.env` before this pin, and npm lowercases every one of its env
+    // keys when resolving a config option — so an inherited lowercase
+    // globalconfig key collides with this uppercase one and whichever one
+    // iterates last wins (measured). Setting both casings to the identical
+    // value removes that ordering dependence. Non-agent panes (sidecars,
+    // project services, the Claude OAuth login pane) go through
+    // `createTmuxCommandSession`, which strips this pin along with npm's
+    // plain prefix var and `PREFIX` so nvm loads there instead — see
+    // `NPM_PIN_SANITIZE_ENV_KEYS` (npm-prefix.ts).
+    [NPM_GLOBALCONFIG_ENV]: npmPinConfigPath(),
+    [NPM_GLOBALCONFIG_ENV_LOWER]: npmPinConfigPath(),
   };
   if (
     args.symlinks.includes("node_modules") &&
