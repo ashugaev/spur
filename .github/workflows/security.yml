@@ -29,7 +29,10 @@ jobs:
           fetch-depth: 0 # Full history for comprehensive scan
 
       - name: Run Gitleaks
-        run: gitleaks detect --source . --redact --log-level warn
+        # Scope to the current branch's history (HEAD ancestry) only. Default
+        # detect scans every ref in the clone; on the reused self-hosted runner
+        # that pulls in unrelated stale branches and their commits.
+        run: gitleaks detect --source . --log-opts=HEAD --redact --log-level warn
 
   npm-audit:
     name: NPM Audit

@@ -15,7 +15,8 @@ Process:
 3. Verify states: loading/empty/error for data, disabled/error/focused for inputs, disabled/loading for actions
 4. Verify layout: alignment, visual hierarchy, density, no overflow or clipping
 5. Read tester's Screenshot self-analysis block; do not redo the same checks
-6. Figma compare (when the spec's Verification references a Figma URL): read screenshots from ${SPUR_SESSION_ARTIFACTS_DIR}, diff against Figma; output table Element | Figma | Implementation | Match | Severity
+6. Read $SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md (known path) when it exists and its Approval status is approved; verify the built UI matches its components, states, tokens, and acceptance criteria
+7. Figma compare (when the spec's Verification references a Figma URL): read screenshots from ${SPUR_SESSION_ARTIFACTS_DIR}, diff against Figma; output table Element | Figma | Implementation | Match | Severity
 
 Rules:
 - Never APPROVE with token violations
