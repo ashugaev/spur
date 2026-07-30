@@ -210,6 +210,8 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     }
     const memorySet = path.match(/^\/sessions\/([^/]+)\/session-memory\/[^/]+$/);
     if (memorySet?.[1]) return { action: "session.memory_set", sessionId: memorySet[1] };
+    const sharedMemorySet = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
+    if (sharedMemorySet?.[1]) return { action: "shared.memory_set", sessionId: sharedMemorySet[1] };
 
     const cancelWake = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/);
     if (cancelWake?.[1]) return { action: "session.wake_cancel", sessionId: cancelWake[1] };
@@ -245,6 +247,10 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method === "DELETE") {
     const projectDelete = path.match(/^\/projects\/([^/]+)$/);
     if (projectDelete?.[1]) return { action: "project.delete", projectId: projectDelete[1] };
+    const sharedMemoryRemove = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
+    if (sharedMemoryRemove?.[1]) {
+      return { action: "shared.memory_remove", sessionId: sharedMemoryRemove[1] };
+    }
   }
 
   return { action: "unknown" };

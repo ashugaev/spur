@@ -1353,6 +1353,123 @@ describe("startServer", () => {
     }
   });
 
+  it("serves shared memory routes with validation and missing-key errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const setResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Use HTTP API" }),
+        },
+      );
+      expect(setResponse.status).toBe(200);
+      await expect(setResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const listResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project`,
+      );
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toEqual({
+        scope: "project",
+        keys: ["decision.api"],
+      });
+
+      const getResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const removeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(removeResponse.status).toBe(200);
+      await expect(removeResponse.json()).resolves.toEqual({
+        scope: "project",
+        key: "decision.api",
+      });
+
+      const missingKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(missingKeyResponse.status).toBe(404);
+
+      const missingKeyRemoveResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(missingKeyRemoveResponse.status).toBe(404);
+
+      const missingSessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/missing/shared-memory/project`,
+      );
+      expect(missingSessionResponse.status).toBe(404);
+
+      const invalidScopeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/bogus`,
+      );
+      expect(invalidScopeResponse.status).toBe(400);
+
+      const invalidKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/Bad`,
+      );
+      expect(invalidKeyResponse.status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /claude-accounts/remove returns 409 when a running session is bound to the account", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

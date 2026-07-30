@@ -123,11 +123,11 @@ describe("session-memory CLI", () => {
     );
   });
 
-  it("does not register a generic memory command", async () => {
+  it("registers the shared memory command alongside session-memory", async () => {
     const { createProgram } = await import("../../src/cli.js");
 
     expect(
       createProgram("/tmp/dist/cli.js").commands.some((command) => command.name() === "memory"),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

@@ -6,7 +6,14 @@ import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
-import { NPM_PREFIX_ENV, ensureNpmGlobalPrefixConfigured, npmGlobalPrefix } from "./npm-prefix.js";
+import {
+  NPM_PIN_SANITIZE_ENV_KEYS,
+  ensureNpmPinFile,
+  hasNvm,
+  healNpmrcPrefixLine,
+  npmGlobalPrefix,
+  npmPinConfigPath,
+} from "./npm-prefix.js";
 import { isReleaseVersion } from "./releases-cache.js";
 import {
   probe,
@@ -686,25 +693,36 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   const scope = resolveSystemdScope(home);
   const expectedPrefix = npmGlobalPrefix(home);
 
-  // Same `$HOME`-at-spawn-time divergence as `ensureNpmGlobalPrefixConfigured`:
-  // an inherited `npm_config_userconfig` outranks `HOME` as npm's userconfig
+  // Same `$HOME`-at-spawn-time divergence as `ensureNpmPinFile`/
+  // `healNpmrcPrefixLine`: an inherited `npm_config_userconfig` outranks
+  // `HOME` as npm's userconfig
   // source, so without `--userconfig` the probe could read a different file
   // than the `<home>/.npmrc` `expectedPrefix` above is derived from.
+  // `--globalconfig` points the probe at the persisted pin: Spur writes it to
+  // its own `<home>/.spur/npmrc`, not `<home>/.npmrc` (nvm greps the latter
+  // for a `prefix=`/`globalconfig=` line and refuses to load when it finds
+  // one).
   //
-  // Spur pins `NPM_CONFIG_PREFIX` (and npm's lowercase `npm_config_prefix`
-  // mirror) into every agent session's env (see `session-service.ts`), so a
-  // `spur doctor` run from inside a session would otherwise read back its own
-  // env pin instead of the persisted `~/.npmrc` state this check exists to
-  // detect drift in. Strip both so the probe reports the file, not the
-  // session.
-  const {
-    [NPM_PREFIX_ENV]: _pinnedUpper,
-    npm_config_prefix: _pinnedLower,
-    ...restEnv
-  } = process.env;
+  // Spur pins the globalconfig keys (both casings) into every agent session's
+  // env (see `session-service.ts`), so a `spur doctor` run from inside a
+  // session would otherwise read back its own env pin instead of the
+  // persisted state this check exists to detect drift in. Strip every
+  // sanitized key so the probe reports the files, not the session.
+  const sanitizeKeys: ReadonlySet<string> = new Set(NPM_PIN_SANITIZE_ENV_KEYS);
+  const restEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !sanitizeKeys.has(key)),
+  );
   const npmPrefix = tryExec(
     "npm",
-    ["config", "get", "prefix", "--userconfig", join(home, ".npmrc")],
+    [
+      "config",
+      "get",
+      "prefix",
+      "--userconfig",
+      join(home, ".npmrc"),
+      "--globalconfig",
+      npmPinConfigPath(home),
+    ],
     { env: { ...restEnv, HOME: home } },
   );
   checks.push({
@@ -712,8 +730,50 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     ok: npmPrefix === expectedPrefix,
     severity: "warn",
     detail: npmPrefix ? `npm prefix is ${npmPrefix}` : "npm prefix unavailable",
-    fix: "npm config set prefix ~/.local",
+    // `spur init` re-derives this exact pin via `ensureNpmPinFile` and is the
+    // preferred fix; the manual fallback must chmod its own target —
+    // `npm config set --location=global` chmods the file it writes to 0666
+    // regardless of umask (verified empirically), which is world-writable
+    // and lets any local user redirect where agent sessions install global
+    // packages.
+    fix: "spur init (or: npm config set prefix ~/.local --location=global --globalconfig ~/.spur/npmrc && chmod 600 ~/.spur/npmrc)",
   });
+
+  // Read-only diagnostic (doctor never mutates): a `prefix=`/`globalconfig=`
+  // line in `<home>/.npmrc` — Spur's own or an operator's — trips nvm's
+  // `nvm_npmrc_bad_news_bears` guard for every shell that sources nvm's
+  // `nvm.sh`, independent of the env pin above. Gated on nvm actually being
+  // installed (shared `hasNvm` predicate with `healNpmrcPrefixLine`, so the
+  // two conditions can never diverge): the line is harmless on any host that
+  // never sources `nvm.sh`, so this stays silent there instead of warning
+  // about a conflict that can't occur. Fires on an operator-set value too
+  // (nvm breaks either way); the `fix` is a manual edit rather than `spur
+  // reinit` (deliberately — `runNpmInit`'s `~/.npmrc` surgery only runs
+  // there, and `spur reinit` itself is unsupported on system-unit hosts, see
+  // install-from-npm.md).
+  if (hasNvm(home)) {
+    let npmrcContents: string | undefined;
+    try {
+      npmrcContents = readFileSync(join(home, ".npmrc"), "utf8");
+    } catch {
+      // Absent .npmrc: npmrcContents stays undefined, no conflict possible.
+    }
+    const npmrcHasNvmIncompatibleLine =
+      npmrcContents !== undefined && /^\s*(prefix|globalconfig)\s*=/m.test(npmrcContents);
+    checks.push({
+      id: "npmrc-nvm-conflict",
+      ok: !npmrcHasNvmIncompatibleLine,
+      severity: "warn",
+      detail: npmrcHasNvmIncompatibleLine
+        ? `${join(home, ".npmrc")} has a prefix=/globalconfig= line — nvm refuses to load in any shell that sources it`
+        : `${join(home, ".npmrc")} has no prefix=/globalconfig= line`,
+      ...(npmrcHasNvmIncompatibleLine
+        ? {
+            fix: `remove the prefix=/globalconfig= line from ${join(home, ".npmrc")} by hand (nvm refuses to load while one is present); a line reading "prefix=${expectedPrefix}" is Spur's own stray pin — the persisted pin now lives in ${npmPinConfigPath(home)} instead`,
+          }
+        : {}),
+    });
+  }
 
   // F1/C1/C2/E1/E2 share this single read-only, non-bootstrapping instance-
   // config read (never triggers `ensureInstanceConfig`'s bootstrap write). A
@@ -932,7 +992,12 @@ export function runNpmInit(
   if (!existsSync(script)) {
     throw new Error(`npm init script not found: ${script}`);
   }
-  ensureNpmGlobalPrefixConfigured();
+  // Full repair: `runNpmInit` (`spur init`/`update`/`reinit`) is the one
+  // caller allowed to do both the pin-file write and the `~/.npmrc` surgery
+  // in one shot. Every other consumer (daemon boot) calls `ensureNpmPinFile`
+  // alone — see its doc comment for why the heal half is boot-unsafe.
+  ensureNpmPinFile();
+  healNpmrcPrefixLine();
   const args: string[] = [];
   if (options.noStart) {
     args.push("--no-start");

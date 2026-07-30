@@ -776,9 +776,14 @@ export async function createTmuxSession(args: {
 
 export async function captureTmuxPane(sessionName: string, lines = 80): Promise<string> {
   try {
+    // `-J` joins soft-wrapped lines back into one logical line. Without it, a
+    // long prompt line that happens to wrap exactly mid-word (e.g. "This"
+    // splitting into "Thi\ns" at the pane's fixed column width) can break a
+    // plain `.includes()` match on assertion text that spans the wrap point —
+    // a false negative unrelated to whether the text is actually present.
     const { stdout } = await execFileAsync(
       "tmux",
-      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`]),
+      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-J", "-S", `-${lines}`]),
     );
     return stdout;
   } catch {

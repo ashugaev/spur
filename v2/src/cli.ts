@@ -8,7 +8,7 @@ import {
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +16,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   connectProjectConfig,
+  deleteJson,
   disconnectProjectConfig,
   getJson,
   listProjects,
@@ -56,11 +57,13 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
@@ -85,11 +88,16 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
+  type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
 } from "./types.js";
@@ -288,6 +296,34 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSharedMemoryList(
+  scope: SharedMemoryScope,
+  response: SharedMemoryListResponse,
+): string {
+  if (response.keys.length === 0) {
+    return dimText(`No ${scope} memory.`);
+  }
+  return response.keys.map((key) => `- ${key}`).join("\n");
+}
+
+function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
+  return `${boldText(response.entry.key)}\n${response.entry.body}`;
+}
+
+function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
+  return `Removed ${response.key}.`;
+}
+
+function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
+  const scope = typeof value === "string" ? value : "";
+  try {
+    assertValidSharedMemoryScope(scope);
+  } catch {
+    throw new Error("--scope must be task, project, or global");
+  }
+  return scope;
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -928,7 +964,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -2376,6 +2412,120 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("memory")
+    .description("Manage shared markdown memory across task, project, and global scopes.")
+    .usage("<set|get|list|rm> [key] [body] --scope <task|project|global>")
+    .argument("<action>", "set, get, list, or rm")
+    .argument("[key]", "Memory key")
+    .argument("[body]", "Body for set (or use --file)")
+    .requiredOption("--scope <scope>", "task, project, or global")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--file <path>", "Read the set body from a file instead of the body argument")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        action: string,
+        key: string | undefined,
+        body: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const scope = parseSharedMemoryScope(options.scope);
+        const sessionId = options.session?.trim() || runningSessionId();
+        if (!sessionId) {
+          throw new Error("memory requires --session or SPUR_SESSION");
+        }
+
+        if (action === "list") {
+          if (key !== undefined || body !== undefined) {
+            throw new Error("memory list does not accept extra arguments");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading ${scope} memory`,
+            action: () =>
+              getJson<SharedMemoryListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}`,
+                configPath,
+              ),
+            render: (response) => renderSharedMemoryList(scope, response),
+          });
+          return;
+        }
+
+        if (!key) {
+          throw new Error(`memory ${action} requires a key`);
+        }
+
+        if (action === "get") {
+          if (body !== undefined) {
+            throw new Error("memory get accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading memory ${key}`,
+            action: () =>
+              getJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "set") {
+          const filePath = options.file?.trim();
+          if (body !== undefined && filePath) {
+            throw new Error("memory set accepts a body argument or --file, not both");
+          }
+          if (body === undefined && !filePath) {
+            throw new Error("memory set requires a body argument or --file");
+          }
+          const resolvedBody = filePath ? readFileSync(filePath, "utf-8") : (body as string);
+          const payload: SetSharedMemoryRequest = { body: resolvedBody };
+          await outputResult({
+            json: Boolean(options.json),
+            label: `saving memory ${key}`,
+            action: () =>
+              postJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                payload,
+                configPath,
+              ),
+            success: (response) => `Saved ${response.entry.key}.`,
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "rm") {
+          if (body !== undefined) {
+            throw new Error("memory rm accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `removing memory ${key}`,
+            action: () =>
+              deleteJson<SharedMemoryRemoveResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryRemoveResponse,
+          });
+          return;
+        }
+
+        throw new Error("memory action must be set, get, list, or rm");
+      },
+    );
+
+  program
     .command("actions")
     .description("Show logged user actions (mutating requests) for a session or globally.")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
@@ -2761,6 +2911,20 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: a source-install / main-deploy host that never runs
+      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
+      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // permissions error writing into `<home>/.spur/` must never abort
+      // daemon boot, so failures are reported and swallowed, not thrown.
+      try {
+        ensureNpmPinFile();
+      } catch (error) {
+        writeStderr(
+          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",

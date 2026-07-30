@@ -33,7 +33,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
-import { collectMcpBindings, resolveSessionSidecars } from "./sidecars/index.js";
+import {
+  collectMcpBindings,
+  manualSidecarNames,
+  resolveSessionSidecars,
+} from "./sidecars/index.js";
 import {
   deleteAgentHookState,
   readAgentHookState,
@@ -113,7 +117,11 @@ import {
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
-import { NPM_PREFIX_ENV, NPM_PREFIX_ENV_LOWER, npmGlobalPrefix } from "./npm-prefix.js";
+import {
+  NPM_GLOBALCONFIG_ENV,
+  NPM_GLOBALCONFIG_ENV_LOWER,
+  npmPinConfigPath,
+} from "./npm-prefix.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
@@ -204,6 +212,15 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  assertValidSharedMemoryScope,
+  getSharedMemory as getSharedMemoryEntry,
+  listSharedMemoryKeys,
+  removeSharedMemory as removeSharedMemoryEntry,
+  setSharedMemory as setSharedMemoryEntry,
+  validateSharedMemoryKey,
+  withSharedMemoryInstructions,
+} from "./shared-memory.js";
+import {
   closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
@@ -269,6 +286,10 @@ import {
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -649,6 +670,32 @@ function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
   }
 }
 
+function assertValidSharedMemoryRequest(
+  scope: string,
+  key?: string,
+): asserts scope is SharedMemoryScope {
+  try {
+    assertValidSharedMemoryScope(scope);
+    if (key !== undefined) {
+      validateSharedMemoryKey(key);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMemoryInputError(message);
+  }
+}
+
+// task = desk-group anchor (matches listDeskSessions); project = session.project; global = constant.
+function resolveSharedMemoryStoreId(session: SessionRecord, scope: SharedMemoryScope): string {
+  if (scope === "task") {
+    return session.deskId ?? session.id;
+  }
+  if (scope === "project") {
+    return session.project;
+  }
+  return "global";
+}
+
 function hasUnseenAttention(
   session: Pick<SessionRecord, "lastOpenedAt">,
   state: SessionState,
@@ -896,7 +943,9 @@ function buildInitialMessage(
 ): string {
   if (!initialMessage.trim()) return "";
   let base = withSelfDestructInstructions(
-    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    withSharedMemoryInstructions(
+      withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    ),
     selfDestruct,
   );
   if (branchNamingRegex) {
@@ -1063,16 +1112,25 @@ function buildSessionEnv(args: {
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
     // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
     // `~/.npmrc` has been clobbered down to just a registry `_authToken`
-    // line. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
-    // `process.env` before this pin, and npm lowercases every `npm_config_*`
-    // key when resolving its `prefix` option — so an inherited lowercase
-    // `npm_config_prefix` (e.g. from update.ts's reinit pin, or pnpm's own
-    // env when it launched the daemon) collides with this uppercase key and
-    // whichever one iterates last wins. Setting both keys to the identical
-    // value removes that ordering dependence instead of relying on either
-    // casing being authoritative.
-    [NPM_PREFIX_ENV]: npmGlobalPrefix(),
-    [NPM_PREFIX_ENV_LOWER]: npmGlobalPrefix(),
+    // line. Points at the Spur-owned globalconfig file (`ensureNpmPinFile` in
+    // npm-prefix.ts writes it on every daemon boot) rather than setting
+    // npm's plain (non-globalconfig) prefix env var directly:
+    // nvm refuses to load whenever it sees that var set (any casing) or a
+    // `prefix=`/`globalconfig=` line in `~/.npmrc`, and a session pane that
+    // sources `~/.nvm/nvm.sh` (e.g. a sidecar) would hit that guard on every
+    // launch. A `*_GLOBALCONFIG` env var is invisible to both of nvm's
+    // guards. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
+    // `process.env` before this pin, and npm lowercases every one of its env
+    // keys when resolving a config option — so an inherited lowercase
+    // globalconfig key collides with this uppercase one and whichever one
+    // iterates last wins (measured). Setting both casings to the identical
+    // value removes that ordering dependence. Non-agent panes (sidecars,
+    // project services, the Claude OAuth login pane) go through
+    // `createTmuxCommandSession`, which strips this pin along with npm's
+    // plain prefix var and `PREFIX` so nvm loads there instead — see
+    // `NPM_PIN_SANITIZE_ENV_KEYS` (npm-prefix.ts).
+    [NPM_GLOBALCONFIG_ENV]: npmPinConfigPath(),
+    [NPM_GLOBALCONFIG_ENV_LOWER]: npmPinConfigPath(),
   };
   if (
     args.symlinks.includes("node_modules") &&
@@ -1818,8 +1876,16 @@ export class SessionService {
     this.sidecarReaperRunning = true;
     try {
       const builtinNames = Object.keys(BUILTIN_SIDECARS);
+      // Also protect a session mid restore/recover: its on-disk status stays
+      // stopped/errored until the restore completes, but startMcpSidecars may
+      // already have started its sidecar tmux pane (see restore() and
+      // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
+      // call for exactly this gap).
       const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) => session.status === "running" || session.status === "spawning",
+        (session) =>
+          session.status === "running" ||
+          session.status === "spawning" ||
+          this.isInRestoreWarmup(session.id),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -3453,6 +3519,11 @@ export class SessionService {
         return args.session;
       }
 
+      // Built-ins may defer command resolution (e.g. a bundle-resolved bin
+      // path) to this point instead of config load — see BuiltinSidecarDef.
+      const resolvedCommand =
+        BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
+
       const agentConfig = this.sessionAgentConfig(args.session);
       const reservedSession = await this.ensureSidecarReservation(
         args.session,
@@ -3485,7 +3556,7 @@ export class SessionService {
           sessionId: reservedSession.id,
           sidecarName: args.sidecarName,
           cwd: reservedSession.worktreePath,
-          command: args.sidecar.command,
+          command: resolvedCommand,
           env: buildSidecarRuntimeEnv(
             sessionEnv,
             reservedSession,
@@ -4074,6 +4145,59 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
     }
     return { record };
+  }
+
+  listSharedMemory(sessionId: string, scope: string): SharedMemoryListResponse {
+    assertValidSharedMemoryRequest(scope);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    return { scope, keys: listSharedMemoryKeys(this.config.dataDir, scope, storeId) };
+  }
+
+  getSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = getSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!entry) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, entry };
+  }
+
+  setSharedMemory(
+    sessionId: string,
+    scope: string,
+    key: string,
+    request: unknown,
+  ): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    if (!isRecord(request)) {
+      throw new InvalidSessionMemoryInputError("request body must be a JSON object");
+    }
+    const body = request["body"];
+    if (typeof body !== "string") {
+      throw new InvalidSessionMemoryInputError("body must be a string");
+    }
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = setSharedMemoryEntry(this.config.dataDir, scope, storeId, key, body);
+    return { scope, entry };
+  }
+
+  removeSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryRemoveResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const removed = removeSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!removed) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, key };
   }
 
   async markOpened(sessionId: string): Promise<SessionView> {
@@ -4858,7 +4982,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const composedInitialMessage = [...startupAttachmentLines, initialMessage]
         .filter((line) => line.trim())
         .join("\n");
@@ -5679,7 +5803,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
@@ -6820,6 +6944,11 @@ export class SessionService {
     if (!sidecar) {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
+    if (!resolveSessionSidecars(session, project)[sidecarName]) {
+      throw new Error(
+        `Sidecar "${sidecarName}" is not available to agent "${session.agent}" for session ${sessionId}`,
+      );
+    }
 
     const updated = await this.startSidecarWithDependencies({
       session,
@@ -7047,7 +7176,6 @@ export class SessionService {
     if (targetStatus === "stopped") {
       delete record.error;
     }
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7153,7 +7281,6 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.retainInList;
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7282,7 +7409,21 @@ export class SessionService {
     }
 
     const project = this.getProject(session.project);
-    const recovered = await this.relaunchSessionInPlace(session, project);
+    // Same restore-warmup protection as restore() above: relaunchSessionInPlace
+    // starts the MCP sidecar before this session's status is guaranteed
+    // running|spawning on disk, and the reaper's default filter would not
+    // otherwise protect that window. Cleared immediately after (not left for
+    // the usual RESTORE_WARMUP_MS) — callers of ensureSessionReadyForSend
+    // (send, tryDeliverQueuedMessage, switchAuth) classify the session's real
+    // state right after this returns and must not have that forced to
+    // "working" the way a genuine post-restore warmup intentionally does.
+    this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    let recovered: SessionRecord;
+    try {
+      recovered = await this.relaunchSessionInPlace(session, project);
+    } finally {
+      this.restoreWarmupUntil.delete(session.id);
+    }
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -7519,6 +7660,12 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    // Set before startMcpSidecars below: the on-disk status stays
+    // stopped/errored until the restore completes (~50 lines down), so the
+    // sidecar reaper's normal running|spawning filter would not protect the
+    // MCP sidecar tmux pane this starts. The reaper additionally checks this
+    // warmup window (see reapDeadSessionSidecars) for exactly this gap.
+    this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
 
@@ -7627,7 +7774,9 @@ export class SessionService {
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(resolveSessionSidecars(current, restoreProject));
+      const restoreSidecarNames = manualSidecarNames(
+        resolveSessionSidecars(current, restoreProject),
+      );
       const env = buildSessionEnv({
         agent: current.agent,
         projectId: current.project,
@@ -7677,6 +7826,12 @@ export class SessionService {
         }
       }
     } catch (error) {
+      // Drop the warmup set before startMcpSidecars: every exit from here
+      // either killed the pane below or returns an already-live session, so
+      // leaving it would make classifySessionRecord report "working" with
+      // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
+      // path after this block intentionally keeps its own warmup.
+      this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
         const recovered: SessionRecord = this.applyReservedSidecars(
@@ -9020,9 +9175,19 @@ export class SessionService {
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
+    // Neither "stopped" nor "errored" is a terminal status (isTerminalSessionStatus
+    // is completed|killed only), so any sidecarPorts left on the record would be
+    // treated as still owned by a live session forever — release them here the
+    // same way pause/kill already do, or the leak sweep can never reclaim the
+    // port and the pool eventually exhausts.
+    const latestNoPorts = copySessionWithoutSidecarPorts(latest);
     let updated: SessionRecord;
     if (terminalUnavailable) {
-      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      const {
+        error: _ignoredError,
+        stopReason: _ignoredStopReason,
+        ...stoppedBase
+      } = latestNoPorts;
       updated = {
         ...stoppedBase,
         status: "stopped",
@@ -9030,7 +9195,7 @@ export class SessionService {
       };
     } else {
       updated = {
-        ...latest,
+        ...latestNoPorts,
         status: "errored",
         error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
         updatedAt,

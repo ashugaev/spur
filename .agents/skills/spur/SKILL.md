@@ -11,7 +11,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spur init` (npm install host flags) takes `--no-start`, `--expose-web` (0.0.0.0, public, explicit override), `--web-port <port>`, `--tailscale`/`--no-tailscale` (default on: widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once Tailscale is up, loopback stays bound either way, never binds `0.0.0.0`). See `docs/configuration.md` and `docs/install-from-npm.md`.
-- `spur init` / `spur update` / `spur reinit` re-apply `npm config set prefix ~/.local` when `~/.npmrc` lost the line (never overwrites an operator-set `prefix=` line or an explicit non-`~/.local` pin). Every agent session also runs with `NPM_CONFIG_PREFIX=~/.local` so `claude`/`codex` self-update lands there regardless of `~/.npmrc`'s current state.
+- `spur init` / `spur update` / `spur reinit` write the npm prefix pin to the Spur-owned `~/.spur/npmrc` (`prefix=~/.local`, read via `--globalconfig`), never `~/.npmrc` — nvm refuses to load whenever it sees a `prefix=`/`globalconfig=` line there — and, only on hosts with nvm installed, strip a Spur-authored `prefix=` line back out of `~/.npmrc` if present (never an operator-set one or an explicit non-`~/.local` pin; on hosts without nvm the line stays, since it's what makes a bare `npm install -g` land in `~/.local` at all). `daemon start` writes the pin file unconditionally on every boot, even behind an explicit prefix env var — npm's env layer always outranks a globalconfig file, so the write only ever removes a dangling globalconfig pointer, never an operator's explicit pin. Every agent session runs with `NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig` pointed at `~/.spur/npmrc` so `claude`/`codex` self-update lands at `~/.local` regardless of `~/.npmrc`'s current state; sidecars/services/the login pane strip that pin (plus `NPM_CONFIG_PREFIX`/`PREFIX`) so they can source `~/.nvm/nvm.sh` without tripping nvm's own guards.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
@@ -55,10 +55,14 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route builds a diagnostic prompt server-side and spawns the built-in Shepherd through daemon `POST /shepherd/spawn`, which is project-independent and works on a clean install with no configured projects.
 - Built-in MCP sidecars: a `sidecars.<name>` entry can carry code-only MCP wiring (command/ports/
   MCP injection) that YAML cannot express; a built-in name (currently only `playwright`) needs no
-  `command` — YAML only overrides `autoStart`/`dependsOn`. `sidecars.playwright.autoStart: true`
-  gates the built-in, Spur-owned playwright MCP sidecar for `claude`/`codex` sessions; `cursor`
-  never gets it (agent-scoped via `SidecarConfig.agents`). Enablement is config-only, re-resolved
-  fresh at every spawn/restore/recover — no per-session toggle, no `spur playwright` command.
+  `command` and rejects any key besides `autoStart` (`dependsOn` included — MCP sidecars start
+  ahead of the dependency-aware autostart pass, so a dependency on one could never be satisfied).
+  `sidecars.playwright.autoStart: true` gates the built-in, Spur-owned playwright MCP sidecar for
+  `claude`/`codex` sessions; `cursor` never gets it (agent-scoped via `SidecarConfig.agents`).
+  Enablement is config-only, re-resolved fresh at every spawn/restore/recover — no per-session
+  toggle, no `spur playwright` command. Enabling it for claude launches with `--mcp-config
+  --strict-mcp-config`, dropping any MCP server not already merged into that generated config. See
+  `docs/commands.md#built-in-mcp-sidecars` for the merge sources and the fresh-worktree gap.
 
 ## Current config shape
 
@@ -246,6 +250,7 @@ cron source
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
 - Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
+- Cross-agent coordination: `spur memory set|get|list|rm --scope task|project|global` gives sibling desk agents, all sessions of a project, and the whole instance a shared markdown cell store (one `.md` file per key, server-derived store id, last-writer-wins). See `docs/commands.md`.
 
 ## CLI Convention
 

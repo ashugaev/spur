@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`, `memory`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -85,6 +85,24 @@ spur service status api-a1b2
 
 `service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar, and stores metadata under the data dir. Stop/restart is not managed yet — the service stays bound while the session is alive. Pass `--port` so `list` can surface it. Sidecar/service output also lands in the session event log for `spur service logs` and `/sessions/:id/logs`.
 
+## memory
+
+```bash
+spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]
+```
+
+Shared markdown memory: one `.md` file per key, body only, no tags/status/timestamps. `set` creates or overwrites. `list`/`get`/`rm` read or remove. Session id defaults to `SPUR_SESSION`; pass `--session` from outside a live session. `set` takes the body positional or `--file <path>` for multiline content — never both, never neither.
+
+Scopes resolve server-side from the caller's session, never from client input:
+
+- `task` — `<dataDir>/memory/task/<deskId ?? sessionId>/<key>.md`, shared across desk-group siblings.
+- `project` — `<dataDir>/memory/project/<projectId>/<key>.md`, shared across all sessions of a project.
+- `global` — `<dataDir>/memory/global/<key>.md`, one cell set for the whole Spur instance.
+
+Writes are atomic (tmp file + rename) but unlocked — concurrent `set` on the same key is last-writer-wins.
+
+Spawn prompt tells agents to read `task`/`project` on start and write durable, high-value facts only (business decisions, gotchas, user preferences) — not scratch, logs, or restated docs.
+
 ## Sidecars
 
 For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` over direct `pnpm dev` / `next dev`. It starts a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against it, publishing a `sidecar-ui` link. `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs. New isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks.
@@ -93,7 +111,9 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
 
-Commands run through `bash -lc`, so a sidecar command may start with `VAR=value ...` and rely on login-shell init. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home, e.g. `source "$SPUR_REAL_HOME/.nvm/nvm.sh"`.
+Commands run through `sh -lc` with no `exec`, so login-shell init still applies and a sidecar command may start with `VAR=value ...`. `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
+
+Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
 ### Built-in MCP sidecars
 
@@ -109,8 +129,18 @@ sidecars:
 ```
 
 Command, ports, and MCP wiring are code-only defaults (see `v2/src/sidecars/`); YAML only overrides
-`autoStart`/`dependsOn`. Enablement re-resolves from config at every spawn/restore/recover — no
+`autoStart` — a built-in entry rejects any other key, including `dependsOn`: MCP sidecars start
+before the agent launches, ahead of the dependency-aware autostart pass, so a dependency on it
+could never be satisfied. Enablement re-resolves from config at every spawn/restore/recover — no
 per-session toggle, no `spur playwright` command.
+
+Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
+with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
+config survive — the merge reads `~/.claude.json` user-scope servers, `~/.claude.json`
+`projects["<worktree path>"]`, and `<worktree>/.mcp.json`. A fresh worktree has no
+`projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
+are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
+is silently replaced by Spur's own.
 
 ## build, daemon
 
