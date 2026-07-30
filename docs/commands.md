@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`, `memory`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
+`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 

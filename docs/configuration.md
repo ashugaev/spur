@@ -190,7 +190,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
@@ -217,6 +217,10 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk, and rejects mixed resolved `overrides.worktree`/`overrides.defaultBranch`.
 - `send.interrupt`: optional boolean, default `false`. `false` queues while `working`/`needs_input`, dedupes, flushes when `waiting`. `true` interrupts immediately while `working`; `needs_input` still queues.
 - `send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
+- `projects.<id>.backlog.<backlogId>.source`: required source id; must be a `jira` source.
+- `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
+- `projects.<id>.backlog.<backlogId>.intervalMs`: optional, default `60000`.
+- `projects.<id>.backlog.<backlogId>.runOnStart`: optional, default `false`.
 
 ## Events
 
@@ -228,6 +232,8 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`.
+- `github-ci`: `github-ci:run.completed`.
+- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it and it exists to back `projects.<id>.backlog`.
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals; state persists under `dataDir`. When `query` is set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids in an append-only registry. GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 

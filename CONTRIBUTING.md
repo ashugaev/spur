@@ -40,6 +40,18 @@ pnpm --dir v2 test:smoke
 - Keep `AGENTS.md` and `CLAUDE.md` in sync.
 - Keep mirrored files under `.agents/` and `.claude/` in sync.
 
+## CLI design
+
+- Human-first output by default; structured commands expose `--json`.
+- Single theme object (`v2/src/cli-view.ts`): brand accent `#f04c4c` (ids, tiny loading frames), brand mark `𖤓` (help headers, runtime summary, spinner). State dot: green `working`, yellow `waiting`/`needs_input`/`rate_limited`, accent-red `error`, gray everything else.
+- Visual primitives: accent, bold, dim, whitespace. No box drawing, no rainbow status, no decorative state aliases.
+- `@clack/prompts` only for transient UI (spinner, select, log, note); data rendering stays custom and flat — `list` is the reference renderer.
+- `list` renders a dim column header (`id state project agent branch`), one padded row per session, and a details pane for the selected session. Keys live in [docs/commands.md](docs/commands.md).
+- `list` is the only session UI. TTY opens the live selector; non-TTY prints a one-shot summary.
+- Never silently retarget keys after refresh — if the selected id disappears, require explicit reselection.
+- Empty states: one sentence plus one dim next-step hint.
+- Animation: at most a one-line transient spinner during waits, cleared before final output.
+
 ## Change Shape
 
 - Keep PRs focused.
