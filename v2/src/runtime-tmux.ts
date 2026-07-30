@@ -366,22 +366,26 @@ const CLAUDE_IDENTITY_ENV_KEYS = new Set([
 
 function buildEnvArgs(env?: Record<string, string>): string[] {
   const envArgs: string[] = [];
-  const sessionEnv = {
+  const mergedEnv = {
     ...Object.fromEntries(
       Object.entries(process.env).filter(
-        (entry): entry is [string, string] =>
-          typeof entry[1] === "string" &&
-          entry[1].length > 0 &&
-          !CLAUDE_IDENTITY_ENV_KEYS.has(entry[0]),
+        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
       ),
     ),
     ...(env ?? {}),
   };
+  const sessionEnv = Object.fromEntries(
+    Object.entries(mergedEnv).filter(([key]) => !CLAUDE_IDENTITY_ENV_KEYS.has(key)),
+  );
   for (const [key, value] of Object.entries(sessionEnv)) {
     envArgs.push("-e", `${key}=${value}`);
   }
   return envArgs;
 }
+
+// Test-only: buildEnvArgs is otherwise only reachable through
+// createTmuxSession/createTmuxCommandSession, which fork real tmux.
+export const _buildEnvArgsForTests = buildEnvArgs;
 
 function exactSessionTarget(sessionName: string): string {
   return `=${sessionName}`;
