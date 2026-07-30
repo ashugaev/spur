@@ -794,50 +794,46 @@ export function DirectTerminal({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
       <div
-        className="flex flex-col gap-0.5 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
+        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
         data-testid="direct-terminal-header"
       >
-        <div className="flex items-center gap-2">
-          <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
-          {title ? (
-            <div
-              className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-              data-testid="direct-terminal-header-title"
-              title={title}
-            >
-              {title}
-            </div>
-          ) : null}
-          {onClose ? (
-            <button
-              aria-label="Close terminal"
-              className={cn(
-                "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
-                !title && "ml-auto",
-              )}
-              onClick={onClose}
-              type="button"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                viewBox="0 0 24 24"
-              >
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          ) : null}
-        </div>
+        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+        {title ? (
+          <div
+            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+            data-testid="direct-terminal-header-title"
+            title={title}
+          >
+            {title}
+          </div>
+        ) : null}
+        {/* Never truncates: the title yields space, this label just butts against it. */}
         <div
-          className="truncate pl-4 text-[10px] leading-4 text-[var(--color-text-secondary)]"
+          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
           data-testid="direct-terminal-header-agent"
         >
           {getAgentDisplayName(agent)}
           {model ? ` • ${model}` : null}
         </div>
+        {onClose ? (
+          <button
+            aria-label="Close terminal"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+            onClick={onClose}
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        ) : null}
       </div>
 
       <div

@@ -212,12 +212,14 @@ async function mountTerminal({
   sessionId = "test-session",
   agent = "claude",
   activity,
+  model,
   title,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  model?: string;
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -228,6 +230,7 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        model={model}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -686,5 +689,24 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
     expect(titleElement.parentElement?.className).toContain("items-center");
+  });
+
+  it("keeps the agent label on the title row, right-aligned and never truncated", async () => {
+    await mountTerminal({
+      model: "claude-opus-4-8",
+      onClose: vi.fn(),
+      title: "Very long terminal header title for isolated sidecar sessions",
+    });
+
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    const agentElement = screen.getByTestId("direct-terminal-header-agent");
+    // Same row as the title, pushed to the right edge next to the close button.
+    expect(agentElement.parentElement).toBe(titleElement.parentElement);
+    expect(agentElement.className).toContain("ml-auto");
+    // The title clamps instead; the agent label keeps its full width.
+    expect(agentElement.className).toContain("shrink-0");
+    expect(agentElement.className).toContain("whitespace-nowrap");
+    expect(agentElement.className).not.toContain("truncate");
+    expect(agentElement.className).toContain("text-[var(--color-text-tertiary)]");
   });
 });
