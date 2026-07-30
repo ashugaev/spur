@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -122,7 +123,7 @@ function linkProjectsDir(link: string, target: string): void {
   }
 }
 
-export function ensureAccountProjectsLink(account: ClaudeAccount): void {
+export function ensureAccountProjectsLink(account: Pick<ClaudeAccount, "configDir">): void {
   const target = join(homedir(), ".claude", "projects");
   mkdirSync(target, { recursive: true });
   const link = join(account.configDir, "projects");
@@ -182,15 +183,73 @@ export function removeAccount(dataDir: string, id: string): void {
   }
 }
 
-export function isAccountAuthenticated(account: ClaudeAccount): boolean {
+export function isAccountAuthenticated(account: Pick<ClaudeAccount, "configDir">): boolean {
   return existsSync(join(account.configDir, ".credentials.json"));
+}
+
+// The host account uses ~/.claude as configDir but writes its onboarding
+// flag to ~/.claude.json, not ~/.claude/.claude.json. Isolated accounts
+// write to <configDir>/.claude.json.
+function onboardingFilePath(configDir: string): string {
+  if (configDir === join(homedir(), ".claude")) {
+    return join(homedir(), ".claude.json");
+  }
+  return join(configDir, ".claude.json");
+}
+
+export function isAccountReady(account: ClaudeAccount): boolean {
+  if (!isAccountAuthenticated(account)) return false;
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(onboardingFilePath(account.configDir), "utf-8"),
+    );
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>).hasCompletedOnboarding === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function sessionClaudeHome(sessionToolDir: string): string {
+  return join(sessionToolDir, "claude-home");
+}
+
+export function seedSessionHome(sessionHome: string, account: ClaudeAccount): void {
+  mkdirSync(sessionHome, { recursive: true });
+  copyFileSync(
+    join(account.configDir, ".credentials.json"),
+    join(sessionHome, ".credentials.json"),
+  );
+  const dotClaudeJson = join(sessionHome, ".claude.json");
+  if (!existsSync(dotClaudeJson)) {
+    const source = onboardingFilePath(account.configDir);
+    try {
+      copyFileSync(source, dotClaudeJson);
+    } catch {
+      writeFileSync(
+        dotClaudeJson,
+        JSON.stringify({ hasCompletedOnboarding: true }) + "\n",
+        "utf-8",
+      );
+    }
+  }
+  ensureAccountProjectsLink({ configDir: sessionHome });
+}
+
+export function swapSessionCredentials(sessionHome: string, account: ClaudeAccount): void {
+  const tmpPath = `${join(sessionHome, ".credentials.json")}.tmp.${process.pid}.${Date.now()}`;
+  copyFileSync(join(account.configDir, ".credentials.json"), tmpPath);
+  renameSync(tmpPath, join(sessionHome, ".credentials.json"));
 }
 
 export function ensureDefaultAccount(
   dataDir: string,
   defaultConfigDir: string = join(homedir(), ".claude"),
 ): void {
-  if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
+  if (!isAccountAuthenticated({ configDir: defaultConfigDir })) return;
   const existing = listAccounts(dataDir);
   if (existing.some((a) => a.configDir === defaultConfigDir)) return;
   const account: ClaudeAccount = {

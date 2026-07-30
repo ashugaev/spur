@@ -181,13 +181,16 @@ Rotate Claude login accounts across the rate limit. Each account is an isolated
 `<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
 
 Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
-accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
-Spur auto-detects the account once `.credentials.json` lands. Select sets the
+accounts. Add or Login opens an interactive login terminal; operator completes OAuth and onboarding;
+Spur auto-detects the account once credentials and onboarding are complete (`isAccountReady`). Select sets the
 active account; remove drops it. The default ~/.claude login is auto-adopted as an account named "default" when its .credentials.json exists.
 
-Per-session switch auth (claude sessions only): kills and relaunches the session
-under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
-switches even while the session is working. Each account's `CLAUDE_CONFIG_DIR/projects` symlinks to shared `~/.claude/projects`, so `--resume <uuid>` resolves the same transcript across accounts; history preserved on rotation.
+Per-session switch auth (claude sessions only): atomically swaps credentials in the per-session
+claude home (`<dataDir>/session-tools/<id>/claude-home/`) — no kill or relaunch; the live process
+rereads credentials on its next request. Sessions launched before the session-home design
+(no session home present) relaunch once as migration. Force switches even while the session is
+working. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>`
+resolves the same transcript; history preserved on rotation.
 
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;

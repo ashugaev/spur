@@ -658,6 +658,12 @@ export async function startServer(
         return;
       }
 
+      const startLoginAccountId = path.match(/^\/claude-accounts\/([^/]+)\/start-login$/)?.[1];
+      if (method === "POST" && startLoginAccountId) {
+        sendJson(response, 200, await service.startAccountLogin(startLoginAccountId));
+        return;
+      }
+
       const loginStatusAccountId = path.match(/^\/claude-accounts\/([^/]+)\/login-status$/)?.[1];
       if (method === "GET" && loginStatusAccountId) {
         sendJson(response, 200, await service.getAccountLoginStatus(loginStatusAccountId));

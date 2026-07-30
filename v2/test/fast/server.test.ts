@@ -1466,6 +1466,51 @@ describe("startServer", () => {
     }
   });
 
+  it("POST /claude-accounts/:id/start-login relaunches the login pane for an existing account", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const startLoginSpy = vi
+      .spyOn(SessionService.prototype, "startAccountLogin")
+      .mockResolvedValue({ loginTmuxSession: "claude-login-acc-1" });
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/acc-1/start-login`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as { loginTmuxSession: string };
+      expect(payload.loginTmuxSession).toBe("claude-login-acc-1");
+      expect(startLoginSpy).toHaveBeenCalledWith("acc-1");
+    } finally {
+      startLoginSpy.mockRestore();
+      await server.stop();
+    }
+  });
+
   it("serves state subscription routes with validation errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

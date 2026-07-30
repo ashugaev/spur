@@ -139,11 +139,14 @@ const readClaudeSessionStatusMock = vi.fn();
 const listAccountsMock = vi.fn();
 const findAccountMock = vi.fn();
 const isAccountAuthenticatedMock = vi.fn();
+const isAccountReadyMock = vi.fn();
 const addAccountMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
 const ensureAccountProjectsLinkMock = vi.fn();
 const ensureDefaultAccountMock = vi.fn();
+const seedSessionHomeMock = vi.fn();
+const swapSessionCredentialsMock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -163,6 +166,9 @@ function resetAccountStoreMocks(): void {
   isAccountAuthenticatedMock
     .mockReset()
     .mockImplementation((account: TestAccount) => account.authenticated);
+  isAccountReadyMock
+    .mockReset()
+    .mockImplementation((account: TestAccount) => account.authenticated);
   touchAccountUsedMock.mockReset().mockImplementation((_dataDir: string, id: string) => {
     const account = testAccounts.find((a) => a.id === id);
     if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
@@ -171,6 +177,8 @@ function resetAccountStoreMocks(): void {
   removeAccountMock.mockReset();
   ensureAccountProjectsLinkMock.mockReset();
   ensureDefaultAccountMock.mockReset();
+  seedSessionHomeMock.mockReset();
+  swapSessionCredentialsMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
@@ -242,11 +250,15 @@ vi.mock("../../src/claude-accounts.js", () => ({
   listAccounts: listAccountsMock,
   findAccount: findAccountMock,
   isAccountAuthenticated: isAccountAuthenticatedMock,
+  isAccountReady: isAccountReadyMock,
   addAccount: addAccountMock,
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
   ensureAccountProjectsLink: ensureAccountProjectsLinkMock,
   ensureDefaultAccount: ensureDefaultAccountMock,
+  seedSessionHome: seedSessionHomeMock,
+  swapSessionCredentials: swapSessionCredentialsMock,
+  sessionClaudeHome: (sessionToolDir: string) => `${sessionToolDir}/claude-home`,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -1170,7 +1182,9 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello", claudeAccountId: "acc-2" });
 
     const launchCall = buildAgentLaunchPlanMock.mock.calls.at(-1);
-    expect(launchCall?.[2]).toMatchObject({ claudeConfigDir: "/abs/acc-2" });
+    expect(launchCall?.[2]).toMatchObject({
+      claudeConfigDir: `${TEST_DATA_DIR}/session-tools/api-1/claude-home`,
+    });
     expect(
       writeSessionMock.mock.calls.some(
         ([, session]) =>
@@ -3979,11 +3993,11 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
-        /not logged in/,
+        /not ready/,
       );
     });
 
-    it("switches with force while working and relaunches with the new config dir", async () => {
+    it("migration: no session home — relaunches with session home config dir", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       seedAccounts();
@@ -3998,22 +4012,16 @@ describe("SessionService", () => {
         force: true,
       });
 
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
       expect(view.activeClaudeAccountId).toBe("backup");
       expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
-
-      // The rotated account's isolated CLAUDE_CONFIG_DIR must thread into the
-      // mcp-config.json merge in setup() too, not just the launch env, so the
-      // relaunch under --strict-mcp-config still sees the backup account's
-      // host MCP servers instead of falling back to the default homedir.
-      expect(setupAgentHooksMock).toHaveBeenCalledWith(
-        expect.objectContaining({ claudeConfigDir: "/abs/backup" }),
-      );
+      expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
 
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
       expect(resumeCall?.[1]).toBe("session-uuid");
-      expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: "/abs/backup" });
+      expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: expectedHome });
       expect(
         createTmuxSessionMock.mock.calls.some(
           ([args]) =>
@@ -4025,6 +4033,34 @@ describe("SessionService", () => {
           ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
         ),
       ).toBe(true);
+      service.dispose();
+    });
+
+    it("in-place swap: session home exists — swaps credentials without kill/relaunch", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      mkdirSync(sessionHome, { recursive: true });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+      expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+        sessionHome,
+        expect.objectContaining({ id: "backup" }),
+      );
+      service.dispose();
     });
   });
 
@@ -4033,20 +4069,23 @@ describe("SessionService", () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(
         resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          id: "sess-1",
           agent: "codex",
           claudeAccountId: "acc-1",
         }),
       ).toEqual({});
-      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
+      expect(seedSessionHomeMock).not.toHaveBeenCalled();
     });
 
     it("returns {} when the session has no bound account", async () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
-      expect(resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude" })).toEqual({});
-      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
+      expect(
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", { id: "sess-1", agent: "claude" }),
+      ).toEqual({});
+      expect(seedSessionHomeMock).not.toHaveBeenCalled();
     });
 
-    it("resolves the config dir from the account store", async () => {
+    it("seeds session home and returns its path as claudeConfigDir", async () => {
       testAccounts = [
         {
           id: "acc-1",
@@ -4056,13 +4095,16 @@ describe("SessionService", () => {
         },
       ];
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
-      expect(
-        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
-          agent: "claude",
-          claudeAccountId: "acc-1",
-        }),
-      ).toEqual({ claudeConfigDir: "/abs/acc-1" });
-      expect(ensureAccountProjectsLinkMock).toHaveBeenCalledWith(
+      const result = resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+        id: "sess-1",
+        agent: "claude",
+        claudeAccountId: "acc-1",
+      });
+      expect(result).toEqual({
+        claudeConfigDir: "/tmp/spur-data/session-tools/sess-1/claude-home",
+      });
+      expect(seedSessionHomeMock).toHaveBeenCalledWith(
+        "/tmp/spur-data/session-tools/sess-1/claude-home",
         expect.objectContaining({ id: "acc-1", configDir: "/abs/acc-1" }),
       );
     });
@@ -4072,11 +4114,12 @@ describe("SessionService", () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(
         resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          id: "sess-1",
           agent: "claude",
           claudeAccountId: "gone",
         }),
       ).toEqual({});
-      expect(ensureAccountProjectsLinkMock).not.toHaveBeenCalled();
+      expect(seedSessionHomeMock).not.toHaveBeenCalled();
     });
   });
 
@@ -4157,6 +4200,47 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       service.listClaudeAccounts();
       expect(ensureDefaultAccountMock).toHaveBeenCalledOnce();
+      service.dispose();
+    });
+  });
+
+  describe("getAccountLoginStatus", () => {
+    it("returns authenticated false when account has credentials but onboarding is incomplete", async () => {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: false,
+        },
+      ];
+      isAccountReadyMock.mockReturnValue(false);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const status = await service.getAccountLoginStatus("acc-1");
+      expect(status.authenticated).toBe(false);
+      expect(status.loginActive).toBe(true);
+      service.dispose();
+    });
+
+    it("returns authenticated true when account has credentials and onboarding is complete", async () => {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const status = await service.getAccountLoginStatus("acc-1");
+      expect(status.authenticated).toBe(true);
+      expect(status.loginActive).toBe(false);
       service.dispose();
     });
   });
@@ -18297,6 +18381,41 @@ describe("SessionService", () => {
 
       expect(autoRotatedEventCount()).toBe(0);
       expect(reactivationEventCount()).toBe(1);
+      service.dispose();
+    });
+
+    it("skips candidate accounts with incomplete onboarding", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({}, 0.001));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      // acc-2 has credentials but onboarding is incomplete → not ready
+      isAccountReadyMock.mockImplementation((account: TestAccount) =>
+        account.id !== "acc-2" ? account.authenticated : false,
+      );
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(5);
+
+      // acc-2 is not ready, so no rotation happens; reactivation nudge fires instead.
+      expect(autoRotatedEventCount()).toBe(0);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-1");
       service.dispose();
     });
 

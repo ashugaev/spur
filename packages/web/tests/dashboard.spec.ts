@@ -1872,6 +1872,73 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     ).toBeVisible();
   });
 
+  test("not-ready account shows a Login button that relaunches the login terminal", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+
+    let startLoginCalled = false;
+    let finishLoginCalled = false;
+    let loginStatusCalls = 0;
+
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [{ id: "incomplete-1", label: "incomplete", authenticated: false }],
+        }),
+      });
+    });
+    await page.route("/api/claude-accounts/incomplete-1/start-login", (route) => {
+      startLoginCalled = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ loginTmuxSession: "claude-login-incomplete-1" }),
+      });
+    });
+    await page.route("/api/claude-accounts/incomplete-1/login-status", (route) => {
+      loginStatusCalls += 1;
+      const authenticated = loginStatusCalls > 1;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
+      });
+    });
+    await page.route("/api/claude-accounts/incomplete-1/finish-login", (route) => {
+      finishLoginCalled = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated: true }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+
+    const row = page.getByRole("listitem").filter({ hasText: "incomplete" });
+    await expect(
+      row.getByRole("button", { name: "Complete login for Claude account incomplete" }),
+    ).toBeVisible();
+    await row.getByTestId("complete-login-incomplete-1").focus();
+    await page.keyboard.press("Enter");
+
+    expect(startLoginCalled).toBe(true);
+
+    // Terminal modal opens on the returned tmux session.
+    const loginTerminal = page.getByRole("dialog", {
+      name: "Terminal claude-login-incomplete-1",
+    });
+    await expect(loginTerminal).toBeVisible();
+
+    // Polling flips authenticated → auto-close via finish-login.
+    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
+    expect(finishLoginCalled).toBe(true);
+  });
+
   test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
     page,
   }) => {
