@@ -9255,6 +9255,47 @@ describe("SessionService", () => {
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
   });
 
+  it("keeps the shared artifacts dir for a desk member parked stopped by a handoff, which holds no sidecar", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    // The handoff shape: the predecessor stays `stopped` in the desk forever.
+    // It cannot hold the shared sidecar (see the M2 release case), but it can
+    // still be restored, so the artifacts it would come back to must survive.
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "stopped" as const,
+      stopReason: "manual_pause" as const,
+      retainInList: true,
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
   it("removes the shared artifacts dir and anchor tool dir when completing the last non-terminal desk member", async () => {
     const store = createSessionStore();
     const base = {
