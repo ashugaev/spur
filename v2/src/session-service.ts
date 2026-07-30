@@ -2965,7 +2965,24 @@ export class SessionService {
           // under it breaks a live session as surely as killing its tmux would.
           continue;
         }
+        // A desk-shared sidecar's pane is named after the desk anchor, so on a
+        // terminal anchor this loop would otherwise reap the pane a live
+        // sibling is still using. Same rule as teardownSessionSidecars: the
+        // last member releases it.
+        const deskSiblingsAlive = this.hasActiveDeskSiblings(session);
+        let reapProject: ProjectConfig | undefined;
+        if (deskSiblingsAlive) {
+          try {
+            reapProject = this.resolveProjectForSession(session);
+          } catch {
+            reapProject = undefined;
+          }
+        }
         for (const sidecarName of session.sidecarNames ?? []) {
+          const reapSidecar = reapProject?.sidecars[sidecarName];
+          if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
+            continue;
+          }
           if (await sidecarTmuxAlive(session.id, sidecarName)) {
             await killSidecarTmux(session.id, sidecarName);
             reaped += 1;
@@ -4447,7 +4464,10 @@ export class SessionService {
                 command: startedSidecar.command,
                 manualOnly: false,
                 sidecarDepth,
-                tmuxSession: sidecarTmuxSession(session.id, startedName),
+                tmuxSession: sidecarTmuxSession(
+                  sidecarOwnerId(session, startedSidecar),
+                  startedName,
+                ),
               },
             });
           },
@@ -7148,7 +7168,7 @@ export class SessionService {
             sidecarDepth,
             command: startedSidecar.command,
             manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
-            tmuxSession: sidecarTmuxSession(sessionId, startedName),
+            tmuxSession: sidecarTmuxSession(sidecarOwnerId(session, startedSidecar), startedName),
           },
         });
       },
@@ -9578,8 +9598,9 @@ export class SessionService {
     // is completed|killed only), so any sidecarPorts left on the record would be
     // treated as still owned by a live session forever — release them here the
     // same way pause/kill already do, or the leak sweep can never reclaim the
-    // port and the pool eventually exhausts.
-    const latestNoPorts = copySessionWithoutSidecarPorts(latest);
+    // port and the pool eventually exhausts. Desk-shared entries are kept while
+    // another member is non-terminal: those ports really are still in use.
+    const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
     let updated: SessionRecord;
     if (terminalUnavailable) {
       const {

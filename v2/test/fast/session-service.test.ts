@@ -18752,6 +18752,52 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("leaves a desk-shared sidecar alone under a terminal anchor with a live sibling, and reaps it once the sibling is terminal too", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+            },
+          },
+        },
+      });
+      const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+      // api-2 is a sibling of the api-1 desk, still running.
+      sessions.set("api-2", {
+        ...(sessions.get("api-1") as SessionRecord),
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "running",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      // The pane is named after the anchor, so reaping it here would kill the
+      // sidecar the live sibling is using.
+      expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("api-1", "daemon");
+
+      sessions.set("api-2", {
+        ...(sessions.get("api-2") as SessionRecord),
+        status: "completed",
+      });
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      service.dispose();
+    });
+
     it("leaves sidecars alone when a live agent runs under the terminal session", async () => {
       seedReaperSession({ status: "killed", sidecarNames: ["proxy"] });
       tmuxSessionExistsMock.mockResolvedValue(true);
