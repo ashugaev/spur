@@ -79,6 +79,7 @@ describe("buildSessionEnv's npm prefix pin (real npm, conflicting inherited lowe
       agent: "claude",
       projectId: "api",
       sessionId: "api-1",
+      artifactsSessionId: "api-1",
       sessionToolDir: join(dataDir, "tools"),
       dataDir,
       repoPath: join(dataDir, "repo"),

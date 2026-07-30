@@ -1183,6 +1183,105 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("gives a desk-sibling spawn the anchor's shared artifacts dir while keeping its own SPUR_SESSION", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "continue the task",
+      reuseWorkspaceSessionId: "api-1",
+    });
+
+    expect(result.id).toBe("api-2");
+    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionName: "api-2",
+        env: expect.objectContaining({
+          SPUR_SESSION: "api-2",
+          SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        }),
+      }),
+    );
+  });
+
+  it("keeps deskId on the errored record left behind by a spawn failure that reused a workspace", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    workspaceExistsMock.mockReturnValue(true);
+    createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+      }),
+    ).rejects.toThrow();
+
+    expect(sessions.get("api-2")?.status).toBe("errored");
+    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+  });
+
+  it("keeps deskId on the errored record left behind by a background spawn preparation failure", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // An invalid attachment name fails validation inside prepareBackgroundSpawn
+    // itself (after the placeholder is written), exercising its own
+    // catch/errored-record path rather than runBackgroundSpawnAttempt's.
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+        attachments: [{ name: "not/a/valid/name", data: "AAAA" }],
+      }),
+    ).rejects.toThrow();
+
+    expect(sessions.get("api-2")?.status).toBe("errored");
+    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+  });
+
   it("binds the launch to the requested claude account and persists the account id", async () => {
     // respawn of a rotated session forwards its claudeAccountId here; the launch must
     // resolve that account's CLAUDE_CONFIG_DIR instead of falling back to the default.
@@ -7006,6 +7105,9 @@ describe("SessionService", () => {
     );
     const artifactId = transitionEntry?.details?.historyArtifactId;
     expect(typeof artifactId).toBe("string");
+    // The writing session's own id is embedded so desk siblings sharing an
+    // artifacts dir don't collide on indistinguishable history dumps.
+    expect(artifactId).toContain("api-1");
     expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
       '{"type":"assistant","message":"needs input"}\n',
     );
@@ -8829,6 +8931,83 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("shows every desk member the anchor's title, links, tags, and pr slot in enrich and enrichDashboard", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        slots: {
+          title: "Shared task",
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+          tags: [],
+        },
+        pr: { number: 7, repo: "org/repo", url: "https://github.com/org/repo/pull/7" },
+      }),
+    );
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const anchorView = await service.get("api-1");
+    const siblingView = await service.get("api-2");
+
+    for (const view of [anchorView, siblingView]) {
+      expect(view.slots?.title).toBe("Shared task");
+      expect(view.slots?.links).toEqual(
+        expect.arrayContaining([
+          { label: "tracker", url: "https://tracker.example.com/1" },
+          { label: "pr", url: "https://github.com/org/repo/pull/7" },
+        ]),
+      );
+    }
+    expect(siblingView.id).toBe("api-2");
+
+    const dashboardViews = await service.list({ view: "dashboard" });
+    const dashboardSibling = dashboardViews.find((view) => view.id === "api-2");
+    expect(dashboardSibling?.slots?.title).toBe("Shared task");
+  });
+
+  it("lists and reads an artifact written by one desk sibling from another sibling", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    const sharedArtifact = {
+      id: "shot.png",
+      name: "shot.png",
+      size: 1,
+      mimeType: "image/png",
+      kind: "image" as const,
+      origin: "intentional" as const,
+      addedByUser: false,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    };
+    listSessionArtifactsMock.mockImplementation((_dataDir: string, sessionId: string) =>
+      sessionId === "api-1" ? [sharedArtifact] : [],
+    );
+    readSessionArtifactMock.mockImplementation(
+      (_dataDir: string, sessionId: string, artifactId: string) =>
+        sessionId === "api-1" && artifactId === "shot.png"
+          ? { ...sharedArtifact, path: "/artifacts/api-1/shot.png" }
+          : null,
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const siblingView = await service.get("api-2");
+    expect(siblingView.artifacts).toEqual([expect.objectContaining({ id: "shot.png" })]);
+    expect(listSessionArtifactsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+
+    const artifact = service.getArtifact("api-2", "shot.png");
+    expect(artifact.id).toBe("shot.png");
+    expect(readSessionArtifactMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", "shot.png");
+  });
+
   it("reuses the dashboard-cache classification for desk siblings instead of re-classifying them per viewer", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", sessionRecord({ id: "api-1" }));
@@ -9039,6 +9218,104 @@ describe("SessionService", () => {
     await service.complete("api-2");
     expect(removeWorktreeMock).toHaveBeenCalledTimes(1);
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+  });
+
+  it("keeps the shared artifacts dir and anchor tool dir when completing a desk member with a live sibling", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    // The closing sibling's own tool dir is per-session and must not leak.
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
+  });
+
+  it("removes the shared artifacts dir and anchor tool dir when completing the last non-terminal desk member", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed" as const,
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
+  it("holds shared resources while an errored desk sibling has not reached a terminal status", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1", status: "errored" as const });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
   });
 
   it("completes a renamed-project session by resolving the repo from its worktree", async () => {
@@ -11690,6 +11967,105 @@ describe("SessionService", () => {
     expect(result.status).toBe("killed");
   });
 
+  it("keeps the shared artifacts dir and anchor tool dir when killing a desk member with a live sibling", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1", status: "running" as const });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
+  it("removes the shared artifacts dir and anchor tool dir when killing the last non-terminal desk member", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed" as const,
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+    writeFileSync(`${artifactDirForSession("api-1")}/note.txt`, "shared note", "utf8");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
+  it("preserves startup attachments under the desk anchor id when killing the last desk member", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed" as const,
+    });
+    store.set("api-2", {
+      ...base,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "running" as const,
+      startupAttachmentIds: ["shot.png"],
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    expect(deleteSessionArtifactsExceptMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", [
+      "shot.png",
+    ]);
+  });
+
   it("ignores the Spur-managed Cursor trust marker in kill dirty checks", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -11975,6 +12351,71 @@ describe("SessionService", () => {
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
     expect(result.status).toBe("killed");
+  });
+
+  it("delegates a desk sibling's slot update to the anchor record and returns the caller's view", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", deskId: "api-1" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-2", { title: "Shared title" });
+
+    // The write lands on the anchor (api-1), not on the caller's own record.
+    expect(store.get("api-1")?.slots?.title).toBe("Shared title");
+    expect(store.get("api-2")?.slots).toBeUndefined();
+    // The API response is always the caller's own view.
+    expect(result.id).toBe("api-2");
+    expect(result.slots?.title).toBe("Shared title");
+    service.dispose();
+  });
+
+  it("keeps a non-desk session's slot update on its own record", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", { title: "Solo title" });
+
+    // A non-desk session (no deskId) is its own anchor: the write lands on
+    // its own record, exactly as before this session had desk siblings.
+    expect(store.get("api-1")?.slots?.title).toBe("Solo title");
+    expect(result.id).toBe("api-1");
+    expect(result.slots?.title).toBe("Solo title");
+    service.dispose();
   });
 
   it("updates slots without changing the session timestamp", async () => {
@@ -16848,7 +17289,11 @@ describe("SessionService", () => {
 
       await service.handoff("api-1", { agent: "cursor" });
 
-      expect(sessions.get("api-2")?.slots).toEqual({
+      // The handoff spawn reuses api-1's workspace, so api-2 is a desk
+      // sibling of api-1 (deskId === "api-1"): carried slots are desk-shared
+      // and land on the anchor (api-1), not on api-2's own record.
+      expect(sessions.get("api-2")?.deskId).toBe("api-1");
+      expect(sessions.get("api-1")?.slots).toEqual({
         title: "Handoff task",
         links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
         tags: ["feature"],
@@ -16947,9 +17392,11 @@ describe("SessionService", () => {
 
       const result = await service.handoff("api-1", { agent: "cursor" });
 
+      // api-2 is a desk sibling of api-1 (reused workspace => deskId ===
+      // "api-1"), so the carried slots write lands on the anchor (api-1).
       const carriedSlots = writeSessionMock.mock.calls
         .map(([, record]) => record as SessionRecord)
-        .filter((record) => record.id === "api-2")
+        .filter((record) => record.id === "api-1")
         .at(-1)?.slots;
       expect(carriedSlots).toMatchObject({
         title: "Handoff task",
