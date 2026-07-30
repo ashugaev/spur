@@ -12,6 +12,7 @@ import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
+import type * as sharedMemoryModule from "../../src/shared-memory.js";
 import type {
   AgentName,
   AppConfig,
@@ -122,6 +123,11 @@ const listSessionMemoryRecordsMock = vi.fn();
 const getSessionMemoryRecordMock = vi.fn();
 const setSessionMemoryRecordMock = vi.fn();
 const resolveSessionMemoryRecordMock = vi.fn();
+const listSharedMemoryKeysMock = vi.fn();
+const getSharedMemoryMock = vi.fn();
+const setSharedMemoryMock = vi.fn();
+const removeSharedMemoryMock = vi.fn();
+const withSharedMemoryInstructionsMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 class MockPreflightBranchValidationError extends Error {
   constructor(
@@ -478,6 +484,18 @@ vi.mock("../../src/session-memory.js", async (importOriginal) => {
     getSessionMemoryRecord: getSessionMemoryRecordMock,
     setSessionMemoryRecord: setSessionMemoryRecordMock,
     resolveSessionMemoryRecord: resolveSessionMemoryRecordMock,
+  };
+});
+
+vi.mock("../../src/shared-memory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof sharedMemoryModule>();
+  return {
+    ...actual,
+    listSharedMemoryKeys: listSharedMemoryKeysMock,
+    getSharedMemory: getSharedMemoryMock,
+    setSharedMemory: setSharedMemoryMock,
+    removeSharedMemory: removeSharedMemoryMock,
+    withSharedMemoryInstructions: withSharedMemoryInstructionsMock,
   };
 });
 
@@ -912,6 +930,11 @@ describe("SessionService", () => {
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
     listSessionMemoryRecordsMock.mockReset().mockReturnValue([]);
     getSessionMemoryRecordMock.mockReset().mockReturnValue(null);
+    listSharedMemoryKeysMock.mockReset().mockReturnValue([]);
+    getSharedMemoryMock.mockReset().mockReturnValue(null);
+    setSharedMemoryMock.mockReset();
+    removeSharedMemoryMock.mockReset().mockReturnValue(false);
+    withSharedMemoryInstructionsMock.mockReset().mockImplementation((prompt: string) => prompt);
     setSessionMemoryRecordMock.mockReset();
     resolveSessionMemoryRecordMock.mockReset().mockReturnValue(null);
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
@@ -16806,6 +16829,190 @@ describe("SessionService", () => {
       expect(() =>
         service.setSessionMemory("api-1", "decision.api", { body: "x", kind: "todo" }),
       ).toThrow(InvalidSessionMemoryInputError);
+    });
+  });
+
+  describe("shared memory", () => {
+    it("resolves task scope to deskId for a desk child", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-2", deskId: "api-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("api-2", "task");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "task", "api-1");
+    });
+
+    it("resolves task scope to its own id for a desk parent", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("api-1", "task");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "task", "api-1");
+    });
+
+    it("resolves task scope to its own id for a solo session", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "solo-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("solo-1", "task");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "task", "solo-1");
+    });
+
+    it("resolves project scope to session.project", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-1", project: "api" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("api-1", "project");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "project", "api");
+    });
+
+    it("resolves global scope to the constant store regardless of the session", async () => {
+      readSessionMock.mockReturnValue(
+        sessionRecord({ id: "api-1", project: "api", deskId: "api-9" }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("api-1", "global");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "global", "global");
+    });
+
+    it("never lets the caller session id override the derived store id", async () => {
+      readSessionMock.mockReturnValue(
+        sessionRecord({ id: "weird-session-id-that-looks-like-a-store", deskId: "api-1" }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.listSharedMemory("weird-session-id-that-looks-like-a-store", "task");
+
+      expect(listSharedMemoryKeysMock).toHaveBeenCalledWith(TEST_DATA_DIR, "task", "api-1");
+    });
+
+    it("lists, gets, sets, and removes entries per scope", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-1", deskId: "api-1" }));
+      listSharedMemoryKeysMock.mockReturnValue(["decision.api"]);
+      getSharedMemoryMock.mockReturnValue({ key: "decision.api", body: "Use HTTP API" });
+      setSharedMemoryMock.mockReturnValue({ key: "decision.api", body: "Use HTTP API" });
+      removeSharedMemoryMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(service.listSharedMemory("api-1", "task")).toEqual({
+        scope: "task",
+        keys: ["decision.api"],
+      });
+      expect(service.getSharedMemory("api-1", "task", "decision.api")).toEqual({
+        scope: "task",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+      expect(
+        service.setSharedMemory("api-1", "task", "decision.api", { body: "Use HTTP API" }),
+      ).toEqual({
+        scope: "task",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+      expect(service.removeSharedMemory("api-1", "task", "decision.api")).toEqual({
+        scope: "task",
+        key: "decision.api",
+      });
+
+      expect(setSharedMemoryMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        "task",
+        "api-1",
+        "decision.api",
+        "Use HTTP API",
+      );
+      expect(removeSharedMemoryMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        "task",
+        "api-1",
+        "decision.api",
+      );
+    });
+
+    it("rejects an invalid scope or key before reading session metadata", async () => {
+      const { InvalidSessionMemoryInputError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.listSharedMemory("api-1", "bogus")).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+      expect(() => service.getSharedMemory("api-1", "task", "Bad")).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+      expect(readSessionMock).not.toHaveBeenCalled();
+      expect(listSharedMemoryKeysMock).not.toHaveBeenCalled();
+      expect(getSharedMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it("throws 404 for missing sessions before touching shared memory storage", async () => {
+      readSessionMock.mockReturnValue(undefined);
+
+      const { SessionResourceNotFoundError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.listSharedMemory("api-1", "task")).toThrow(SessionResourceNotFoundError);
+      expect(() => service.setSharedMemory("api-1", "task", "decision.api", { body: "x" })).toThrow(
+        SessionResourceNotFoundError,
+      );
+      expect(listSharedMemoryKeysMock).not.toHaveBeenCalled();
+      expect(setSharedMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it("throws 404 for missing keys on get and rm", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-1" }));
+      getSharedMemoryMock.mockReturnValue(null);
+      removeSharedMemoryMock.mockReturnValue(false);
+
+      const { SessionResourceNotFoundError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.getSharedMemory("api-1", "task", "missing")).toThrow(
+        SessionResourceNotFoundError,
+      );
+      expect(() => service.removeSharedMemory("api-1", "task", "missing")).toThrow(
+        SessionResourceNotFoundError,
+      );
+    });
+
+    it("rejects invalid set request bodies", async () => {
+      readSessionMock.mockReturnValue(sessionRecord({ id: "api-1" }));
+
+      const { InvalidSessionMemoryInputError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.setSharedMemory("api-1", "task", "decision.api", {})).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+      expect(() => service.setSharedMemory("api-1", "task", "decision.api", { body: 5 })).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+    });
+
+    it("wires the real shared memory instructions once into the composed spawn message", async () => {
+      const actual = await vi.importActual<typeof sharedMemoryModule>("../../src/shared-memory.js");
+      withSharedMemoryInstructionsMock.mockImplementation(actual.withSharedMemoryInstructions);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "ship the task" });
+
+      const [, initialMessage] = buildAgentLaunchPlanMock.mock.calls[0] ?? [];
+      expect(initialMessage).toContain("Shared memory:");
+      expect(initialMessage).toContain("spur memory set|get|list|rm");
+      expect((String(initialMessage).match(/Shared memory:/g) ?? []).length).toBe(1);
     });
   });
 

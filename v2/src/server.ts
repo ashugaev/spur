@@ -908,6 +908,76 @@ export async function startServer(
         return;
       }
 
+      const sharedMemoryListMatch = path.match(/^\/sessions\/([^/]+)\/shared-memory\/([^/]+)$/);
+      if (method === "GET" && sharedMemoryListMatch?.[1] && sharedMemoryListMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.listSharedMemory(
+            decodeURIComponent(sharedMemoryListMatch[1]),
+            decodeURIComponent(sharedMemoryListMatch[2]),
+          ),
+        );
+        return;
+      }
+
+      const sharedMemoryEntryMatch = path.match(
+        /^\/sessions\/([^/]+)\/shared-memory\/([^/]+)\/([^/]+)$/,
+      );
+      if (
+        method === "GET" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.getSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+      if (
+        method === "POST" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          service.setSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+            body,
+          ),
+        );
+        return;
+      }
+      if (
+        method === "DELETE" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.removeSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+
       const logsSessionId = path.match(/^\/sessions\/([^/]+)\/logs$/)?.[1];
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
