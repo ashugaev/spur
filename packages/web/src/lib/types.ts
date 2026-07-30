@@ -95,14 +95,14 @@ export interface SpurSidecarPort {
   port: number;
 }
 
-// `tmuxSession` is optional because cached/legacy payloads (persisted before
-// this field existed) lack it; SessionDetail falls back to the old
-// `${session.id}--${name}` construction for those.
+// `tmuxSession` is the daemon's own name for the sidecar's pane — for a
+// desk-shared sidecar that is the desk anchor's, not this session's, so it
+// must never be reconstructed client-side.
 export interface SpurSessionSidecarView {
   name: string;
   alive: boolean;
   ports?: SpurSidecarPort[];
-  tmuxSession?: string;
+  tmuxSession: string;
 }
 
 export interface SpurSidecarPortConflictCandidate {

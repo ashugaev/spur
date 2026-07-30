@@ -9525,7 +9525,9 @@ describe("SessionService", () => {
         deskId: "api-1",
         status: "running" as const,
       });
-      tmuxSessionExistsMock.mockResolvedValue(false);
+      // The sibling must be genuinely live: a `running` record with no tmux is
+      // reconciled to stopped, which would release the shared sidecar.
+      tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-2");
       workspaceExistsMock.mockReturnValue(true);
 
       const { SessionService } = await loadSessionServiceModule();
@@ -9544,7 +9546,67 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("stopped");
     });
 
-    it("completing the anchor with an errored sibling keeps the shared sidecar tmux and port, and still kills and drops the anchor's own playwright", async () => {
+    it("completing the anchor releases the shared sidecar and its port when no member has a running agent, so a stopped or errored member cannot strand them", async () => {
+      loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+      const sessions = createSessionStore();
+      const base = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+      sessions.set("api-1", {
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        status: "running" as const,
+        sidecarNames: ["daemon", "playwright"],
+        sidecarPorts: {
+          daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+          playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8730 },
+        },
+      });
+      // The shape handoff leaves behind: the predecessor is parked `stopped`
+      // and stays in the desk forever, so treating it as holding would leak
+      // the pane and its pool port for good.
+      sessions.set("api-2", {
+        ...base,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "stopped" as const,
+        stopReason: "manual_pause" as const,
+        retainInList: true,
+      });
+      sessions.set("api-3", {
+        ...base,
+        id: "api-3",
+        tmuxSession: "api-3",
+        deskId: "api-1",
+        status: "errored" as const,
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.complete("api-1");
+
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(sessions.get("api-1")?.sidecarPorts).toBeUndefined();
+      // The worktree and the shared artifacts still belong to the members that
+      // can come back.
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+    });
+
+    it("completing the anchor with a running sibling keeps the shared sidecar tmux and port, and still kills and drops the anchor's own playwright", async () => {
       loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
       const sessions = createSessionStore();
       const base = {
@@ -9574,9 +9636,10 @@ describe("SessionService", () => {
         id: "api-2",
         tmuxSession: "api-2",
         deskId: "api-1",
-        status: "errored" as const,
+        status: "running" as const,
       });
-      tmuxSessionExistsMock.mockResolvedValue(false);
+      // See the pause case: a `running` record with no tmux gets reconciled.
+      tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-2");
       workspaceExistsMock.mockReturnValue(true);
 
       const { SessionService } = await loadSessionServiceModule();

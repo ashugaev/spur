@@ -1344,17 +1344,17 @@ function buildLastActivityAt(
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
 // owned, non-mcp) and per-session (mcp) entries, so a going-terminal write
 // must strip per-name, not wholesale: an anchor-owned entry survives while
-// another desk member is still non-terminal; every mcp entry (always
-// per-session) is dropped along with the record it belongs to. `project`
-// undefined, or a name no longer present in it, drops that entry too — no
-// config to prove it is desk-shared. Returns undefined when nothing
+// another desk member's agent is still running and using it; every mcp entry
+// (always per-session) is dropped along with the record it belongs to.
+// `project` undefined, or a name no longer present in it, drops that entry
+// too — no config to prove it is desk-shared. Returns undefined when nothing
 // survives, so callers can `delete` the field outright.
 function releasableSidecarPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   project: Pick<ProjectConfig, "sidecars"> | undefined,
-  hasActiveDeskSiblings: boolean,
+  hasLiveDeskSiblings: boolean,
 ): SessionRecord["sidecarPorts"] {
-  if (!session.sidecarPorts || !hasActiveDeskSiblings) {
+  if (!session.sidecarPorts || !hasLiveDeskSiblings) {
     return undefined;
   }
   const kept = Object.fromEntries(
@@ -1820,6 +1820,7 @@ export class SessionService {
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  private readonly prCheckRuns = new Set<Promise<void>>();
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
   // considered rate-limited; sessionId -> per-episode rotation count.
   private readonly claudeAccountRateLimit = new Map<string, number>();
@@ -1859,9 +1860,18 @@ export class SessionService {
     this.startReaperLoop();
   }
 
-  /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
+  /**
+   * Resolves once every in-flight fire-and-forget run has settled: background
+   * spawns, PR auto-detect checks, and the dashboard cache tick. Lets teardown
+   * drain async work whose writes and `gh` calls would otherwise land after the
+   * caller is gone.
+   */
   async settleBackgroundSpawns(): Promise<void> {
-    await Promise.allSettled([...this.backgroundSpawnRuns]);
+    await Promise.allSettled([
+      ...this.backgroundSpawnRuns,
+      ...this.prCheckRuns,
+      ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
+    ]);
   }
 
   dispose(): void {
@@ -2968,8 +2978,9 @@ export class SessionService {
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
         // terminal anchor this loop would otherwise reap the pane a live
         // sibling is still using. Same rule as teardownSessionSidecars: the
-        // last member releases it.
-        const deskSiblingsAlive = this.hasActiveDeskSiblings(session);
+        // last running member releases it.
+        const deskSiblingsAlive =
+          (session.sidecarNames?.length ?? 0) > 0 && this.hasLiveDeskSiblings(session);
         let reapProject: ProjectConfig | undefined;
         if (deskSiblingsAlive) {
           try {
@@ -3079,8 +3090,9 @@ export class SessionService {
       tracker.waitingChecks += 1;
     }
 
-    // Fire and forget
-    void this.runPrCheck(session).catch((error) => {
+    // Fire and forget, but tracked so teardown can drain it — an unawaited
+    // `gh` call outliving its caller lands on whatever runs next.
+    const run = this.runPrCheck(session).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.pr_auto_detect.failed", {
         level: "warn",
@@ -3089,6 +3101,8 @@ export class SessionService {
         message: `PR auto-detect failed for ${session.id}: ${message}`,
       });
     });
+    this.prCheckRuns.add(run);
+    void run.finally(() => this.prCheckRuns.delete(run));
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
@@ -3397,13 +3411,13 @@ export class SessionService {
       }
     }
     // A terminal anchor still holds its shared sidecar ports while another
-    // desk member is non-terminal (single listSessions snapshot, O(N): a
-    // second pass would let a fresh session steal a shared port still in
-    // use by a live sibling of a completed anchor).
+    // desk member's agent is still running (single listSessions snapshot,
+    // O(N): a second pass would let a fresh session steal a shared port still
+    // in use by a live sibling of a completed anchor).
     const allSessions = listSessions(this.config.dataDir);
     const liveDeskAnchors = new Set<string>();
     for (const candidate of allSessions) {
-      if (!isTerminalSessionStatus(candidate.status)) {
+      if (candidate.status === "running" || candidate.status === "spawning") {
         liveDeskAnchors.add(deskAnchorId(candidate));
       }
     }
@@ -5307,8 +5321,11 @@ export class SessionService {
           project: request.project,
           ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         };
+        const failedSpawnDeskAlive = reuseCtx
+          ? this.hasLiveDeskSiblings(failedSpawnSession)
+          : false;
         for (const [scName, sidecar] of Object.entries(project.sidecars)) {
-          if (!sidecar.mcp && this.hasActiveDeskSiblings(failedSpawnSession)) {
+          if (!sidecar.mcp && failedSpawnDeskAlive) {
             continue;
           }
           await killSidecarTmux(sidecarOwnerId(failedSpawnSession, sidecar), scName).catch(
@@ -5414,8 +5431,11 @@ export class SessionService {
     await killTmuxSession(prepared.sessionId);
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
+    const deskAlive = prepared.placeholder.deskId
+      ? this.hasLiveDeskSiblings(prepared.placeholder)
+      : false;
     for (const [sidecarName, sidecar] of Object.entries(prepared.project.sidecars)) {
-      if (!sidecar.mcp && this.hasActiveDeskSiblings(prepared.placeholder)) {
+      if (!sidecar.mcp && deskAlive) {
         continue;
       }
       await killSidecarTmux(sidecarOwnerId(prepared.placeholder, sidecar), sidecarName).catch(
@@ -5542,8 +5562,9 @@ export class SessionService {
     return members;
   }
 
-  private hasActiveDeskSiblings(
+  private someDeskSibling(
     session: Pick<SessionRecord, "id" | "project" | "deskId">,
+    match: (sibling: SessionRecord) => boolean,
   ): boolean {
     const anchor = deskAnchorId(session);
     return listSessions(this.config.dataDir).some(
@@ -5551,8 +5572,28 @@ export class SessionService {
         s.id !== session.id &&
         s.project === session.project &&
         deskAnchorId(s) === anchor &&
-        !isTerminalSessionStatus(s.status),
+        match(s),
     );
+  }
+
+  // Another desk member could still come back and need the desk's persistent
+  // state: its worktree and the shared artifacts dir. A paused or errored
+  // member counts — restore brings it back into the same workspace.
+  private hasActiveDeskSiblings(
+    session: Pick<SessionRecord, "id" | "project" | "deskId">,
+  ): boolean {
+    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status));
+  }
+
+  // Another desk member has an agent running right now, so the desk's shared
+  // sidecars and their reserved ports are actually in use. Deliberately
+  // narrower than hasActiveDeskSiblings: pausing a session already tears its
+  // own sidecars down, and a stopped or errored member holding a shared pane
+  // would leak it forever — handoff parks its predecessor as `stopped` and
+  // keeps it in the desk, so the desk would never release the pane or its
+  // pool ports. Restore re-runs autostart, so releasing early self-heals.
+  private hasLiveDeskSiblings(session: Pick<SessionRecord, "id" | "project" | "deskId">): boolean {
+    return this.someDeskSibling(session, (s) => s.status === "running" || s.status === "spawning");
   }
 
   // Resolves the record that owns a desk's shared state (slots, PR binding).
@@ -7229,14 +7270,14 @@ export class SessionService {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
       const sidecar = project?.sidecars[scName];
-      // Non-mcp project sidecars are desk-shared: while another desk member
-      // is still non-terminal, this session's own teardown (paused, killed,
+      // Non-mcp project sidecars are desk-shared: while another desk member's
+      // agent is still running, this session's own teardown (paused, killed,
       // completed, crashed) must not touch the shared pane, slot link, or
-      // ports — the last member's teardown handles that. This holds for the
-      // anchor's own teardown too, where the owner id is its own id. MCP
-      // sidecars are always per-session and tear down unconditionally.
+      // ports — that member's own teardown handles it. Holds for the anchor's
+      // own teardown too, where the owner id is its own id. MCP sidecars are
+      // always per-session and tear down unconditionally.
       const isDeskSharedSidecar = sidecar !== undefined && !sidecar.mcp;
-      if (isDeskSharedSidecar && this.hasActiveDeskSiblings(session)) {
+      if (isDeskSharedSidecar && this.hasLiveDeskSiblings(session)) {
         continue;
       }
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
@@ -7254,14 +7295,17 @@ export class SessionService {
   }
 
   // Strips sidecarPorts from a going-terminal record, keeping only the
-  // anchor-owned (non-mcp, desk-shared) entries while another desk member is
-  // still non-terminal. Route every terminal-write site through this instead
-  // of a wholesale delete.
+  // anchor-owned (non-mcp, desk-shared) entries while another desk member's
+  // agent is still running and using them. Route every terminal-write site
+  // through this instead of a wholesale delete.
   private sessionWithReleasedSidecarPorts(session: SessionRecord): SessionRecord {
+    if (!session.sidecarPorts) {
+      return session;
+    }
     const kept = releasableSidecarPorts(
       session,
       this.resolveProjectForSession(session),
-      this.hasActiveDeskSiblings(session),
+      this.hasLiveDeskSiblings(session),
     );
     const { sidecarPorts: _dropped, ...rest } = session;
     return kept ? { ...rest, sidecarPorts: kept } : rest;
@@ -10122,12 +10166,19 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(this.deskAnchorRecord(session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
-    // (it probes its own tmux id, which never has the pane).
-    const project = this.resolveProjectForSession(session);
+    // (it probes its own tmux id, which never has the pane). Resolving the
+    // project re-reads and re-validates the config file, so this 2s-tick path
+    // only pays for it when the session is actually a desk member with
+    // sidecars — a non-desk session always owns its own panes.
+    const sidecarNames = session.sidecarNames ?? [];
+    const deskProject =
+      session.deskId && sidecarNames.length > 0
+        ? this.resolveProjectForSession(session)
+        : undefined;
     const runningSidecarNames = (
       await Promise.all(
-        (session.sidecarNames ?? []).map(async (name) => {
-          const ownerId = this.sidecarOwnerIdForName(session, project, name);
+        sidecarNames.map(async (name) => {
+          const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
           return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
         }),
       )

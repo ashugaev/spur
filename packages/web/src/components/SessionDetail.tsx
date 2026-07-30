@@ -3267,9 +3267,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                                onClick={() =>
-                                  syncTerminalFilter(sc.tmuxSession ?? `${session.id}--${sc.name}`)
-                                }
+                                onClick={() => syncTerminalFilter(sc.tmuxSession)}
                               >
                                 Terminal
                               </button>
