@@ -57,6 +57,7 @@ import {
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
+import { useBackendConnection } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 
@@ -1099,6 +1100,7 @@ export function Dashboard() {
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const { phase: versionSwitchPhase } = useVersionSwitch();
+  const { phase: backendPhase } = useBackendConnection();
 
   useEffect(() => {
     if (!sessionsError) {
@@ -1110,9 +1112,15 @@ export function Dashboard() {
       return;
     }
     // The daemon is expected to be unreachable while a version switch is in
-    // flight — don't surface that as a new session-load error toast, and
-    // clear any pre-existing one so it doesn't linger behind the overlay.
-    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") {
+    // flight, or while the backend-connection gate is showing its own
+    // blocking overlay — don't surface that as a new session-load error
+    // toast, and clear any pre-existing one so it doesn't linger behind the
+    // overlay.
+    if (
+      versionSwitchPhase === "switching" ||
+      versionSwitchPhase === "done" ||
+      backendPhase === "disconnected"
+    ) {
       const current = sessionsErrorToastRef.current;
       if (current) {
         dismissToast(current.id);
@@ -1128,7 +1136,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
+  }, [backendPhase, dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
