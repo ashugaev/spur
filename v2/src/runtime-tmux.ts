@@ -310,7 +310,7 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 // the service user, while `required` propagates the failure. Either way,
 // KillMode=process on the daemon unit remains the actual guarantee that a
 // daemon restart does not stop the session.
-async function runTmuxNewSession(args: string[], environment?: NodeJS.ProcessEnv): Promise<void> {
+async function runTmuxScoped(args: string[], environment?: NodeJS.ProcessEnv): Promise<void> {
   const options = environment ? { env: environment } : undefined;
   const mode = systemdScopeMode();
   if (mode === "direct") {
@@ -342,6 +342,10 @@ async function runTmuxNewSession(args: string[], environment?: NodeJS.ProcessEnv
   }
 }
 
+async function startTmuxServer(): Promise<void> {
+  await runTmuxScoped(withTmuxSocketArgs(["-f", TMUX_CONFIG_PATH, "start-server"]));
+}
+
 function buildEnvArgs(env?: Record<string, string>): string[] {
   const envArgs: string[] = [];
   const sessionEnv = {
@@ -360,6 +364,7 @@ function buildEnvArgs(env?: Record<string, string>): string[] {
 }
 
 async function ensureClaudeTokenImport(): Promise<void> {
+  await startTmuxServer();
   const current = await tmux("show-options", "-gv", "update-environment");
   if (!current.split(/\s+/).includes("CLAUDE_CODE_OAUTH_TOKEN")) {
     await tmux("set-option", "-ag", "update-environment", "CLAUDE_CODE_OAUTH_TOKEN");
@@ -555,7 +560,7 @@ export async function createTmuxSession(input: {
     await ensureClaudeTokenImport();
   }
 
-  await runTmuxNewSession(
+  await runTmuxScoped(
     [
       ...withTmuxSocketArgs([]),
       "-f",
@@ -615,7 +620,7 @@ export async function createTmuxCommandSession(input: {
   // tears the pane down before the pane option can land — making the failure
   // invisible. `remain-on-exit` is a pane option, so set it with `-p` on the
   // pane we are about to respawn.
-  await runTmuxNewSession([
+  await runTmuxScoped([
     ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,

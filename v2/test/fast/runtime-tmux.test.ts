@@ -134,6 +134,30 @@ describe("runtime-tmux", () => {
     ).toBe(true);
   });
 
+  it("starts a cold tmux server before reading token import options", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args[0] === "show-options" ? "DISPLAY SSH_AUTH_SOCK" : "",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-auth",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude",
+      agent: "claude",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "selected" },
+    });
+
+    const calls = execFileAsyncMock.mock.calls.map(([, args]) => args);
+    const startServer = calls.findIndex((args) => args.includes("start-server"));
+    const showOptions = calls.findIndex((args) => args[0] === "show-options");
+    const newSession = calls.findIndex((args) => args.includes("new-session"));
+    expect(startServer).toBe(0);
+    expect(showOptions).toBeGreaterThan(startServer);
+    expect(newSession).toBeGreaterThan(showOptions);
+  });
+
   it("fails launch when Claude token import cannot be configured", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "show-options") throw new Error("tmux option unavailable");

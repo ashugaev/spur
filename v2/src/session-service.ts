@@ -1016,6 +1016,14 @@ function resolveClaudeRuntimeAuth(
   };
 }
 
+async function assertClaudeRuntimeAuthImported(
+  tmuxSession: string,
+  runtimeAuth: { fingerprint?: string },
+): Promise<void> {
+  if (!runtimeAuth.fingerprint) return;
+  await assertTmuxClaudeTokenFingerprint(tmuxSession, runtimeAuth.fingerprint);
+}
+
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
@@ -4911,6 +4919,7 @@ export class SessionService {
 
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
+      await assertClaudeRuntimeAuthImported(tmuxSession, claudeRuntimeAuth);
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
@@ -6080,7 +6089,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (session.claudeAuthSwitch) {
+    if (this.claudeAuthSwitches.has(sessionId) || session.claudeAuthSwitch) {
       throw new ClaudeAuthSwitchConflictError("Claude auth recovery is still pending");
     }
     if (!hasMessageContent(request)) {
@@ -6153,6 +6162,9 @@ export class SessionService {
     if (session.agent !== "claude") {
       throw new Error("Interactive answering is only supported for claude sessions");
     }
+    if (this.claudeAuthSwitches.has(sessionId) || session.claudeAuthSwitch) {
+      throw new ClaudeAuthSwitchConflictError("Claude auth recovery is still pending");
+    }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
@@ -6190,6 +6202,9 @@ export class SessionService {
     try {
       if (!initialSession) {
         throw new Error(`Session not found: ${sessionId}`);
+      }
+      if (this.claudeAuthSwitches.has(sessionId) || initialSession.claudeAuthSwitch) {
+        throw new ClaudeAuthSwitchConflictError("Claude auth recovery is still pending");
       }
       if (this.isLiveStateRateLimited(initialSession)) {
         this.logEvent("session.message.suppressed_rate_limited", {
@@ -7352,6 +7367,7 @@ export class SessionService {
         undefined,
         { agent: session.agent },
       );
+      await assertClaudeRuntimeAuthImported(session.tmuxSession, claudeRuntimeAuth);
       // fresh:true: this session's tmux pane was just created by
       // createTmuxSession above and may postdate the last fleet-pane
       // snapshot, which would otherwise wrongly see it as absent and abort a
@@ -7411,6 +7427,7 @@ export class SessionService {
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
+      await assertClaudeRuntimeAuthImported(session.tmuxSession, claudeRuntimeAuth);
       // fresh:true — same rationale as the resume-plan check above: this
       // pane was just (re)created and may postdate the last fleet snapshot.
       if (
@@ -7648,6 +7665,7 @@ export class SessionService {
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });
+      await assertClaudeRuntimeAuthImported(current.tmuxSession, claudeRuntimeAuth);
       // fresh:true — this pane was just created by createTmuxSession above
       // and may postdate the last fleet-pane snapshot.
       if (
@@ -7784,11 +7802,6 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (session.agent !== "claude") {
-      throw new Error(
-        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
-      );
-    }
     const account = findAccount(this.config.dataDir, accountId);
     if (!account) {
       throw new Error(`Unknown claude account: ${accountId}`);
@@ -7796,42 +7809,48 @@ export class SessionService {
     if (account.kind !== "setup_token" || accountStatus(this.config.dataDir, account) !== "ready") {
       throw new Error(`Claude account ${accountId} must be re-enrolled before switching`);
     }
-    if (session.claudeAuthSwitch) {
-      throw new ClaudeAuthSwitchConflictError(`Claude auth recovery is already in progress`);
-    }
-    if (!session.agentSessionId) {
-      throw new Error(`Session ${sessionId} has no native Claude session id`);
-    }
-    if (
-      session.claudeAccountId === account.id &&
-      session.claudeAccountFingerprint === account.tokenFingerprint
-    ) {
-      throw new ClaudeAuthSwitchConflictError(`Claude account ${accountId} is already current`);
-    }
 
     this.claudeAuthSwitches.add(sessionId);
     try {
       const force = opts.force === true;
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      if (current.agent !== "claude") {
+        throw new Error(
+          `switch-auth is only supported for claude sessions (session ${sessionId} runs ${current.agent})`,
+        );
+      }
+      if (current.claudeAuthSwitch) {
+        throw new ClaudeAuthSwitchConflictError(`Claude auth recovery is already in progress`);
+      }
+      if (!current.agentSessionId) {
+        throw new Error(`Session ${sessionId} has no native Claude session id`);
+      }
+      if (
+        current.claudeAccountId === account.id &&
+        current.claudeAccountFingerprint === account.tokenFingerprint
+      ) {
+        throw new ClaudeAuthSwitchConflictError(`Claude account ${accountId} is already current`);
+      }
       if (!force) {
-        const state = await this.classifySessionState(session);
+        const state = await this.classifySessionState(current);
         if (state === "working") {
           throw new Error(
             `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
           );
         }
       }
-      await this.ensureKillDirtyWorktreeAllowed(session, force);
-
-      const setupToken = readSetupToken(this.config.dataDir, account);
-      await validateClaudeSetupToken(setupToken, { cwd: session.worktreePath });
+      await this.ensureKillDirtyWorktreeAllowed(current, force);
 
       const startedAt = nowIso();
       const prepared: SessionRecord = {
-        ...session,
+        ...current,
         claudeAuthSwitch: {
-          ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
-          ...(session.claudeAccountFingerprint
-            ? { fromFingerprint: session.claudeAccountFingerprint }
+          ...(current.claudeAccountId ? { fromAccountId: current.claudeAccountId } : {}),
+          ...(current.claudeAccountFingerprint
+            ? { fromFingerprint: current.claudeAccountFingerprint }
             : {}),
           toAccountId: account.id,
           startedAt,
@@ -7842,6 +7861,14 @@ export class SessionService {
       writeSession(this.config.dataDir, prepared);
       const preparedIntent = prepared.claudeAuthSwitch;
       if (!preparedIntent) throw new Error("Failed to persist Claude auth switch intent");
+      try {
+        const setupToken = readSetupToken(this.config.dataDir, account);
+        await validateClaudeSetupToken(setupToken, { cwd: prepared.worktreePath });
+      } catch (error) {
+        const { claudeAuthSwitch: _intent, ...withoutIntent } = prepared;
+        writeSession(this.config.dataDir, { ...withoutIntent, updatedAt: nowIso() });
+        throw error;
+      }
 
       try {
         try {
@@ -7864,7 +7891,6 @@ export class SessionService {
           },
           { persist: false, allowFreshFallback: false, strictClaudeResume: true },
         );
-        await assertTmuxClaudeTokenFingerprint(candidate.tmuxSession, account.tokenFingerprint);
         const { claudeAuthSwitch: _intent, ...candidateWithoutIntent } = candidate;
         const committed: SessionRecord = {
           ...candidateWithoutIntent,
@@ -7904,7 +7930,7 @@ export class SessionService {
         }
         const original = error instanceof Error ? error.message : "Claude auth switch failed";
         try {
-          await killTmuxSession(prepared.tmuxSession, { required: true });
+          await killTmuxSession(prepared.tmuxSession);
           const rollback = await this.ensureSessionReadyForSend(prepared, {
             persist: false,
             allowFreshFallback: false,
@@ -8267,7 +8293,7 @@ export class SessionService {
     if (!intent || this.claudeAuthSwitches.has(session.id)) return;
     this.claudeAuthSwitches.add(session.id);
     try {
-      await killTmuxSession(session.tmuxSession, { required: true });
+      await killTmuxSession(session.tmuxSession);
       const recovered = await this.ensureSessionReadyForSend(session, {
         persist: false,
         allowFreshFallback: false,

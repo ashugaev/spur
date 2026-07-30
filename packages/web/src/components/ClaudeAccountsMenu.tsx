@@ -109,6 +109,11 @@ export function ClaudeAccountsMenu() {
   const accounts = accountsQuery.data?.accounts ?? [];
   const readyCount = accounts.filter((account) => account.status === "ready").length;
   const error = enrollMutation.error?.message ?? removeMutation.error?.message ?? null;
+  const cancelReEnroll = () => {
+    setEnrollId(null);
+    setSetupToken("");
+    enrollMutation.reset();
+  };
 
   return (
     <div
@@ -232,7 +237,7 @@ export function ClaudeAccountsMenu() {
                 {enrollMutation.isPending ? "Validating…" : enrollId ? "Re-enroll" : "Enroll"}
               </button>
               {enrollId ? (
-                <button type="button" onClick={() => setEnrollId(null)}>
+                <button type="button" onClick={cancelReEnroll}>
                   Cancel
                 </button>
               ) : null}

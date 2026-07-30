@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { isSpurDaemonError, spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import type { ClaudeAccountSummary } from "@/lib/types";
 
 interface AddAccountBody {
@@ -29,6 +29,9 @@ export async function POST(request: Request) {
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to add Claude account";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return NextResponse.json(
+      { error: message },
+      { status: isSpurDaemonError(error) ? error.status : 502 },
+    );
   }
 }

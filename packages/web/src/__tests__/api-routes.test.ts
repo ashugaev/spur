@@ -2677,6 +2677,19 @@ describe("Spur web API routes", () => {
       expect(await response.json()).toEqual({ error: "account is in use" });
     });
 
+    it("POST /api/claude-accounts/add preserves daemon error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("token rejected", 400));
+      const response = await addClaudeAccount(
+        new Request("http://localhost:3000/api/claude-accounts/add", {
+          method: "POST",
+          body: JSON.stringify({ setupToken: "replacement-token" }),
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "token rejected" });
+    });
+
     it("rejects an empty setup token before contacting the daemon", async () => {
       const response = await addClaudeAccount(
         new Request("http://localhost:3000/api/claude-accounts/add", {
