@@ -1305,6 +1305,41 @@ test.describe("D5: Tracker and PR links", () => {
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 
+  test("PR row keeps real status data when the payload also carries a soft error", async ({
+    page,
+  }) => {
+    const prUrl = "https://github.com/test/repo/pull/42002";
+    const session = makeSessionWithPR({
+      id: "pr-row-partial-error-1",
+      slots: {
+        title: "PR with partial error",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          mergeConflict: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          error: "Minor field error",
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.getByRole("img", { name: "CI passing" })).toBeVisible();
+  });
+
   test("session without links has no tracker or PR icons", async ({ page }) => {
     const session = makeWorkingSession({ id: "no-links-1" });
     await mockSessions(page, [session]);

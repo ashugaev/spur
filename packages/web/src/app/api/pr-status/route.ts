@@ -1,5 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
+import {
+  type GitHubGraphQLError,
+  getGitHubRateLimitError,
+  ghHeaders,
+  handleGitHubRateLimit,
+} from "@/lib/github-api";
 import { glabHeaders, resolveGlabToken } from "@/lib/gitlab-api";
 import { type CiStatus, type PrState, parseReviewDecision } from "@/lib/pr-status-shape";
 import {
@@ -32,7 +37,7 @@ interface GitHubGraphQLResponse {
       };
     };
   };
-  errors?: Array<{ message?: string }>;
+  errors?: GitHubGraphQLError[];
 }
 
 interface GitLabMergeRequestResponse {
@@ -258,10 +263,13 @@ async function handleGitHubStatus(url: string) {
 
     const gql = (await ghResponse.json()) as GitHubGraphQLResponse;
     const pr = gql.data?.repository?.pullRequest;
-    const gqlError = gql.errors
-      ?.map((entry) => entry.message?.trim())
-      .filter(Boolean)
-      .join("; ");
+    const gqlError = gql.errors?.length
+      ? gql.errors
+          .map((entry) => entry.message?.trim())
+          .filter(Boolean)
+          .join("; ") || "GitHub GraphQL error"
+      : undefined;
+    handleGitHubRateLimit(ghResponse, gql.errors);
 
     if (!pr) {
       if (gqlError) {
@@ -308,8 +316,9 @@ async function handleGitHubStatus(url: string) {
       totalThreads,
       unresolvedThreads,
     });
-    cachePrStatusResponse(cacheKey, response, cacheTtlMs());
-    return NextResponse.json(response);
+    const payload = gqlError ? { ...response, error: gqlError } : response;
+    cachePrStatusResponse(cacheKey, payload, gqlError ? errorCacheTtlMs() : cacheTtlMs());
+    return NextResponse.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
     const response = errorResponse(cacheKey, message);
