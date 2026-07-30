@@ -2097,7 +2097,7 @@ export class SessionService {
         // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
         // cooldown, per-episode cap, and all-accounts-limited fall-through) and
         // returns true only when a rotation happened. A successful rotation
-        // relaunches the session and suppresses the afterHours nudge below.
+        // sends an immediate reactivation nudge and suppresses the afterHours nudge below.
         // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
         // dirty-worktree kill-confirmation, a stale-liveState race, or a
         // concurrently-removed account. Scope the catch to this session so one
@@ -7826,20 +7826,24 @@ export class SessionService {
 
     const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
     const sessionHome = sessionClaudeHome(sessionToolDir);
+    const active = await this.ensureSessionReadyForSend(session);
+    const usesSessionHome = active.launchCommand.startsWith(
+      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
+    );
 
     const updated: SessionRecord = {
-      ...session,
+      ...active,
       claudeAccountId: accountId,
       updatedAt: nowIso(),
     };
-    writeSession(this.config.dataDir, updated);
-    touchAccountUsed(this.config.dataDir, accountId);
 
-    if (existsSync(sessionHome)) {
-      // Session home exists: atomically swap credentials in place.
+    if (usesSessionHome) {
+      // Session launched against its session home: atomically swap credentials in place.
       // The live Claude process rereads credentials on its next request,
       // so no kill/relaunch is needed.
       swapSessionCredentials(sessionHome, account);
+      writeSession(this.config.dataDir, updated);
+      touchAccountUsed(this.config.dataDir, accountId);
       this.logEvent("session.auth.switched", {
         level: "info",
         sessionId,
@@ -7850,7 +7854,9 @@ export class SessionService {
       return this.enrich(updated);
     }
 
-    // No session home: session was launched against an account dir directly.
+    writeSession(this.config.dataDir, updated);
+    touchAccountUsed(this.config.dataDir, accountId);
+    // Session was launched against an account dir directly.
     // Relaunch once to migrate onto the new account's session home.
     await killTmuxSession(updated.tmuxSession);
     const relaunched = await this.ensureSessionReadyForSend(updated);
@@ -7895,6 +7901,11 @@ export class SessionService {
       return false;
     }
     await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
+    const switched = readSession(this.config.dataDir, session.id);
+    if (!switched) {
+      throw new Error(`Session not found after auth switch: ${session.id}`);
+    }
+    await this.sendAgentMessage(switched, RATE_LIMIT_REACTIVATION_PROMPT);
     this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
     this.logEvent("session.auth.auto_rotated", {
       level: "info",

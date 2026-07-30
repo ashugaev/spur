@@ -314,7 +314,7 @@ describe("ensureAccountProjectsLink", () => {
     rmSync(sessionToolDir, { recursive: true, force: true });
   });
 
-  it("seedSessionHome: idempotent — second call does not overwrite .claude.json", () => {
+  it("seedSessionHome: second call preserves runtime credentials and .claude.json", () => {
     const account = addAccount(dataDir);
     writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"v1"}', "utf-8");
     writeFileSync(
@@ -329,24 +329,38 @@ describe("ensureAccountProjectsLink", () => {
     writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"v2"}', "utf-8");
     seedSessionHome(sessionHome, account);
 
-    // credentials updated, .claude.json left as-is
-    expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"v2"}');
+    // Runtime state remains owned by the session after initial seeding.
+    expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"v1"}');
     expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"custom":true}');
     rmSync(sessionToolDir, { recursive: true, force: true });
   });
 
-  it("swapSessionCredentials: atomically replaces credentials in session home", () => {
+  it("seedSessionHome: rejects a source account without onboarding state", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"abc"}', "utf-8");
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+
+    expect(() => seedSessionHome(sessionHome, account)).toThrow();
+    expect(existsSync(join(sessionHome, ".claude.json"))).toBe(false);
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("swapSessionCredentials: replaces credentials and onboarding state in session home", () => {
     const account = addAccount(dataDir);
     writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"old"}', "utf-8");
+    writeFileSync(join(account.configDir, ".claude.json"), '{"oauthAccount":"new"}', "utf-8");
     const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
     const sessionHome = sessionClaudeHome(sessionToolDir);
     mkdirSync(sessionHome, { recursive: true });
     writeFileSync(join(sessionHome, ".credentials.json"), '{"token":"old"}', "utf-8");
+    writeFileSync(join(sessionHome, ".claude.json"), '{"oauthAccount":"old"}', "utf-8");
 
     writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"new"}', "utf-8");
     swapSessionCredentials(sessionHome, account);
 
     expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"new"}');
+    expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"oauthAccount":"new"}');
     expect(readFileSync(join(account.configDir, ".credentials.json"), "utf-8")).toBe(
       '{"token":"new"}',
     );

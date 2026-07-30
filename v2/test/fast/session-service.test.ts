@@ -3997,13 +3997,17 @@ describe("SessionService", () => {
       );
     });
 
-    it("migration: no session home — relaunches with session home config dir", async () => {
+    it("migration: existing session home not used by launch — relaunches with session home config dir", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       seedAccounts();
       mockClaudeJsonlState("waiting");
-      tmuxSessionExistsMock.mockResolvedValue(false);
       loadConfigMock.mockReturnValue(baseConfig());
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      mkdirSync(expectedHome, { recursive: true });
+      killTmuxSessionMock.mockImplementation(async () => {
+        tmuxSessionExistsMock.mockResolvedValue(false);
+      });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -4012,22 +4016,16 @@ describe("SessionService", () => {
         force: true,
       });
 
-      const expectedHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
       expect(view.activeClaudeAccountId).toBe("backup");
       expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
 
-      const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
-      expect(resumeCall?.[1]).toBe("session-uuid");
-      expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: expectedHome });
-      expect(
-        createTmuxSessionMock.mock.calls.some(
-          ([args]) =>
-            args.sessionName === "api-1" && args.launchCommand.includes("--resume session-uuid"),
-        ),
-      ).toBe(true);
+      expect(seedSessionHomeMock).toHaveBeenCalledWith(
+        expectedHome,
+        expect.objectContaining({ id: "backup" }),
+      );
       expect(
         writeSessionMock.mock.calls.some(
           ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
@@ -4038,11 +4036,16 @@ describe("SessionService", () => {
 
     it("in-place swap: session home exists — swaps credentials without kill/relaunch", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      sessions.set(
+        "api-1",
+        runningSession({
+          launchCommand: `CLAUDE_CONFIG_DIR='${sessionHome}' claude --dangerously-skip-permissions`,
+        }),
+      );
       seedAccounts();
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue(baseConfig());
-      const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
       mkdirSync(sessionHome, { recursive: true });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -18324,7 +18327,12 @@ describe("SessionService", () => {
       // rateLimitedAt stays set so the per-episode cap stays keyed on this episode;
       // classification clears it once the session leaves rate_limited.
       expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
-      // With afterHours=0 the typed reactivation nudge never fires.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining(REACTIVATION_MARKER),
+        { agent: "claude" },
+      );
+      // With afterHours=0 the delayed reactivation path never fires.
       expect(reactivationEventCount()).toBe(0);
       service.dispose();
     });

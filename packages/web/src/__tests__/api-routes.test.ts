@@ -92,6 +92,7 @@ import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/proje
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { POST as startClaudeAccountLogin } from "@/app/api/claude-accounts/[id]/start-login/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -2635,6 +2636,38 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(502);
       expect(payload.error).toBe("daemon down");
+    });
+
+    it("POST /api/claude-accounts/:id/start-login forwards to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ loginTmuxSession: "claude-login-acc-1" });
+
+      const response = await startClaudeAccountLogin(
+        new Request("http://localhost:3000/api/claude-accounts/acc%2F1/start-login", {
+          method: "POST",
+        }),
+        { params: Promise.resolve({ id: "acc/1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/claude-accounts/acc%2F1/start-login",
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(await response.json()).toEqual({ loginTmuxSession: "claude-login-acc-1" });
+    });
+
+    it("POST /api/claude-accounts/:id/start-login returns 502 when the daemon fails", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new Error("login failed"));
+
+      const response = await startClaudeAccountLogin(
+        new Request("http://localhost:3000/api/claude-accounts/acc-1/start-login", {
+          method: "POST",
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ error: "login failed" });
     });
   });
 });

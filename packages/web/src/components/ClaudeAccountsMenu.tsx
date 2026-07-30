@@ -24,13 +24,12 @@ interface AccountsResponse {
   accounts: ClaudeAccountSummary[];
 }
 
-interface AddAccountResult {
-  account: ClaudeAccountSummary;
+interface LoginResult {
   loginTmuxSession: string;
 }
 
-interface StartLoginResult {
-  loginTmuxSession: string;
+interface AddAccountResult extends LoginResult {
+  account: ClaudeAccountSummary;
 }
 
 interface LoginStatusResult {
@@ -51,19 +50,15 @@ function isAccountsResponse(value: unknown): value is AccountsResponse {
   );
 }
 
-function isAddAccountResult(value: unknown): value is AddAccountResult {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as { account?: unknown; loginTmuxSession?: unknown };
-  return (
-    typeof record.loginTmuxSession === "string" &&
-    typeof record.account === "object" &&
-    record.account !== null
-  );
-}
-
-function isStartLoginResult(value: unknown): value is StartLoginResult {
+function isLoginResult(value: unknown): value is LoginResult {
   if (typeof value !== "object" || value === null) return false;
   return typeof (value as { loginTmuxSession?: unknown }).loginTmuxSession === "string";
+}
+
+function isAddAccountResult(value: unknown): value is AddAccountResult {
+  if (!isLoginResult(value)) return false;
+  const account = (value as { account?: unknown }).account;
+  return typeof account === "object" && account !== null;
 }
 
 function isLoginStatusResult(value: unknown): value is LoginStatusResult {
@@ -182,14 +177,14 @@ export function ClaudeAccountsMenu() {
     },
   });
 
-  const startLoginMutation = useMutation<StartLoginResult, Error, ClaudeAccountSummary>({
+  const startLoginMutation = useMutation<LoginResult, Error, ClaudeAccountSummary>({
     mutationFn: async (account) => {
       const response = await fetch(
         `/api/claude-accounts/${encodeURIComponent(account.id)}/start-login`,
         { method: "POST" },
       );
       const payload = await readResponsePayload(response);
-      if (!response.ok || !isStartLoginResult(payload)) {
+      if (!response.ok || !isLoginResult(payload)) {
         throw new Error(responseErrorMessage(payload, "Failed to start account login"));
       }
       return payload;

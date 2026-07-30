@@ -219,22 +219,13 @@ export function sessionClaudeHome(sessionToolDir: string): string {
 
 export function seedSessionHome(sessionHome: string, account: ClaudeAccount): void {
   mkdirSync(sessionHome, { recursive: true });
-  copyFileSync(
-    join(account.configDir, ".credentials.json"),
-    join(sessionHome, ".credentials.json"),
-  );
+  const credentialsPath = join(sessionHome, ".credentials.json");
+  if (!existsSync(credentialsPath)) {
+    copyFileSync(join(account.configDir, ".credentials.json"), credentialsPath);
+  }
   const dotClaudeJson = join(sessionHome, ".claude.json");
   if (!existsSync(dotClaudeJson)) {
-    const source = onboardingFilePath(account.configDir);
-    try {
-      copyFileSync(source, dotClaudeJson);
-    } catch {
-      writeFileSync(
-        dotClaudeJson,
-        JSON.stringify({ hasCompletedOnboarding: true }) + "\n",
-        "utf-8",
-      );
-    }
+    copyFileSync(onboardingFilePath(account.configDir), dotClaudeJson);
   }
   ensureAccountProjectsLink({ configDir: sessionHome });
 }
@@ -242,6 +233,7 @@ export function seedSessionHome(sessionHome: string, account: ClaudeAccount): vo
 export function swapSessionCredentials(sessionHome: string, account: ClaudeAccount): void {
   const tmpPath = `${join(sessionHome, ".credentials.json")}.tmp.${process.pid}.${Date.now()}`;
   copyFileSync(join(account.configDir, ".credentials.json"), tmpPath);
+  copyFileSync(onboardingFilePath(account.configDir), join(sessionHome, ".claude.json"));
   renameSync(tmpPath, join(sessionHome, ".credentials.json"));
 }
 
