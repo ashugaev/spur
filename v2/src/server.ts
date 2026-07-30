@@ -119,7 +119,8 @@ const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
 // Sandbox flags for served HTML artifacts. allow-same-origin is deliberately absent:
 // scripts run, but in an opaque origin with no access to Spur's cookies or storage.
-// The preview iframes mirror this flag list in packages/web/src/components/SessionDetail.tsx.
+// The web preview frames mirror this flag list in packages/web/src/lib/artifact-html.ts;
+// the server test above asserts the two stay identical.
 const ARTIFACT_HTML_SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals";
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
@@ -1011,13 +1012,14 @@ export async function startServer(
           decodeURIComponent(artifactMatch[1]),
           decodeURIComponent(artifactMatch[2]),
         );
+        // An SVG opened as a top-level document runs its own scripts on Spur's origin,
+        // and browsers ignore a CSP sandbox on image documents, so hand it over as a
+        // download instead. <img> previews ignore content-disposition and still render.
+        const renderInline = artifact.kind !== "download" && artifact.mimeType !== "image/svg+xml";
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition":
-            artifact.kind === "download"
-              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
-              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
           "cache-control": "no-store",
           // Artifact HTML is agent-authored: render it in an opaque origin so it can
           // never read Spur's storage or call the API with the operator's session.

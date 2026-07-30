@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ARTIFACT_HTML_CSP, isHtmlMimeType } from "@/lib/artifact-html";
 import { spurRequest } from "@/lib/spur-daemon";
 
 interface RouteContext {
@@ -14,16 +15,21 @@ export async function GET(_: Request, context: RouteContext) {
     if (!res.ok) {
       return new NextResponse(await res.text(), { status: res.status });
     }
+    const contentType = res.headers.get("content-type");
     return new NextResponse(res.body, {
       status: res.status,
       headers: {
-        "content-type": res.headers.get("content-type") ?? "application/octet-stream",
+        "content-type": contentType ?? "application/octet-stream",
         "content-disposition": res.headers.get("content-disposition") ?? "attachment",
         "cache-control": "no-store",
-        // Keeps the daemon's sandbox on HTML artifacts: they render in an opaque
-        // origin, so agent-authored markup cannot reach the dashboard origin.
-        ...(res.headers.get("content-security-policy")
-          ? { "content-security-policy": res.headers.get("content-security-policy") ?? "" }
+        // Artifact HTML always leaves this route sandboxed, whatever the daemon sent:
+        // an older or remote daemon that omits the header must not put agent-authored
+        // markup on the dashboard origin.
+        ...(isHtmlMimeType(contentType)
+          ? {
+              "content-security-policy":
+                res.headers.get("content-security-policy") ?? ARTIFACT_HTML_CSP,
+            }
           : {}),
         ...(res.headers.get("content-length")
           ? { "content-length": res.headers.get("content-length") ?? "" }

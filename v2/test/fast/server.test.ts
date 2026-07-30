@@ -1132,6 +1132,81 @@ describe("startServer", () => {
     }
   });
 
+  it("keeps the html artifact sandbox identical to the web preview frames", async () => {
+    // The web package cannot import from v2, so the flag list exists twice. Drift
+    // between the CSP header and the iframe sandbox must fail here, not in a browser.
+    const flagPattern = /ARTIFACT_HTML_SANDBOX = "([^"]+)"/;
+    const daemonSource = await readFile(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const webSource = await readFile(
+      new URL("../../../packages/web/src/lib/artifact-html.ts", import.meta.url),
+      "utf8",
+    );
+
+    const daemonPolicy = daemonSource.match(flagPattern)?.[1];
+    const webFlags = webSource.match(flagPattern)?.[1];
+
+    expect(webFlags).toBeTruthy();
+    expect(daemonPolicy).toBe(`sandbox ${webFlags}`);
+    expect(daemonPolicy).not.toContain("allow-same-origin");
+  });
+
+  it("hands SVG artifacts over as downloads so they never render on Spur's origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "chart.svg");
+    await writeFile(artifactPath, "<svg xmlns='http://www.w3.org/2000/svg'/>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "chart.svg",
+        name: "chart.svg",
+        size: 38,
+        mimeType: "image/svg+xml",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/artifacts/chart.svg`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/svg+xml");
+      expect(response.headers.get("content-disposition")).toContain("attachment");
+      await response.text();
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
   it("sandboxes HTML artifacts served through GET /sessions/:id/artifacts/:artifactId", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

@@ -296,6 +296,40 @@ describe("Spur web API routes", () => {
     expect(response.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
   });
 
+  it("GET /api/sessions/:id/artifacts/:artifactId sandboxes html a daemon served without a CSP", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("<h1>Report</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-modals",
+    );
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId leaves non-html artifacts unsandboxed", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("png-bytes", {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBeNull();
+  });
+
   // ── POST /api/spawn ────────────────────────────────────────────────────
 
   it("POST /api/spawn returns 400 when projectId is missing", async () => {

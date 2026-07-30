@@ -44,6 +44,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { ARTIFACT_HTML_SANDBOX, isHtmlMimeType } from "@/lib/artifact-html";
 import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
@@ -443,13 +444,6 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
-// Agent-authored markup runs without allow-same-origin, so it never reaches the
-// dashboard origin. Mirrors the flag list of ARTIFACT_HTML_SANDBOX in v2/src/server.ts,
-// which sets the same sandbox as a CSP header on the raw response (no cross-package
-// import). Both sandboxes apply to a framed artifact; the header alone covers the
-// standalone tab.
-const ARTIFACT_HTML_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
-
 function artifactUrl(sessionId: string, artifactId: string): string {
   return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
 }
@@ -464,7 +458,7 @@ function isMarkdownArtifact(artifact: SessionArtifact): boolean {
 }
 
 function isHtmlArtifact(artifact: SessionArtifact): boolean {
-  return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/html";
+  return isHtmlMimeType(artifact.mimeType);
 }
 
 function artifactKindLabel(artifact: SessionArtifact): string {
@@ -550,6 +544,7 @@ function ArtifactHtmlFrame({
     <iframe
       className={className}
       data-artifact-lightbox-interactive
+      loading="lazy"
       onError={() => onPreviewError(artifact.id)}
       onLoad={() => onPreviewReady(artifact.id)}
       sandbox={ARTIFACT_HTML_SANDBOX}
@@ -577,6 +572,9 @@ function ArtifactCard({
   onPreviewReady: (artifactId: string) => void;
 }) {
   const html = isHtmlArtifact(artifact);
+  // A grid thumbnail runs the artifact's own scripts, so oversized pages wait for an
+  // explicit preview click; the lightbox still frames them at full size.
+  const htmlThumbnail = html && artifact.size <= TEXT_ARTIFACT_MAX_BYTES;
   const PreviewIcon =
     artifact.kind === "video"
       ? ArtifactPreviewIcon
@@ -636,7 +634,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {html ? (
+        {htmlThumbnail ? (
           <>
             <ArtifactHtmlFrame
               artifact={artifact}
@@ -652,7 +650,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind !== "image" && artifact.kind !== "video" && !html ? (
+        {artifact.kind !== "image" && artifact.kind !== "video" && !htmlThumbnail ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
