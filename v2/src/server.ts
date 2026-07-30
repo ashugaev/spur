@@ -354,6 +354,16 @@ function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionState
   };
 }
 
+function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesRequest[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new InvalidSessionSubscriptionInputError("subscriptions must be an array");
+  }
+  return raw.map((entry) => parseSubscribeSessionStatesRequest(entry));
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -1112,13 +1122,23 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(body));
+        const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
+        sendJson(
+          response,
+          201,
+          await service.spawn({ ...body, ...(subscriptions ? { subscriptions } : {}) }),
+        );
         return;
       }
 
       if (method === "POST" && path === "/sessions/background") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnInBackground(body));
+        const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
+        sendJson(
+          response,
+          201,
+          await service.spawnInBackground({ ...body, ...(subscriptions ? { subscriptions } : {}) }),
+        );
         return;
       }
 

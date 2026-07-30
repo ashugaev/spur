@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -15,7 +15,7 @@ Read-only. Checks host install, config validity, and daemon/web health; exits no
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -24,6 +24,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
 - `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
+- `--subscribe-to <sessionId>` arms one state subscription on the new session before it returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.
 
@@ -104,6 +105,24 @@ Scopes resolve server-side from the caller's session, never from client input:
 Writes are atomic (tmp file + rename) but unlocked — concurrent `set` on the same key is last-writer-wins.
 
 Spawn prompt tells agents to read `task`/`project` on start and write durable, high-value facts only (business decisions, gotchas, user preferences) — not scratch, logs, or restated docs.
+
+## subscribe
+
+```bash
+spur subscribe <targetSessionId> --state <state> [--state <state> ...] [--message <text>] [--session <id>]
+spur subscribe --list [--session <id>]
+spur subscribe --remove <subscriptionId> [--session <id>]
+```
+
+Watches another session's state and sends the subscriber a message on a matching transition. Subscriber session defaults to `SPUR_SESSION`; pass `--session` from outside a live session.
+
+One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing to the same target overwrites its states and message. Cannot subscribe to yourself.
+
+`--state` is repeatable. Valid states: `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, `killed`. Delivery fires once per matching transition, immediately after the target session's own state settles — not on every poll. `--message` sets custom text appended to the default `Session <targetSessionId> changed state: <from> -> <to>` line.
+
+Delivery goes through the normal send path: a `stopped`/`paused` subscriber gets resumed (native conversation resume, then fresh launch fallback) to receive it. A failed delivery logs `session.subscription.delivery_failed` and leaves the transition unclaimed for the next attempt.
+
+`spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one subscription at spawn time instead of a separate `subscribe` call after the session exists — same target/state/message rules above. An invalid spawn-time target (unknown session id) doesn't fail the spawn: the new session still starts, and Spur logs `session.subscription.spawn_failed` instead.
 
 ## Sidecars
 

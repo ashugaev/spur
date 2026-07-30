@@ -4287,6 +4287,32 @@ export class SessionService {
     return { records: nextSubscriptions };
   }
 
+  private applyRequestedStateSubscriptions(
+    session: SessionRecord,
+    requested: SubscribeSessionStatesRequest[] | undefined,
+  ): SessionRecord {
+    if (!requested || requested.length === 0) {
+      return session;
+    }
+    for (const entry of requested) {
+      try {
+        this.subscribeToSessionStates(session.id, entry);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: {
+            targetSessionId: entry.targetSessionId,
+            error: message,
+          },
+        });
+      }
+    }
+    return readSession(this.config.dataDir, session.id) ?? session;
+  }
+
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
     this.requireSessionMemorySession(sessionId);
     return {
@@ -5355,6 +5381,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -6294,6 +6321,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",

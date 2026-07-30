@@ -1642,6 +1642,32 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function resolveCliSpawnSubscriptions(options: {
+  subscribeTo?: string;
+  subscribeState?: string[];
+  subscribeMessage?: string;
+}): SubscribeSessionStatesRequest[] | undefined {
+  const target = options.subscribeTo?.trim();
+  if (!target) {
+    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
+      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    }
+    return undefined;
+  }
+  const states = (options.subscribeState ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error("--subscribe-to requires at least one --subscribe-state");
+  }
+  const message = options.subscribeMessage?.trim();
+  return [
+    {
+      targetSessionId: target,
+      states,
+      ...(message ? { message } : {}),
+    },
+  ];
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -1804,6 +1830,16 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--subscribe-to <sessionId>",
+      "Subscribe the new session to another session's state transitions",
+    )
+    .option(
+      "--subscribe-state <state>",
+      "State to watch for --subscribe-to; repeatable",
+      appendOptionValue,
+    )
+    .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1822,6 +1858,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
+      const subscriptions = resolveCliSpawnSubscriptions(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
@@ -1868,6 +1905,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(subscriptions ? { subscriptions } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -2096,7 +2134,7 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("subscribe", { hidden: true })
+    .command("subscribe")
     .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
