@@ -9,7 +9,7 @@ Sections through `## Safety` describe Spur anywhere, no repo path needed. Sectio
 
 ## What Spur is
 
-- CLI plus a local HTTP daemon, default `127.0.0.1:4310`. Commands that talk to the daemon auto-start it; `doctor` and `init`/`update` do not.
+- CLI plus a local HTTP daemon, default `127.0.0.1:4310`. Commands that talk to the daemon auto-start it. `doctor` only probes it; `init`/`update` start it through systemd.
 - Web UI is a thin client over the daemon API, no runtime logic of its own. Default port 5555 (`ui.port`).
 - Agents are `claude`, `codex`, `cursor` only, each launched full-access in a detached tmux pane: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, cursor's `agent --force --sandbox disabled`.
 - Workspace setup is only `git worktree` + configured symlinks + detached `tmux` + agent launch.
@@ -42,7 +42,7 @@ spur send <sessionId> "message"
 - Steps pipeline: each phase arrives as `[Spur step N/M: <label>]` plus the task. The next phase is sent only after the agent returns to its prompt, then a 30s wait.
 - Owned worktree by default, `--worktree [baseBranch]` to override the base; `--shared` runs in the project path instead.
 - `status`: `spawning|running|stopped|paused|errored|completed|killed`. `state`: `working|waiting|needs_input|rate_limited|stopped|error|killed`.
-- `pause` keeps the worktree. `complete` and `kill` both remove owned artifacts and differ only in final status. Shared-workspace sessions keep the project path on `kill` and are not restorable. `respawn` starts a fresh session from a terminal session's config.
+- `pause` keeps the worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs a non-terminal status plus a `stopped`/`error` state and an existing workspace, so `killed` and `completed` sessions are never restorable. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. `respawn` starts a fresh session from a terminal session's config.
 - `send` queues while the agent is busy and flushes at the next prompt, ahead of the next auto-step.
 - Model precedence: request `--model`, then project `defaultModels[agent]`, then Spur's own default (claude `opus`, cursor `auto`; codex has none). Claude ids: `opus|sonnet|haiku|fable`.
 
