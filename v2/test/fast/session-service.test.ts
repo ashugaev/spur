@@ -12919,20 +12919,6 @@ describe("SessionService", () => {
       expect(seeded.current).toMatchObject({ status: "completed" });
     });
 
-    it("refuses when the rebuilt worktree lands at a different path, writing nothing", async () => {
-      const seeded = seedReopenableSession();
-      workspaceExistsMock.mockReset().mockReturnValue(false);
-      branchRefsExistMock.mockResolvedValue({ exists: true, remote: true });
-      createWorktreeMock.mockResolvedValue("/tmp/other/api-1");
-
-      const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      expect(writeSessionMock).not.toHaveBeenCalled();
-      expect(seeded.current).toMatchObject({ status: "completed" });
-    });
-
     it("completes a codex session with no resume state through the logged fresh-launch fallback", async () => {
       seedReopenableSession({
         agent: "codex",
@@ -13049,10 +13035,74 @@ describe("SessionService", () => {
 
       await expect(service.reopen("api-1")).rejects.toThrow();
 
+      // killTmuxSession alone doesn't discriminate the rollback block from
+      // restore()'s own failure-path teardown (restore() kills the pane it
+      // creates on every internal failure too) — assert the thing only the
+      // rollback does.
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+      expect(deleteServiceInstancesForSessionMock).toHaveBeenCalledWith(expect.anything(), "api-1");
     });
 
-    it("clears a stale queued message and running pipeline before restoring, so nothing replays", async () => {
+    it("rolls back from a fresh read, not the stale pre-flip snapshot, so a message queued during the reopen window survives", async () => {
+      const seeded = seedReopenableSession();
+      createTmuxSessionMock.mockImplementation(async () => {
+        // Simulate a concurrent send() landing in the window between
+        // reopenLocked's own flip (status stopped/manual_pause, restorable)
+        // and restore() failing below: send() legally queues a message on
+        // the record while it's in this intermediate state.
+        writeSessionMock("/tmp/spur-data", {
+          ...seeded.current,
+          queuedMessages: { messages: ["urgent"], awaitingPrompt: false },
+        });
+        throw new Error("boom");
+      });
+
+      const service = await createDisposedSessionService();
+      mockTimerPromisesSleepWithFakeTimers();
+
+      await expect(service.reopen("api-1")).rejects.toThrow();
+
+      expect(seeded.current.status).toBe("completed");
+      expect(seeded.current.stopReason).toBeUndefined();
+      expect(seeded.current.queuedMessages).toEqual({
+        messages: ["urgent"],
+        awaitingPrompt: false,
+      });
+    });
+
+    it("does not roll back or kill the pane when restore already persisted the session as running before failing", async () => {
+      const seeded = seedReopenableSession();
+      buildAgentRestorePlanMock.mockResolvedValue(null);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValueOnce(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      // Fail restore() in its uncaught post-write tail — after writeSession
+      // has already persisted status:"running" (most likely thrown by its
+      // very last statement, `await this.enrich(persistedRestored)`) — by
+      // making a real enrich() dependency throw only once the record is
+      // genuinely live on disk.
+      listServiceInstancesForSessionMock.mockImplementation(() => {
+        if (seeded.current.status === "running") {
+          throw new Error("boom");
+        }
+        return [];
+      });
+
+      const service = await createDisposedSessionService();
+      mockTimerPromisesSleepWithFakeTimers();
+
+      await expect(service.reopen("api-1")).rejects.toThrow("boom");
+
+      expect(seeded.current.status).toBe("running");
+      // restore() itself unconditionally kills whatever stale pane it found
+      // before creating its own fresh one — that's the one call here, not
+      // the rollback. A second call would mean reopenLocked wrongly tore
+      // down the genuinely-live pane restore() just created.
+      expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(deleteServiceInstancesForSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("clears a stale queued message and suppresses a running pipeline before restoring, so nothing replays but the steps survive for a later respawn", async () => {
       const seeded = seedReopenableSession({
         queuedMessages: { messages: ["stale reply"], awaitingPrompt: false },
         pipeline: { steps: ["review"], nextStepIndex: 0, status: "running" },
@@ -13069,29 +13119,57 @@ describe("SessionService", () => {
 
       expect(reopened.status).toBe("running");
       expect(seeded.current.queuedMessages).toBeUndefined();
-      expect(seeded.current.pipeline).toBeUndefined();
+      // Not deleted: `steps` still feeds a later "Edit & Respawn"
+      // (resolveRespawnRequest). Only the replay must be suppressed, which
+      // hinges on `status` alone (shouldRunDelivery, queuedPipelineMessages).
+      expect(seeded.current.pipeline).toMatchObject({
+        steps: ["review"],
+        nextStepIndex: 0,
+        status: "completed",
+      });
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
     });
 
     it("refuses a second concurrent reopen and calls restore only once", async () => {
       seedReopenableSession();
-      buildAgentRestorePlanMock.mockResolvedValue(null);
-      tmuxSessionExistsMock.mockResolvedValue(true);
-      tmuxSessionExistsMock.mockResolvedValueOnce(false);
-      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      // Drive the worktree-rebuild path: it has a real `await` gap (branchRefsExist,
+      // then createWorktree) between the `completed` status check and the write
+      // below it. In the no-worktree path both happen back to back with no
+      // `await` in between, so the status flip alone would serialize a second
+      // call — that doesn't exercise the guard at all. Gate createWorktree so
+      // both calls can reach it (i.e. both pass the `completed` check) before
+      // either writes, the exact race the guard exists to prevent.
+      let worktreeCreated = false;
+      workspaceExistsMock.mockReset().mockImplementation(() => worktreeCreated);
+      branchRefsExistMock.mockResolvedValue({ exists: true, remote: true });
+      let resolveCreateWorktree!: (worktreePath: string) => void;
+      const createWorktreeGate = new Promise<string>((resolve) => {
+        resolveCreateWorktree = resolve;
+      });
+      createWorktreeMock.mockReset().mockImplementation(() => createWorktreeGate);
 
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       service.dispose();
       mockTimerPromisesSleepWithFakeTimers();
 
-      const [first, second] = await Promise.allSettled([
-        service.reopen("api-1"),
-        service.reopen("api-1"),
-      ]);
+      const first = service.reopen("api-1");
+      const second = service.reopen("api-1");
 
-      const outcomes = [first, second];
+      // Flush microtasks until the in-flight call reaches the gated
+      // createWorktree call. With the guard in place, the second call is
+      // rejected synchronously before ever calling branchRefsExist/
+      // createWorktree, so exactly one call gets this far.
+      for (let i = 0; i < 10 && createWorktreeMock.mock.calls.length < 1; i += 1) {
+        await Promise.resolve();
+      }
+      expect(createWorktreeMock).toHaveBeenCalledTimes(1);
+      worktreeCreated = true;
+      resolveCreateWorktree("/tmp/spur-worktrees/api/api-1");
+
+      const [firstOutcome, secondOutcome] = await Promise.allSettled([first, second]);
+      const outcomes = [firstOutcome, secondOutcome];
       const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
       const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
       expect(fulfilled).toHaveLength(1);
@@ -13099,6 +13177,10 @@ describe("SessionService", () => {
       expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
         SessionNotReopenableError,
       );
+      expect(((rejected[0] as PromiseRejectedResult).reason as Error).message).toMatch(
+        /already being reopened/,
+      );
+      expect(createWorktreeMock).toHaveBeenCalledTimes(1);
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
     });
   });

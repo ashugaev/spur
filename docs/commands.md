@@ -60,7 +60,7 @@ Hides `completed` and `killed` by default. Derives live `state` and `lastActivit
 
 `pause` keeps the worktree; `complete` and `kill` remove owned artifacts but persist different statuses. Shared-workspace sessions keep the project path on `kill` and are not restorable.
 
-`reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`) and does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
+`reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` worktree session, `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
 

@@ -8014,11 +8014,6 @@ export class SessionService {
           `Session ${sessionId} cannot be reopened: failed to rebuild its worktree (${message}) — use respawn`,
         );
       }
-      if (created !== session.worktreePath) {
-        throw new SessionNotReopenableError(
-          `Session ${sessionId} cannot be reopened: rebuilt worktree at ${created}, expected ${session.worktreePath}`,
-        );
-      }
       this.logEvent("session.reopen.worktree_rebuilt", {
         level: "info",
         sessionId,
@@ -8044,9 +8039,13 @@ export class SessionService {
     // pipeline step from before completion (applyManualStatus's completed
     // branch does not clear either). Once restore() below flips status to
     // "running", shouldRunDelivery would otherwise replay them — resending
-    // exactly the text this feature promises not to resend.
+    // exactly the text this feature promises not to resend. The pipeline's
+    // `steps` still feed a later "Edit & Respawn" (resolveRespawnRequest),
+    // so stop the replay by flipping its status instead of deleting it.
     delete record.queuedMessages;
-    delete record.pipeline;
+    if (record.pipeline) {
+      record.pipeline = { ...record.pipeline, status: "completed" };
+    }
     writeSession(this.config.dataDir, record);
     this.stateCache.delete(sessionId);
     await this.refreshDashboardCacheEntry(record);
@@ -8058,23 +8057,46 @@ export class SessionService {
       // The completed record's Telegram binding, artifacts, and work-item
       // completion are already destroyed, so leaving the flipped
       // stopped/manual_pause record in place would make send/kill/sidecars
-      // legal on a gutted session. Roll back to completed instead.
-      //
+      // legal on a gutted session. Roll back to completed instead — but
+      // read fresh, not from the pre-flip `session` snapshot: the record on
+      // disk is restorable (status stopped/manual_pause) the moment we wrote
+      // it above, so a concurrent send()/deliver() can legally queue a
+      // message, or restore() itself can persist status:"running" and then
+      // still throw from its own uncaught tail (most likely
+      // `await this.enrich(persistedRestored)`, its very last statement, but
+      // also captureAgentSessionId/writeSession/refreshDashboardCacheEntry
+      // just before it). Rolling back from the stale snapshot would discard
+      // whatever happened in that window instead of what's actually on disk.
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      if (latest.status === "running") {
+        // restore() got far enough to persist a genuinely live, running
+        // agent (writeSession succeeded) before failing afterward. That
+        // agent is real and working — killing its pane and stamping
+        // "completed" here would destroy a session that isn't actually
+        // broken just because the reopen call that revived it failed a step
+        // after the revival already landed. Leave it running.
+        this.logEvent("session.reopen.failed", {
+          level: "error",
+          sessionId,
+          projectId: session.project,
+          message: `Reopen of ${sessionId} errored after restore already brought it back to running: ${message}`,
+        });
+        throw error;
+      }
       // restore() itself kills the tmux pane it created before rethrowing
       // for every failure inside its own try/catch (including the fresh
-      // pane created by createTmuxSession). But a throw from the small
-      // uncaught tail of restore() after that catch block exits (writeSession,
-      // captureAgentSessionId, refreshDashboardCacheEntry, ...) would leave a
-      // live, ready agent pane with nothing tearing it down. Tear down
-      // defensively in both cases — killTmuxSession/cleanupSessionServices
-      // are best-effort and safe to call on an already-dead pane.
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
+      // pane created by createTmuxSession). Tear down defensively here too —
+      // killTmuxSession/cleanupSessionServices are best-effort and safe to
+      // call on an already-dead pane — to cover a pane restore() created but
+      // didn't get to kill before this catch ran.
+      await killTmuxSession(latest.tmuxSession);
+      await this.cleanupSessionServices(latest);
       const rolledBack: SessionRecord = {
-        ...copySessionWithoutSidecarPorts(session),
+        ...copySessionWithoutSidecarPorts(latest),
         status: "completed",
         updatedAt: nowIso(),
       };
+      delete rolledBack.stopReason; // latest may still carry manual_pause
       writeSession(this.config.dataDir, rolledBack);
       this.stateCache.delete(sessionId);
       await this.refreshDashboardCacheEntry(rolledBack);
