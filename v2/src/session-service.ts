@@ -7293,7 +7293,7 @@ export class SessionService {
     if (session.status === "completed") {
       throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
-    if (!session.worktree || !session.worktreePath || !workspacePresent) {
+    if (session.worktree && (!session.worktreePath || !workspacePresent)) {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
     }
 
@@ -7859,6 +7859,11 @@ export class SessionService {
     // Session was launched against an account dir directly.
     // Relaunch once to migrate onto the new account's session home.
     await killTmuxSession(updated.tmuxSession);
+    // Install target account credentials into the session home before relaunch so
+    // a home that already exists (from a prior seed or migration) does not keep
+    // stale credentials from the previous account.
+    mkdirSync(sessionHome, { recursive: true });
+    swapSessionCredentials(sessionHome, account);
     const relaunched = await this.ensureSessionReadyForSend(updated);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -7901,12 +7906,18 @@ export class SessionService {
       return false;
     }
     await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
-    const switched = readSession(this.config.dataDir, session.id);
-    if (!switched) {
-      throw new Error(`Session not found after auth switch: ${session.id}`);
-    }
-    await this.sendAgentMessage(switched, RATE_LIMIT_REACTIVATION_PROMPT);
     this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
+    try {
+      await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.auth.auto_rotate_nudge_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
+      });
+    }
     this.logEvent("session.auth.auto_rotated", {
       level: "info",
       sessionId: session.id,

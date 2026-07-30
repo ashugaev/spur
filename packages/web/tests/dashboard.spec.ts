@@ -3226,3 +3226,51 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });
+
+// D8: Switch Claude account dialog
+test.describe("D8: Switch Claude account dialog", () => {
+  test("switch-auth succeeds for a Shepherd (no-worktree) session without worktree-missing error", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "shp-test",
+      project: "spur-shepherd",
+      worktree: false,
+      worktreePath: null,
+      workspaceExists: false,
+      prompt: "Shepherd session task",
+      claudeAccounts: [
+        { id: "acc-primary", label: "Primary", authenticated: true },
+        { id: "acc-backup", label: "Backup", authenticated: true },
+      ],
+      activeClaudeAccountId: "acc-primary",
+    });
+
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/switch-auth`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, activeClaudeAccountId: "acc-backup" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("link", { name: session.prompt }).first().click();
+    await expect(page.getByRole("button", { name: "Switch auth" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Switch auth" }).click();
+    await expect(page.getByRole("dialog", { name: "Switch Claude account" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Switch" }).click();
+
+    await expect(page.getByTestId("switch-auth-error")).toHaveCount(0);
+  });
+});

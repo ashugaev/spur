@@ -4020,8 +4020,10 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
       expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
-      expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
-
+      expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+        expectedHome,
+        expect.objectContaining({ id: "backup" }),
+      );
       expect(seedSessionHomeMock).toHaveBeenCalledWith(
         expectedHome,
         expect.objectContaining({ id: "backup" }),
@@ -4031,6 +4033,78 @@ describe("SessionService", () => {
           ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
         ),
       ).toBe(true);
+      service.dispose();
+    });
+
+    it("shepherd: in-place swap succeeds on a worktree-less session", async () => {
+      const sessionHome = `${TEST_DATA_DIR}/session-tools/shp-1/claude-home`;
+      const sessions = seedShepherdSession({
+        claudeAccountId: "primary",
+        launchCommand: `CLAUDE_CONFIG_DIR='${sessionHome}' claude --dangerously-skip-permissions`,
+      });
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      mkdirSync(sessionHome, { recursive: true });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("shp-1", "backup", { reason: "manual", force: true });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("shp-1")?.claudeAccountId).toBe("backup");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+        sessionHome,
+        expect.objectContaining({ id: "backup" }),
+      );
+      service.dispose();
+    });
+
+    it("shepherd: migration succeeds when process dies after kill — no worktree check", async () => {
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/shp-1/claude-home`;
+      const sessions = seedShepherdSession({ claudeAccountId: "primary" });
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      mkdirSync(`${TEST_DATA_DIR}/shepherd`, { recursive: true });
+      killTmuxSessionMock.mockImplementation(async () => {
+        tmuxSessionExistsMock.mockResolvedValue(false);
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("shp-1", "backup", { reason: "manual", force: true });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("shp-1")?.claudeAccountId).toBe("backup");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("shp-1");
+      expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+        expectedHome,
+        expect.objectContaining({ id: "backup" }),
+      );
+      service.dispose();
+    });
+
+    it("shepherd: recovery allowed when process already dead before switch", async () => {
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/shp-1/claude-home`;
+      const _sessions = seedShepherdSession({ claudeAccountId: "primary" });
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      mkdirSync(`${TEST_DATA_DIR}/shepherd`, { recursive: true });
+      // Process dead from the start: upfront ensureSessionReadyForSend must not throw.
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("shp-1", "backup", { reason: "manual", force: true });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+        expectedHome,
+        expect.objectContaining({ id: "backup" }),
+      );
       service.dispose();
     });
 
@@ -18327,11 +18401,7 @@ describe("SessionService", () => {
       // rateLimitedAt stays set so the per-episode cap stays keyed on this episode;
       // classification clears it once the session leaves rate_limited.
       expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
-      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-        "api-1",
-        expect.stringContaining(REACTIVATION_MARKER),
-        { agent: "claude" },
-      );
+      expect(reactivationQueued(sessions)).toBe(true);
       // With afterHours=0 the delayed reactivation path never fires.
       expect(reactivationEventCount()).toBe(0);
       service.dispose();
@@ -18467,6 +18537,51 @@ describe("SessionService", () => {
 
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
+      (service as unknown as { dispose(): void }).dispose();
+    });
+
+    it("episode accounting survives nudge failure — rotation returns true and cap advances", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({ maxRotationsPerEpisode: 1 }));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      const session = runningSession({
+        claudeAccountId: "acc-1",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+      });
+      sessions.set("api-1", session);
+      mockClaudeJsonlState("waiting");
+      sendMessageToTmuxMock.mockRejectedValue(new Error("tmux send failed"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        tryAutoRotateClaudeAccount(record: SessionRecord): Promise<boolean>;
+      };
+
+      // Rotation succeeds even though the nudge send throws.
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
+      // Episode was incremented before the nudge, so the cap is exhausted.
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
+      // The nudge failure was logged, not thrown.
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.auth.auto_rotate_nudge_failed",
+        ),
+      ).toBe(true);
       (service as unknown as { dispose(): void }).dispose();
     });
 

@@ -284,7 +284,7 @@ export function ClaudeAccountsMenu() {
                           : "text-[var(--color-status-attention)]"
                       }
                     >
-                      {account.authenticated ? "ready" : "not logged in"}
+                      {account.authenticated ? "ready" : "not ready"}
                     </span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
@@ -304,7 +304,10 @@ export function ClaudeAccountsMenu() {
                         aria-label={`Complete login for Claude account ${accountName(account)}`}
                         className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                         data-testid={`complete-login-${account.id}`}
-                        disabled={startLoginMutation.isPending}
+                        disabled={
+                          startLoginMutation.isPending &&
+                          startLoginMutation.variables?.id === account.id
+                        }
                         type="button"
                         onClick={() => startLoginMutation.mutate(account)}
                       >
