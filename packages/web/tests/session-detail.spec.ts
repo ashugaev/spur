@@ -2327,15 +2327,127 @@ test.describe("S4b: Artifacts section", () => {
     const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
     await expect(dialog).toBeVisible();
 
-    const pre = dialog.locator("pre");
-    await expect(pre).toBeVisible();
-    const overflow = await pre.evaluate((node) => node.scrollHeight > node.clientHeight);
+    const scroller = dialog.locator("[data-artifact-lightbox-interactive]");
+    await expect(scroller).toBeVisible();
+    const overflow = await scroller.evaluate((node) => node.scrollHeight > node.clientHeight);
     expect(overflow).toBe(true);
-    await pre.evaluate((node) => {
+    await scroller.evaluate((node) => {
       node.scrollTop = 200;
     });
-    const scrolled = await pre.evaluate((node) => node.scrollTop);
+    const scrolled = await scroller.evaluate((node) => node.scrollTop);
     expect(scrolled).toBeGreaterThan(0);
+    await expect(scroller).toHaveCSS("overscroll-behavior-y", "contain");
+  });
+
+  test("tap on an oversize text preview still navigates to the next artifact", async ({ page }) => {
+    // Oversize artifacts never get fetched (SessionDetail.tsx TEXT_ARTIFACT_MAX_BYTES guard),
+    // so this reaches a deterministic non-content state without stalling any route.
+    const session = makeWorkingSession({
+      id: "detail-s4b-oversize-nav",
+      artifacts: [
+        {
+          id: "huge-one.txt",
+          name: "huge-one.txt",
+          size: 1024 * 1024 + 1,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "huge-two.txt",
+          name: "huge-two.txt",
+          size: 1024 * 1024 + 1,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview huge-one.txt" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview huge-one.txt" });
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByText("File exceeds 1 MiB preview limit. Download to view the full content."),
+    ).toBeVisible();
+
+    const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(surfaceBox).not.toBeNull();
+    if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      surfaceBox.x + surfaceBox.width * 0.75,
+      surfaceBox.y + surfaceBox.height / 2,
+    );
+
+    await expect(page.getByRole("dialog", { name: "Artifact preview huge-two.txt" })).toBeVisible();
+  });
+
+  test("mobile text lightbox scrolls on first open without a pinch", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-scroll",
+      artifacts: [
+        {
+          id: "long.txt",
+          name: "long.txt",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-scroll/artifacts/long.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+          });
+        },
+      );
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview long.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
+      await expect(dialog).toBeVisible();
+
+      const scroller = dialog.locator("[data-artifact-lightbox-interactive]");
+      await expect(scroller).toHaveCSS("overflow-y", "auto");
+
+      const overflow = await scroller.evaluate((node) => node.scrollHeight > node.clientHeight);
+      expect(overflow).toBe(true);
+
+      const box = await scroller.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) throw new Error("Artifact preview scroller missing bounds");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, 240);
+
+      await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+
+      const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
+      expect(bodyOverflow).toBe("hidden");
+
+      await expectArtifactControlsOutsideSurface(page);
+    } finally {
+      await context.close();
+    }
   });
 
   test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
