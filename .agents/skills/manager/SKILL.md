@@ -33,7 +33,7 @@ Property modifiers (orthogonal, add to any tier):
 | Property | Add |
 |---|---|
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
-| Introduces or changes visible `packages/web` UI | `design-author` before `architect` (Claude runtime); manager hard-stops for user approval of the exported design-spec before any implementation; on a non-Claude runtime design-author is consume-only (use an existing approved design-spec, else route the design step to a Claude session; never stall) |
+| Introduces or changes visible `packages/web` UI | manager runs the `design-author` process itself in the main Claude session before `architect` (only place `DesignSync` works; not a Task subagent); hard-stop for user approval of the exported design-spec before any implementation; on a non-Claude runtime or missing `DesignSync`, consume-only (existing approved design-spec, else route the design step to a Claude session; never stall) |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), or touches published docs (`docs/`, `README.md`, root doc files) | `docs` before `reviewer`; `developer` documents new surface and updates the owning doc in the same change |
@@ -56,7 +56,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 3. Execute gates in canonical order, one delegation per step:
    - Research: `researcher` -> `critic`. Critic selects one approach.
    - Clarify: only when ambiguity changes implementation. One batched round.
-   - Design: `design-author` for tasks that introduce or change visible UI; runs before architect. After it returns `PENDING_APPROVAL`, manager pings the user (`telegram` skill) with the project URL + summary and HARD-STOPS (await input); on change requests re-invoke `design-author`; never proceed to architect/developer until the user approves `design-spec.md`.
+   - Design: for tasks that introduce or change visible UI, the manager runs the `design-author` process itself in the main Claude session before architect — never a Task subagent, which can't reach `DesignSync`. On a non-Claude runtime or when `DesignSync` is unavailable, fall back to consume-only (existing approved `design-spec.md`) or route the design step to a Claude session. After authoring, ping the user (`telegram` skill) with the project URL + summary and HARD-STOP (await input); iterate on change requests; never proceed to architect/developer until the user approves `design-spec.md`.
    - Plan: `architect`.
    - Implement: `developer`.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
@@ -73,7 +73,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 
 - Collapse phases for trivial work; do not skip the skill.
 - One manager step, one todo. Never merge two listed steps into one entry.
-- Manager never reads code, edits files, or runs commands. It only delegates and aggregates.
+- Manager never reads code, edits files, or runs commands. It only delegates and aggregates. Sole exception: the design-authoring gate, which the manager runs itself in the main Claude session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
 - One phase, one owner, one output.
 - Use local checks only. Never wait for remote CI.
 - Mirror durable instructions across `AGENTS.md` and `CLAUDE.md` in the same change.

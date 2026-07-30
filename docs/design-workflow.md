@@ -5,7 +5,7 @@ Pre-implementation design gate in `$manager`: for visible `packages/web` UI, aut
 ## Gate
 
 - Trigger: task introduces or changes visible `packages/web` UI.
-- Agent `design-author` runs before `architect`. Gate order and the approval hard-stop: `manager` skill.
+- The manager runs the `design-author` process itself in the main Claude session (the only place `DesignSync` works) before `architect` — not a Task subagent. Gate order and the approval hard-stop: `manager` skill.
 - Export contract (bundle layout, `design-spec.md` sections, approval field): `design` skill — the owner, not restated here.
 - Post-implementation UI review stays with `designer`; distinct role, unchanged.
 
@@ -22,6 +22,5 @@ Claude Design tools are Claude-only, so authoring is Claude-only. Coding must st
 
 ## Open questions (build carefully)
 
-- Authoring host: `DesignSync` works only in the main session, but `manager` is a pure delegator that never acts, and Task subagents can't reach `DesignSync` — so nothing can currently author. Resolve before relying on the gate: let the manager run the design step inline, add a main-session design worker, or route design to a dedicated Claude session.
 - Cross-session handoff: `$SPUR_SESSION_ARTIFACTS_DIR` is session-scoped. Fine within one task/session; a different runtime session picking up the coding work needs a shared path or a committed `design-spec.md`.
 - Approval is an orchestration rule, not runtime-enforced. Mitigate: manager rule + Telegram ping + await-input.

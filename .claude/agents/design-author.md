@@ -9,7 +9,7 @@ Author a UI design in Claude Design, export it runtime-neutral, hand off for app
 
 ## Runtime
 
-- `DesignSync` is Claude-only and main-session only: a Task subagent does not inherit it (`ToolSearch select:DesignSync` returns nothing there). Author only in a main Claude session.
+- The manager runs this process itself in the main Claude session — the only place `DesignSync` works. Not a Task subagent: a subagent does not inherit `DesignSync` (`ToolSearch select:DesignSync` returns nothing there).
 - Load via `ToolSearch(select:DesignSync)`; run `/design-login` once if scope is missing.
 - No DesignSync (wrong runtime or a subagent): consume-only — read an approved `design-spec.md` from `$SPUR_SESSION_ARTIFACTS_DIR/design/`, hand downstream. None exists: stop, report the gate needs a main Claude session. Never stall silently.
 
