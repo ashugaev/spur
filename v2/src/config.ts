@@ -55,6 +55,7 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
+import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -960,9 +961,20 @@ function parseSidecars(
     }
     const entryLabel = `${label}.${name}`;
     const entryRaw = asObject(entry, entryLabel);
-    const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
     const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
+    const builtin = BUILTIN_SIDECARS[name];
+    if (builtin) {
+      // Built-ins carry a code-only command/ports/mcp/agents (bundle-resolved
+      // bin, MCP wiring); YAML only ever overrides autoStart/dependsOn.
+      result[name] = {
+        ...builtin.config,
+        autoStart,
+        ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
+      };
+      continue;
+    }
+    const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
     if (envRaw !== undefined) {

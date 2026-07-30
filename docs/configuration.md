@@ -135,7 +135,7 @@ projects:
 
 ## selfDestruct, steps
 
-When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Optional `conditions` replace the default completion condition. Disabled or omitted capability returns access denied and leaves the session running.
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Omitting `conditions` (or leaving it blank) uses the default completion condition, `every objective in the task prompt is done`; an explicit `conditions` string is trimmed and replaces it.
 
 With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message.
 
@@ -182,6 +182,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`. `false` runs in the project path instead of an owned worktree. Override per session with `--worktree`/`--shared` or `trigger.spawn.overrides.worktree`.
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
+- `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` — YAML only overrides `autoStart`/`dependsOn`. See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.

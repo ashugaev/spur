@@ -62,8 +62,8 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
       ws:
-        specifier: ^8.20.1
-        version: 8.20.1
+        specifier: ^8.21.0
+        version: 8.21.0
       xterm:
         specifier: ^5.3.0
         version: 5.3.0
@@ -2650,8 +2650,8 @@ packages:
     resolution: {integrity: sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==}
     engines: {node: '>=0.10.0'}
 
-  ws@8.20.1:
-    resolution: {integrity: sha512-It4dO0K5v//JtTXuPkfEOaI3uUN87iYPnqo/ZzqCoG3g8uhA66QUMs/SrM0YK7/NAu+r4LMh/9dq2A7k+rHs+w==}
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
     engines: {node: '>=10.0.0'}
     peerDependencies:
       bufferutil: ^4.0.1
@@ -4180,7 +4180,7 @@ snapshots:
       whatwg-encoding: 3.1.1
       whatwg-mimetype: 4.0.0
       whatwg-url: 14.2.0
-      ws: 8.20.1
+      ws: 8.21.0
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - bufferutil
@@ -5243,7 +5243,7 @@ snapshots:
 
   word-wrap@1.2.5: {}
 
-  ws@8.20.1: {}
+  ws@8.21.0: {}
 
   xml-name-validator@5.0.0: {}
 

@@ -27,6 +27,8 @@ projects:
     codexArgs:
       - -c
       - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="default"'
     preflight: {}
     sidecars:
       isolated-daemon:

@@ -97,6 +97,23 @@ Commands run through `sh -lc` (login-shell init still applies, so a sidecar comm
 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
+### Built-in MCP sidecars
+
+A sidecar entry can carry MCP wiring, injecting its reserved port into the launching agent's MCP
+config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright`
+is the one built-in: a Spur-owned HTTP playwright MCP sidecar (headless browser tooling) for
+claude/codex sessions, never cursor, off by default. Opt a project in with:
+
+```yaml
+sidecars:
+  playwright:
+    autoStart: true
+```
+
+Command, ports, and MCP wiring are code-only defaults (see `v2/src/sidecars/`); YAML only overrides
+`autoStart`/`dependsOn`. Enablement re-resolves from config at every spawn/restore/recover — no
+per-session toggle, no `spur playwright` command.
+
 ## build, daemon
 
 ```bash

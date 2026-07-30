@@ -2392,10 +2392,15 @@ projects:
     );
   });
 
-  it("does not enable codex fast mode for the sp project", async () => {
+  it("pins codex non-fast service_tier and high reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'model_reasoning_effort="high"']);
+    expect(config.projects["sp"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'service_tier="default"',
+    ]);
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -3114,6 +3119,71 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.api.restoreAfterReboot must be a boolean",
+    );
+  });
+
+  it("built-in sidecar is absent when unconfigured", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.sidecars).toEqual({});
+  });
+
+  it("parses a built-in sidecar entry without a command, filling code-only fields", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+`);
+
+    const config = loadConfig(configPath);
+    const playwright = config.projects["api"]?.sidecars["playwright"];
+
+    expect(playwright?.autoStart).toBe(true);
+    expect(playwright?.agents).toEqual(["claude", "codex"]);
+    expect(playwright?.mcp).toEqual({
+      server: "playwright",
+      portId: "http",
+      path: "/mcp",
+      clientHost: "localhost",
+    });
+    expect(playwright?.command).toContain("--headless");
+  });
+
+  it("defaults a built-in sidecar's autoStart to false when omitted", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.sidecars["playwright"]?.autoStart).toBe(false);
+  });
+
+  it("rejects a non-built-in sidecar without a command", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      widget:
+        autoStart: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.sidecars.widget.command must be a non-empty string",
     );
   });
 

@@ -41,7 +41,7 @@ import {
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 import {
   SESSION_STATES,
   isSessionState,
@@ -565,7 +565,7 @@ export async function startServer(
       if (method === "GET" && path === "/deploy/versions") {
         const releases = await getReleases();
         sendJson(response, 200, {
-          current: version,
+          current: getVersion(),
           available: releases.entries,
           ...(releases.stale ? { stale: true } : {}),
           ...(releases.error ? { registryError: releases.error } : {}),

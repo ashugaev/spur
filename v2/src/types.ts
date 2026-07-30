@@ -321,6 +321,10 @@ export interface SidecarConfig {
   dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
+  /** Agents allowed to use this sidecar. Undefined = all agents. */
+  agents?: AgentName[];
+  /** Present when this sidecar exposes an MCP server to the launching agent. */
+  mcp?: SidecarMcpConfig;
 }
 
 export interface SidecarPortConfig {
@@ -328,6 +332,19 @@ export interface SidecarPortConfig {
   start: number;
   end: number;
   url?: string;
+}
+
+export interface SidecarMcpConfig {
+  server: string;
+  /** Selects which `ports` entry carries the reserved port for this MCP server. */
+  portId: string;
+  path: string;
+  clientHost?: string;
+}
+
+export interface SidecarMcpBinding {
+  server: string;
+  url: string;
 }
 
 export type WorkspaceAccessItemKind = "copy" | "link";

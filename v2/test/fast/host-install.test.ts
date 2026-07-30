@@ -68,8 +68,10 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
-import { version } from "../../src/version.js";
+import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
+
+const version = getVersion();
 
 // Resolved once, up front — used as `writeFileSyncMock`'s default
 // passthrough implementation every test, independent of whether
@@ -568,19 +570,18 @@ describe("satisfiesNodeEngineRange", () => {
       readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
     ) as { engines?: { node?: string } };
     const range = pkg.engines?.node;
-    expect(
-      range,
-      "engines.node must be present so node-version never silently no-ops",
-    ).toBeTruthy();
+    if (!range) {
+      throw new Error("engines.node must be present");
+    }
     const supported = /^\^\d+\.\d+\.\d+$|^>=\d+(?:\.\d+){0,2}$/;
-    for (const clause of range!.split("||").map((c) => c.trim())) {
+    for (const clause of range.split("||").map((c) => c.trim())) {
       expect(
         clause,
         `unsupported engines.node clause "${clause}" — extend satisfiesClause`,
       ).toMatch(supported);
     }
     // And the pinned range must actually admit a version inside it.
-    expect(satisfiesNodeEngineRange(range!, "v20.19.0")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v20.19.0")).toBe(true);
   });
 });
 
@@ -1061,6 +1062,16 @@ describe("checkVersionDrift", () => {
   it("flags a warn-severity drift when the daemon version differs from the installed one", () => {
     const result = checkVersionDrift("0.0.0-does-not-match");
     expect(result).toMatchObject({ id: "version-drift", ok: false, severity: "warn" });
+  });
+
+  // In this dev/test checkout `v2/package.json` carries the managed
+  // placeholder, so `getVersion()` always resolves through the git-describe
+  // fallback here -- never a bare "x.y.z" release string. That's exactly the
+  // source-checkout shape `spur update`'s `assertNotSourceCheckout` guard
+  // refuses to run against, so the suggested fix must not be `spur update`.
+  it("suggests the repo deploy flow instead of `spur update` when the installed version isn't a release", () => {
+    const result = checkVersionDrift("0.0.0-does-not-match");
+    expect(result).toMatchObject({ fix: "pull latest and redeploy" });
   });
 
   it("reports ok:true when versions match", () => {

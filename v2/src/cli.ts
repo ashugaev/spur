@@ -94,7 +94,7 @@ import {
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
 } from "./types.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -1618,7 +1618,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version(version, "-V, --version", "Show version");
+    .version(getVersion(), "-V, --version", "Show version");
 
   program
     .command("init")
