@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Providers from "@/app/providers";
+import { FAILURE_THRESHOLD, HEARTBEAT_INTERVAL_MS } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 
 // Test-only trigger so we can drive the provider's state machine through its
@@ -17,6 +18,12 @@ function StartSwitchTrigger({ version }: { version: string }) {
 describe("Providers", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // BackendConnectionProvider probes immediately on mount; give every test
+    // a default healthy response so tests that aren't exercising the
+    // backend gate itself don't leak an uncontrolled real fetch.
+    vi.spyOn(global, "fetch").mockImplementation(
+      async () => new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 }),
+    );
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -48,6 +55,23 @@ describe("Providers", () => {
     );
 
     fireEvent.click(screen.getByText("trigger-start-switch"));
+
+    expect(screen.getByText("app-control").closest("[inert]")).not.toBeNull();
+  });
+
+  it("marks the background app tree inert once the backend-connection gate disconnects", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async () => new Response(null, { status: 500 }));
+
+    vi.useFakeTimers();
+    render(
+      <Providers>
+        <button type="button">app-control</button>
+      </Providers>,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * FAILURE_THRESHOLD);
+    });
 
     expect(screen.getByText("app-control").closest("[inert]")).not.toBeNull();
   });
