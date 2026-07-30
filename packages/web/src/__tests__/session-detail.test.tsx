@@ -3456,6 +3456,71 @@ describe("SessionDetail artifacts", () => {
     );
   });
 
+  it("previews html artifacts in a sandboxed frame with a standalone open link", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "report.html",
+                  name: "report.html",
+                  size: 15,
+                  mimeType: "text/html; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.html")).toBeInTheDocument();
+    });
+
+    const cardFrame = screen.getByTitle("report.html preview");
+    expect(cardFrame).toHaveAttribute("src", "/api/sessions/api-a1/artifacts/report.html");
+    expect(cardFrame).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-forms allow-popups allow-modals",
+    );
+
+    const cardOpenLink = screen.getByRole("link", {
+      name: "Open report.html in a new tab",
+    });
+    expect(cardOpenLink).toHaveAttribute("href", "/api/sessions/api-a1/artifacts/report.html");
+    expect(cardOpenLink).toHaveAttribute("target", "_blank");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview report.html" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Artifact preview report.html" });
+    const dialogFrame = within(dialog).getByTitle("report.html preview");
+    expect(dialogFrame).toHaveAttribute("src", "/api/sessions/api-a1/artifacts/report.html");
+    expect(
+      within(dialog).getByRole("link", { name: "Open report.html in a new tab" }),
+    ).toBeVisible();
+    expect(
+      within(dialog).queryByRole("button", { name: "Copy report.html" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("locks page scroll while an artifact preview is open", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

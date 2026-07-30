@@ -1124,7 +1124,70 @@ describe("startServer", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("image/png");
       expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBeNull();
       await expect(response.text()).resolves.toBe("artifact-bytes");
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("sandboxes HTML artifacts served through GET /sessions/:id/artifacts/:artifactId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "report.html");
+    await writeFile(artifactPath, "<h1>Report</h1>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "report.html",
+        name: "report.html",
+        size: 15,
+        mimeType: "text/html; charset=utf-8",
+        kind: "text",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/artifacts/report.html`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBe(
+        "sandbox allow-scripts allow-forms allow-popups allow-modals",
+      );
+      await expect(response.text()).resolves.toBe("<h1>Report</h1>");
     } finally {
       SessionService.prototype.getArtifact = getArtifact;
       await server.stop();

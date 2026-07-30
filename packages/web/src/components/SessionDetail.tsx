@@ -252,6 +252,25 @@ function ArtifactDownloadIcon() {
   );
 }
 
+function ArtifactOpenExternalIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M14 4h6v6" />
+      <path d="m20 4-8 8" />
+      <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+    </svg>
+  );
+}
+
 function ArtifactPreviewIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
@@ -424,6 +443,10 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
+// Agent-authored markup runs without allow-same-origin, so it never reaches the
+// dashboard origin. The daemon sets the matching CSP sandbox on the raw response.
+const ARTIFACT_HTML_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
+
 function artifactUrl(sessionId: string, artifactId: string): string {
   return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
 }
@@ -435,6 +458,10 @@ function artifactExtension(name: string): string {
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
   return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/markdown";
+}
+
+function isHtmlArtifact(artifact: SessionArtifact): boolean {
+  return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/html";
 }
 
 function artifactKindLabel(artifact: SessionArtifact): string {
@@ -480,10 +507,11 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const html = isHtmlArtifact(artifact);
   const PreviewIcon =
     artifact.kind === "video"
       ? ArtifactPreviewIcon
-      : artifact.kind === "image"
+      : artifact.kind === "image" || html
         ? ArtifactImagePreviewIcon
         : ArtifactFileIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
@@ -539,7 +567,24 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind !== "image" && artifact.kind !== "video" ? (
+        {html ? (
+          <>
+            <iframe
+              className={`pointer-events-none absolute left-0 top-0 h-[200%] w-[200%] origin-top-left scale-50 border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              sandbox={ARTIFACT_HTML_SANDBOX}
+              src={artifactHref}
+              title={`${artifact.name} preview`}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind !== "image" && artifact.kind !== "video" && !html ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -571,6 +616,18 @@ function ArtifactCard({
           >
             <PreviewIcon />
           </button>
+          {html ? (
+            <a
+              aria-label={`Open ${artifact.name} in a new tab`}
+              className={overlayButtonClass(false)}
+              href={artifactHref}
+              onClick={(event) => event.stopPropagation()}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <ArtifactOpenExternalIcon />
+            </a>
+          ) : null}
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
@@ -856,7 +913,8 @@ function ArtifactLightbox({
     setTextPreviewState("loading");
     setCopyState("idle");
 
-    if (!artifact || !artifactHref || artifact.kind !== "text") {
+    // HTML renders in a sandboxed frame instead of a source dump, so it needs no fetch.
+    if (!artifact || !artifactHref || artifact.kind !== "text" || isHtmlArtifact(artifact)) {
       return;
     }
 
@@ -893,7 +951,7 @@ function ArtifactLightbox({
     return () => {
       controller.abort();
     };
-  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+  }, [artifact?.id, artifact?.kind, artifact?.mimeType, artifact?.size, artifactHref]);
 
   const isOpen = Boolean(artifact && artifactHref);
 
@@ -908,14 +966,15 @@ function ArtifactLightbox({
 
   if (!artifact || !artifactHref) return null;
 
+  const html = isHtmlArtifact(artifact);
   const previewStatusMessage =
-    artifact.kind === "text"
+    artifact.kind === "text" && !html
       ? textPreviewState === "loading"
         ? "Loading preview"
         : textPreviewState === "error"
           ? "Preview unavailable"
           : null
-      : artifact.kind === "image" || artifact.kind === "video"
+      : artifact.kind === "image" || artifact.kind === "video" || html
         ? previewState !== "ready"
           ? previewState === "error"
             ? "Preview unavailable"
@@ -1028,6 +1087,18 @@ function ArtifactLightbox({
                 {COPY_TEXT_LABELS[copyState]}
               </button>
             ) : null}
+            {html ? (
+              <a
+                aria-label={`Open ${artifact.name} in a new tab`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                href={artifactHref}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <ArtifactOpenExternalIcon />
+                Open
+              </a>
+            ) : null}
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
@@ -1083,6 +1154,16 @@ function ArtifactLightbox({
                 onLoadedData={() => onPreviewReady(artifact.id)}
                 preload="metadata"
                 src={artifactHref}
+              />
+            ) : html ? (
+              <iframe
+                className={`absolute inset-0 h-full w-full border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                data-artifact-lightbox-interactive
+                onError={() => onPreviewError(artifact.id)}
+                onLoad={() => onPreviewReady(artifact.id)}
+                sandbox={ARTIFACT_HTML_SANDBOX}
+                src={artifactHref}
+                title={`${artifact.name} preview`}
               />
             ) : artifact.kind === "text" ? (
               <div

@@ -117,6 +117,10 @@ const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 // on a spawn that fails to settle.
 const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
+// Sandbox flags for served HTML artifacts. allow-same-origin is deliberately absent:
+// scripts run, but in an opaque origin with no access to Spur's cookies or storage.
+const ARTIFACT_HTML_SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals";
+
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -1014,6 +1018,11 @@ export async function startServer(
               ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
               : `inline; filename="${encodeURIComponent(artifact.name)}"`,
           "cache-control": "no-store",
+          // Artifact HTML is agent-authored: render it in an opaque origin so it can
+          // never read Spur's storage or call the API with the operator's session.
+          ...(artifact.mimeType.startsWith("text/html")
+            ? { "content-security-policy": ARTIFACT_HTML_SANDBOX }
+            : {}),
         });
         const stream = createReadStream(artifact.path);
         stream.on("error", () => {
