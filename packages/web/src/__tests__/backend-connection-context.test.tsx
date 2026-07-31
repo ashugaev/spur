@@ -395,6 +395,43 @@ describe("BackendConnectionProvider", () => {
     expect(Date.now() - t0).toBeGreaterThanOrEqual(32_000);
   });
 
+  it("requires the full confirmation window before disconnecting on instant failures", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(global, "fetch").mockImplementation(() =>
+      Promise.reject(new Error("connection refused")),
+    );
+
+    const { result } = renderProvider();
+
+    const t0 = Date.now();
+    // p1: mount probe fires immediately, fails instantly (0ms probe cost)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // p2: fires at retryIntervalMs(1), fails instantly
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(1));
+    });
+    // p3: fires at retryIntervalMs(2), fails instantly
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(2));
+    });
+    // p4 fires at 0+retryIntervalMs(1)+retryIntervalMs(2)+retryIntervalMs(3)=20_000;
+    // advance to just before it fires
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(3) - 1);
+    });
+    expect(result.current.phase).toBe("connected");
+    expect(Date.now() - t0).toBe(19_999);
+
+    // p4 fires — threshold reached
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(result.current.phase).toBe("disconnected");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(20_000);
+  });
+
   it("stays dormant (connected, no reload) while a version switch is in flight", async () => {
     mockFetchResults(() => false);
 
