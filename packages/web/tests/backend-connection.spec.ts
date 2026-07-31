@@ -32,6 +32,7 @@ async function routeRuntimeInfo(page: Page, getState: () => RuntimeState) {
 }
 
 test.describe("D6e: Backend-connection gate", () => {
+  test.describe.configure({ timeout: 90_000 });
   test("shows a blocking, inert overlay when the backend drops, then reloads once it recovers on a different version", async ({
     page,
   }) => {
@@ -47,7 +48,7 @@ test.describe("D6e: Backend-connection gate", () => {
     await expect(page.locator("[inert]")).toHaveCount(0);
 
     state.alive = false;
-    await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 35_000 });
     await expect(page.getByText("Reconnecting to Spur…")).toBeVisible();
 
     // The background app tree is marked inert while the overlay blocks it.
@@ -86,7 +87,7 @@ test.describe("D6e: Backend-connection gate", () => {
     await expect.poll(() => state.healthyServed, { timeout: 10_000 }).toBeGreaterThan(0);
 
     state.alive = false;
-    await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 35_000 });
 
     let reloaded = false;
     await page.exposeFunction("__markReloadedSameVersion", () => {

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Providers from "@/app/providers";
-import { FAILURE_THRESHOLD, HEARTBEAT_INTERVAL_MS } from "@/lib/backend-connection-context";
+import { FAILURE_THRESHOLD, retryIntervalMs } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 
 // Test-only trigger so we can drive the provider's state machine through its
@@ -70,8 +70,13 @@ describe("Providers", () => {
     );
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * FAILURE_THRESHOLD);
+      await vi.advanceTimersByTimeAsync(0);
     });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
+      });
+    }
 
     expect(screen.getByText("app-control").closest("[inert]")).not.toBeNull();
   });

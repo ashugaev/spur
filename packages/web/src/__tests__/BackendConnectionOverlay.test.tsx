@@ -5,8 +5,7 @@ import { BackendConnectionOverlay } from "@/components/BackendConnectionOverlay"
 import {
   BackendConnectionProvider,
   FAILURE_THRESHOLD,
-  HEARTBEAT_INTERVAL_MS,
-  RECONNECT_INTERVAL_MS,
+  retryIntervalMs,
 } from "@/lib/backend-connection-context";
 import { VersionSwitchProvider } from "@/lib/version-switch-context";
 
@@ -53,15 +52,15 @@ describe("BackendConnectionOverlay", () => {
     vi.useFakeTimers();
     renderOverlay();
 
-    // The first probe fires on the slow heartbeat; once it fails the
-    // provider swaps to the fast reconnect cadence for the rest of the
-    // confirmation window (see backend-connection-context.tsx).
+    // The first probe fires immediately on mount; flush it, then step
+    // through the backoff schedule to reach the failure threshold
+    // (see backend-connection-context.tsx).
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(0);
     });
-    for (let i = 1; i < FAILURE_THRESHOLD; i++) {
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
       });
     }
 
