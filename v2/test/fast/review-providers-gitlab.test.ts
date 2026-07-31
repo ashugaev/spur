@@ -16,6 +16,7 @@ function makeSession(): SessionRecord {
   return {
     id: "api-a1",
     project: "api",
+    workspaceId: "api-a1",
     agent: "claude",
     prompt: "",
     branch: "feat/x",

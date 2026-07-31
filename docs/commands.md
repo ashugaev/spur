@@ -97,7 +97,7 @@ Shared markdown memory: one `.md` file per key, body only, no tags/status/timest
 
 Scopes resolve server-side from the caller's session, never from client input:
 
-- `task` — `<dataDir>/memory/task/<deskId ?? sessionId>/<key>.md`, shared across desk-group siblings.
+- `task` — `<dataDir>/memory/task/<workspaceId>/<key>.md`, shared across every session in the same workspace.
 - `project` — `<dataDir>/memory/project/<projectId>/<key>.md`, shared across all sessions of a project.
 - `global` — `<dataDir>/memory/global/<key>.md`, one cell set for the whole Spur instance.
 
@@ -112,6 +112,8 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 `autoStart` applies only when the main session spawns. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
+
+A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk group](configuration.md#desk-groups), started and stopped from any member.
 
 Commands run through `sh -lc` with no `exec`, so login-shell init still applies and a sidecar command may start with `VAR=value ...`. `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
 

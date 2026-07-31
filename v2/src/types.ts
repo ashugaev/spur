@@ -654,6 +654,20 @@ export interface SessionStateSubscriptionRecordResponse {
 export interface SessionRecord {
   id: string;
   project: string;
+  // The id of the workspace (shared git worktree) this session lives in.
+  // Equals the session's own id for a session that does not share a
+  // workspace; otherwise the id of the session whose workspace it joined
+  // (desk sibling, handoff). Written once at session creation, and filled in
+  // for every record by normalizeSessionRecord on write.
+  //
+  // Optional because this is the on-disk shape and a record written before
+  // this field existed genuinely lacks it. Never read it directly — go
+  // through `workspaceIdOf` in session-desk.ts, the one accessor that
+  // resolves the legacy shapes.
+  workspaceId?: string;
+  // Legacy input field: the pre-workspaceId name for the same fact. Read
+  // for back-compat by normalizeSessionRecord/workspaceIdOf; no longer
+  // written by any code path.
   deskId?: string;
   agent: AgentName;
   model?: string;
@@ -725,6 +739,17 @@ export interface SidecarPortView {
   port: number;
 }
 
+// A desk-shared (non-mcp) project sidecar's `tmuxSession` is
+// `${anchorId}--${name}`; a per-session (mcp) sidecar's is
+// `${sessionId}--${name}` — this is the sole source of the pane name outside
+// the daemon (web terminal attach, CLI `spur sidecar` commands).
+export interface SessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports: SidecarPortView[];
+  tmuxSession: string;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -734,7 +759,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
+  sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
