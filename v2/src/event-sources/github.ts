@@ -46,6 +46,9 @@ const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
 const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
 const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
+// After this many consecutive poll failures for the same session, its failures stop
+// counting toward the CI-active hysteresis flag (see consecutiveSessionPollErrors).
+const CI_HYSTERESIS_ERROR_TOLERANCE = 3;
 
 interface GitHubSearchPrItem {
   number: number;
@@ -271,6 +274,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const deadWorktreeSessions = new Set<string>();
   const adaptive = deps.config.adaptivePoll;
   const attemptedSessionIds = new Set<string>();
+  // Tracks consecutive poll failures per session (catch-block errors or a failed CI
+  // checks fetch). A session erroring on *every* cycle (persistent 404/permission
+  // issue, not rate-limit/bad-creds — those are handled separately) would otherwise
+  // never produce a "clean" cycle, latching lastCycleCiActive true forever and
+  // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
+  // stop counting toward the hysteresis flag (still logged, just excluded from it).
+  const consecutiveSessionPollErrors = new Map<string, number>();
   let nextEligiblePollAtMs = 0;
   let lastCycleCiActive = false;
   let stopped = false;
@@ -283,6 +293,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let authWarned = false;
 
   const shouldSkipGitHubCalls = (): boolean => authDisabled || Date.now() < cooldownUntilMs;
+
+  // Records a poll failure for a session and reports whether it should still count
+  // toward this cycle's CI-active hysteresis flag. Returns false once the session has
+  // failed more than CI_HYSTERESIS_ERROR_TOLERANCE cycles in a row, so a persistently
+  // erroring session can't wedge the flag true forever.
+  const countsTowardCiHysteresis = (sessionId: string): boolean => {
+    const count = (consecutiveSessionPollErrors.get(sessionId) ?? 0) + 1;
+    consecutiveSessionPollErrors.set(sessionId, count);
+    return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
+  };
 
   const listPollableSessions = () =>
     listSessions(deps.dataDir).filter(
@@ -414,6 +434,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           if (collected?.ciActive) {
             cycleCiActive = true;
           }
+          // A failed CI-check fetch is not a clean observation: it must not count
+          // toward letting this cycle lower the CI-active hysteresis flag (see the
+          // cycleHadPollError comment below), even though collectSignals itself
+          // returned successfully. `!collected` (PR genuinely gone/not found) is a
+          // clean observation, not a failure — only a failed checks fetch resets the
+          // session's error streak below.
+          if (collected?.ciCheckFetchFailed) {
+            if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
+          } else {
+            consecutiveSessionPollErrors.delete(session.id);
+          }
           if (!collected) {
             snapshots.delete(session.id);
             deleteReviewSourceSnapshot(
@@ -484,7 +515,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           }
         } catch (error) {
           if (handleGitHubSuppressionError(error)) return;
-          cycleHadPollError = true;
+          if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
           const message = extractGithubErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
@@ -533,6 +564,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const sessionId of [...attemptedSessionIds]) {
         if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);
+      }
+
+      for (const sessionId of [...consecutiveSessionPollErrors.keys()]) {
+        if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
       }
     } finally {
       polling = false;

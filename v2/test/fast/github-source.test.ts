@@ -2092,6 +2092,104 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("preserves the CI-active hysteresis flag when a session's CI-check fetch fails but the rest of the cycle succeeds", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Next real tick bypasses the deadline gate on lastCycleCiActive. `gh pr view`
+      // succeeds, but `gh pr checks` fails with a generic (non "no checks configured")
+      // error — collectSignals itself does not throw (fetchChecks swallows it), so
+      // this cycle completes "successfully" from pollSignals' point of view, yet it
+      // never actually observed whether CI settled.
+      ghMock.mockResolvedValueOnce(prView());
+      ghMock.mockRejectedValueOnce(new Error("gh: connection reset by peer"));
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+      await waitForGhCallCount(10);
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // A buggy implementation would count the failed checks fetch as a clean
+      // observation (no exception propagated) and reset lastCycleCiActive to false,
+      // so the deadline gate alone would suppress every further tick. The flag must
+      // instead survive, keeping ticks forced well inside the slow window (deadline
+      // stays at 00:10:00).
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(15);
+
+      handle.stop();
+    });
+
+    it("stops letting a persistently erroring session latch the CI-active hysteresis flag after a bounded number of consecutive failures", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // The same session errors on every subsequent cycle (e.g. a persistent
+      // 404/permission issue) — never producing a clean observation. The first
+      // CI_HYSTERESIS_ERROR_TOLERANCE (3) consecutive failures still preserve the
+      // flag, each one bypassing the deadline gate for the next tick in turn.
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(6);
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(7);
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(8);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // The 4th consecutive failure for this session exceeds the tolerance: it no
+      // longer counts toward the hysteresis flag, so with no other session reporting
+      // active CI this cycle, lastCycleCiActive finally drops to false.
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(9);
+
+      // A buggy (unbounded) implementation would still have lastCycleCiActive=true
+      // here, so the deadline gate would keep forcing ticks — and each one would
+      // issue another (rejected) gh call, growing the call count. The fix must
+      // instead let the deadline gate suppress further ticks well inside the slow
+      // window (deadline stays at 00:10:00), so the call count stays flat.
+      await assertGhCallCountStable(9);
+
+      handle.stop();
+    });
+
     it("does not advance the adaptive deadline for a poll cycle suppressed entirely by an active rate-limit cooldown", async () => {
       // Baseline: startup poll succeeds, legitimately arming the deadline at
       // T0 + slowIntervalMs = 00:10:00.

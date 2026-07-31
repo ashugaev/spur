@@ -1,4 +1,4 @@
-import { gh } from "../gh.js";
+import { extractGithubErrorText, gh } from "../gh.js";
 import { readCommentSeenRegistry } from "../metadata.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
@@ -265,20 +265,38 @@ export async function resolveBoundPrSummary(
   };
 }
 
-async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
+interface FetchChecksResult {
+  checks: GitHubCheck[];
+  // True when the `gh pr checks` call itself failed (network, transient gh error,
+  // etc.) — distinct from a genuine empty checks array. The caller must not treat a
+  // failed fetch as "CI observed to have zero active checks": that would silently
+  // clear the CI-active hysteresis flag on a transient failure instead of leaving it
+  // untouched, defeating the point of tracking it (see event-sources/github.ts).
+  failed: boolean;
+}
+
+async function fetchChecks(worktreePath: string, prNumber: number): Promise<FetchChecksResult> {
   try {
     const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
     const parsed = parseJson(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((value): GitHubCheck[] => {
+    if (!Array.isArray(parsed)) return { checks: [], failed: false };
+    const checks = parsed.flatMap((value): GitHubCheck[] => {
       if (!isRecord(value)) return [];
       const name = readString(value.name);
       const state = readString(value.state);
       if (!name || !state) return [];
       return [{ name, state }];
     });
-  } catch {
-    return [];
+    return { checks, failed: false };
+  } catch (error) {
+    // `gh pr checks` exits non-zero with this exact message when the PR genuinely has
+    // no CI configured — a routine, permanent condition (common for repos without
+    // workflows, or a PR before its first check reports), not a fetch failure. Every
+    // other exception (network error, gh crash, rate limit, etc.) is a real failure.
+    const isNoChecksConfigured = extractGithubErrorText(error)
+      .toLowerCase()
+      .includes("no checks reported");
+    return { checks: [], failed: !isNoChecksConfigured };
   }
 }
 
@@ -407,6 +425,7 @@ async function collectSignals(
   data: ReviewEventData;
   snapshot: Map<string, ReviewSignal>;
   ciActive: boolean;
+  ciCheckFetchFailed: boolean;
 } | null> {
   const pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
@@ -416,7 +435,7 @@ async function collectSignals(
       );
   if (!pr) return null;
 
-  const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
+  const [checksResult, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
     pr.repo
       ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
@@ -429,6 +448,7 @@ async function collectSignals(
       : Promise.resolve([]),
   ]);
 
+  const checks = checksResult.checks;
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
@@ -489,6 +509,7 @@ async function collectSignals(
     },
     snapshot,
     ciActive: hasActiveChecks(checks),
+    ciCheckFetchFailed: checksResult.failed,
   };
 }
 

@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
   hasGitHubMergeConflictRestoreReplay,
@@ -17,7 +18,8 @@ const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
   readCurrentBranchMock: vi.fn(),
   isGitWorktreeMock: vi.fn().mockResolvedValue(true),
 }));
-vi.mock("../../src/gh.js", () => ({
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
@@ -35,7 +37,7 @@ const {
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
 
-const { resolveBoundPrSummary, hasActiveChecks } =
+const { resolveBoundPrSummary, hasActiveChecks, githubReviewProvider } =
   await import("../../src/review-providers/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
@@ -365,6 +367,86 @@ describe("resolveBoundPrSummary", () => {
         url: "https://github.com/o/r/pull/212",
       }),
     ).rejects.toThrow("invalid GitHub PR summary");
+  });
+});
+
+describe("collectSignals ciCheckFetchFailed", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  function prView(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      number: 42,
+      title: "Fix CI alert",
+      url: "https://github.com/acme/api/pull/42",
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      isDraft: false,
+      state: "OPEN",
+      ...overrides,
+    });
+  }
+
+  // gh call order for a bound PR session in collectSignals:
+  // pr view, pr checks, review comments, issue comments, reviews.
+  it("reports ciCheckFetchFailed=true when `gh pr checks` fails for a reason other than no checks configured", async () => {
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockRejectedValueOnce(new Error("gh: connection reset by peer"))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const result = await githubReviewProvider.collectSignals(
+      sourceSession("/wt"),
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+    );
+
+    expect(result?.ciActive).toBe(false);
+    expect(result?.ciCheckFetchFailed).toBe(true);
+  });
+
+  it("reports ciCheckFetchFailed=false when `gh pr checks` fails because the PR genuinely has no checks configured", async () => {
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockRejectedValueOnce(new Error("no checks reported on the 'feature/test' branch"))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const result = await githubReviewProvider.collectSignals(
+      sourceSession("/wt"),
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+    );
+
+    expect(result?.ciActive).toBe(false);
+    expect(result?.ciCheckFetchFailed).toBe(false);
+  });
+
+  it("reports ciCheckFetchFailed=false when `gh pr checks` succeeds", async () => {
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockResolvedValueOnce(JSON.stringify([{ name: "workflow", state: "IN_PROGRESS" }]))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const result = await githubReviewProvider.collectSignals(
+      sourceSession("/wt"),
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+    );
+
+    expect(result?.ciActive).toBe(true);
+    expect(result?.ciCheckFetchFailed).toBe(false);
   });
 });
 
