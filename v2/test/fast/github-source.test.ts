@@ -1794,14 +1794,48 @@ describe("github source", () => {
   });
 
   describe("adaptive poll", () => {
-    // Only Date is faked here, not setImmediate/node:timers — flushPollCycle relies
-    // on a real setImmediate to drain the fire-and-forget pollCycle promise chain.
+    // These tests drive the REAL production gate: the `startInterval` tick at
+    // github.ts's `if (!shouldPollThisTick()) return;`. That interval is created via
+    // `node:timers`' own `setInterval`, which vitest's fake timers do not intercept
+    // (verified empirically: neither a full `vi.useFakeTimers()` nor an explicit
+    // `toFake: ["setInterval", "clearInterval"]` list makes a directly-imported
+    // `node:timers` callback fire under `vi.advanceTimersByTimeAsync`). So `intervalMs`
+    // here is a small REAL duration and ticks are awaited with real waits, while `Date`
+    // stays faked and frozen (only moved via explicit `vi.setSystemTime`) so the
+    // adaptive-window math above the tick is fully deterministic. `runOnStart: false`
+    // is used so the harness's own ungated startup poll (`await pollCycle(false)` in
+    // `start()`) seeds `attemptedSessionIds`/snapshots once, and every poll after that
+    // is driven exclusively through the real gated interval callback.
+    const REAL_INTERVAL_MS = 20;
+
     function queuePollResponse(checksState: string): void {
       ghMock.mockResolvedValueOnce(prView());
       ghMock.mockResolvedValueOnce(JSON.stringify([{ name: "check", state: checksState }]));
       ghMock.mockResolvedValueOnce("[]");
       ghMock.mockResolvedValueOnce("[]");
       ghMock.mockResolvedValueOnce("[]");
+    }
+
+    async function waitForGhCallCount(target: number, timeoutMs = 4000): Promise<void> {
+      const stepMs = 10;
+      let waited = 0;
+      while (ghMock.mock.calls.length < target) {
+        if (waited >= timeoutMs) {
+          throw new Error(
+            `timed out waiting for ghMock call count >= ${target}, saw ${ghMock.mock.calls.length}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+        waited += stepMs;
+      }
+    }
+
+    async function assertGhCallCountStable(
+      count: number,
+      durationMs = REAL_INTERVAL_MS * 8,
+    ): Promise<void> {
+      await new Promise((resolve) => setTimeout(resolve, durationMs));
+      expect(ghMock).toHaveBeenCalledTimes(count);
     }
 
     beforeEach(() => {
@@ -1811,7 +1845,7 @@ describe("github source", () => {
       listSessionsMock.mockReturnValue([makeSession()]);
     });
 
-    it("polls every runOnStart tick when adaptivePoll is not configured", async () => {
+    it("polls every interval tick when adaptivePoll is not configured", async () => {
       queuePollResponse("SUCCESS");
       queuePollResponse("SUCCESS");
       queuePollResponse("SUCCESS");
@@ -1820,23 +1854,23 @@ describe("github source", () => {
         sourceId: "pr-watch",
         projectId: "api",
         dataDir: "/tmp/spur-data",
-        config: { type: "github", intervalMs: 60_000, runOnStart: true, emitExisting: false },
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+        },
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
       });
 
-      handle.runOnStart?.();
-      await flushPollCycle();
+      // Seeded by the ungated startup poll in start().
       expect(ghMock).toHaveBeenCalledTimes(5);
 
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(10);
-
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(15);
+      // Both subsequent cycles run only through the real gated interval tick.
+      await waitForGhCallCount(10);
+      await waitForGhCallCount(15);
 
       handle.stop();
     });
@@ -1851,8 +1885,8 @@ describe("github source", () => {
         dataDir: "/tmp/spur-data",
         config: {
           type: "github",
-          intervalMs: 60_000,
-          runOnStart: true,
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
           emitExisting: false,
           adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
         },
@@ -1861,15 +1895,11 @@ describe("github source", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       });
 
-      handle.runOnStart?.();
-      await flushPollCycle();
       expect(ghMock).toHaveBeenCalledTimes(5);
 
-      // Still well inside the slow window, but the last cycle's CI was non-terminal.
-      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(10);
+      // Well inside the slow window (Date never advanced), but the last cycle's CI
+      // was non-terminal, so the real gated tick polls anyway.
+      await waitForGhCallCount(10);
 
       handle.stop();
     });
@@ -1883,8 +1913,8 @@ describe("github source", () => {
         dataDir: "/tmp/spur-data",
         config: {
           type: "github",
-          intervalMs: 60_000,
-          runOnStart: true,
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
           emitExisting: false,
           adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
         },
@@ -1893,22 +1923,16 @@ describe("github source", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       });
 
-      handle.runOnStart?.();
-      await flushPollCycle();
       expect(ghMock).toHaveBeenCalledTimes(5);
 
-      // Still inside the slow window: settled CI, session already attempted, no activity.
-      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(5);
+      // Still inside the slow window: settled CI, session already attempted, no
+      // activity — real ticks keep firing but must stay suppressed.
+      await assertGhCallCountStable(5);
 
-      // Past the slow window: the deadline alone re-arms polling.
+      // Past the slow window: the deadline alone re-arms the real gated tick.
       queuePollResponse("SUCCESS");
       vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(10);
+      await waitForGhCallCount(10);
 
       handle.stop();
     });
@@ -1922,8 +1946,8 @@ describe("github source", () => {
         dataDir: "/tmp/spur-data",
         config: {
           type: "github",
-          intervalMs: 60_000,
-          runOnStart: true,
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
           emitExisting: false,
           adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
         },
@@ -1932,22 +1956,14 @@ describe("github source", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       });
 
-      handle.runOnStart?.();
-      await flushPollCycle();
       expect(ghMock).toHaveBeenCalledTimes(5);
 
       hasRecentSessionUserActionMock.mockReturnValue(true);
       queuePollResponse("SUCCESS");
-      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(10);
+      await waitForGhCallCount(10);
 
       hasRecentSessionUserActionMock.mockReturnValue(false);
-      vi.setSystemTime(new Date("2026-07-30T00:02:00.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(10);
+      await assertGhCallCountStable(10);
 
       handle.stop();
     });
@@ -1961,8 +1977,8 @@ describe("github source", () => {
         dataDir: "/tmp/spur-data",
         config: {
           type: "github",
-          intervalMs: 60_000,
-          runOnStart: true,
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
           emitExisting: false,
           adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
         },
@@ -1971,8 +1987,6 @@ describe("github source", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       });
 
-      handle.runOnStart?.();
-      await flushPollCycle();
       expect(ghMock).toHaveBeenCalledTimes(5);
 
       // A brand-new session appears mid-window: never attempted, forces a real poll.
@@ -1983,10 +1997,57 @@ describe("github source", () => {
       listSessionsMock.mockReturnValue([makeSession(), newSession]);
       queuePollResponse("SUCCESS");
       queuePollResponse("SUCCESS");
-      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
-      handle.runOnStart?.();
-      await flushPollCycle();
-      expect(ghMock).toHaveBeenCalledTimes(15);
+      await waitForGhCallCount(15);
+
+      handle.stop();
+    });
+
+    it("keeps the CI-active hysteresis flag intact when a poll cycle is suppressed by a rate-limit cooldown", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const rateLimitError = Object.assign(new Error("GraphQL: API rate limit already exceeded"), {
+        stderr: JSON.stringify({
+          errors: [{ message: "API rate limit already exceeded" }],
+          data: { rateLimit: { resetAt: "2026-07-30T00:05:00.000Z" } },
+        }),
+      });
+      ghMock.mockRejectedValueOnce(rateLimitError);
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Next real tick bypasses the deadline gate on lastCycleCiActive, but the poll
+      // itself hits a rate limit on the very first gh call and enters cooldown before
+      // ever reassigning lastCycleCiActive.
+      await waitForGhCallCount(6);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("GitHub rate limit hit"));
+
+      // While the cooldown holds, shouldSkipGitHubCalls suppresses every further tick.
+      await assertGhCallCountStable(6);
+
+      // Lift the cooldown but stay well short of the slow-window deadline (set from
+      // the first cycle at T0+600_000ms = 00:10:00). If the suppressed cycle had
+      // wrongly reset lastCycleCiActive to false, the deadline gate alone would keep
+      // suppressing here and this would time out.
+      vi.setSystemTime(new Date("2026-07-30T00:05:01.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
 
       handle.stop();
     });

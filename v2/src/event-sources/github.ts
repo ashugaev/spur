@@ -524,6 +524,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       for (const sessionId of [...deadWorktreeSessions]) {
         if (!currentSessionIds.has(sessionId)) deadWorktreeSessions.delete(sessionId);
       }
+
+      for (const sessionId of [...attemptedSessionIds]) {
+        if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);
+      }
     } finally {
       polling = false;
     }
@@ -564,6 +568,11 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const pollCycle = async (emitInitial: boolean): Promise<void> => {
     if (pollingCycle) return;
     pollingCycle = true;
+    // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
+    // already active going into this cycle, no real polling happened, so the
+    // adaptive deadline must not move — otherwise it silently consumes the
+    // slow window during an outage instead of resuming promptly once it lifts.
+    const skippedByCooldown = shouldSkipGitHubCalls();
     try {
       await pollSignals(emitInitial);
       if (shouldSkipGitHubCalls()) return;
@@ -572,7 +581,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         rateLimitFailures = 0;
       }
     } finally {
-      if (adaptive) {
+      if (adaptive && !skippedByCooldown) {
         nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
       }
       pollingCycle = false;
@@ -600,7 +609,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            if (!shouldPollThisTick()) return;
             void pollCycle(true);
           },
         }
