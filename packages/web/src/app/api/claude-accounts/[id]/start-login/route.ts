@@ -14,8 +14,7 @@ export async function POST(_request: Request, context: RouteContext) {
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to start Claude account login";
+    const message = error instanceof Error ? error.message : "Failed to start Claude account login";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

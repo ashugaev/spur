@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -346,10 +347,9 @@ describe("ensureAccountProjectsLink", () => {
     rmSync(sessionToolDir, { recursive: true, force: true });
   });
 
-  it("swapSessionCredentials: replaces credentials and onboarding state in session home", () => {
+  it("swapSessionCredentials: replaces credentials only; .claude.json is byte-identical", () => {
     const account = addAccount(dataDir);
     writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"old"}', "utf-8");
-    writeFileSync(join(account.configDir, ".claude.json"), '{"oauthAccount":"new"}', "utf-8");
     const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
     const sessionHome = sessionClaudeHome(sessionToolDir);
     mkdirSync(sessionHome, { recursive: true });
@@ -360,10 +360,22 @@ describe("ensureAccountProjectsLink", () => {
     swapSessionCredentials(sessionHome, account);
 
     expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"new"}');
-    expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"oauthAccount":"new"}');
+    expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"oauthAccount":"old"}');
     expect(readFileSync(join(account.configDir, ".credentials.json"), "utf-8")).toBe(
       '{"token":"new"}',
     );
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("swapSessionCredentials: cleans up tmp file on copy failure", () => {
+    const account = addAccount(dataDir);
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    mkdirSync(sessionHome, { recursive: true });
+
+    expect(() => swapSessionCredentials(sessionHome, account)).toThrow();
+    const leaked = readdirSync(sessionHome).filter((f) => f.includes(".tmp."));
+    expect(leaked).toHaveLength(0);
     rmSync(sessionToolDir, { recursive: true, force: true });
   });
 

@@ -233,19 +233,14 @@ export function seedSessionHome(sessionHome: string, account: ClaudeAccount): vo
 export function swapSessionCredentials(sessionHome: string, account: ClaudeAccount): void {
   const ts = `${process.pid}.${Date.now()}`;
   const credTmp = join(sessionHome, `.credentials.json.tmp.${ts}`);
-  const dotClaudeTmp = join(sessionHome, `.claude.json.tmp.${ts}`);
   try {
     copyFileSync(join(account.configDir, ".credentials.json"), credTmp);
-    copyFileSync(onboardingFilePath(account.configDir), dotClaudeTmp);
     renameSync(credTmp, join(sessionHome, ".credentials.json"));
-    renameSync(dotClaudeTmp, join(sessionHome, ".claude.json"));
   } catch (error) {
-    for (const tmp of [credTmp, dotClaudeTmp]) {
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // best-effort cleanup; file may not have been created
-      }
+    try {
+      unlinkSync(credTmp);
+    } catch {
+      // best-effort cleanup
     }
     throw error;
   }

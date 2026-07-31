@@ -1863,9 +1863,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
     ).toBeVisible();
 
-    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
+    // No label falls back to the first 8 chars of the id, with the "not ready" badge.
     const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
-    await expect(shortIdRow).toContainText("not logged in");
+    await expect(shortIdRow).toContainText("not ready");
     await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
     await expect(
       shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
@@ -3236,8 +3236,8 @@ test.describe("D8: Switch Claude account dialog", () => {
       id: "shp-test",
       project: "spur-shepherd",
       worktree: false,
-      worktreePath: null,
-      workspaceExists: false,
+      worktreePath: "/workspace/spur-shepherd",
+      workspaceExists: true,
       prompt: "Shepherd session task",
       claudeAccounts: [
         { id: "acc-primary", label: "Primary", authenticated: true },
@@ -3267,10 +3267,12 @@ test.describe("D8: Switch Claude account dialog", () => {
     await expect(page.getByRole("button", { name: "Switch auth" })).toBeVisible();
 
     await page.getByRole("button", { name: "Switch auth" }).click();
-    await expect(page.getByRole("dialog", { name: "Switch Claude account" })).toBeVisible();
+    const dialog = page.getByRole("dialog", { name: "Switch Claude account" });
+    await expect(dialog).toBeVisible();
 
-    await page.getByRole("button", { name: "Switch" }).click();
+    await dialog.getByRole("button", { name: "Switch" }).click();
 
+    await expect(dialog).toBeHidden();
     await expect(page.getByTestId("switch-auth-error")).toHaveCount(0);
   });
 });
