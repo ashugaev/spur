@@ -257,7 +257,7 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 `github:ci_failed` uses one fixed policy: retry every 10 minutes, stop after 3 deliveries, reset only when the failing signal disappears from the latest snapshot. `github:merge_conflict` is snapshot-based and one-shot: emitted when the PR becomes conflicting, cleared when mergeable again, re-emittable if conflicts return. Terminal events (`merged`/`closed`) fire only while the owning session still runs.
 
-With `adaptivePoll` configured, a `github` source tick is a no-op — zero `gh` calls — unless: the slow deadline (`slowIntervalMs` since the last real poll) has passed; the last cycle saw a non-terminal CI check; a tracked session hasn't been polled yet; or a session had a `send`/source-reply within `activeGraceMs`. The existing rate-limit cooldown backoff still overrides everything above, on `adaptivePoll` sources and plain ones alike.
+With `adaptivePoll` configured, a `github` source tick is a no-op — zero `gh` calls — unless: the slow deadline (`slowIntervalMs` since the last real poll) has passed; the last cycle saw a non-terminal CI check; a tracked session hasn't been polled yet; or a session had a `send`/source-reply within `activeGraceMs`. The existing rate-limit cooldown backoff still overrides everything above, on `adaptivePoll` sources and plain ones alike. When `query` is also set, `github:work_item.new` discovery (`gh search prs`) runs on the same gated tick as session polling; every gate condition is scoped to already-tracked sessions, so a new, undiscovered PR alone cannot re-arm the tick early — discovery waits for the slow deadline or for an existing session to re-qualify.
 
 ## Daemon restarts
 
