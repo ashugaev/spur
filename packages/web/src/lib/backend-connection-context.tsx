@@ -9,16 +9,21 @@ import { isRuntimeInfoResponse, useVersionSwitch } from "@/lib/version-switch-co
 export const HEARTBEAT_INTERVAL_MS = 5_000;
 // Tighter cadence while disconnected: we want to reload as soon as the
 // daemon comes back, not wait out a full healthy-state heartbeat.
-export const RECONNECT_INTERVAL_MS = 2_000;
-// Require this many consecutive failures before flipping to "disconnected"
-// so a single transient blip (e.g. a 5xx during a daemon GC pause) doesn't
-// flash the blocking overlay.
-export const FAILURE_THRESHOLD = 3;
+export const RECONNECT_INTERVAL_MS = 4_000;
+export const RECONNECT_MAX_INTERVAL_MS = 8_000;
+// Require this many consecutive failures before flipping to "disconnected".
+// Combined with retryIntervalMs, this buys a ≥32s tolerance window so
+// daemon event-loop stalls shorter than that leave the overlay hidden.
+export const FAILURE_THRESHOLD = 4;
 // Must stay comfortably below RECONNECT_INTERVAL_MS: a black-holed
 // connection (sleep/wake, VPN drop that neither errors nor resolves) would
 // otherwise never resolve and never count as a failure, leaving the gate
 // stuck showing a healthy app against a dead backend.
-export const PROBE_TIMEOUT_MS = 1_500;
+export const PROBE_TIMEOUT_MS = 3_000;
+
+export function retryIntervalMs(consecutiveFailures: number): number {
+  return Math.min(RECONNECT_INTERVAL_MS * 2 ** (consecutiveFailures - 1), RECONNECT_MAX_INTERVAL_MS);
+}
 
 export type BackendConnectionPhase = "connected" | "disconnected";
 
@@ -105,14 +110,15 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
     let probeInFlight = false;
 
     // Use the slow heartbeat only in the fully-healthy steady state (zero
-    // failures). As soon as the first probe failure is seen, switch to the
-    // fast reconnect cadence for the rest of the FAILURE_THRESHOLD
-    // confirmation window so a real outage is confirmed quickly instead of
-    // waiting out a full heartbeat between each check.
+    // failures). Once a failure is seen, apply capped doubling backoff via
+    // retryIntervalMs for the rest of the confirmation window. While
+    // disconnected the cadence stays flat at RECONNECT_INTERVAL_MS.
     const intervalMs =
-      state.phase === "disconnected" || consecutiveFailures > 0
+      state.phase === "disconnected"
         ? RECONNECT_INTERVAL_MS
-        : HEARTBEAT_INTERVAL_MS;
+        : consecutiveFailures > 0
+          ? retryIntervalMs(consecutiveFailures)
+          : HEARTBEAT_INTERVAL_MS;
 
     const runProbe = () => {
       if (probeInFlight) return;
