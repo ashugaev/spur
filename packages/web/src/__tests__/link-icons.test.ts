@@ -1,6 +1,14 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchPrInfo, extractLinkId, prStateColor, usePrInfo } from "@/lib/link-icons.js";
+import {
+  fetchPrInfo,
+  fetchPrInfoBatch,
+  extractLinkId,
+  primePrInfo,
+  prStateColor,
+  usePrInfo,
+  usePrReadyUrls,
+} from "@/lib/link-icons.js";
 import type { SpurSessionLink } from "@/lib/types.js";
 
 const mockFetch = vi.fn<typeof fetch>();
@@ -462,5 +470,143 @@ describe("usePrInfo hook", () => {
 
     expect(mockFetch.mock.calls.length).toBeGreaterThan(callCountAfterMount);
     unmount();
+  });
+});
+
+describe("primePrInfo", () => {
+  it("re-renders an already-mounted usePrInfo consumer", async () => {
+    const url = "https://github.com/org/repo/pull/prime-rerender";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    );
+    const { result } = renderHook(() => usePrInfo(url));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.state).toBe("open");
+
+    act(() => {
+      primePrInfo(url, {
+        state: "merged",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: false,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+    });
+
+    expect(result.current.state).toBe("merged");
+  });
+});
+
+describe("fetchPrInfoBatch", () => {
+  it("primes the cache for each URL in the batch response", async () => {
+    const urlA = "https://github.com/org/repo/pull/batch-a";
+    const urlB = "https://github.com/org/repo/pull/batch-b";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [urlA]: {
+            state: "open",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+          [urlB]: {
+            state: "merged",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: false,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    await fetchPrInfoBatch([urlA, urlB]);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [requestUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(requestUrl).toBe("/api/pr-status/batch");
+    expect(init.method).toBe("POST");
+
+    const { result } = renderHook(() => usePrInfo(urlA));
+    expect(result.current.state).toBe("open");
+    expect(result.current.canMerge).toBe(true);
+  });
+});
+
+describe("usePrReadyUrls", () => {
+  it("does not fetch while disabled", () => {
+    const urls = ["https://github.com/org/repo/pull/ready-disabled"];
+    const { result } = renderHook(() => usePrReadyUrls(urls, false));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.current.loaded).toBe(false);
+    expect(result.current.ready.size).toBe(0);
+  });
+
+  it("returns only GitHub URLs satisfying isPrReady once the batch resolves", async () => {
+    const readyUrl = "https://github.com/org/repo/pull/901";
+    const notReadyUrl = "https://github.com/org/repo/pull/902";
+    const gitlabUrl = "https://gitlab.com/org/repo/-/merge_requests/1";
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [readyUrl]: {
+            state: "open",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+          [notReadyUrl]: {
+            state: "open",
+            reviewDecision: "changes_requested",
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    const urls = [readyUrl, notReadyUrl, gitlabUrl];
+    const { result } = renderHook(() => usePrReadyUrls(urls, true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { urls: string[] };
+    expect(body.urls).toEqual([readyUrl, notReadyUrl]);
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(readyUrl)).toBe(true);
+    expect(result.current.ready.has(notReadyUrl)).toBe(false);
   });
 });

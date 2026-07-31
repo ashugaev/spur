@@ -12,6 +12,7 @@ import {
   makeSessionWithTracker,
   mockGitHubStatus,
   mockGitLabStatus,
+  mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -617,6 +618,109 @@ test.describe("D2: Filters modal status counts are correct", () => {
   });
 });
 
+test.describe("D2b: PR-ready filter", () => {
+  function prSession(prompt: string, id: string, prNumber: number): SpurSessionView {
+    return makeSessionWithPR({
+      id,
+      slots: {
+        title: prompt,
+        links: [{ label: "github-pr", url: `https://github.com/test/repo/pull/${prNumber}` }],
+      },
+    });
+  }
+
+  test("narrows to the ready session, restores on off, and Reset clears it", async ({ page }) => {
+    const ready = prSession("Ready session", "pr-ready-1", 501);
+    const changesRequested = prSession("Changes requested session", "pr-ready-2", 502);
+    const unresolvedThreads = prSession("Unresolved threads session", "pr-ready-3", 503);
+
+    await mockSessions(page, [ready, changesRequested, unresolvedThreads]);
+    await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/501": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/502": {
+        state: "open",
+        reviewDecision: "changes_requested",
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/503": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 2,
+        unresolvedThreads: 2,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).not.toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: "Reset all filters" }).click();
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+  });
+
+  test("issues zero /api/pr-status/batch requests while the filter is off", async ({ page }) => {
+    const idle = prSession("Idle PR session", "pr-ready-idle-1", 601);
+    await mockSessions(page, [idle]);
+    const batch = await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/601": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Idle PR session")).toBeVisible();
+    await page.waitForTimeout(500);
+
+    expect(batch.count()).toBe(0);
+  });
+});
+
 // D3: Session rows render with correct columns
 test.describe("D3: Session rows render with correct columns", () => {
   test("session title link renders and has correct href", async ({ page }) => {
@@ -946,7 +1050,7 @@ test.describe("D4b: Merged-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return merged state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -981,7 +1085,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1037,7 +1141,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1115,7 +1219,7 @@ test.describe("D4b: Merged-PR done button", () => {
       slots: { title: "Desk helper", links: [] },
     });
     await mockSessions(page, [session, subagent]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1225,7 +1329,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1255,7 +1359,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1284,7 +1388,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1309,7 +1413,7 @@ test.describe("D5: Tracker and PR links", () => {
   }) => {
     const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",

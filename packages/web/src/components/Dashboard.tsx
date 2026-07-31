@@ -35,7 +35,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { JiraIcon } from "@/lib/link-icons";
+import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -1012,10 +1012,10 @@ export function Dashboard() {
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const [agentFilter, setAgentFilter] = useState<AgentName[]>([]);
-  // Phase A (PR-ready predicate) lands separately; this toggle is wired
-  // through the Filters modal and the badge count now so the modal doesn't
-  // need reshaping when that predicate arrives, but it does not filter the
-  // session list yet.
+  // Not persisted: PR readiness is remote state that flips without user
+  // action, so a persisted "empty dashboard" on next load would have no
+  // user-visible cause — unlike user-authored tags. Matches the
+  // un-persisted `activeStatFilter` above.
   const [prReadyOnly, setPrReadyOnly] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
@@ -1247,13 +1247,38 @@ export function Dashboard() {
     return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [tagFilteredSessions, agentFilter]);
 
+  // One review-link URL per session (undefined when a session has no GitHub
+  // or GitLab review link). usePrReadyUrls filters to GitHub-only itself and
+  // only fetches while prReadyOnly is true.
+  const reviewUrls = useMemo(
+    () =>
+      agentFilteredSessions
+        .map((session) => session.links.find((link) => isReviewLinkLabel(link.label))?.url)
+        .filter((url): url is string => Boolean(url)),
+    [agentFilteredSessions],
+  );
+  const prReady = usePrReadyUrls(reviewUrls, prReadyOnly);
+
+  const prReadyFilteredSessions = useMemo(() => {
+    if (!prReadyOnly || !prReady.loaded) return agentFilteredSessions;
+    const keys = new Set(
+      agentFilteredSessions
+        .filter((s) => {
+          const url = s.links.find((link) => isReviewLinkLabel(link.label))?.url;
+          return url ? prReady.ready.has(url) : false;
+        })
+        .map((s) => s.deskKey),
+    );
+    return agentFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [agentFilteredSessions, prReadyOnly, prReady]);
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return agentFilteredSessions;
-    const narrowed = agentFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
+    if (!q) return prReadyFilteredSessions;
+    const narrowed = prReadyFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
     const keys = new Set(narrowed.map((s) => s.deskKey));
-    return agentFilteredSessions.filter((s) => keys.has(s.deskKey));
-  }, [agentFilteredSessions, searchQuery]);
+    return prReadyFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [prReadyFilteredSessions, searchQuery]);
 
   const visibleBacklog = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1357,6 +1382,22 @@ export function Dashboard() {
     }
     return map;
   }, [projectSessions, agentFilter, searchQuery]);
+
+  // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
+  // its own facet query: computing this independently of the toggle would
+  // require fetching PR readiness for every session at all times, which
+  // violates "no /api/pr-status/batch request while prReadyOnly is false".
+  const prReadyCount = useMemo(() => {
+    if (!prReady.loaded) return 0;
+    let count = 0;
+    for (const session of agentFilteredSessions) {
+      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
+        continue;
+      const url = session.links.find((link) => isReviewLinkLabel(link.label))?.url;
+      if (url && prReady.ready.has(url)) count++;
+    }
+    return count;
+  }, [agentFilteredSessions, prReady, searchQuery]);
 
   const activeFilterCount =
     (projectId ? 1 : 0) +
@@ -2247,6 +2288,7 @@ export function Dashboard() {
               current.includes(tag) ? current.filter((name) => name !== tag) : [...current, tag],
             )
           }
+          prReadyCount={prReadyCount}
           prReadyOnly={prReadyOnly}
           projectId={projectId}
           projectOptions={filterProjectOptions.map((project) => ({

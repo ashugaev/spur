@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
 import {
   type CiStatus,
@@ -9,6 +9,7 @@ import {
   type ReviewDecision,
   isCiStatus,
   isPrInfoShape,
+  isPrReady,
   isPrState,
   parseReviewDecision,
   prInfosEqual,
@@ -45,6 +46,30 @@ interface CacheEntry {
 
 const prCache = new Map<string, CacheEntry>();
 const pendingPrRequests = new Map<string, Promise<PrInfo>>();
+
+// Notified from setPrCache so a `primePrInfo` write from anywhere (a batch
+// fetch, a merge action) re-renders every already-mounted `usePrInfo`
+// consumer for that URL, not just the one that triggered the write.
+const prCacheListeners = new Map<string, Set<() => void>>();
+
+function notifyPrCacheListeners(url: string): void {
+  const listeners = prCacheListeners.get(url);
+  if (!listeners) return;
+  for (const listener of listeners) listener();
+}
+
+export function subscribePrInfo(url: string, listener: () => void): () => void {
+  let listeners = prCacheListeners.get(url);
+  if (!listeners) {
+    listeners = new Set();
+    prCacheListeners.set(url, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners?.delete(listener);
+    if (listeners && listeners.size === 0) prCacheListeners.delete(url);
+  };
+}
 
 export function isGitHubPrLinkLabel(label: string): boolean {
   return label === "github-pr" || label === "pr";
@@ -104,6 +129,7 @@ function persistPrCache(): void {
 function setPrCache(url: string, data: PrInfo): void {
   prCache.set(url, { data, fetchedAt: Date.now() });
   persistPrCache();
+  notifyPrCacheListeners(url);
 }
 
 hydratePrCacheFromStorage();
@@ -115,6 +141,20 @@ function cachedOrEmpty(url: string): PrInfo {
 
 export function primePrInfo(url: string, data: PrInfo): void {
   setPrCache(url, data);
+}
+
+function parsePrInfoPayload(obj: Record<string, unknown>): PrInfo {
+  return {
+    state: isPrState(obj["state"]) ? obj["state"] : null,
+    reviewDecision: parseReviewDecision(obj["reviewDecision"]),
+    ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+    canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
+    mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
+    totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
+    unresolvedThreads: typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
+    fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
+    stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
+  };
 }
 
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
@@ -129,18 +169,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
       if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
-      const parsed: PrInfo = {
-        state: isPrState(obj["state"]) ? obj["state"] : null,
-        reviewDecision: parseReviewDecision(obj["reviewDecision"]),
-        ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
-        canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
-        mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
-        totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
-        unresolvedThreads:
-          typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
-        fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
-        stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
-      };
+      const parsed = parsePrInfoPayload(obj);
       if (error && parsed.state === null) return cachedOrEmpty(url);
       return parsed;
     } catch {
@@ -152,6 +181,34 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
 
   pendingPrRequests.set(url, request);
   return request;
+}
+
+// Primes the client cache for every URL in one round trip, so mounted rows'
+// `usePrInfo` short-circuits on the next poll instead of each firing its own
+// single-URL fetch. Best-effort: a failed batch just leaves rows to fall
+// back to their existing per-row fetch.
+export async function fetchPrInfoBatch(urls: readonly string[]): Promise<void> {
+  const unique = [...new Set(urls)];
+  if (unique.length === 0) return;
+
+  try {
+    const res = await fetch("/api/pr-status/batch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ urls: unique }),
+    });
+    if (!res.ok) return;
+    const data: unknown = await res.json();
+    if (typeof data !== "object" || data === null) return;
+    const results = (data as Record<string, unknown>)["results"];
+    if (typeof results !== "object" || results === null) return;
+    for (const [url, value] of Object.entries(results as Record<string, unknown>)) {
+      if (typeof value !== "object" || value === null) continue;
+      primePrInfo(url, parsePrInfoPayload(value as Record<string, unknown>));
+    }
+  } catch {
+    /* best-effort; per-row fetchPrInfo remains the fallback */
+  }
 }
 
 export function reviewProviderFromUrl(url: string): ReviewProvider {
@@ -213,7 +270,69 @@ export function usePrInfo(url: string | undefined): PrInfo {
     };
   }, [url]);
 
+  useEffect(() => {
+    if (!url) return;
+    const unsubscribe = subscribePrInfo(url, () => {
+      setInfo((current) => {
+        const next = cachedOrEmpty(url);
+        return prInfosEqual(current, next) ? current : next;
+      });
+    });
+    return unsubscribe;
+  }, [url]);
+
   return info;
+}
+
+// GitHub-only URLs from `urls` are batch-fetched while `enabled` is true (on
+// mount and every POLL_MS), and readiness is derived from the primed cache
+// via `isPrReady`. `loaded` stays false until the first batch for the
+// current URL set resolves, so a filter consumer can no-op instead of
+// flashing an empty list while priming.
+export function usePrReadyUrls(
+  urls: readonly string[],
+  enabled: boolean,
+): { readonly ready: ReadonlySet<string>; readonly loaded: boolean } {
+  // Keyed on content, not array identity: a caller that doesn't memoize its
+  // `urls` array (a fresh literal each render) must not re-trigger the
+  // fetch effect below every render.
+  const urlsKey = urls.join("\n");
+  const githubUrls = useMemo(
+    () => urls.filter((url) => reviewProviderFromUrl(url) === "github"),
+    [urlsKey],
+  );
+  const [state, setState] = useState<{ ready: ReadonlySet<string>; loaded: boolean }>({
+    ready: new Set(),
+    loaded: false,
+  });
+
+  useEffect(() => {
+    if (!enabled) {
+      setState({ ready: new Set(), loaded: false });
+      return;
+    }
+    if (githubUrls.length === 0) {
+      setState({ ready: new Set(), loaded: true });
+      return;
+    }
+
+    let cancelled = false;
+    const run = async () => {
+      await fetchPrInfoBatch(githubUrls);
+      if (cancelled) return;
+      const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
+      setState({ ready, loaded: true });
+    };
+
+    void run();
+    const timer = setInterval(() => void run(), POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [enabled, githubUrls]);
+
+  return state;
 }
 
 export function prStateColor(state: PrState | null): string | undefined {

@@ -60,6 +60,17 @@ export function isPrInfoShape(value: unknown): value is PrInfo {
   );
 }
 
+// `state === "open"` is deliberately not re-checked: route.ts already folds
+// it into `canMerge` (canMerge is only ever true for an open PR). Likewise
+// `mergeConflict` is not checked: it is mutually exclusive with `canMerge`
+// (a conflicting/dirty PR can never be mergeable), so re-checking it here
+// would be dead code.
+export function isPrReady(info: PrInfo): boolean {
+  return (
+    info.canMerge && info.unresolvedThreads === 0 && info.reviewDecision !== "changes_requested"
+  );
+}
+
 export function prInfosEqual(a: PrInfo, b: PrInfo): boolean {
   return (
     a.state === b.state &&

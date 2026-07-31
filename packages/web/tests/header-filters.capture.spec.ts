@@ -5,8 +5,10 @@ import {
   gotoMocked,
   makeErroredSession,
   makeNeedsInputSession,
+  makeSessionWithPR,
   makeStoppedSession,
   makeWorkingSession,
+  mockPrStatusBatch,
 } from "./fixtures.js";
 
 const ARTIFACTS_DIR = process.env.SPUR_SESSION_ARTIFACTS_DIR ?? "screenshots";
@@ -40,6 +42,26 @@ const SESSIONS = [
     agent: "claude",
     slots: { title: "Errored session", links: [], tags: ["bug"] },
   }),
+  makeSessionWithPR({
+    id: "hf-pr-ready-1",
+    project: "sp",
+    agent: "claude",
+    slots: {
+      title: "PR-ready session",
+      links: [{ label: "github-pr", url: "https://github.com/spur/spur/pull/701" }],
+      tags: [],
+    },
+  }),
+  makeSessionWithPR({
+    id: "hf-pr-not-ready-1",
+    project: "sp",
+    agent: "codex",
+    slots: {
+      title: "PR not-ready session",
+      links: [{ label: "github-pr", url: "https://github.com/spur/spur/pull/702" }],
+      tags: [],
+    },
+  }),
   ...Array.from({ length: 12 }, (_, index) =>
     makeStoppedSession({
       id: `hf-stopped-${index + 1}`,
@@ -49,6 +71,27 @@ const SESSIONS = [
     }),
   ),
 ];
+
+const PR_STATUS_BY_URL: Record<string, Record<string, unknown>> = {
+  "https://github.com/spur/spur/pull/701": {
+    state: "open",
+    reviewDecision: null,
+    ciStatus: null,
+    canMerge: true,
+    mergeConflict: false,
+    totalThreads: 0,
+    unresolvedThreads: 0,
+  },
+  "https://github.com/spur/spur/pull/702": {
+    state: "open",
+    reviewDecision: "changes_requested",
+    ciStatus: null,
+    canMerge: true,
+    mergeConflict: false,
+    totalThreads: 1,
+    unresolvedThreads: 0,
+  },
+};
 
 const TAG_CATALOG = [
   { name: "feature", description: "New user-facing capability", color: "#3fb950" },
@@ -89,6 +132,7 @@ async function mockDashboard(page: Page) {
       });
     });
   }
+  await mockPrStatusBatch(page, PR_STATUS_BY_URL);
 }
 
 function shot(page: Page, name: string) {
@@ -111,11 +155,15 @@ test.describe("header + filters capture — mobile (390px)", () => {
     await page.getByRole("dialog", { name: "Filters" }).waitFor();
     await shot(page, "header-02-mobile-filters-open.png");
 
+    // 7. Modal open, PR Ready selected on its own — same chip shape as a
+    //    status option, with the count of ready sessions.
+    await page.getByRole("button", { name: /^Ready to merge:/ }).click();
+    await shot(page, "header-07-mobile-prready-on.png");
+
     // 3. Filters active: select a status lane, a tag, and PR-ready — badge
     //    shows a count, trigger gets an accent border, FAB stays reachable.
     await page.getByRole("button", { name: /^Errors:/ }).click();
     await page.getByRole("button", { name: /^bug:/ }).click();
-    await page.getByRole("button", { name: "Ready to merge" }).click();
     await page.getByRole("button", { name: "done", exact: true }).click();
     await shot(page, "header-03-mobile-filters-active.png");
 
@@ -141,5 +189,11 @@ test.describe("header + filters capture — desktop (1280px)", () => {
     await page.getByRole("button", { name: "Filters", exact: true }).click();
     await page.getByRole("dialog", { name: "Filters" }).waitFor();
     await shot(page, "header-06-desktop-filters-open.png");
+
+    // 8. PR Ready toggled on and the modal closed: the trigger shows an
+    //    active badge and the list narrows to the one ready session.
+    await page.getByRole("button", { name: /^Ready to merge:/ }).click();
+    await page.getByRole("button", { name: "done", exact: true }).click();
+    await shot(page, "header-08-desktop-prready-active.png");
   });
 });

@@ -270,6 +270,35 @@ export async function mockGitLabStatus(
   });
 }
 
+/**
+ * Stub `POST /api/pr-status/batch` with a fixed `url -> PrStatusResponse`
+ * map and a request counter, so E2E specs can both drive the PR-ready
+ * filter and assert the batch endpoint is never called while it's off.
+ */
+export async function mockPrStatusBatch(
+  page: Page,
+  byUrl: Record<string, Record<string, unknown>>,
+): Promise<{ count: () => number }> {
+  let requestCount = 0;
+  await page.route(/\/api\/pr-status\/batch$/, (route) => {
+    requestCount += 1;
+    const payload = route.request().postDataJSON() as { urls?: unknown } | null;
+    const urls = Array.isArray(payload?.urls) ? payload.urls : [];
+    const results: Record<string, unknown> = {};
+    for (const url of urls) {
+      if (typeof url === "string" && byUrl[url]) {
+        results[url] = byUrl[url];
+      }
+    }
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ results }),
+    });
+  });
+  return { count: () => requestCount };
+}
+
 export async function mockTagCatalog(page: Page): Promise<void> {
   await page.route("/api/tags", (route) => {
     void route.fulfill({

@@ -87,6 +87,7 @@ import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/st
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
+import { POST as postPrStatusBatch } from "@/app/api/pr-status/batch/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
@@ -2760,6 +2761,162 @@ describe("Spur web API routes", () => {
         expect(fetchMock).toHaveBeenCalledTimes(2);
       } finally {
         Date.now = realNow;
+      }
+    });
+  });
+
+  describe("POST /api/pr-status/batch", () => {
+    const fetchMock = vi.fn();
+
+    // Use a counter to generate unique PR numbers, avoiding module-level cache hits
+    let prCounter = 9000;
+    function nextPrUrl() {
+      return `https://github.com/owner/repo/pull/${prCounter++}`;
+    }
+
+    function postBatch(urls: unknown) {
+      return postPrStatusBatch(
+        new NextRequest("http://localhost:3000/api/pr-status/batch", {
+          method: "POST",
+          body: JSON.stringify({ urls }),
+        }),
+      );
+    }
+
+    function makePrNode(overrides: Record<string, unknown> = {}) {
+      return {
+        state: "OPEN",
+        isDraft: false,
+        merged: false,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviewDecision: null,
+        reviewThreads: { nodes: [] },
+        commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+        ...overrides,
+      };
+    }
+
+    function aliasedGql(nodesByAlias: Record<string, unknown>) {
+      const data: Record<string, unknown> = {};
+      for (const [alias, node] of Object.entries(nodesByAlias)) {
+        data[alias] = { pullRequest: node };
+      }
+      return { data };
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITHUB_TOKEN"] = "test-token";
+      resetGitHubApiStateForTests();
+      const reset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof reset === "function") (reset as () => void)();
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    it("returns 400 when urls is not an array", async () => {
+      const response = await postBatch("not-an-array");
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for more than 100 urls", async () => {
+      const urls = Array.from({ length: 101 }, () => nextPrUrl());
+      const response = await postBatch(urls);
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("omits an invalid URL from results without a 400", async () => {
+      const validUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+
+      const response = await postBatch([validUrl, "https://example.com/not-a-pr"]);
+      const payload = (await response.json()) as { results: Record<string, unknown> };
+
+      expect(response.status).toBe(200);
+      expect(Object.keys(payload.results)).toEqual([validUrl]);
+    });
+
+    it("issues zero fetch when every URL is already cached", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+      await postBatch([url]); // warms the cache
+      fetchMock.mockReset();
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null }>;
+      };
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(payload.results[url]?.state).toBe("open");
+    });
+
+    it("issues exactly one fetch with one alias per uncached PR on a partial cache miss", async () => {
+      const cachedUrl = nextPrUrl();
+      const missUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+      await postBatch([cachedUrl]); // warms cachedUrl
+      fetchMock.mockReset();
+
+      fetchMock.mockResolvedValueOnce(
+        ghOk(aliasedGql({ pr0: makePrNode({ state: "MERGED", merged: true }) })),
+      );
+
+      const response = await postBatch([cachedUrl, missUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null }>;
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+      const body = JSON.parse(init.body) as { query: string };
+      expect(body.query.match(/pr\d+: repository/g)).toHaveLength(1);
+      expect(payload.results[cachedUrl]?.state).toBe("open");
+      expect(payload.results[missUrl]?.state).toBe("merged");
+    });
+
+    it("returns a stale last-good snapshot with the rate-limit error per miss, issuing zero fetch", async () => {
+      vi.useFakeTimers();
+      try {
+        const readyUrl = nextPrUrl();
+        fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+        await postBatch([readyUrl]); // warms last-good + the short-lived response cache
+
+        vi.advanceTimersByTime(130_000); // expire the short-lived cache; last-good persists
+
+        const tripUrl = nextPrUrl();
+        const resetAt = Math.floor((Date.now() + 30_000) / 1000);
+        fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          headers: new Headers({
+            "x-ratelimit-reset": String(resetAt),
+            "x-ratelimit-remaining": "0",
+          }),
+          json: async () => ({ message: "rate limited" }),
+          text: async () => JSON.stringify({ message: "rate limited" }),
+        });
+        await postBatch([tripUrl]); // trips the shared rate-limit window
+
+        fetchMock.mockClear();
+        const response = await postBatch([readyUrl]);
+        const payload = (await response.json()) as {
+          results: Record<string, { state: string | null; stale?: boolean; error?: string }>;
+        };
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(payload.results[readyUrl]?.stale).toBe(true);
+        expect(payload.results[readyUrl]?.state).toBe("open");
+        expect(payload.results[readyUrl]?.error).toContain("GitHub rate limit");
+      } finally {
+        vi.useRealTimers();
       }
     });
   });

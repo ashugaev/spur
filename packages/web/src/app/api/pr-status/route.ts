@@ -5,18 +5,21 @@ import {
   ghHeaders,
   handleGitHubRateLimit,
 } from "@/lib/github-api";
+import {
+  GITHUB_PR_STATUS_FIELDS,
+  type GitHubPrNode,
+  recordGitHubPrAbsent,
+  recordGitHubPrError,
+  recordGitHubPrNode,
+} from "@/lib/github-pr-status";
 import { glabHeaders, resolveGlabToken } from "@/lib/gitlab-api";
-import { type CiStatus, type PrState, parseReviewDecision } from "@/lib/pr-status-shape";
+import { type CiStatus, type PrState } from "@/lib/pr-status-shape";
 import {
   type PrStatusResponse,
   cacheKeyForCoords,
-  cachePrStatusResponse,
-  cacheTtlMs,
-  errorCacheTtlMs,
   errorResponse,
   extractPrCoords,
   readCachedPrStatus,
-  recordSuccessfulPrStatus,
   resetPrStatusCacheForTests,
 } from "@/lib/pr-status-store";
 
@@ -25,16 +28,7 @@ type ReviewProvider = "github" | "gitlab";
 interface GitHubGraphQLResponse {
   data?: {
     repository?: {
-      pullRequest?: {
-        state: string;
-        isDraft: boolean;
-        merged: boolean;
-        mergeable: string | null;
-        mergeStateStatus: string | null;
-        reviewDecision: string | null;
-        reviewThreads: { nodes: { isResolved: boolean }[] };
-        commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
-      };
+      pullRequest?: GitHubPrNode;
     };
   };
   errors?: GitHubGraphQLError[];
@@ -78,11 +72,7 @@ type GitLabLastGoodEntry = {
 
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
-    pullRequest(number:$number) {
-      state isDraft merged mergeable mergeStateStatus reviewDecision
-      reviewThreads(first:100) { nodes { isResolved } }
-      commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
-    }
+    pullRequest(number:$number) { ${GITHUB_PR_STATUS_FIELDS} }
   }
 }`;
 
@@ -90,17 +80,6 @@ const GITLAB_CACHE_TTL_MS = 120_000;
 const GITLAB_ERROR_CACHE_TTL_MS = 60_000;
 const gitlabCache = new Map<string, GitLabCacheEntry>();
 const gitlabLastGoodCache = new Map<string, GitLabLastGoodEntry>();
-
-function normalizeGitHubState(value: string | null | undefined): string {
-  return (value ?? "").trim().toUpperCase();
-}
-
-function normalizeGitHubCiStatus(rollupState: string | undefined): CiStatus {
-  if (rollupState === "SUCCESS") return "success";
-  if (rollupState === "FAILURE" || rollupState === "ERROR") return "failure";
-  if (rollupState === "PENDING" || rollupState === "EXPECTED") return "pending";
-  return null;
-}
 
 function gitlabCoords(
   url: string,
@@ -256,9 +235,7 @@ async function handleGitHubStatus(url: string) {
 
     if (!ghResponse.ok) {
       handleGitHubRateLimit(ghResponse);
-      const response = errorResponse(cacheKey, `GitHub API ${ghResponse.status}`);
-      cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
-      return NextResponse.json(response);
+      return NextResponse.json(recordGitHubPrError(cacheKey, `GitHub API ${ghResponse.status}`));
     }
 
     const gql = (await ghResponse.json()) as GitHubGraphQLResponse;
@@ -273,57 +250,15 @@ async function handleGitHubStatus(url: string) {
 
     if (!pr) {
       if (gqlError) {
-        const response = errorResponse(cacheKey, gqlError);
-        cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
-        return NextResponse.json(response);
+        return NextResponse.json(recordGitHubPrError(cacheKey, gqlError));
       }
-
-      const response = recordSuccessfulPrStatus(cacheKey, {
-        state: null,
-        reviewDecision: null,
-        ciStatus: null,
-        canMerge: false,
-        mergeConflict: false,
-        totalThreads: 0,
-        unresolvedThreads: 0,
-      });
-      cachePrStatusResponse(cacheKey, response, cacheTtlMs());
-      return NextResponse.json(response);
+      return NextResponse.json(recordGitHubPrAbsent(cacheKey));
     }
 
-    let state: PrState;
-    if (pr.isDraft) state = "draft";
-    else if (pr.merged) state = "merged";
-    else if (pr.state === "CLOSED") state = "closed";
-    else state = "open";
-
-    const totalThreads = pr.reviewThreads.nodes.length;
-    const unresolvedThreads = pr.reviewThreads.nodes.filter((thread) => !thread.isResolved).length;
-    const mergeable = normalizeGitHubState(pr.mergeable);
-    const mergeStateStatus = normalizeGitHubState(pr.mergeStateStatus);
-    const canMerge = state === "open" && mergeable === "MERGEABLE" && mergeStateStatus === "CLEAN";
-    const mergeConflict =
-      mergeable === "CONFLICTING" ||
-      mergeStateStatus === "DIRTY" ||
-      mergeStateStatus === "CANNOT_BE_MERGED";
-
-    const response = recordSuccessfulPrStatus(cacheKey, {
-      state,
-      reviewDecision: parseReviewDecision(pr.reviewDecision),
-      ciStatus: normalizeGitHubCiStatus(pr.commits.nodes[0]?.commit.statusCheckRollup?.state),
-      canMerge,
-      mergeConflict,
-      totalThreads,
-      unresolvedThreads,
-    });
-    const payload = gqlError ? { ...response, error: gqlError } : response;
-    cachePrStatusResponse(cacheKey, payload, gqlError ? errorCacheTtlMs() : cacheTtlMs());
-    return NextResponse.json(payload);
+    return NextResponse.json(recordGitHubPrNode(cacheKey, pr, gqlError));
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
-    const response = errorResponse(cacheKey, message);
-    cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
-    return NextResponse.json(response);
+    return NextResponse.json(recordGitHubPrError(cacheKey, message));
   }
 }
 

@@ -73,6 +73,7 @@ export interface FiltersModalProps {
   onSelectStatus: (level: AttentionLevel | null) => void;
   prReadyOnly: boolean;
   onPrReadyOnlyChange: (value: boolean) => void;
+  prReadyCount: number;
   projectOptions: FiltersModalProjectOption[];
   allProjectsCount: number;
   projectId: string;
@@ -95,6 +96,7 @@ export function FiltersModal({
   onSelectStatus,
   prReadyOnly,
   onPrReadyOnlyChange,
+  prReadyCount,
   projectOptions,
   allProjectsCount,
   projectId,
@@ -205,8 +207,25 @@ export function FiltersModal({
                 title="GitHub only"
                 type="button"
               >
-                <IconMergeReady />
-                <span>Ready to merge</span>
+                <span
+                  style={{
+                    color:
+                      prReadyCount > 0 ? "var(--color-status-ready)" : "var(--color-text-tertiary)",
+                  }}
+                >
+                  <IconMergeReady />
+                </span>
+                <span
+                  style={prReadyCount > 0 ? undefined : { color: "var(--color-text-tertiary)" }}
+                >
+                  Ready to merge:
+                </span>
+                <span
+                  className="font-bold tabular-nums"
+                  style={prReadyCount > 0 ? undefined : { color: "var(--color-text-tertiary)" }}
+                >
+                  {prReadyCount}
+                </span>
               </button>
             </div>
           </div>

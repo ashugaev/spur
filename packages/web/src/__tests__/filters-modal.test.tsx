@@ -128,7 +128,7 @@ describe("Filters modal", () => {
     // Tag
     fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
     // PR-ready toggle
-    fireEvent.click(screen.getByRole("button", { name: "Ready to merge" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Ready to merge:/ }));
 
     await waitFor(() => {
       expect(trigger).toHaveTextContent("5");
@@ -189,19 +189,25 @@ describe("Filters modal", () => {
     expect(screen.getByText("web-1")).toBeInTheDocument();
   });
 
-  it("toggles Ready to merge without touching the visible session list", async () => {
+  it("toggles Ready to merge and narrows to nothing when no session has a GitHub review link", async () => {
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
 
     openFilters();
-    const toggle = screen.getByRole("button", { name: "Ready to merge" });
+    const toggle = screen.getByRole("button", { name: /^Ready to merge:/ });
     expect(toggle).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-pressed", "true");
 
-    // Phase B: the toggle is wired through state and the badge, but it does
-    // not filter the list yet — that predicate lands in a follow-up.
-    expect(screen.getByText("api-1")).toBeInTheDocument();
+    // None of the fixture sessions carry a GitHub review link, so the batch
+    // (with zero GitHub URLs to fetch) resolves synchronously to an empty
+    // ready set, and the list narrows to nothing.
+    await waitFor(() => expect(screen.queryByText("api-1")).not.toBeInTheDocument());
+    expect(screen.queryByText("api-2")).not.toBeInTheDocument();
+    expect(screen.queryByText("web-1")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
     expect(screen.getByText("api-2")).toBeInTheDocument();
     expect(screen.getByText("web-1")).toBeInTheDocument();
   });
@@ -214,12 +220,12 @@ describe("Filters modal", () => {
     openFilters();
     fireEvent.click(screen.getByRole("button", { name: /^Working:/ }));
     fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Ready to merge" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Ready to merge:/ }));
 
     fireEvent.click(screen.getByRole("button", { name: "clear all" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Ready to merge" })).toHaveAttribute(
+      expect(screen.getByRole("button", { name: /^Ready to merge:/ })).toHaveAttribute(
         "aria-pressed",
         "false",
       );
