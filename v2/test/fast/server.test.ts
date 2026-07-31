@@ -9,6 +9,7 @@ import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SidecarPortConflictError,
@@ -652,6 +653,67 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.restore = originalRestore;
+      await server.stop();
+    }
+  });
+
+  it("routes POST /sessions/:id/reopen and forwards a refusal as 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalReopen = SessionService.prototype.reopen;
+    const calls: string[] = [];
+    SessionService.prototype.reopen = async function mockReopen(sessionId) {
+      calls.push(sessionId);
+      if (sessionId === "demo-1") {
+        throw new SessionNotReopenableError(
+          "Session demo-1 is running, not completed — use restore or respawn",
+        );
+      }
+      return { id: sessionId, status: "running" } as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const refused = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/reopen`, {
+        method: "POST",
+      });
+      expect(refused.status).toBe(409);
+      await expect(refused.json()).resolves.toEqual({
+        error: "Session demo-1 is running, not completed — use restore or respawn",
+      });
+
+      const accepted = await fetch(`http://127.0.0.1:${port}/sessions/demo-2/reopen`, {
+        method: "POST",
+      });
+      expect(accepted.status).toBe(200);
+      await expect(accepted.json()).resolves.toEqual({ id: "demo-2", status: "running" });
+      expect(calls).toEqual(["demo-1", "demo-2"]);
+    } finally {
+      SessionService.prototype.reopen = originalReopen;
       await server.stop();
     }
   });

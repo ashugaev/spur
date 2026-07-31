@@ -21,6 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
 - `list` hides `completed` and `killed` sessions by default.
+- `reopen` revives a `completed` session on its own id via the restore path; `completed` stays terminal for `send`, `deliver`, and sidecar actions.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
 - Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
