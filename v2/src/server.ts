@@ -355,8 +355,8 @@ function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionState
 }
 
 // A CLI spawn only ever sends one entry; this bounds direct API/MCP callers,
-// which can pass an arbitrary array, since each entry does a sync
-// read/write on the spawn hot path.
+// which can pass an arbitrary array. Each entry still does a requireSession
+// read on the spawn hot path (the writes are batched into one at the end).
 const MAX_SPAWN_STATE_SUBSCRIPTIONS = 20;
 
 function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesRequest[] | undefined {

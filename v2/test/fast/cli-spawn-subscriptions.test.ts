@@ -164,6 +164,24 @@ describe("spawn CLI state subscriptions", () => {
     expect(postJsonMock).not.toHaveBeenCalled();
   });
 
+  it("rethrows a non-404 --subscribe-to lookup failure unchanged, no spawn", async () => {
+    getJsonMock.mockRejectedValue(new Error("Timed out waiting for daemon at http://x"));
+
+    await expect(
+      parseSpawn([
+        "spawn",
+        "demo",
+        "do the thing",
+        "--subscribe-to",
+        "demo-1",
+        "--subscribe-state",
+        "waiting",
+        "--json",
+      ]),
+    ).rejects.toThrow(/^Timed out waiting for daemon at http:\/\/x$/);
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
   it("validates the --subscribe-to target exists before spawning", async () => {
     getJsonMock.mockResolvedValue({ id: "demo-1", project: "demo" });
     postJsonMock.mockResolvedValue({ id: "demo-2", project: "demo" });

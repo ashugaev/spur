@@ -1707,8 +1707,14 @@ async function ensureCliSpawnSubscriptionTargetsExist(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (!/session not found/i.test(message)) {
+        // Not a 404 for this target — a daemon-start failure, 500, or
+        // transport error shouldn't be relabeled as an unknown target.
+        throw error;
+      }
       throw new Error(
         `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+        { cause: error },
       );
     }
   }

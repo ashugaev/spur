@@ -4340,7 +4340,19 @@ export class SessionService {
       }
     }
     if (armedAny) {
-      this.writeStateSubscriptions(session, nextSubscriptions, now);
+      try {
+        this.writeStateSubscriptions(session, nextSubscriptions, now);
+      } catch (error) {
+        // A write/index failure here must not fail the spawn — same
+        // non-fatal contract as the per-entry validation above.
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: { error: message },
+        });
+      }
     }
     return readSession(this.config.dataDir, session.id) ?? session;
   }

@@ -1411,6 +1411,47 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("arms and persists the valid entry from a mixed valid/missing-target batch, logs spawn_failed only for the missing one", async () => {
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [
+        { targetSessionId: "watched-1", states: ["needs_input"] },
+        { targetSessionId: "missing-1", states: ["needs_input"] },
+      ],
+    });
+
+    expect(result.status).toBe("running");
+    expect(result.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1", targetSessionId: "watched-1" }),
+    ]);
+    expect(sessions.get("api-1")?.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1" }),
+    ]);
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.subscription.spawn_failed",
+      ),
+    ).toHaveLength(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.subscription.spawn_failed",
+        level: "warn",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({ targetSessionId: "missing-1" }),
+      }),
+    );
+    service.dispose();
+  });
+
   it("delivers exactly one message to a spawn-time subscriber on a matching target transition", async () => {
     // Subscriber spawns as codex so classifying it during delivery doesn't share
     // the claude jsonl mock being driven below to transition the claude target.
