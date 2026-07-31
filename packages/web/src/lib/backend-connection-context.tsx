@@ -10,7 +10,7 @@ export const HEARTBEAT_INTERVAL_MS = 5_000;
 // Tighter cadence while disconnected: we want to reload as soon as the
 // daemon comes back, not wait out a full healthy-state heartbeat.
 export const RECONNECT_INTERVAL_MS = 4_000;
-export const RECONNECT_MAX_INTERVAL_MS = 8_000;
+const RECONNECT_MAX_INTERVAL_MS = 8_000;
 // Require this many consecutive failures before flipping to "disconnected".
 // Combined with retryIntervalMs, this buys a ≥32s tolerance window so
 // daemon event-loop stalls shorter than that leave the overlay hidden.
@@ -22,7 +22,10 @@ export const FAILURE_THRESHOLD = 4;
 export const PROBE_TIMEOUT_MS = 3_000;
 
 export function retryIntervalMs(consecutiveFailures: number): number {
-  return Math.min(RECONNECT_INTERVAL_MS * 2 ** (consecutiveFailures - 1), RECONNECT_MAX_INTERVAL_MS);
+  return Math.min(
+    RECONNECT_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+    RECONNECT_MAX_INTERVAL_MS,
+  );
 }
 
 export type BackendConnectionPhase = "connected" | "disconnected";

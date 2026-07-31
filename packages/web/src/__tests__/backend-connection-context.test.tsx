@@ -366,20 +366,33 @@ describe("BackendConnectionProvider", () => {
 
     const { result } = renderProvider();
 
+    const t0 = Date.now();
     // p1 aborts at t=3_000; step through each probe individually so React
     // commits effect cleanups between timer firings.
-    await act(async () => { await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS);
+    });
     // p2 fires at t=7_000, aborts at t=10_000
-    await act(async () => { await vi.advanceTimersByTimeAsync(retryIntervalMs(1) + PROBE_TIMEOUT_MS); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(1) + PROBE_TIMEOUT_MS);
+    });
     // p3 fires at t=18_000, aborts at t=21_000
-    await act(async () => { await vi.advanceTimersByTimeAsync(retryIntervalMs(2) + PROBE_TIMEOUT_MS); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(2) + PROBE_TIMEOUT_MS);
+    });
     // p4 fires at t=29_000; not yet aborted — advance to t=31_000
-    await act(async () => { await vi.advanceTimersByTimeAsync(retryIntervalMs(3) + 2_000); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(3) + 2_000);
+    });
     expect(result.current.phase).toBe("connected");
+    expect(Date.now() - t0).toBe(31_000);
 
     // p4 aborts at t=32_000 — advance past it
-    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
     expect(result.current.phase).toBe("disconnected");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(32_000);
   });
 
   it("stays dormant (connected, no reload) while a version switch is in flight", async () => {
