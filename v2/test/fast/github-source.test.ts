@@ -2051,6 +2051,66 @@ describe("github source", () => {
 
       handle.stop();
     });
+
+    it("does not advance the adaptive deadline for a poll cycle suppressed entirely by an active rate-limit cooldown", async () => {
+      // Baseline: startup poll succeeds, legitimately arming the deadline at
+      // T0 + slowIntervalMs = 00:10:00.
+      queuePollResponse("SUCCESS");
+      const rateLimitError = Object.assign(new Error("GraphQL: API rate limit already exceeded"), {
+        stderr: JSON.stringify({
+          errors: [{ message: "API rate limit already exceeded" }],
+          data: { rateLimit: { resetAt: "2026-07-30T00:03:00.000Z" } },
+        }),
+      });
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Force the next real tick to attempt a poll mid-window via recent
+      // session activity, and let that attempt hit the rate limit. This is
+      // the cycle that FIRST enters cooldown: `skippedByCooldown` is false
+      // when captured (no cooldown existed yet), so it legitimately re-arms
+      // the deadline — unchanged here since Date hasn't moved.
+      hasRecentSessionUserActionMock.mockReturnValue(true);
+      ghMock.mockRejectedValueOnce(rateLimitError);
+      await waitForGhCallCount(6);
+
+      // Move Date forward, still inside the cooldown window (lifts at
+      // 00:03:00). The forced tick still fires, but this time
+      // `shouldSkipGitHubCalls()` is already true when the cycle captures
+      // `skippedByCooldown`, so the whole cycle is suppressed before any gh
+      // call is made.
+      vi.setSystemTime(new Date("2026-07-30T00:02:00.000Z"));
+      await new Promise((resolve) => setTimeout(resolve, REAL_INTERVAL_MS * 4));
+      expect(ghMock).toHaveBeenCalledTimes(6);
+
+      // Stop forcing attempts and let the cooldown lift. Land on a Date that
+      // is past the ORIGINAL deadline (00:10:00) but well short of where a
+      // buggy implementation would have pushed the deadline to from the
+      // suppressed cycle above (00:02:00 + 600_000 = 00:12:00). Only the
+      // correct "deadline never moved" behavior lets this real tick poll.
+      hasRecentSessionUserActionMock.mockReturnValue(false);
+      vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
+
+      handle.stop();
+    });
   });
 });
 
