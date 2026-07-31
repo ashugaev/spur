@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
@@ -23,7 +24,6 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
-import { SPARK_GLYPH_PATH } from "@/design/colors";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -317,23 +317,6 @@ function IconPlus({ className }: { className: string }) {
       strokeLinecap="round"
     >
       <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-
-function BrandGlyph() {
-  return (
-    <svg
-      aria-label="Spur"
-      className="h-[17px] w-[17px] shrink-0"
-      role="img"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="var(--color-accent)"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-    >
-      <path d={SPARK_GLYPH_PATH} />
     </svg>
   );
 }
@@ -1054,15 +1037,8 @@ export function Dashboard() {
     if (typeof window === "undefined") return;
     window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
   }, []);
-  const toggleStatFilter = (level: AttentionLevel) =>
+  const selectStatFilter = (level: AttentionLevel | null) =>
     setActiveStatFilter((current) => (current === level ? null : level));
-  const selectStatFilter = (level: AttentionLevel | null) => {
-    if (level === null) {
-      setActiveStatFilter(null);
-      return;
-    }
-    toggleStatFilter(level);
-  };
   const toggleAgentFilter = (agent: AgentName) =>
     setAgentFilter((current) =>
       current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
@@ -1341,16 +1317,22 @@ export function Dashboard() {
 
   // Faceted counts for the Filters modal chips: each dimension is counted
   // against every OTHER active filter, but not against itself, so toggling
-  // one option never zeroes out the rest of that same section.
+  // one option never zeroes out the rest of that same section. Counted via
+  // `collapseDeskRows` (one entry per desk, keyed on its anchor session) so
+  // a desk with several subagent sessions counts as 1 here, matching the
+  // Status lane counts and `allStatusesCount` above.
   const projectCounts = useMemo(() => {
     const map = new Map<string, number>();
-    for (const session of allSessions) {
+    const filtered = allSessions.filter((session) => {
       if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
-        continue;
-      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) continue;
+        return false;
+      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) return false;
       if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        continue;
-      map.set(session.projectId, (map.get(session.projectId) ?? 0) + 1);
+        return false;
+      return true;
+    });
+    for (const row of collapseDeskRows(filtered)) {
+      map.set(row.session.projectId, (map.get(row.session.projectId) ?? 0) + 1);
     }
     return map;
   }, [allSessions, activeTagFilters, agentFilter, searchQuery]);
@@ -1362,23 +1344,29 @@ export function Dashboard() {
 
   const agentCounts = useMemo(() => {
     const map = new Map<AgentName, number>();
-    for (const session of projectSessions) {
+    const filtered = projectSessions.filter((session) => {
       if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
-        continue;
+        return false;
       if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        continue;
-      map.set(session.agent, (map.get(session.agent) ?? 0) + 1);
+        return false;
+      return true;
+    });
+    for (const row of collapseDeskRows(filtered)) {
+      map.set(row.session.agent, (map.get(row.session.agent) ?? 0) + 1);
     }
     return map;
   }, [projectSessions, activeTagFilters, searchQuery]);
 
   const tagCounts = useMemo(() => {
     const map = new Map<string, number>();
-    for (const session of projectSessions) {
-      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) continue;
+    const filtered = projectSessions.filter((session) => {
+      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) return false;
       if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        continue;
-      for (const tag of session.tags) map.set(tag, (map.get(tag) ?? 0) + 1);
+        return false;
+      return true;
+    });
+    for (const row of collapseDeskRows(filtered)) {
+      for (const tag of row.session.tags) map.set(tag, (map.get(tag) ?? 0) + 1);
     }
     return map;
   }, [projectSessions, agentFilter, searchQuery]);
@@ -1389,11 +1377,13 @@ export function Dashboard() {
   // violates "no /api/pr-status/batch request while prReadyOnly is false".
   const prReadyCount = useMemo(() => {
     if (!prReady.loaded) return 0;
+    const filtered = agentFilteredSessions.filter(
+      (session) =>
+        !searchQuery.trim() || sessionMatchesQuery(session, searchQuery.trim().toLowerCase()),
+    );
     let count = 0;
-    for (const session of agentFilteredSessions) {
-      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        continue;
-      const url = session.links.find((link) => isReviewLinkLabel(link.label))?.url;
+    for (const row of collapseDeskRows(filtered)) {
+      const url = row.session.links.find((link) => isReviewLinkLabel(link.label))?.url;
       if (url && prReady.ready.has(url)) count++;
     }
     return count;
@@ -1422,7 +1412,7 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
   const emptyStateMessage = hasActiveFilters
-    ? `No matching sessions${projectId ? ` in ${activeProjectName}` : ""}.`
+    ? `No sessions match this filter${projectId ? ` in ${activeProjectName}` : ""}. Reset the filters, or spawn a new session.`
     : grouped.done.length > 0
       ? "No active sessions."
       : undefined;
@@ -2161,7 +2151,7 @@ export function Dashboard() {
             ) : null}
           </button>
           <div className="relative flex min-w-0 max-w-[32rem] flex-1 items-center">
-            <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2">
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 focus-within:border-[var(--color-accent)]">
               <svg
                 aria-hidden="true"
                 className="h-[13px] w-[13px] shrink-0 text-[var(--color-text-tertiary)]"

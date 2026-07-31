@@ -171,6 +171,12 @@ test.describe("header + filters capture — mobile (390px)", () => {
     await page.getByRole("button", { name: "Reset all filters" }).click();
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await shot(page, "header-04-mobile-scrolled-fab.png");
+
+    // 9. Search field keyboard-focused: the field container shows an accent
+    //    border in place of the removed `outline-none` default ring.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.getByLabel("Filter sessions").focus();
+    await shot(page, "header-09-mobile-search-focus.png");
   });
 });
 

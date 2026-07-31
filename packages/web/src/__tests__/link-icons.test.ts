@@ -548,6 +548,85 @@ describe("fetchPrInfoBatch", () => {
     expect(result.current.state).toBe("open");
     expect(result.current.canMerge).toBe(true);
   });
+
+  it("chunks requests above the route's 100-URL cap into multiple calls", async () => {
+    const urls = Array.from(
+      { length: 250 },
+      (_, i) => `https://github.com/org/repo/pull/chunk-${i}`,
+    );
+    mockFetch.mockResolvedValue(jsonResponse({ results: {} }));
+
+    const success = await fetchPrInfoBatch(urls);
+
+    expect(success).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const sizes = mockFetch.mock.calls.map(
+      ([, init]) =>
+        (JSON.parse((init as RequestInit).body as string) as { urls: string[] }).urls.length,
+    );
+    expect(sizes).toEqual([100, 100, 50]);
+  });
+
+  it("returns false when the request fails, without throwing", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "bad request" }, false, 400));
+
+    const success = await fetchPrInfoBatch(["https://github.com/org/repo/pull/batch-fail"]);
+
+    expect(success).toBe(false);
+  });
+
+  it("returns false when a chunk network request throws", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network down"));
+
+    const success = await fetchPrInfoBatch(["https://github.com/org/repo/pull/batch-throw"]);
+
+    expect(success).toBe(false);
+  });
+
+  it("does not clobber a cached entry with a soft error payload (state: null + error)", async () => {
+    const url = "https://github.com/org/repo/pull/batch-soft-error";
+
+    // Seed a known-good cache entry via the hook, which writes through to
+    // the shared cache (a bare `fetchPrInfo` call does not).
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: null,
+        ciStatus: "success",
+        canMerge: true,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      }),
+    );
+    await act(async () => {
+      renderHook(() => usePrInfo(url));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Batch response for the same URL carries a soft error (state: null, error set).
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [url]: {
+            state: null,
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: false,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+            error: "GitHub API 503",
+          },
+        },
+      }),
+    );
+    await fetchPrInfoBatch([url]);
+
+    const { result } = renderHook(() => usePrInfo(url));
+    expect(result.current.state).toBe("open");
+    expect(result.current.ciStatus).toBe("success");
+  });
 });
 
 describe("usePrReadyUrls", () => {
@@ -608,5 +687,22 @@ describe("usePrReadyUrls", () => {
     expect(result.current.loaded).toBe(true);
     expect(result.current.ready.has(readyUrl)).toBe(true);
     expect(result.current.ready.has(notReadyUrl)).toBe(false);
+  });
+
+  it("keeps loaded false when the batch fetch fails, instead of committing an empty ready set", async () => {
+    const url = "https://github.com/org/repo/pull/903";
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "at most 100 urls" }, false, 400));
+
+    const { result } = renderHook(() => usePrReadyUrls([url], true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(false);
+    expect(result.current.ready.size).toBe(0);
   });
 });

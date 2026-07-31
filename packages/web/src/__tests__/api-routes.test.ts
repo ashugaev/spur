@@ -2919,6 +2919,56 @@ describe("Spur web API routes", () => {
         vi.useRealTimers();
       }
     });
+
+    it("resolves the successful alias and records the GraphQL error for the failed one on a partial error", async () => {
+      const okUrl = nextPrUrl();
+      const failUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: makePrNode() }, pr1: { pullRequest: null } },
+          errors: [{ message: "Could not resolve to a PullRequest" }],
+        }),
+      );
+
+      const response = await postBatch([okUrl, failUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[okUrl]?.state).toBe("open");
+      expect(payload.results[okUrl]?.error).toBeUndefined();
+      expect(payload.results[failUrl]?.state).toBeNull();
+      expect(payload.results[failUrl]?.error).toContain("Could not resolve to a PullRequest");
+    });
+
+    it("records a per-miss error and returns 200 for a non-rate-limit GitHub API failure", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghErr(500, { message: "Internal Server Error" }));
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBeNull();
+      expect(payload.results[url]?.error).toContain("GitHub API 500");
+    });
+
+    it("records a per-miss error and returns 200 when the GitHub fetch throws", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockRejectedValueOnce(new Error("network unreachable"));
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBeNull();
+      expect(payload.results[url]?.error).toContain("network unreachable");
+    });
   });
 
   describe("POST /api/pr-status/merge", () => {

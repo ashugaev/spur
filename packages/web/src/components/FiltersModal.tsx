@@ -302,7 +302,7 @@ export function FiltersModal({
 
         <div className="flex shrink-0 items-center justify-between border-t border-[var(--color-border-default)] px-[13px] py-2">
           <span className="text-[var(--color-text-secondary)]">
-            {activeFilterCount} filters applied
+            {activeFilterCount} filter{activeFilterCount === 1 ? "" : "s"} applied
           </span>
           <div className="flex items-center gap-2">
             <button

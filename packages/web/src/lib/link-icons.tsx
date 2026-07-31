@@ -183,32 +183,54 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
   return request;
 }
 
-// Primes the client cache for every URL in one round trip, so mounted rows'
-// `usePrInfo` short-circuits on the next poll instead of each firing its own
-// single-URL fetch. Best-effort: a failed batch just leaves rows to fall
-// back to their existing per-row fetch.
-export async function fetchPrInfoBatch(urls: readonly string[]): Promise<void> {
-  const unique = [...new Set(urls)];
-  if (unique.length === 0) return;
+// Matches the route's cap (route.ts MAX_BATCH_URLS): requests above this are
+// rejected with a 400, so the batch must be chunked before it's sent.
+const BATCH_CHUNK_SIZE = 100;
 
+async function fetchPrInfoBatchChunk(urls: readonly string[]): Promise<boolean> {
   try {
     const res = await fetch("/api/pr-status/batch", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ urls: unique }),
+      body: JSON.stringify({ urls }),
     });
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const data: unknown = await res.json();
-    if (typeof data !== "object" || data === null) return;
+    if (typeof data !== "object" || data === null) return false;
     const results = (data as Record<string, unknown>)["results"];
-    if (typeof results !== "object" || results === null) return;
+    if (typeof results !== "object" || results === null) return false;
     for (const [url, value] of Object.entries(results as Record<string, unknown>)) {
       if (typeof value !== "object" || value === null) continue;
-      primePrInfo(url, parsePrInfoPayload(value as Record<string, unknown>));
+      const obj = value as Record<string, unknown>;
+      const error = typeof obj["error"] === "string" ? obj["error"] : null;
+      const parsed = parsePrInfoPayload(obj);
+      // Mirror fetchPrInfo's guard: don't clobber a known-good cached entry
+      // with a soft error payload (state: null alongside an `error` field).
+      if (error && parsed.state === null) continue;
+      primePrInfo(url, parsed);
     }
+    return true;
   } catch {
-    /* best-effort; per-row fetchPrInfo remains the fallback */
+    return false;
   }
+}
+
+// Primes the client cache for every URL in one round trip, so mounted rows'
+// `usePrInfo` short-circuits on the next poll instead of each firing its own
+// single-URL fetch. Chunks above the route's per-request cap. Returns
+// whether every chunk succeeded, so a caller like `usePrReadyUrls` can tell
+// a real (possibly partial) result apart from a failed fetch.
+export async function fetchPrInfoBatch(urls: readonly string[]): Promise<boolean> {
+  const unique = [...new Set(urls)];
+  if (unique.length === 0) return true;
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < unique.length; i += BATCH_CHUNK_SIZE) {
+    chunks.push(unique.slice(i, i + BATCH_CHUNK_SIZE));
+  }
+
+  const results = await Promise.all(chunks.map(fetchPrInfoBatchChunk));
+  return results.every(Boolean);
 }
 
 export function reviewProviderFromUrl(url: string): ReviewProvider {
@@ -318,8 +340,14 @@ export function usePrReadyUrls(
 
     let cancelled = false;
     const run = async () => {
-      await fetchPrInfoBatch(githubUrls);
+      const success = await fetchPrInfoBatch(githubUrls);
       if (cancelled) return;
+      if (!success) {
+        // Leave the existing state as-is: a failed fetch must not commit an
+        // unprimed (empty) `ready` set, which would narrow a `prReadyOnly`
+        // filter to nothing instead of leaving it a no-op.
+        return;
+      }
       const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
       setState({ ready, loaded: true });
     };

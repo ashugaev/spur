@@ -822,7 +822,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No matching sessions in API.", { exact: false }),
+        screen.getByText("No sessions match this filter in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 

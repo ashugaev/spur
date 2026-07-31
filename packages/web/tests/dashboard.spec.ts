@@ -609,7 +609,9 @@ test.describe("D2: Filters modal status counts are correct", () => {
 
     await selectStatus(page, "Needs Input");
 
-    await expect(page.getByText("No matching sessions.")).toBeVisible();
+    await expect(
+      page.getByText("No sessions match this filter. Reset the filters, or spawn a new session."),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
 
     await page.getByRole("button", { name: "Reset Filters" }).click();
