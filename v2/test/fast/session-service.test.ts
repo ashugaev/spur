@@ -14132,7 +14132,7 @@ describe("SessionService", () => {
 
       await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
       const error = await service.reopen("api-1").catch((caught: unknown) => caught);
-      expect((error as Error).message).toMatch(/desk anchor/);
+      expect((error as Error).message).toMatch(/shared workspace/);
       expect(branchRefsExistMock).not.toHaveBeenCalled();
       expect(createWorktreeMock).not.toHaveBeenCalled();
       expect(writeSessionMock).not.toHaveBeenCalled();

@@ -3140,10 +3140,7 @@ export class SessionService {
         ...(resolved.slots ? { slots: resolved.slots } : {}),
         pr: binding,
       };
-      writeWorkspaceState(this.config.dataDir, anchorId, nextState);
-      // Transitional mirror onto the owning session record: see updateSlots
-      // for why this keeps being written this release.
-      writeSession(this.config.dataDir, { ...current, pr: binding });
+      this.writeWorkspaceStateWithLegacyMirror(current, nextState);
       this.logEvent("session.pr_auto_detect.found", {
         level: "info",
         sessionId: session.id,
@@ -3194,11 +3191,7 @@ export class SessionService {
     // No pr to preserve here: the early return above already covers
     // `resolved.pr` being set.
     const nextState: WorkspaceState = { ...(slots ? { slots } : {}) };
-    writeWorkspaceState(this.config.dataDir, anchorId, nextState);
-    // Transitional mirror onto the owning session record: see updateSlots
-    // for why this keeps being written this release.
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
-    writeSession(this.config.dataDir, updated);
+    this.writeWorkspaceStateWithLegacyMirror(current, nextState);
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
@@ -3713,18 +3706,18 @@ export class SessionService {
         const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
         const slotsChanged = nextSlots !== resolved.slots;
         if (reservedSession !== args.session || slotsChanged) {
-          if (slotsChanged) {
-            writeWorkspaceState(this.config.dataDir, workspaceIdOf(baseRecord), {
+          // Rolls the reserved-port state back off this session's own record.
+          writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
+        }
+        if (slotsChanged) {
+          this.writeWorkspaceStateWithLegacyMirror(
+            baseRecord,
+            {
               ...(nextSlots ? { slots: nextSlots } : {}),
               ...(resolved.pr ? { pr: resolved.pr } : {}),
-            });
-          }
-          // Transitional mirror onto the owning session record: see
-          // updateSlots for why this keeps being written this release.
-          writeSession(this.config.dataDir, {
-            ...withSessionSlots(baseRecord, nextSlots),
-            updatedAt: nowIso(),
-          });
+            },
+            { touchUpdatedAt: true },
+          );
         }
         throw error;
       }
@@ -3906,15 +3899,15 @@ export class SessionService {
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, sidecarName);
     if (nextSlots === resolved.slots) return latest;
-    writeWorkspaceState(this.config.dataDir, workspaceIdOf(latest), {
-      ...(nextSlots ? { slots: nextSlots } : {}),
-      ...(resolved.pr ? { pr: resolved.pr } : {}),
-    });
-    // Transitional mirror onto the owning session record: see updateSlots
-    // for why this keeps being written this release.
-    const nextRecord = withSessionSlots(latest, nextSlots);
-    writeSession(this.config.dataDir, { ...nextRecord, updatedAt: nowIso() });
-    return nextRecord;
+    this.writeWorkspaceStateWithLegacyMirror(
+      latest,
+      {
+        ...(nextSlots ? { slots: nextSlots } : {}),
+        ...(resolved.pr ? { pr: resolved.pr } : {}),
+      },
+      { touchUpdatedAt: true },
+    );
+    return withSessionSlots(latest, nextSlots);
   }
 
   // Resolves the record that owns a sidecar's tmux pane and reserved ports:
@@ -4056,14 +4049,10 @@ export class SessionService {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
-    writeWorkspaceState(this.config.dataDir, workspaceIdOf(latest), {
+    this.writeWorkspaceStateWithLegacyMirror(latest, {
       ...(slots ? { slots } : {}),
       ...(resolved.pr ? { pr: resolved.pr } : {}),
     });
-    // Transitional mirror onto the owning session record: see updateSlots
-    // for why this keeps being written this release.
-    const updated = withSessionSlots(latest, slots);
-    writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.link.published", {
       level: "info",
       sessionId,
@@ -5666,6 +5655,47 @@ export class SessionService {
     return readSession(this.config.dataDir, anchorId) ?? session;
   }
 
+  // Persists workspace-owned state plus its transitional legacy mirror.
+  //
+  // The mirror has to land on the WORKSPACE OWNER's record, which is not
+  // always the record in hand: a sidecar callback holds the sidecar owner's
+  // record, and for an mcp sidecar that is the session itself rather than
+  // the workspace. Mirroring onto the wrong record would leave the legacy
+  // fields drifting from the file, which a rollback would then serve. Both
+  // fields are always written together for the same reason — mirroring only
+  // the half that changed lets the other half go stale.
+  // Returns the owner record as written, so a caller that is itself the owner
+  // can enrich from it instead of paying for a re-read.
+  private writeWorkspaceStateWithLegacyMirror(
+    member: SessionRecord,
+    state: WorkspaceState,
+    options?: { touchUpdatedAt?: boolean },
+  ): SessionRecord | null {
+    const workspaceId = workspaceIdOf(member);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
+    const owner =
+      member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
+    if (!owner) {
+      return null;
+    }
+    const mirrored: SessionRecord = {
+      ...owner,
+      ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
+    };
+    if (state.slots) {
+      mirrored.slots = state.slots;
+    } else {
+      delete mirrored.slots;
+    }
+    if (state.pr) {
+      mirrored.pr = state.pr;
+    } else {
+      delete mirrored.pr;
+    }
+    writeSession(this.config.dataDir, mirrored);
+    return mirrored;
+  }
+
   private hasActiveWorktreePathPeers(session: SessionRecord): boolean {
     const worktreePath = session.worktreePath.trim();
     if (!worktreePath) {
@@ -7135,11 +7165,8 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     // Slots (title/links/tags/pr) are workspace-owned: mutations always land
-    // on the workspace's own state so every desk member sees the same
-    // slots. `session` is still the anchor record — it, not the caller's own
-    // record, is the transitional legacy-mirror target below.
+    // on the workspace's own state, so every member sees the same slots.
     const session = this.deskAnchorRecord(currentSession);
-    const workspaceId = workspaceIdOf(session);
     const current = resolveWorkspaceState(this.config.dataDir, session);
     const normalized = normalizeSlotsUpdate(request);
     if (normalized.tags.length > 0) {
@@ -7180,23 +7207,7 @@ export class SessionService {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
     };
-    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
-    // Transitional mirror onto the owning session record: a rollback to the
-    // pre-workspace-file binary reads only this legacy field, so it keeps
-    // being written this release to avoid silently serving a stale title or
-    // link set on downgrade. A follow-up release drops this write.
-    const updated: SessionRecord = {
-      ...session,
-      ...(nextState.slots ? { slots: nextState.slots } : {}),
-      ...(nextState.pr ? { pr: nextState.pr } : {}),
-    };
-    if (!nextState.slots) {
-      delete updated.slots;
-    }
-    if (!nextState.pr) {
-      delete updated.pr;
-    }
-    writeSession(this.config.dataDir, updated);
+    const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
     this.logEvent("session.slots.updated", {
       level: "info",
@@ -7208,12 +7219,12 @@ export class SessionService {
         linkCount: displaySlots?.links.length ?? 0,
       },
     });
-    // The API response is always the CALLER's view, never the anchor's: for a
-    // non-desk session `updated` already is the caller's own record, but for
-    // a desk sibling it is the anchor's, so re-read the caller's own record.
+    // The API response is always the CALLER's view, never the workspace
+    // owner's. When the caller IS the owner, the record just written is
+    // already the caller's; otherwise re-read the caller's own.
     const callerRecord =
-      updated.id === sessionId
-        ? updated
+      owner?.id === sessionId
+        ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
     return this.enrich(callerRecord);
   }
@@ -7304,16 +7315,17 @@ export class SessionService {
     const resolved = resolveWorkspaceState(this.config.dataDir, afterKill);
     const nextSlots = applySlotsUpdate(resolved.slots, { unlinkLabels: [sidecarName] });
     if (nextSlots !== resolved.slots) {
-      writeWorkspaceState(this.config.dataDir, workspaceIdOf(afterKill), {
-        ...(nextSlots ? { slots: nextSlots } : {}),
-        ...(resolved.pr ? { pr: resolved.pr } : {}),
-      });
+      this.writeWorkspaceStateWithLegacyMirror(
+        afterKill,
+        {
+          ...(nextSlots ? { slots: nextSlots } : {}),
+          ...(resolved.pr ? { pr: resolved.pr } : {}),
+        },
+        { touchUpdatedAt: true },
+      );
+    } else {
+      writeSession(this.config.dataDir, { ...afterKill, updatedAt: nowIso() });
     }
-    // Transitional mirror onto the owning session record: see updateSlots
-    // for why this keeps being written this release.
-    const baseRecord =
-      nextSlots !== resolved.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
-    writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
@@ -7374,14 +7386,10 @@ export class SessionService {
         const resolved = resolveWorkspaceState(this.config.dataDir, record);
         const next = applySlotsUpdate(resolved.slots, { unlinkLabels: [scName] });
         if (next !== resolved.slots) {
-          writeWorkspaceState(this.config.dataDir, workspaceIdOf(record), {
+          this.writeWorkspaceStateWithLegacyMirror(record, {
             ...(next ? { slots: next } : {}),
             ...(resolved.pr ? { pr: resolved.pr } : {}),
           });
-          // Transitional mirror onto the owning session record: see
-          // updateSlots for why this keeps being written this release.
-          const updated = withSessionSlots(record, next);
-          writeSession(this.config.dataDir, updated);
         }
       }
       await killSidecarTmux(ownerId, scName).catch(() => {});
@@ -8380,7 +8388,8 @@ export class SessionService {
         session.id,
       );
       if (expectedWorktreePath !== session.worktreePath) {
-        const deskNote = session.deskId ? " it belonged to this session's desk anchor;" : "";
+        const deskNote =
+          workspaceIdOf(session) !== session.id ? " it belonged to a shared workspace;" : "";
         throw new SessionNotReopenableError(
           `Session ${sessionId} cannot be reopened: its worktree at ${session.worktreePath} is gone and cannot be rebuilt at that path;${deskNote} use respawn`,
         );

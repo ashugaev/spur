@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -56,6 +56,63 @@ describe("readWorkspaceState", () => {
     const path = join(dataDir, "workspaces", "api-1.json");
     writeFileSync(path, "{ not json", "utf-8");
     expect(readWorkspaceState(dataDir, "api-1")).toBeNull();
+  });
+
+  // Valid JSON of the wrong shape is the dangerous case: it parses, so a cast
+  // would hand a number to deriveSessionSlots, which throws inside
+  // enrichDashboard — and that runs in the dashboard tick's Promise.all, so
+  // one bad file would stall the tick for every session.
+  it("drops a slots value of the wrong shape instead of passing it through", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "workspaces", "api-1.json");
+    mkdirSync(join(dataDir, "workspaces"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ slots: 5 }), "utf-8");
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({});
+  });
+
+  it("drops slots whose links are not a list, and keeps a well-formed sibling field", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "workspaces", "api-1.json");
+    mkdirSync(join(dataDir, "workspaces"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        slots: { title: "t", links: "nope" },
+        pr: { number: 7, repo: "acme/api", url: "https://x/7" },
+      }),
+      "utf-8",
+    );
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({
+      pr: { number: 7, repo: "acme/api", url: "https://x/7" },
+    });
+  });
+
+  it("drops a pr binding missing a field", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "workspaces", "api-1.json");
+    mkdirSync(join(dataDir, "workspaces"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ pr: { number: 7, repo: "acme/api" } }), "utf-8");
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({});
+  });
+
+  it("keeps only well-formed links and tags", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "workspaces", "api-1.json");
+    mkdirSync(join(dataDir, "workspaces"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        slots: {
+          title: 5,
+          links: [{ label: "pr", url: "https://x" }, { label: 1, url: "https://y" }, "junk"],
+          tags: ["bug", 7],
+        },
+      }),
+      "utf-8",
+    );
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({
+      slots: { links: [{ label: "pr", url: "https://x" }], tags: ["bug"] },
+    });
   });
 });
 

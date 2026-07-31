@@ -6,6 +6,7 @@ const glabMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const writeWorkspaceStateMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -94,7 +95,7 @@ vi.mock("../../src/workspace-store.js", () => ({
     ...(record.slots ? { slots: record.slots } : {}),
     ...(record.pr ? { pr: record.pr } : {}),
   }),
-  writeWorkspaceState: vi.fn(),
+  writeWorkspaceState: writeWorkspaceStateMock,
   deleteWorkspaceState: vi.fn(),
   readWorkspaceState: vi.fn().mockReturnValue(null),
 }));
@@ -313,6 +314,20 @@ describe("PR auto-detect", () => {
       "number,title,url",
       "--limit",
       "1",
+    );
+    // The binding is workspace-owned state: it lands in the workspace file
+    // keyed by the workspace id, and is mirrored onto the session record for
+    // the transitional legacy readers.
+    expect(writeWorkspaceStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      session.id,
+      expect.objectContaining({
+        pr: {
+          number: 42,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      }),
     );
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from "node:path";
 import { readSession } from "./metadata.js";
 import { workspaceIdOf } from "./session-desk.js";
-import type { SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
+import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
 
 // Workspace-owned state: the subset of a shared-desk-workspace's data that
 // used to live inside the owning (anchor) session's own record — slots
@@ -18,7 +18,39 @@ export interface WorkspaceState {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Shape-check, not just JSON-parse-check. A file whose `slots` is any
+// non-slots value (`{"slots": 5}`) parses fine and then throws deep inside
+// deriveSessionSlots — which runs in enrichDashboard, inside the dashboard
+// cache tick's Promise.all, so one malformed file would stall the tick for
+// every session. Anything that does not match the shape is treated as absent.
+function parseSlots(value: unknown): SessionSlots | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!Array.isArray(value["links"])) return undefined;
+  const links = value["links"].filter(
+    (link): link is SessionLink =>
+      isRecord(link) && typeof link["label"] === "string" && typeof link["url"] === "string",
+  );
+  const title = value["title"];
+  const tags = value["tags"];
+  return {
+    ...(typeof title === "string" ? { title } : {}),
+    links,
+    ...(Array.isArray(tags)
+      ? { tags: tags.filter((tag): tag is string => typeof tag === "string") }
+      : {}),
+  };
+}
+
+function parsePrBinding(value: unknown): SessionPrBinding | undefined {
+  if (!isRecord(value)) return undefined;
+  const { number, repo, url } = value;
+  if (typeof number !== "number" || typeof repo !== "string" || typeof url !== "string") {
+    return undefined;
+  }
+  return { number, repo, url };
 }
 
 function workspaceStateFilePath(dataDir: string, workspaceId: string): string {
@@ -33,7 +65,8 @@ function readWorkspaceStateFile(path: string): WorkspaceState | null {
     return null;
   }
   if (!isRecord(parsed)) return null;
-  const { slots, pr } = parsed as { slots?: SessionSlots; pr?: SessionPrBinding };
+  const slots = parseSlots(parsed["slots"]);
+  const pr = parsePrBinding(parsed["pr"]);
   return {
     ...(slots ? { slots } : {}),
     ...(pr ? { pr } : {}),
