@@ -15,14 +15,20 @@ import type { ITheme } from "xterm";
 export const BG_BASE_HEX = "#0d0d0e";
 
 /**
- * Brand spark glyph path, a 24-unit viewBox path. Shared between the static
- * app icon (`src/app/icon.tsx`) and the dynamic status favicon
- * (`SessionDetail.tsx`) so both render pixel-identical geometry. Lives here
- * rather than in the route file because `icon.tsx` imports `next/og`
- * (server/edge-only, pulls in `fs`), which cannot be bundled into a client
- * component.
+ * Brand spark glyph path, a 24-unit viewBox path. Shared between the header
+ * brand mark (`Dashboard.tsx`), the static app icon (`src/app/icon.tsx`) and
+ * the dynamic status favicon (`SessionDetail.tsx`) so all three render
+ * pixel-identical geometry. Lives here rather than in the route file because
+ * `icon.tsx` imports `next/og` (server/edge-only, pulls in `fs`), which
+ * cannot be bundled into a client component.
+ *
+ * Eight rays drawn outward from center; the four diagonal rays are
+ * shortened from radius 7.07 to 6.4 so they read as slightly shorter than
+ * the four axis-aligned rays. Render with `strokeLinecap="round"` so every
+ * ray gets a rounded tip.
  */
-export const SPARK_GLYPH_PATH = "M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07";
+export const SPARK_GLYPH_PATH =
+  "M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4";
 
 /** Mirrors `--color-terminal-bg` (dark). Used by the xterm `ITheme` and the container div. */
 export const TERMINAL_BG_HEX = "#0a0a0f";

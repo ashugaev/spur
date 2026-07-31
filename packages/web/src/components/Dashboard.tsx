@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { DataRow, RowIconButton } from "@/components/DataRow";
@@ -8,12 +16,14 @@ import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { FiltersModal } from "@/components/FiltersModal";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
+import { SPARK_GLYPH_PATH } from "@/design/colors";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -30,7 +40,7 @@ import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-rout
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
-import type { AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
   ATTENTION_ZONE_ORDER,
@@ -56,7 +66,6 @@ import {
   type UpdateProjectResponse,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
-import { TagFilter } from "@/components/TagFilter";
 import { useBackendConnection } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
@@ -116,41 +125,6 @@ function completedIdsFromResponse(value: unknown): string[] {
   const completedIds = (value as { completedIds?: unknown }).completedIds;
   if (!Array.isArray(completedIds)) return [];
   return completedIds.filter((id): id is string => typeof id === "string");
-}
-
-function StatItem({
-  icon,
-  label,
-  value,
-  color,
-  active,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: number | string;
-  color?: string;
-  active?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
-      onClick={onClick}
-      type="button"
-    >
-      <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">
-        {label}:
-      </span>
-      <span
-        className="font-bold text-[var(--color-text-primary)]"
-        style={color ? { color } : undefined}
-      >
-        {value}
-      </span>
-    </button>
-  );
 }
 
 function BacklogZone({
@@ -310,6 +284,77 @@ function IconStop() {
   );
 }
 
+function IconSliders() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-[13px] w-[13px] opacity-75"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+    >
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="9" cy="6" r="2" fill="var(--color-bg-base)" />
+      <circle cx="16" cy="12" r="2" fill="var(--color-bg-base)" />
+      <circle cx="11" cy="18" r="2" fill="var(--color-bg-base)" />
+    </svg>
+  );
+}
+
+function IconPlus({ className }: { className: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function BrandGlyph() {
+  return (
+    <svg
+      aria-label="Spur"
+      className="h-[17px] w-[17px] shrink-0"
+      role="img"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--color-accent)"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    >
+      <path d={SPARK_GLYPH_PATH} />
+    </svg>
+  );
+}
+
+// Static per-lane presentation for the Filters modal Status section — the
+// same label/color pairing the header stat cluster used to render inline.
+const STATUS_LANE_META: Record<AttentionLevel, { label: string; color: string; icon: ReactNode }> =
+  {
+    error: { label: "Errors", color: "var(--color-status-error)", icon: <IconAlert /> },
+    rate_limited: {
+      label: "Rate Limited",
+      color: "var(--color-status-attention)",
+      icon: <IconGauge />,
+    },
+    respond: { label: "Needs Input", color: "var(--color-status-error)", icon: <IconChat /> },
+    working: { label: "Working", color: "var(--color-status-working)", icon: <IconBolt /> },
+    pending: { label: "Waiting", color: "var(--color-status-attention)", icon: <IconClock /> },
+    stopped: { label: "Stopped", color: "var(--color-text-tertiary)", icon: <IconStop /> },
+    done: { label: "Completed", color: "var(--color-status-ready)", icon: <IconCheck /> },
+  };
+
 function IconEdit() {
   return (
     <svg
@@ -454,12 +499,11 @@ function ProjectMenu({
         aria-expanded={popover.open}
         aria-haspopup="menu"
         aria-label={`Project filter: ${activeProjectName}`}
-        className="inline-flex min-w-0 max-w-full items-center gap-3 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+        className="inline-flex min-w-0 max-w-full items-center text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
         type="button"
         onClick={popover.toggle}
       >
-        <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-        <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] sm:text-2xl">
+        <span className="inline-flex min-w-0 max-w-[230px] items-center gap-1 text-base font-bold uppercase tracking-[-0.02em]">
           <span className="block min-w-0 truncate">{activeProjectName}</span>
           <svg
             aria-hidden="true"
@@ -967,6 +1011,13 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
+  const [agentFilter, setAgentFilter] = useState<AgentName[]>([]);
+  // Phase A (PR-ready predicate) lands separately; this toggle is wired
+  // through the Filters modal and the badge count now so the modal doesn't
+  // need reshaping when that predicate arrives, but it does not filter the
+  // session list yet.
+  const [prReadyOnly, setPrReadyOnly] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
@@ -1005,6 +1056,17 @@ export function Dashboard() {
   }, []);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
+  const selectStatFilter = (level: AttentionLevel | null) => {
+    if (level === null) {
+      setActiveStatFilter(null);
+      return;
+    }
+    toggleStatFilter(level);
+  };
+  const toggleAgentFilter = (agent: AgentName) =>
+    setAgentFilter((current) =>
+      current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
+    );
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
@@ -1177,13 +1239,21 @@ export function Dashboard() {
     return projectSessions.filter((s) => keys.has(s.deskKey));
   }, [projectSessions, activeTagFilters]);
 
+  const agentFilteredSessions = useMemo(() => {
+    if (agentFilter.length === 0) return tagFilteredSessions;
+    const keys = new Set(
+      tagFilteredSessions.filter((s) => agentFilter.includes(s.agent)).map((s) => s.deskKey),
+    );
+    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [tagFilteredSessions, agentFilter]);
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return tagFilteredSessions;
-    const narrowed = tagFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
+    if (!q) return agentFilteredSessions;
+    const narrowed = agentFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
     const keys = new Set(narrowed.map((s) => s.deskKey));
-    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
-  }, [tagFilteredSessions, searchQuery]);
+    return agentFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [agentFilteredSessions, searchQuery]);
 
   const visibleBacklog = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1242,11 +1312,69 @@ export function Dashboard() {
     [activeStatFilter, grouped],
   );
 
-  const hasActiveFilters =
-    projectId.length > 0 ||
-    searchQuery.trim().length > 0 ||
-    activeStatFilter !== null ||
-    activeTagFilters.length > 0;
+  const allStatusesCount = deskCollapsedRows.length;
+
+  // Faceted counts for the Filters modal chips: each dimension is counted
+  // against every OTHER active filter, but not against itself, so toggling
+  // one option never zeroes out the rest of that same section.
+  const projectCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const session of allSessions) {
+      if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
+        continue;
+      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) continue;
+      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
+        continue;
+      map.set(session.projectId, (map.get(session.projectId) ?? 0) + 1);
+    }
+    return map;
+  }, [allSessions, activeTagFilters, agentFilter, searchQuery]);
+
+  const allProjectsCount = useMemo(
+    () => [...projectCounts.values()].reduce((total, count) => total + count, 0),
+    [projectCounts],
+  );
+
+  const agentCounts = useMemo(() => {
+    const map = new Map<AgentName, number>();
+    for (const session of projectSessions) {
+      if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
+        continue;
+      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
+        continue;
+      map.set(session.agent, (map.get(session.agent) ?? 0) + 1);
+    }
+    return map;
+  }, [projectSessions, activeTagFilters, searchQuery]);
+
+  const tagCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const session of projectSessions) {
+      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) continue;
+      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
+        continue;
+      for (const tag of session.tags) map.set(tag, (map.get(tag) ?? 0) + 1);
+    }
+    return map;
+  }, [projectSessions, agentFilter, searchQuery]);
+
+  const activeFilterCount =
+    (projectId ? 1 : 0) +
+    (activeStatFilter !== null ? 1 : 0) +
+    activeTagFilters.length +
+    agentFilter.length +
+    (prReadyOnly ? 1 : 0);
+
+  const hasActiveFilters = activeFilterCount > 0 || searchQuery.trim().length > 0;
+
+  const resetAllFilters = () => {
+    setSearchQuery("");
+    setActiveStatFilter(null);
+    setActiveTagFilters([]);
+    setAgentFilter([]);
+    setPrReadyOnly(false);
+    syncProjectFilter("");
+  };
   const hasVisibleSessions = visibleLevels.length > 0;
   const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
@@ -1960,182 +2088,188 @@ export function Dashboard() {
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
-      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
-          <ProjectMenu
-            activeProjectName={activeProjectName}
-            projects={filterProjectOptions}
-            selectedProjectId={projectId}
-            onSelectProject={syncProjectFilter}
-            onNewProject={openNewProjectModal}
-            onEdit={openEditProjectModal}
-          />
-          {stats.error > 0 ? (
-            <StatItem
-              icon={<IconAlert />}
-              label="Errors"
-              value={stats.error}
-              color="var(--color-status-error)"
-              active={activeStatFilter === "error"}
-              onClick={() => toggleStatFilter("error")}
+      <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
+        <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+          <BrandGlyph />
+          <span className="hidden min-w-0 md:inline-flex">
+            <ProjectMenu
+              activeProjectName={activeProjectName}
+              projects={filterProjectOptions}
+              selectedProjectId={projectId}
+              onSelectProject={syncProjectFilter}
+              onNewProject={openNewProjectModal}
+              onEdit={openEditProjectModal}
             />
-          ) : null}
-          {stats.rate_limited > 0 ? (
-            <StatItem
-              icon={<IconGauge />}
-              label="Rate Limited"
-              value={stats.rate_limited}
-              color="var(--color-status-attention)"
-              active={activeStatFilter === "rate_limited"}
-              onClick={() => toggleStatFilter("rate_limited")}
-            />
-          ) : null}
-          <StatItem
-            icon={<IconChat />}
-            label="Needs Input"
-            value={stats.respond}
-            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-            active={activeStatFilter === "respond"}
-            onClick={() => toggleStatFilter("respond")}
-          />
-          <StatItem
-            icon={<IconBolt />}
-            label="Working"
-            value={stats.working}
-            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-            active={activeStatFilter === "working"}
-            onClick={() => toggleStatFilter("working")}
-          />
-          <StatItem
-            icon={<IconClock />}
-            label="Waiting"
-            value={stats.pending}
-            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-            active={activeStatFilter === "pending"}
-            onClick={() => toggleStatFilter("pending")}
-          />
-          <StatItem
-            icon={<IconStop />}
-            label="Stopped"
-            value={stats.stopped}
-            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
-            active={activeStatFilter === "stopped"}
-            onClick={() => toggleStatFilter("stopped")}
-          />
-          <StatItem
-            icon={<IconCheck />}
-            label="Completed"
-            value={stats.done}
-            color={
-              activeStatFilter === "done" && stats.done > 0
-                ? "var(--color-status-ready)"
-                : undefined
-            }
-            active={activeStatFilter === "done"}
-            onClick={() => toggleStatFilter("done")}
-          />
-          {filterTagCatalog.length > 0 ? (
-            <span className="sm:ml-auto">
-              <TagFilter
-                catalog={filterTagCatalog}
-                value={activeTagFilters}
-                onChange={setActiveTagFilters}
-              />
-            </span>
-          ) : null}
-          <div
-            className={`flex min-w-[12rem] flex-[999_1_16rem] flex-col gap-1 ${
-              filterTagCatalog.length > 0 ? "" : "sm:ml-auto"
+          </span>
+          <button
+            aria-label="Filters"
+            className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-[0.08em] transition ${
+              activeFilterCount > 0
+                ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
             }`}
+            onClick={() => setFiltersOpen(true)}
+            type="button"
           >
-            <div className="flex items-stretch border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5">
-                <svg
-                  className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.35-4.35" />
-                </svg>
-                <input
-                  aria-label="Filter sessions"
-                  className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (isVoiceToggleHotkey(event)) {
-                      event.preventDefault();
-                      searchVoice.toggleRecording();
-                    }
+            <IconSliders />
+            <span className="hidden text-[10px] md:inline">Filters</span>
+            {activeFilterCount > 0 ? (
+              <span className="min-w-4 border border-[var(--color-accent)] px-1 text-center font-bold tabular-nums">
+                {activeFilterCount}
+              </span>
+            ) : null}
+          </button>
+          <div className="relative flex min-w-0 flex-1 items-center">
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2">
+              <svg
+                aria-hidden="true"
+                className="h-[13px] w-[13px] shrink-0 text-[var(--color-text-tertiary)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                aria-label="Filter sessions"
+                className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    searchVoice.toggleRecording();
+                  }
+                }}
+                placeholder={voicePlaceholder("Filter...", searchVoice)}
+                ref={searchInputRef}
+                value={searchQuery}
+              />
+              {searchQuery.length > 0 ? (
+                <button
+                  aria-label="Clear dashboard search"
+                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                  onClick={() => {
+                    setSearchQuery("");
+                    searchInputRef.current?.focus();
                   }}
-                  placeholder={voicePlaceholder("Filter...", searchVoice)}
-                  ref={searchInputRef}
-                  value={searchQuery}
+                  type="button"
+                >
+                  <CloseIcon />
+                </button>
+              ) : null}
+              {searchVoice.canUseVoice ? (
+                <VoiceControls
+                  borderless
+                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                  groupClassName="flex items-center gap-1"
+                  voice={searchVoice}
                 />
-              </div>
-              <div className="flex shrink-0 items-stretch">
-                {searchQuery.length > 0 ? (
-                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
-                    <button
-                      aria-label="Clear dashboard search"
-                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                      onClick={() => {
-                        setSearchQuery("");
-                        searchInputRef.current?.focus();
-                      }}
-                      type="button"
-                    >
-                      <CloseIcon />
-                    </button>
-                  </div>
-                ) : null}
-                {searchVoice.canUseVoice ? (
-                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
-                    <VoiceControls
-                      borderless
-                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                      groupClassName="flex items-center gap-1"
-                      voice={searchVoice}
-                    />
-                  </div>
-                ) : null}
-              </div>
+              ) : null}
             </div>
             {searchVoice.voiceError ? (
               <div
-                className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
                 role="alert"
               >
                 {searchVoice.voiceError}
               </div>
             ) : searchVoice.recording || searchVoice.voiceBusy ? (
-              <div className="px-2 text-[10px] text-[var(--color-text-tertiary)]">
+              <div className="absolute left-0 top-full z-10 mt-1 px-2 text-[10px] text-[var(--color-text-tertiary)]">
                 <VoiceStatusHint voice={searchVoice} />
               </div>
             ) : null}
           </div>
-          <div className="inline-flex w-full sm:w-auto sm:shrink-0">
+          {hasActiveFilters ? (
             <button
-              aria-label="Spawn Shepherd"
-              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openShepherdSpawnModal}
-              title="Spawn Shepherd"
+              aria-label="Reset all filters"
+              className="h-7 shrink-0 border border-[var(--color-border-default)] px-2 uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              onClick={resetAllFilters}
               type="button"
             >
-              <IconShepherd />
+              Reset
             </button>
+          ) : null}
+          <button
+            aria-label="Spawn Shepherd"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            onClick={openShepherdSpawnModal}
+            title="Spawn Shepherd"
+            type="button"
+          >
+            <IconShepherd />
+          </button>
+          {!isMobile ? (
             <button
-              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
+              className="inline-flex h-7 shrink-0 items-center gap-[7px] whitespace-nowrap border border-[var(--color-accent)] bg-[var(--color-accent)] px-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
               onClick={openSpawnModal}
               type="button"
             >
+              <IconPlus className="h-3 w-3" />
               Spawn Session
             </button>
-          </div>
-        </header>
+          ) : null}
+        </div>
+      </header>
 
+      {isMobile && !spawnOpen && !terminalSession ? (
+        <button
+          aria-label="Spawn Session"
+          className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center rounded-[14px] border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-[0_6px_20px_var(--color-shadow-modal-lg)] transition hover:bg-[var(--color-accent-hover)]"
+          onClick={openSpawnModal}
+          type="button"
+        >
+          <IconPlus className="h-4 w-4" />
+        </button>
+      ) : null}
+
+      {filtersOpen ? (
+        <FiltersModal
+          activeFilterCount={activeFilterCount}
+          activeStatFilter={activeStatFilter}
+          activeTagFilters={activeTagFilters}
+          agentFilter={agentFilter}
+          agentOptions={AGENT_OPTIONS.map((agent) => ({
+            id: agent,
+            count: agentCounts.get(agent) ?? 0,
+          }))}
+          allProjectsCount={allProjectsCount}
+          allStatusesCount={allStatusesCount}
+          onClearAll={resetAllFilters}
+          onClose={() => setFiltersOpen(false)}
+          onPrReadyOnlyChange={setPrReadyOnly}
+          onSelectProject={syncProjectFilter}
+          onSelectStatus={selectStatFilter}
+          onToggleAgent={toggleAgentFilter}
+          onToggleTag={(tag) =>
+            setActiveTagFilters((current) =>
+              current.includes(tag) ? current.filter((name) => name !== tag) : [...current, tag],
+            )
+          }
+          prReadyOnly={prReadyOnly}
+          projectId={projectId}
+          projectOptions={filterProjectOptions.map((project) => ({
+            id: project.id,
+            name: project.name,
+            count: projectCounts.get(project.id) ?? 0,
+          }))}
+          statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
+            level,
+            label: STATUS_LANE_META[level].label,
+            color: STATUS_LANE_META[level].color,
+            icon: STATUS_LANE_META[level].icon,
+            count: stats[level],
+          }))}
+          tagOptions={filterTagCatalog.map((tag) => ({
+            name: tag.name,
+            color: tag.color,
+            count: tagCounts.get(tag.name) ?? 0,
+          }))}
+        />
+      ) : null}
+
+      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         {newProjectOpen ? (
           <NewProjectModal
             displayName={newProjectDisplayName}
@@ -2312,12 +2446,7 @@ export function Dashboard() {
               <div className="mt-3 flex justify-center">
                 <button
                   className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  onClick={() => {
-                    setSearchQuery("");
-                    setActiveStatFilter(null);
-                    setActiveTagFilters([]);
-                    syncProjectFilter("");
-                  }}
+                  onClick={resetAllFilters}
                   type="button"
                 >
                   Reset Filters
