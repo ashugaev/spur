@@ -730,10 +730,14 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      const header = screen.getByRole("banner");
-      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
       expect(screen.queryByRole("link", { name: "Collapsed mobile stop" })).not.toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Stopped:/ })).toHaveTextContent("1");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close filters" }));
 
     fireEvent.click(getAttentionZoneToggle("Stopped"));
 
@@ -818,7 +822,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No matching sessions in API.", { exact: false }),
+        screen.getByText("No sessions match this filter in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 

@@ -12,6 +12,7 @@ import {
   makeSessionWithTracker,
   mockGitHubStatus,
   mockGitLabStatus,
+  mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -20,6 +21,36 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+// The Status lane cluster moved out of the header and into the Filters
+// modal — these helpers open it, act on a lane chip (which renders as
+// "{label}:{count}"), and close it again so the underlying list re-renders
+// unobstructed by the modal overlay.
+async function openFilters(page: Page) {
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Filters" })).toBeVisible();
+}
+
+async function closeFilters(page: Page) {
+  await page.getByRole("button", { name: "done", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Filters" })).toHaveCount(0);
+}
+
+function statusChip(page: Page, label: string) {
+  return page.getByRole("button", { name: new RegExp(`^${label}:`) });
+}
+
+async function selectStatus(page: Page, label: string) {
+  await openFilters(page);
+  await statusChip(page, label).click();
+  await closeFilters(page);
+}
+
+async function expectStatusCount(page: Page, label: string, count: number | string) {
+  await openFilters(page);
+  await expect(statusChip(page, label)).toContainText(String(count));
+  await closeFilters(page);
+}
 
 async function openSpawnModal(
   page: Page,
@@ -108,10 +139,10 @@ function attentionZone(page: Page, label: string) {
 
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
-  test("𖤓 icon visible", async ({ page }) => {
+  test("brand glyph visible", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "d1-icon" })]);
     await page.goto("/");
-    await expect(page.locator("main > header").first()).toContainText("𖤓");
+    await expect(page.getByRole("img", { name: "Spur" })).toBeVisible();
   });
 
   test("project title menu visible with chevron indicator", async ({ page }) => {
@@ -364,23 +395,19 @@ test.describe("D1: Header renders correctly", () => {
   });
 });
 
-// D2: Header stats show correct counts
-test.describe("D2: Header stats show correct counts", () => {
-  test("stat buttons visible", async ({ page }) => {
+// D2: Filters modal status counts are correct
+test.describe("D2: Filters modal status counts are correct", () => {
+  test("Filters trigger visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // The stat buttons have label text but they're hidden on mobile; use broader selector
-    const header = page.locator("header").first();
-    await expect(header).toBeVisible();
+    await expect(page.getByRole("button", { name: "Filters" })).toBeVisible();
   });
 
   test("Needs Input shows 1 with one needs_input session", async ({ page }) => {
     const session = makeNeedsInputSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    // Find the stat button containing "Needs Input" label (hidden on small) and value 1
-    const needsInputBtn = page.getByRole("button").filter({ hasText: "1" }).first();
-    await expect(needsInputBtn).toBeVisible();
+    await expectStatusCount(page, "Needs Input", 1);
   });
 
   test("Errors stat appears only for error sessions and Needs Input excludes them", async ({
@@ -397,35 +424,37 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [errored, needsInput]);
     await page.goto("/");
 
-    await expect(page.getByRole("button", { name: /Errors:\s*1/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Errors", 1);
+    await expectStatusCount(page, "Needs Input", 1);
 
-    await page.getByRole("button", { name: /errors/i }).click();
+    await selectStatus(page, "Errors");
     await expect(page.getByText("Errored runtime session")).toBeVisible();
     await expect(page.getByText("Needs response session")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /errors/i }).click();
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Errors");
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Needs response session")).toBeVisible();
     await expect(page.getByText("Errored runtime session")).not.toBeVisible();
   });
 
-  test("Errors stat is hidden when there are no error sessions", async ({ page }) => {
+  test("Errors stat shows 0, dimmed but still selectable, when there are no error sessions", async ({
+    page,
+  }) => {
     const session = makeNeedsInputSession();
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.locator("header").getByRole("button", { name: /Errors/i })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+    await openFilters(page);
+    await expect(statusChip(page, "Errors")).toContainText("0");
+    await expect(statusChip(page, "Needs Input")).toContainText("1");
+    await closeFilters(page);
   });
 
   test("Working shows 1 with one working session", async ({ page }) => {
     const session = makeWorkingSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    // Working session → stats.working = 1
-    const header = page.locator("header").first();
-    await expect(header.getByText("1")).toBeVisible();
+    await expectStatusCount(page, "Working", 1);
   });
 
   test("spawning session stays in Working instead of Needs Input", async ({ page }) => {
@@ -436,13 +465,13 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.getByRole("button", { name: /Needs Input:\s*0/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Working:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Needs Input", 0);
+    await expectStatusCount(page, "Working", 1);
 
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Spawning startup session")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /working/i }).click();
+    await selectStatus(page, "Working");
     await expect(page.getByText("Spawning startup session")).toBeVisible();
   });
 
@@ -450,24 +479,21 @@ test.describe("D2: Header stats show correct counts", () => {
     const session = makeWaitingSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    const header = page.locator("header").first();
-    await expect(header.getByText("1")).toBeVisible();
+    await expectStatusCount(page, "Waiting", 1);
   });
 
   test("Stopped shows 1 with one stopped session", async ({ page }) => {
     const session = makeStoppedSession({ prompt: "Stopped session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expect(page.locator("header").getByRole("button", { name: /Stopped/i })).toContainText(
-      "1",
-    );
+    await expectStatusCount(page, "Stopped", 1);
   });
 
   test("Completed shows 1 with one completed session", async ({ page }) => {
     const session = makeCompletedSession({ prompt: "Completed session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expectStatusCount(page, "Completed", 1);
   });
 
   test("Completed count updates after polling when a session finishes", async ({ page }) => {
@@ -480,7 +506,7 @@ test.describe("D2: Header stats show correct counts", () => {
     await page.goto("/");
 
     await expect(page.getByText("Completes after poll")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("0");
+    await expectStatusCount(page, "Completed", 0);
 
     sessions = [
       {
@@ -494,10 +520,10 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await page.waitForTimeout(5500);
 
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expectStatusCount(page, "Completed", 1);
     await expect(page.getByText("Completes after poll")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Completes after poll")).toBeVisible();
   });
 
@@ -510,8 +536,7 @@ test.describe("D2: Header stats show correct counts", () => {
     // Wait for sessions to load
     await expect(page.getByText("Working session")).toBeVisible();
 
-    // Click the Needs Input stat button — accessible name comes from the visible label
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
 
     // After filtering, working session should be hidden
     await expect(page.getByText("Working section")).not.toBeVisible();
@@ -527,13 +552,12 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Working session two")).toBeVisible();
 
-    const needsInputStat = page.getByRole("button", { name: /needs input/i });
-    await needsInputStat.click();
+    await selectStatus(page, "Needs Input");
     // Now filtered - working hidden
     await expect(page.getByText("Working session two")).not.toBeVisible();
 
-    // Click again to unfilter
-    await needsInputStat.click();
+    // Select again to unfilter
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Working session two")).toBeVisible();
   });
 
@@ -549,7 +573,7 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(page.getByText("Working still active")).toBeVisible();
     await expect(page.getByText("Completed and archived")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
 
     await expect(page.getByText("Completed and archived")).toBeVisible();
     await expect(page.getByText("Working still active")).not.toBeVisible();
@@ -565,11 +589,10 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    const completedToggle = page.getByRole("button", { name: /Completed/i });
-    await completedToggle.click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Completed hides again")).toBeVisible();
 
-    await completedToggle.click();
+    await selectStatus(page, "Completed");
 
     await expect(page.getByText("Working returns")).toBeVisible();
     await expect(page.getByText("Completed hides again")).not.toBeVisible();
@@ -584,14 +607,119 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Only working session")).toBeVisible();
 
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
 
-    await expect(page.getByText("No matching sessions.")).toBeVisible();
+    await expect(
+      page.getByText("No sessions match this filter. Reset the filters, or spawn a new session."),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
 
     await page.getByRole("button", { name: "Reset Filters" }).click();
 
     await expect(page.getByText("Only working session")).toBeVisible();
+  });
+});
+
+test.describe("D2b: PR-ready filter", () => {
+  function prSession(prompt: string, id: string, prNumber: number): SpurSessionView {
+    return makeSessionWithPR({
+      id,
+      slots: {
+        title: prompt,
+        links: [{ label: "github-pr", url: `https://github.com/test/repo/pull/${prNumber}` }],
+      },
+    });
+  }
+
+  test("narrows to the ready session, restores on off, and Reset clears it", async ({ page }) => {
+    const ready = prSession("Ready session", "pr-ready-1", 501);
+    const changesRequested = prSession("Changes requested session", "pr-ready-2", 502);
+    const unresolvedThreads = prSession("Unresolved threads session", "pr-ready-3", 503);
+
+    await mockSessions(page, [ready, changesRequested, unresolvedThreads]);
+    await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/501": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/502": {
+        state: "open",
+        reviewDecision: "changes_requested",
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/503": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 2,
+        unresolvedThreads: 2,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).not.toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: "Reset all filters" }).click();
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+  });
+
+  test("issues zero /api/pr-status/batch requests while the filter is off", async ({ page }) => {
+    const idle = prSession("Idle PR session", "pr-ready-idle-1", 601);
+    await mockSessions(page, [idle]);
+    const batch = await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/601": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Idle PR session")).toBeVisible();
+    await page.waitForTimeout(500);
+
+    expect(batch.count()).toBe(0);
   });
 });
 
@@ -924,7 +1052,7 @@ test.describe("D4b: Merged-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return merged state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -959,7 +1087,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -995,9 +1123,9 @@ test.describe("D4b: Merged-PR done button", () => {
 
     await expect.poll(() => completeRequestSeen).toBe(true);
     await expect(page.getByText("Optimistic done row")).not.toBeVisible();
-    await expect(page.getByRole("button", { name: /Completed:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Completed", 1);
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
@@ -1015,7 +1143,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1093,7 +1221,7 @@ test.describe("D4b: Merged-PR done button", () => {
       slots: { title: "Desk helper", links: [] },
     });
     await mockSessions(page, [session, subagent]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1203,7 +1331,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1233,7 +1361,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1262,7 +1390,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1287,7 +1415,7 @@ test.describe("D5: Tracker and PR links", () => {
   }) => {
     const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1408,7 +1536,7 @@ test.describe("D6: Attention zone sections", () => {
     expect(needsInputY).toBeGreaterThan(rateLimitedY);
 
     await expect(page.getByText("Rate limited zone session")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Rate Limited:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Rate Limited", 1);
   });
 
   test("Rate Limited stat filter isolates rate_limited sessions", async ({ page }) => {
@@ -1419,7 +1547,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    await page.getByRole("button", { name: /Rate Limited:\s*1/i }).click();
+    await selectStatus(page, "Rate Limited");
     await expect(page.getByText("Filtered rate limited")).toBeVisible();
     await expect(page.getByText("Hidden while filtered")).toHaveCount(0);
     await expect(attentionZone(page, "Working")).toHaveCount(0);
