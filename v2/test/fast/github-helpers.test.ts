@@ -178,7 +178,16 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = ["FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "CANCELED", "ACTION_REQUIRED"];
+    const states = [
+      "FAILURE",
+      "FAILED",
+      "TIMED_OUT",
+      "CANCELLED",
+      "CANCELED",
+      "ACTION_REQUIRED",
+      "ERROR",
+      "STARTUP_FAILURE",
+    ];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
@@ -233,6 +242,14 @@ describe("hasActiveChecks", () => {
       { name: "e2e", state: "QUEUED" },
     ];
     expect(hasActiveChecks(checks)).toBe(true);
+  });
+
+  it("treats ERROR and STARTUP_FAILURE as terminal, not active, so a permanently failed check never pins CI-active hysteresis", () => {
+    const checks: GitHubCheck[] = [
+      { name: "legacy-status", state: "ERROR" },
+      { name: "action-run", state: "STARTUP_FAILURE" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(false);
   });
 });
 
