@@ -248,4 +248,80 @@ describe("Filters modal", () => {
     fireEvent.click(dialog);
     expect(screen.queryByRole("dialog", { name: "Filters" })).not.toBeInTheDocument();
   });
+
+  it("shows an unknown state for Ready to merge before the toggle has ever fetched", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    // The toggle is off, so `usePrReadyUrls` has never fetched: the count
+    // must read as "not counted yet", not a literal 0.
+    expect(screen.getByRole("button", { name: /^Ready to merge: –$/ })).toBeInTheDocument();
+  });
+
+  it("traps focus inside the dialog and puts initial focus there", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    const dialog = screen.getByRole("dialog", { name: "Filters" });
+
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+
+    const doneButton = screen.getByRole("button", { name: "done" });
+    doneButton.focus();
+    expect(document.activeElement).toBe(doneButton);
+
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    // Tabbing forward off the last focusable control wraps back to the first.
+    expect(document.activeElement).not.toBe(doneButton);
+  });
+});
+
+describe("Filters modal — PR-ready batch failure", () => {
+  const sessionsWithReviewLink = {
+    projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
+    sessions: [
+      {
+        ...session("api-1", "api", "claude", "running", "working", []),
+        slots: {
+          title: "api-1",
+          links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/1" }],
+          tags: [],
+        },
+      },
+    ],
+    daemonAlive: true,
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") return new Response(JSON.stringify(sessionsWithReviewLink));
+      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+      if (url === "/api/pr-status/batch") return new Response("{}", { status: 500 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  });
+
+  it("gives a subtle unavailable hint when the toggle is on but the batch failed", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    fireEvent.click(screen.getByRole("button", { name: /^Ready to merge:/ }));
+
+    await waitFor(() => {
+      const toggle = screen.getByRole("button", { name: /^Ready to merge: –$/ });
+      expect(toggle).toHaveAttribute("title", "GitHub only — status unavailable");
+    });
+  });
 });

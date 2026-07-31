@@ -705,4 +705,108 @@ describe("usePrReadyUrls", () => {
     expect(result.current.loaded).toBe(false);
     expect(result.current.ready.size).toBe(0);
   });
+
+  it("resets loaded to false while a new URL set's batch is in flight, instead of keeping stale readiness", async () => {
+    const urlA = "https://github.com/org/repo/pull/920";
+    const urlB = "https://github.com/org/repo/pull/921";
+    const prInfo = {
+      state: "open",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    };
+
+    mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [urlA]: prInfo } }));
+
+    const { result, rerender } = renderHook(({ urls }) => usePrReadyUrls(urls, true), {
+      initialProps: { urls: [urlA] },
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(urlA)).toBe(true);
+
+    // Leave the second batch unresolved so the reset can be observed before
+    // it settles.
+    let resolveSecondBatch: (value: Response) => void = () => {};
+    mockFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSecondBatch = resolve;
+        }),
+    );
+
+    act(() => {
+      rerender({ urls: [urlB] });
+    });
+
+    expect(result.current.loaded).toBe(false);
+
+    resolveSecondBatch(jsonResponse({ results: { [urlB]: prInfo } }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(urlB)).toBe(true);
+  });
+
+  it("updates the ready set from a primePrInfo write without waiting for the next poll", async () => {
+    const url = "https://github.com/org/repo/pull/930";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [url]: {
+            state: "open",
+            reviewDecision: "changes_requested",
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    const { result } = renderHook(() => usePrReadyUrls([url], true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(url)).toBe(false);
+
+    // A write from elsewhere (e.g. SessionRow's post-merge prime) flips the
+    // PR to ready — the set must update immediately, not after POLL_MS.
+    act(() => {
+      primePrInfo(url, {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+    });
+
+    expect(result.current.ready.has(url)).toBe(true);
+  });
 });

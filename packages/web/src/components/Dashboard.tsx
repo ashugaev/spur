@@ -43,6 +43,7 @@ import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
+  ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
@@ -106,6 +107,88 @@ function buildSessionProjectLabelMap(
     }
   }
   return labels;
+}
+
+function sessionReviewUrl(session: DashboardSession): string | undefined {
+  return session.links.find((link) => isReviewLinkLabel(link.label))?.url;
+}
+
+interface FacetFilterState {
+  projectId: string;
+  tagFilters: readonly string[];
+  agentFilter: readonly AgentName[];
+  searchQuery: string;
+  prReadyOnly: boolean;
+  prReady: { readonly ready: ReadonlySet<string>; readonly loaded: boolean };
+}
+
+type FacetDimension = "project" | "tag" | "agent" | "prReady";
+
+// Whether `session` passes every facet filter dimension EXCEPT `exclude` —
+// the shared predicate behind every Filters modal chip count, so a chip
+// never counts against its own selection.
+function sessionMatchesFacetFilters(
+  session: DashboardSession,
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+): boolean {
+  if (exclude !== "project" && filters.projectId && session.projectId !== filters.projectId) {
+    return false;
+  }
+  if (
+    exclude !== "tag" &&
+    filters.tagFilters.length > 0 &&
+    !filters.tagFilters.some((tag) => session.tags.includes(tag))
+  ) {
+    return false;
+  }
+  if (
+    exclude !== "agent" &&
+    filters.agentFilter.length > 0 &&
+    !filters.agentFilter.includes(session.agent)
+  ) {
+    return false;
+  }
+  if (filters.searchQuery && !sessionMatchesQuery(session, filters.searchQuery)) {
+    return false;
+  }
+  if (exclude !== "prReady" && filters.prReadyOnly && filters.prReady.loaded) {
+    const url = sessionReviewUrl(session);
+    if (!url || !filters.prReady.ready.has(url)) return false;
+  }
+  return true;
+}
+
+// Tallies desks (not sessions) per facet key: a desk counts once for a key
+// as soon as ANY member session carries it — the same "any member of the
+// desk" rule `tagFilteredSessions` / `agentFilteredSessions` /
+// `prReadyFilteredSessions` use to actually narrow the list, so a desk whose
+// matching session (e.g. a ready PR link) lives on a subagent rather than
+// the anchor still counts here. Drives every Filters modal chip count
+// (project, agent, tag, PR-ready) through one path instead of four
+// hand-rolled copies, each of which must independently remember to skip
+// only its own dimension.
+function buildFacetCounts<T extends string>(
+  sessions: readonly DashboardSession[],
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+  keyFn: (session: DashboardSession) => readonly T[],
+): Map<T, number> {
+  const deskKeysByValue = new Map<T, Set<string>>();
+  for (const session of sessions) {
+    if (!sessionMatchesFacetFilters(session, exclude, filters)) continue;
+    for (const key of keyFn(session)) {
+      let deskKeys = deskKeysByValue.get(key);
+      if (!deskKeys) {
+        deskKeys = new Set();
+        deskKeysByValue.set(key, deskKeys);
+      }
+      deskKeys.add(session.deskKey);
+    }
+  }
+  const counts = new Map<T, number>();
+  for (const [key, deskKeys] of deskKeysByValue) counts.set(key, deskKeys.size);
+  return counts;
 }
 
 function sameDeskActiveSessions(
@@ -321,22 +404,18 @@ function IconPlus({ className }: { className: string }) {
   );
 }
 
-// Static per-lane presentation for the Filters modal Status section — the
-// same label/color pairing the header stat cluster used to render inline.
-const STATUS_LANE_META: Record<AttentionLevel, { label: string; color: string; icon: ReactNode }> =
-  {
-    error: { label: "Errors", color: "var(--color-status-error)", icon: <IconAlert /> },
-    rate_limited: {
-      label: "Rate Limited",
-      color: "var(--color-status-attention)",
-      icon: <IconGauge />,
-    },
-    respond: { label: "Needs Input", color: "var(--color-status-error)", icon: <IconChat /> },
-    working: { label: "Working", color: "var(--color-status-working)", icon: <IconBolt /> },
-    pending: { label: "Waiting", color: "var(--color-status-attention)", icon: <IconClock /> },
-    stopped: { label: "Stopped", color: "var(--color-text-tertiary)", icon: <IconStop /> },
-    done: { label: "Completed", color: "var(--color-status-ready)", icon: <IconCheck /> },
-  };
+// Icon per lane for the Filters modal Status section. Label/color live in
+// the single shared `ATTENTION_LANE_META` (also used by AttentionZone), so
+// only the icon assignment — which AttentionZone doesn't render — stays here.
+const STATUS_LANE_ICONS: Record<AttentionLevel, ReactNode> = {
+  error: <IconAlert />,
+  rate_limited: <IconGauge />,
+  respond: <IconChat />,
+  working: <IconBolt />,
+  pending: <IconClock />,
+  stopped: <IconStop />,
+  done: <IconCheck />,
+};
 
 function IconEdit() {
   return (
@@ -1229,7 +1308,7 @@ export function Dashboard() {
   const reviewUrls = useMemo(
     () =>
       agentFilteredSessions
-        .map((session) => session.links.find((link) => isReviewLinkLabel(link.label))?.url)
+        .map((session) => sessionReviewUrl(session))
         .filter((url): url is string => Boolean(url)),
     [agentFilteredSessions],
   );
@@ -1240,7 +1319,7 @@ export function Dashboard() {
     const keys = new Set(
       agentFilteredSessions
         .filter((s) => {
-          const url = s.links.find((link) => isReviewLinkLabel(link.label))?.url;
+          const url = sessionReviewUrl(s);
           return url ? prReady.ready.has(url) : false;
         })
         .map((s) => s.deskKey),
@@ -1315,61 +1394,42 @@ export function Dashboard() {
 
   const allStatusesCount = deskCollapsedRows.length;
 
-  // Faceted counts for the Filters modal chips: each dimension is counted
-  // against every OTHER active filter, but not against itself, so toggling
-  // one option never zeroes out the rest of that same section. Counted via
-  // `collapseDeskRows` (one entry per desk, keyed on its anchor session) so
-  // a desk with several subagent sessions counts as 1 here, matching the
-  // Status lane counts and `allStatusesCount` above.
-  const projectCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    const filtered = allSessions.filter((session) => {
-      if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
-        return false;
-      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) return false;
-      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        return false;
-      return true;
-    });
-    for (const row of collapseDeskRows(filtered)) {
-      map.set(row.session.projectId, (map.get(row.session.projectId) ?? 0) + 1);
-    }
-    return map;
-  }, [allSessions, activeTagFilters, agentFilter, searchQuery]);
+  // Faceted counts for the Filters modal chips, all driven through
+  // `buildFacetCounts` off the full, unfiltered `allSessions`: each
+  // dimension excludes only itself and applies every other active filter —
+  // including `prReadyOnly` — so toggling one option never zeroes out, nor
+  // silently under-counts, the rest of that same section.
+  const facetFilters: FacetFilterState = useMemo(
+    () => ({
+      projectId,
+      tagFilters: activeTagFilters,
+      agentFilter,
+      searchQuery: searchQuery.trim(),
+      prReadyOnly,
+      prReady,
+    }),
+    [projectId, activeTagFilters, agentFilter, searchQuery, prReadyOnly, prReady],
+  );
+
+  const projectCounts = useMemo(
+    () => buildFacetCounts(allSessions, "project", facetFilters, (s) => [s.projectId]),
+    [allSessions, facetFilters],
+  );
 
   const allProjectsCount = useMemo(
     () => [...projectCounts.values()].reduce((total, count) => total + count, 0),
     [projectCounts],
   );
 
-  const agentCounts = useMemo(() => {
-    const map = new Map<AgentName, number>();
-    const filtered = projectSessions.filter((session) => {
-      if (activeTagFilters.length > 0 && !activeTagFilters.some((t) => session.tags.includes(t)))
-        return false;
-      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        return false;
-      return true;
-    });
-    for (const row of collapseDeskRows(filtered)) {
-      map.set(row.session.agent, (map.get(row.session.agent) ?? 0) + 1);
-    }
-    return map;
-  }, [projectSessions, activeTagFilters, searchQuery]);
+  const agentCounts = useMemo(
+    () => buildFacetCounts(allSessions, "agent", facetFilters, (s) => [s.agent]),
+    [allSessions, facetFilters],
+  );
 
-  const tagCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    const filtered = projectSessions.filter((session) => {
-      if (agentFilter.length > 0 && !agentFilter.includes(session.agent)) return false;
-      if (searchQuery.trim() && !sessionMatchesQuery(session, searchQuery.trim().toLowerCase()))
-        return false;
-      return true;
-    });
-    for (const row of collapseDeskRows(filtered)) {
-      for (const tag of row.session.tags) map.set(tag, (map.get(tag) ?? 0) + 1);
-    }
-    return map;
-  }, [projectSessions, agentFilter, searchQuery]);
+  const tagCounts = useMemo(
+    () => buildFacetCounts(allSessions, "tag", facetFilters, (s) => s.tags),
+    [allSessions, facetFilters],
+  );
 
   // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
   // its own facet query: computing this independently of the toggle would
@@ -1377,17 +1437,12 @@ export function Dashboard() {
   // violates "no /api/pr-status/batch request while prReadyOnly is false".
   const prReadyCount = useMemo(() => {
     if (!prReady.loaded) return 0;
-    const filtered = agentFilteredSessions.filter(
-      (session) =>
-        !searchQuery.trim() || sessionMatchesQuery(session, searchQuery.trim().toLowerCase()),
-    );
-    let count = 0;
-    for (const row of collapseDeskRows(filtered)) {
-      const url = row.session.links.find((link) => isReviewLinkLabel(link.label))?.url;
-      if (url && prReady.ready.has(url)) count++;
-    }
-    return count;
-  }, [agentFilteredSessions, prReady, searchQuery]);
+    const counts = buildFacetCounts(allSessions, "prReady", facetFilters, (s) => {
+      const url = sessionReviewUrl(s);
+      return url && prReady.ready.has(url) ? (["ready"] as const) : [];
+    });
+    return counts.get("ready") ?? 0;
+  }, [allSessions, facetFilters, prReady]);
 
   const activeFilterCount =
     (projectId ? 1 : 0) +
@@ -2279,6 +2334,7 @@ export function Dashboard() {
             )
           }
           prReadyCount={prReadyCount}
+          prReadyLoaded={prReady.loaded}
           prReadyOnly={prReadyOnly}
           projectId={projectId}
           projectOptions={filterProjectOptions.map((project) => ({
@@ -2288,9 +2344,9 @@ export function Dashboard() {
           }))}
           statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
             level,
-            label: STATUS_LANE_META[level].label,
-            color: STATUS_LANE_META[level].color,
-            icon: STATUS_LANE_META[level].icon,
+            label: ATTENTION_LANE_META[level].label,
+            color: ATTENTION_LANE_META[level].color,
+            icon: STATUS_LANE_ICONS[level],
             count: stats[level],
           }))}
           tagOptions={filterTagCatalog.map((tag) => ({

@@ -2926,7 +2926,7 @@ describe("Spur web API routes", () => {
       fetchMock.mockResolvedValueOnce(
         ghOk({
           data: { pr0: { pullRequest: makePrNode() }, pr1: { pullRequest: null } },
-          errors: [{ message: "Could not resolve to a PullRequest" }],
+          errors: [{ message: "Could not resolve to a PullRequest", path: ["pr1", "pullRequest"] }],
         }),
       );
 
@@ -2940,6 +2940,31 @@ describe("Spur web API routes", () => {
       expect(payload.results[okUrl]?.error).toBeUndefined();
       expect(payload.results[failUrl]?.state).toBeNull();
       expect(payload.results[failUrl]?.error).toContain("Could not resolve to a PullRequest");
+    });
+
+    it("maps a GraphQL error to only its own alias, leaving an unrelated null node genuinely absent", async () => {
+      const errorUrl = nextPrUrl();
+      const absentUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: null }, pr1: { pullRequest: null } },
+          errors: [{ message: "Could not resolve to a PullRequest", path: ["pr0", "pullRequest"] }],
+        }),
+      );
+
+      const response = await postBatch([errorUrl, absentUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      // pr0 (errorUrl) carries the GraphQL error.
+      expect(payload.results[errorUrl]?.state).toBeNull();
+      expect(payload.results[errorUrl]?.error).toContain("Could not resolve to a PullRequest");
+      // pr1 (absentUrl) has no matching error entry — it's genuinely absent,
+      // not tainted by pr0's unrelated error message.
+      expect(payload.results[absentUrl]?.state).toBeNull();
+      expect(payload.results[absentUrl]?.error).toBeUndefined();
     });
 
     it("records a per-miss error and returns 200 for a non-rate-limit GitHub API failure", async () => {

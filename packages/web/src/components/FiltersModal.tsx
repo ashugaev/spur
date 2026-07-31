@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { tagChipStyle } from "@/lib/tag-style";
 import type { AttentionLevel } from "@/lib/types";
@@ -74,6 +74,7 @@ export interface FiltersModalProps {
   prReadyOnly: boolean;
   onPrReadyOnlyChange: (value: boolean) => void;
   prReadyCount: number;
+  prReadyLoaded: boolean;
   projectOptions: FiltersModalProjectOption[];
   allProjectsCount: number;
   projectId: string;
@@ -97,6 +98,7 @@ export function FiltersModal({
   prReadyOnly,
   onPrReadyOnlyChange,
   prReadyCount,
+  prReadyLoaded,
   projectOptions,
   allProjectsCount,
   projectId,
@@ -110,11 +112,46 @@ export function FiltersModal({
   activeFilterCount,
   onClearAll,
 }: FiltersModalProps) {
+  // Toggle on but no snapshot yet gets the extra "unavailable" hint (title +
+  // dimmed chrome); either state with no snapshot dims the count itself so
+  // "0" never reads as a computed answer before one exists.
+  const prReadyUnavailable = prReadyOnly && !prReadyLoaded;
+  const prReadyDimmed = !prReadyLoaded || prReadyCount === 0;
+
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Initial focus inside the dialog so Tab can't reach the page behind it
+    // before the user interacts with the modal at all.
+    dialogRef.current?.querySelector<HTMLElement>("button, [href], input, [tabindex]")?.focus();
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+      const first = focusable[0] as HTMLElement;
+      const last = focusable[focusable.length - 1] as HTMLElement;
+      if (event.shiftKey) {
+        if (document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
     window.addEventListener("keydown", handler);
@@ -129,6 +166,7 @@ export function FiltersModal({
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
+      ref={dialogRef}
       role="dialog"
     >
       <div className="flex max-h-[80vh] w-[min(560px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)]">
@@ -202,29 +240,28 @@ export function FiltersModal({
             <div className="flex flex-wrap gap-2">
               <button
                 aria-pressed={prReadyOnly}
-                className={optionClass(prReadyOnly)}
+                className={`${optionClass(prReadyOnly)}${prReadyUnavailable ? " opacity-60" : ""}`}
                 onClick={() => onPrReadyOnlyChange(!prReadyOnly)}
-                title="GitHub only"
+                title={prReadyUnavailable ? "GitHub only — status unavailable" : "GitHub only"}
                 type="button"
               >
                 <span
                   style={{
-                    color:
-                      prReadyCount > 0 ? "var(--color-status-ready)" : "var(--color-text-tertiary)",
+                    color: prReadyDimmed
+                      ? "var(--color-text-tertiary)"
+                      : "var(--color-status-ready)",
                   }}
                 >
                   <IconMergeReady />
                 </span>
-                <span
-                  style={prReadyCount > 0 ? undefined : { color: "var(--color-text-tertiary)" }}
-                >
+                <span style={prReadyDimmed ? { color: "var(--color-text-tertiary)" } : undefined}>
                   Ready to merge:
                 </span>
                 <span
                   className="font-bold tabular-nums"
-                  style={prReadyCount > 0 ? undefined : { color: "var(--color-text-tertiary)" }}
+                  style={prReadyDimmed ? { color: "var(--color-text-tertiary)" } : undefined}
                 >
-                  {prReadyCount}
+                  {prReadyLoaded ? prReadyCount : "–"}
                 </span>
               </button>
             </div>

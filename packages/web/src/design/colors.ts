@@ -22,10 +22,11 @@ export const BG_BASE_HEX = "#0d0d0e";
  * `icon.tsx` imports `next/og` (server/edge-only, pulls in `fs`), which
  * cannot be bundled into a client component.
  *
- * Eight rays drawn outward from center; the four diagonal rays are
- * shortened from radius 7.07 to 6.4 so they read as slightly shorter than
- * the four axis-aligned rays. Render with `strokeLinecap="round"` so every
- * ray gets a rounded tip.
+ * Eight rays drawn outward from center; the four diagonal rays use a
+ * shortened per-axis offset of 6.4 (diagonal length ~9.05, via the
+ * Pythagorean 6.4*sqrt(2)) against the four axis-aligned rays' length of 10,
+ * so they read as slightly shorter. Render with `strokeLinecap="round"` so
+ * every ray gets a rounded tip.
  */
 export const SPARK_GLYPH_PATH =
   "M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4";

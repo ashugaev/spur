@@ -382,6 +382,29 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "done",
 ];
 
+export interface AttentionLaneMeta {
+  label: string;
+  color: string;
+  dividerColor?: string;
+}
+
+// Single source of truth for lane label/color pairs — shared by the
+// AttentionZone section header and the Filters modal Status section so
+// renaming or recoloring a lane can't leave the two views disagreeing.
+export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
+  error: { label: "Errors", color: "var(--color-status-error)" },
+  rate_limited: { label: "Rate Limited", color: "var(--color-status-attention)" },
+  respond: { label: "Needs Input", color: "var(--color-status-error)" },
+  working: { label: "Working", color: "var(--color-status-working)" },
+  pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  stopped: {
+    label: "Stopped",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
+  done: { label: "Completed", color: "var(--color-status-ready)" },
+};
+
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
   let bestRank = ATTENTION_ZONE_ORDER.length;
   let result: AttentionLevel = "done";

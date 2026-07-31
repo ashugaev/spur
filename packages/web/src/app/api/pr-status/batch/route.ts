@@ -50,6 +50,28 @@ function buildAliasedQuery(entries: AliasEntry[]): {
   return { query: `query(${varDecls.join(",")}) {\n${fields.join("\n")}\n}`, variables };
 }
 
+// Maps each GraphQL error to the alias it belongs to via its `path` (GitHub
+// includes the failing field's alias as the first path segment, e.g.
+// `["pr1","pullRequest"]`). Errors without a resolvable alias are dropped
+// here rather than applied to every miss — a caller with no matching entry
+// falls back to `recordGitHubPrAbsent` instead of inheriting an unrelated
+// alias's error message.
+function gqlErrorsByAlias(errorsRaw: unknown): Map<string, string> {
+  const byAlias = new Map<string, string>();
+  if (!Array.isArray(errorsRaw)) return byAlias;
+  for (const entry of errorsRaw) {
+    if (!isRecord(entry)) continue;
+    const message = typeof entry["message"] === "string" ? entry["message"].trim() : "";
+    if (!message) continue;
+    const path = entry["path"];
+    const alias = Array.isArray(path) && typeof path[0] === "string" ? path[0] : null;
+    if (!alias) continue;
+    const existing = byAlias.get(alias);
+    byAlias.set(alias, existing ? `${existing}; ${message}` : message);
+  }
+  return byAlias;
+}
+
 function recordForMisses(
   entries: AliasEntry[],
   missUrlsByKey: Map<string, string[]>,
@@ -130,26 +152,17 @@ export async function POST(request: NextRequest) {
 
     const gqlRaw: unknown = await ghResponse.json().catch(() => null);
     const gqlData = isRecord(gqlRaw) && isRecord(gqlRaw["data"]) ? gqlRaw["data"] : {};
-    const gqlErrorsRaw = isRecord(gqlRaw) ? gqlRaw["errors"] : undefined;
-    const gqlError = Array.isArray(gqlErrorsRaw)
-      ? gqlErrorsRaw
-          .map((entry) =>
-            isRecord(entry) && typeof entry["message"] === "string"
-              ? entry["message"].trim()
-              : null,
-          )
-          .filter((message): message is string => Boolean(message))
-          .join("; ")
-      : "";
+    const errorsByAlias = gqlErrorsByAlias(isRecord(gqlRaw) ? gqlRaw["errors"] : undefined);
 
     for (const entry of aliasEntries) {
       const aliasValue = gqlData[entry.alias];
       const node = isRecord(aliasValue) ? aliasValue["pullRequest"] : null;
+      const aliasError = errorsByAlias.get(entry.alias);
       let response: PrStatusResponse;
       if (isGitHubPrNode(node)) {
         response = recordGitHubPrNode(entry.key, node);
-      } else if (gqlError) {
-        response = recordGitHubPrError(entry.key, gqlError);
+      } else if (aliasError) {
+        response = recordGitHubPrError(entry.key, aliasError);
       } else {
         response = recordGitHubPrAbsent(entry.key);
       }

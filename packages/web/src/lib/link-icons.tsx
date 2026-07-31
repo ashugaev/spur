@@ -338,6 +338,13 @@ export function usePrReadyUrls(
       return;
     }
 
+    // The URL set just changed (this effect re-runs on every `githubUrls`
+    // identity change): the previous `ready` set belonged to a different set
+    // of URLs, so it must stop gating the filter as "loaded" until the new
+    // batch below resolves — otherwise a newly PR-ready session is filtered
+    // out for one round trip against stale readiness data.
+    setState((current) => ({ ready: current.ready, loaded: false }));
+
     let cancelled = false;
     const run = async () => {
       const success = await fetchPrInfoBatch(githubUrls);
@@ -357,6 +364,22 @@ export function usePrReadyUrls(
     return () => {
       cancelled = true;
       clearInterval(timer);
+    };
+  }, [enabled, githubUrls]);
+
+  // Recompute the ready set the moment any of these URLs' cache entries
+  // change — a `primePrInfo` write from anywhere (e.g. the post-merge prime
+  // in `SessionRow`) — rather than waiting for the next POLL_MS batch. Keeps
+  // the filter's ready set aligned with the per-row badges it's meant to match.
+  useEffect(() => {
+    if (!enabled || githubUrls.length === 0) return;
+    const recompute = () => {
+      const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
+      setState({ ready, loaded: true });
+    };
+    const unsubscribes = githubUrls.map((url) => subscribePrInfo(url, recompute));
+    return () => {
+      for (const unsubscribe of unsubscribes) unsubscribe();
     };
   }, [enabled, githubUrls]);
 
