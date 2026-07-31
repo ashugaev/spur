@@ -9,21 +9,26 @@ import { isRuntimeInfoResponse, useVersionSwitch } from "@/lib/version-switch-co
 export const HEARTBEAT_INTERVAL_MS = 5_000;
 // Tighter cadence while disconnected: we want to reload as soon as the
 // daemon comes back, not wait out a full healthy-state heartbeat.
-export const RECONNECT_INTERVAL_MS = 4_000;
+export const RECONNECT_INTERVAL_MS = 2_000;
 const RECONNECT_MAX_INTERVAL_MS = 8_000;
+const RETRY_BASE_INTERVAL_MS = 4_000;
 // Require this many consecutive failures before flipping to "disconnected".
-// Combined with retryIntervalMs, this buys a ≥32s tolerance window so
-// daemon event-loop stalls shorter than that leave the overlay hidden.
+// Combined with retryIntervalMs this buys a 20-32s confirmation window:
+// 20s when probes fail instantly, 32s when each probe burns its full timeout.
 export const FAILURE_THRESHOLD = 4;
-// Must stay comfortably below RECONNECT_INTERVAL_MS: a black-holed
+// Must stay comfortably below RETRY_BASE_INTERVAL_MS: a black-holed
 // connection (sleep/wake, VPN drop that neither errors nor resolves) would
 // otherwise never resolve and never count as a failure, leaving the gate
-// stuck showing a healthy app against a dead backend.
+// stuck showing a healthy app against a dead backend. While disconnected
+// a 3s probe under a 2s tick causes the in-flight guard to skip a tick
+// (~4s effective cadence); instant failures and a recovered backend still
+// get the full 2s cadence.
 export const PROBE_TIMEOUT_MS = 3_000;
 
+// Precondition: consecutiveFailures is in 1..FAILURE_THRESHOLD-1.
 export function retryIntervalMs(consecutiveFailures: number): number {
   return Math.min(
-    RECONNECT_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+    RETRY_BASE_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
     RECONNECT_MAX_INTERVAL_MS,
   );
 }
