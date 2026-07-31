@@ -2052,6 +2052,46 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("preserves the CI-active hysteresis flag when a session poll errors instead of observing settled CI", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Next real tick bypasses the deadline gate on lastCycleCiActive, but the poll
+      // itself hits a transient, non-rate-limit error on its very first gh call — the
+      // cycle never gets to observe whether CI actually settled.
+      ghMock.mockRejectedValueOnce(new Error("gh offline"));
+      await waitForGhCallCount(6);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // A buggy implementation would have reset lastCycleCiActive to false here (no
+      // session in this cycle reported ciActive), so the deadline gate alone would
+      // suppress every further tick. The flag must instead survive the errored cycle,
+      // keeping ticks forced well inside the slow window (deadline stays at 00:10:00).
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
+
+      handle.stop();
+    });
+
     it("does not advance the adaptive deadline for a poll cycle suppressed entirely by an active rate-limit cooldown", async () => {
       // Baseline: startup poll succeeds, legitimately arming the deadline at
       // T0 + slowIntervalMs = 00:10:00.

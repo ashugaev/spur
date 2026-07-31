@@ -362,6 +362,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       const sessions = listPollableSessions();
       const currentSessionIds = new Set<string>();
       let cycleCiActive = false;
+      let cycleHadPollError = false;
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
@@ -483,6 +484,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           }
         } catch (error) {
           if (handleGitHubSuppressionError(error)) return;
+          cycleHadPollError = true;
           const message = extractGithubErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
@@ -498,7 +500,11 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
       }
 
-      lastCycleCiActive = cycleCiActive;
+      // A per-session poll error means this cycle's CI observation is incomplete, not
+      // that CI stopped: only let the cycle *lower* the hysteresis flag to false when
+      // every session was actually observed cleanly. A freshly observed active check
+      // still raises it regardless.
+      lastCycleCiActive = cycleCiActive || (cycleHadPollError && lastCycleCiActive);
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
