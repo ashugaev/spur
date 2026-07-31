@@ -35,7 +35,8 @@ const {
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
 
-const { resolveBoundPrSummary } = await import("../../src/review-providers/github.js");
+const { resolveBoundPrSummary, hasActiveChecks } =
+  await import("../../src/review-providers/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -204,6 +205,34 @@ describe("summarizeFailingCi", () => {
 
     expect(result).toContain("build");
     expect(result).not.toContain("docs");
+  });
+});
+
+describe("hasActiveChecks", () => {
+  it("returns false for an empty checks array", () => {
+    expect(hasActiveChecks([])).toBe(false);
+  });
+
+  it("returns false when every check is in a known-terminal state", () => {
+    const checks: GitHubCheck[] = [
+      { name: "build", state: "SUCCESS" },
+      { name: "lint", state: "FAILURE" },
+      { name: "docs", state: "SKIPPED" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(false);
+  });
+
+  it("returns true for a check in an unrecognized, non-terminal-shaped state", () => {
+    const checks: GitHubCheck[] = [{ name: "e2e", state: "IN_PROGRESS" }];
+    expect(hasActiveChecks(checks)).toBe(true);
+  });
+
+  it("returns true when active and terminal checks are mixed", () => {
+    const checks: GitHubCheck[] = [
+      { name: "build", state: "SUCCESS" },
+      { name: "e2e", state: "QUEUED" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(true);
   });
 });
 

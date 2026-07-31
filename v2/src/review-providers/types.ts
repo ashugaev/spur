@@ -13,5 +13,9 @@ export interface ReviewProvider {
     dataDir: string,
     projectId: string,
     sourceId: string,
-  ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null>;
+  ): Promise<{
+    data: ReviewEventData;
+    snapshot: Map<string, ReviewSignal>;
+    ciActive?: boolean;
+  } | null>;
 }

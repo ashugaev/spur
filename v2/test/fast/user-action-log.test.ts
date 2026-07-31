@@ -8,6 +8,7 @@ import {
   appendUserAction,
   buildUserActionRecord,
   deleteSessionUserActions,
+  hasRecentSessionUserAction,
   readSessionUserActions,
   readUserActionLog,
   sessionUserActionLogPath,
@@ -120,6 +121,55 @@ describe("read shard vs global", () => {
     expect(capped.map((entry) => entry.action)).toEqual(["session.kill", "session.pause"]);
 
     expect(readUserActionLog(dir)).toHaveLength(3);
+  });
+});
+
+describe("hasRecentSessionUserAction", () => {
+  const actions = new Set(["session.send", "session.source_reply"]);
+
+  it("returns false when the session has no shard yet", async () => {
+    const dir = await makeDir();
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, 0)).toBe(false);
+  });
+
+  it("returns true for a matching action inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
+  });
+
+  it("returns false for a matching action aged out of the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:00.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:10.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a non-matching action type inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.kill", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a different session id", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-2", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
   });
 });
 

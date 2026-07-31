@@ -28,6 +28,11 @@ const FAILING_GITHUB_CI_STATES = new Set([
   "ACTION_REQUIRED",
 ]);
 const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
+const TERMINAL_GITHUB_CI_STATES = new Set([
+  ...FAILING_GITHUB_CI_STATES,
+  ...IGNORED_GITHUB_CI_STATES,
+  "SUCCESS",
+]);
 
 // Review states whose body is unsolicited feedback worth surfacing. APPROVED is
 // intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
@@ -127,6 +132,13 @@ export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
   return failing.length > 0
     ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
     : null;
+}
+
+export function hasActiveChecks(checks: GitHubCheck[]): boolean {
+  return checks.some(
+    (check) =>
+      !TERMINAL_GITHUB_CI_STATES.has(normalizeReviewState(check.conclusion ?? check.state)),
+  );
 }
 
 export function parseRepoFromUrl(url: string): string {
@@ -389,7 +401,11 @@ async function collectSignals(
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
+): Promise<{
+  data: ReviewEventData;
+  snapshot: Map<string, ReviewSignal>;
+  ciActive: boolean;
+} | null> {
   const pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
     : await resolvePrSummary(
@@ -470,6 +486,7 @@ async function collectSignals(
       signals: [],
     },
     snapshot,
+    ciActive: hasActiveChecks(checks),
   };
 }
 

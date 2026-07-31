@@ -139,6 +139,31 @@ export function readSessionUserActions(
   return out;
 }
 
+export function hasRecentSessionUserAction(
+  dataDir: string,
+  sessionId: string,
+  actions: ReadonlySet<string>,
+  sinceMs: number,
+): boolean {
+  let shardExists: boolean;
+  try {
+    shardExists = existsSync(sessionShardDir(dataDir, sessionId));
+  } catch {
+    return false;
+  }
+  if (!shardExists) return false;
+
+  for (const line of iterArchivedThenLive(
+    sessionUserActionLogPath(dataDir, sessionId),
+    userActionLogConfig.retainArchives,
+  )) {
+    const entry = parseJsonLine<UserActionRecord>(line);
+    if (!entry || entry.sessionId !== sessionId || !actions.has(entry.action)) continue;
+    if (Date.parse(entry.ts) >= sinceMs) return true;
+  }
+  return false;
+}
+
 export function deleteSessionUserActions(dataDir: string, sessionId: string): void {
   // Enumerate the shard dir instead of looping to the current retainArchives: a config
   // that was lowered since the archives were written would otherwise leak the higher-

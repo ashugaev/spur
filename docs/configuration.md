@@ -203,6 +203,9 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
+- `projects.<id>.sources.<sourceId>.adaptivePoll`: optional, `github` only. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
+- `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
+- `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
 - `projects.<id>.sources.<sourceId>.service`: required for `service`; logical id used by `spur service run <serviceId>`.
 - `projects.<id>.sources.<sourceId>.tailLines`: optional for `service`, default `200`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex for `service`.
@@ -253,6 +256,8 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals; state persists under `dataDir`. When `query` is set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids in an append-only registry. GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
 `github:ci_failed` uses one fixed policy: retry every 10 minutes, stop after 3 deliveries, reset only when the failing signal disappears from the latest snapshot. `github:merge_conflict` is snapshot-based and one-shot: emitted when the PR becomes conflicting, cleared when mergeable again, re-emittable if conflicts return. Terminal events (`merged`/`closed`) fire only while the owning session still runs.
+
+With `adaptivePoll` configured, a `github` source tick is a no-op — zero `gh` calls — unless: the slow deadline (`slowIntervalMs` since the last real poll) has passed; the last cycle saw a non-terminal CI check; a tracked session hasn't been polled yet; or a session had a `send`/source-reply within `activeGraceMs`. The existing rate-limit cooldown backoff still overrides everything above, on `adaptivePoll` sources and plain ones alike.
 
 ## Daemon restarts
 

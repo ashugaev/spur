@@ -1665,6 +1665,106 @@ projects:
     });
   });
 
+  it("omits adaptivePoll entirely from a github source that doesn't configure it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect(Object.keys(parsed ?? {})).not.toContain("adaptivePoll");
+    expect("adaptivePoll" in (parsed ?? {})).toBe(false);
+  });
+
+  it("derives adaptivePoll defaults from an empty block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 30000
+        adaptivePoll: {}
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      intervalMs: 30_000,
+      adaptivePoll: {
+        slowIntervalMs: 150_000,
+        activeGraceMs: 600_000,
+      },
+    });
+  });
+
+  it("passes through explicit adaptivePoll overrides", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 30000
+        adaptivePoll:
+          slowIntervalMs: 900000
+          activeGraceMs: 120000
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      adaptivePoll: {
+        slowIntervalMs: 900_000,
+        activeGraceMs: 120_000,
+      },
+    });
+  });
+
+  it("rejects an adaptivePoll.slowIntervalMs not greater than intervalMs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 60000
+        adaptivePoll:
+          slowIntervalMs: 60000
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.pr-watch.adaptivePoll.slowIntervalMs must be greater than projects.backend.sources.pr-watch.intervalMs",
+    );
+  });
+
+  it("ignores a stray adaptivePoll block on a gitlab source without throwing", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+        adaptivePoll:
+          slowIntervalMs: 900000
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["mr-watch"];
+    expect(parsed).toBeDefined();
+    expect("adaptivePoll" in (parsed ?? {})).toBe(false);
+  });
+
   it("parses a sentry source with a resolved token and defaults", async () => {
     const configPath = await writeConfig(`
 projects:

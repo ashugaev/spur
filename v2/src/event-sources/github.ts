@@ -26,6 +26,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { hasRecentSessionUserAction } from "../user-action-log.js";
 import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
@@ -44,6 +45,7 @@ export type { GitHubCheck, GitHubPrSummary };
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
 const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
 
 interface GitHubSearchPrItem {
   number: number;
@@ -267,6 +269,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.sourceId,
   );
   const deadWorktreeSessions = new Set<string>();
+  const adaptive = deps.config.adaptivePoll;
+  const attemptedSessionIds = new Set<string>();
+  let nextEligiblePollAtMs = 0;
+  let lastCycleCiActive = false;
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -277,6 +283,38 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let authWarned = false;
 
   const shouldSkipGitHubCalls = (): boolean => authDisabled || Date.now() < cooldownUntilMs;
+
+  const listPollableSessions = () =>
+    listSessions(deps.dataDir).filter(
+      (session) =>
+        session.project === deps.projectId &&
+        session.status === "running" &&
+        Boolean(session.worktreePath) &&
+        existsSync(session.worktreePath),
+    );
+
+  const shouldPollThisTick = (): boolean => {
+    if (!adaptive) return true;
+    if (Date.now() >= nextEligiblePollAtMs) return true;
+    if (lastCycleCiActive) return true;
+    for (const session of listPollableSessions()) {
+      if (deadWorktreeSessions.has(session.id)) continue;
+      const existing = snapshots.get(session.id);
+      if (existing && (existing.has("merged") || existing.has("closed"))) continue;
+      if (!attemptedSessionIds.has(session.id)) return true;
+      if (
+        hasRecentSessionUserAction(
+          deps.dataDir,
+          session.id,
+          ADAPTIVE_ACTIVITY_ACTIONS,
+          Date.now() - adaptive.activeGraceMs,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   const handleGitHubSuppressionError = (error: unknown): boolean => {
     const message = extractGithubErrorText(error);
@@ -321,14 +359,9 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
-      const sessions = listSessions(deps.dataDir).filter(
-        (session) =>
-          session.project === deps.projectId &&
-          session.status === "running" &&
-          Boolean(session.worktreePath) &&
-          existsSync(session.worktreePath),
-      );
+      const sessions = listPollableSessions();
       const currentSessionIds = new Set<string>();
+      let cycleCiActive = false;
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
@@ -370,12 +403,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             session.id,
           );
+          attemptedSessionIds.add(session.id);
           const collected = await provider.collectSignals(
             session,
             deps.dataDir,
             deps.projectId,
             deps.sourceId,
           );
+          if (collected?.ciActive) {
+            cycleCiActive = true;
+          }
           if (!collected) {
             snapshots.delete(session.id);
             deleteReviewSourceSnapshot(
@@ -461,6 +498,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
       }
 
+      lastCycleCiActive = cycleCiActive;
+
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
@@ -533,11 +572,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         rateLimitFailures = 0;
       }
     } finally {
+      if (adaptive) {
+        nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+      }
       pollingCycle = false;
     }
   };
 
   const timer = startInterval(() => {
+    if (!shouldPollThisTick()) return;
     void pollCycle(false);
   }, deps.config.intervalMs);
 
@@ -557,6 +600,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
+            if (!shouldPollThisTick()) return;
             void pollCycle(true);
           },
         }

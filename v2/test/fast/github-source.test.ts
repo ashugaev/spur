@@ -18,6 +18,7 @@ const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
+const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
@@ -44,6 +45,9 @@ vi.mock("../../src/metadata.js", () => ({
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
   isGitWorktree: isGitWorktreeMock,
+}));
+vi.mock("../../src/user-action-log.js", () => ({
+  hasRecentSessionUserAction: hasRecentSessionUserActionMock,
 }));
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
@@ -106,6 +110,7 @@ describe("github source", () => {
     // Default: sessions have a valid git worktree so polling proceeds. The
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
+    hasRecentSessionUserActionMock.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -1786,6 +1791,205 @@ describe("github source", () => {
     });
 
     handle.stop();
+  });
+
+  describe("adaptive poll", () => {
+    // Only Date is faked here, not setImmediate/node:timers — flushPollCycle relies
+    // on a real setImmediate to drain the fire-and-forget pollCycle promise chain.
+    function queuePollResponse(checksState: string): void {
+      ghMock.mockResolvedValueOnce(prView());
+      ghMock.mockResolvedValueOnce(JSON.stringify([{ name: "check", state: checksState }]));
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-07-30T00:00:00.000Z"));
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+    });
+
+    it("polls every runOnStart tick when adaptivePoll is not configured", async () => {
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 60_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(10);
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(15);
+
+      handle.stop();
+    });
+
+    it("polls an in-window tick when the last cycle saw a non-terminal CI check", async () => {
+      queuePollResponse("IN_PROGRESS");
+      queuePollResponse("IN_PROGRESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: true,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Still well inside the slow window, but the last cycle's CI was non-terminal.
+      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(10);
+
+      handle.stop();
+    });
+
+    it("goes quiet in-window once CI settles with no pending session, then polls again past the slow window", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: true,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Still inside the slow window: settled CI, session already attempted, no activity.
+      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Past the slow window: the deadline alone re-arms polling.
+      queuePollResponse("SUCCESS");
+      vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(10);
+
+      handle.stop();
+    });
+
+    it("polls in-window on recent session activity, then quiets again once activity ages out", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: true,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      hasRecentSessionUserActionMock.mockReturnValue(true);
+      queuePollResponse("SUCCESS");
+      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(10);
+
+      hasRecentSessionUserActionMock.mockReturnValue(false);
+      vi.setSystemTime(new Date("2026-07-30T00:02:00.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(10);
+
+      handle.stop();
+    });
+
+    it("forces a poll for a brand-new session mid-window even when the tracked session is quiet", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: true,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // A brand-new session appears mid-window: never attempted, forces a real poll.
+      const newSession = makeSession({
+        id: "api-c3d4",
+        pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+      });
+      listSessionsMock.mockReturnValue([makeSession(), newSession]);
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+      vi.setSystemTime(new Date("2026-07-30T00:01:00.000Z"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghMock).toHaveBeenCalledTimes(15);
+
+      handle.stop();
+    });
   });
 });
 

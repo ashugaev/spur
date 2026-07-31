@@ -66,6 +66,7 @@ One shape only: `sources -> events -> triggers -> spawn|send`.
 - `runOnStart` defaults to `false` on every source.
 - A trigger names one `source`, one `event`, then exactly one of `spawn` or `send`.
 - Work-item sources (`github` with `query`, `sentry`, `github-ci`) suppress the first poll's backlog; `emitExisting: true` emits it once, capped at 10.
+- `github` source `adaptivePoll` (optional, opt-in): a tick is a no-op (zero `gh` calls) unless the `slowIntervalMs` deadline passed, the last cycle saw a non-terminal CI check, a tracked session hasn't been polled yet, or a session sent/replied within `activeGraceMs`. Omitted by default, which keeps today's poll-every-tick cadence.
 - `spawnDeskGroup: true` puts every child in one workspace. Members of a workspace (same `workspaceId`, one worktree — also the two sides of a handoff) share slots, session artifacts, and non-MCP project sidecars; each keeps its own transcript, agent, status, MCP sidecar, and tool dir. The worktree and shared artifacts survive while any member can still return; a shared sidecar and its ports are released once no member has a running agent, and a restore starts it again.
 
 ## Config
