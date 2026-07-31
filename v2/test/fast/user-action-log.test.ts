@@ -132,6 +132,20 @@ describe("hasRecentSessionUserAction", () => {
     expect(hasRecentSessionUserAction(dir, "demo-1", actions, 0)).toBe(false);
   });
 
+  it("never falls back to the global log: a matching in-window entry there alone is not enough without a shard", async () => {
+    const dir = await makeDir();
+    // Write directly to the global log only — bypass appendUserAction so no
+    // per-session shard gets created for demo-1.
+    const line = `${JSON.stringify(
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    )}\n`;
+    writeFileSync(userActionLogPath(dir), line, { encoding: "utf-8", mode: 0o600 });
+    expect(existsSync(sessionUserActionLogPath(dir, "demo-1"))).toBe(false);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
   it("returns true for a matching action inside the window", async () => {
     const dir = await makeDir();
     appendUserAction(
