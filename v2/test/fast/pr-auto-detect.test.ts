@@ -77,6 +77,27 @@ vi.mock("../../src/metadata.js", () => ({
   writeServiceInstance: vi.fn(),
   writeSession: writeSessionMock,
 }));
+// node:fs is stubbed below (existsSync always true, mkdirSync/writeFileSync
+// no-ops) for the rest of this suite's needs, which breaks
+// workspace-store.js's real tmp-file-and-rename write (renameSync is real
+// and would throw ENOENT on the never-actually-written tmp file). This
+// suite only cares that a found PR binding lands on the session record via
+// writeSession, so resolve workspace state straight off the passed-in
+// record — the same "no workspace file yet" value the real resolver would
+// give here, since every test in this file uses a single non-desk session
+// id (`workspaceId === id`) and never actually writes a workspace file.
+vi.mock("../../src/workspace-store.js", () => ({
+  resolveWorkspaceState: (
+    _dataDir: string,
+    record: { slots?: SessionSlots; pr?: SessionRecord["pr"] },
+  ) => ({
+    ...(record.slots ? { slots: record.slots } : {}),
+    ...(record.pr ? { pr: record.pr } : {}),
+  }),
+  writeWorkspaceState: vi.fn(),
+  deleteWorkspaceState: vi.fn(),
+  readWorkspaceState: vi.fn().mockReturnValue(null),
+}));
 vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
   readAgentHookState: vi.fn(),

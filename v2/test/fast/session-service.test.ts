@@ -563,6 +563,13 @@ async function loadSessionServiceModule() {
   return { ...module, SessionService: TrackedSessionService };
 }
 
+// workspace-store.js transitively imports the mocked metadata.js, so — like
+// session-service.js — it must be loaded dynamically, after this file's
+// top-level `vi.fn()` mocks have run, never as a static top-level import.
+async function loadWorkspaceStoreModule() {
+  return import("../../src/workspace-store.js");
+}
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -9257,6 +9264,37 @@ describe("SessionService", () => {
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
   });
 
+  it("keeps the workspace state file while completing a desk member with a live sibling", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState, writeWorkspaceState } = await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { title: "Shared", links: [] } });
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Shared");
+  });
+
   it("keeps the shared artifacts dir for a desk member parked stopped by a handoff, which holds no sidecar", async () => {
     const store = createSessionStore();
     const base = {
@@ -9379,6 +9417,41 @@ describe("SessionService", () => {
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
+  it("deletes the workspace state file only on the last member's teardown", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed" as const,
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState, writeWorkspaceState } = await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { title: "Shared", links: [] } });
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-2");
+
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")).toBeNull();
   });
 
   it("holds shared resources while an errored desk sibling has not reached a terminal status", async () => {
@@ -13023,6 +13096,7 @@ describe("SessionService", () => {
     workspaceExistsMock.mockReturnValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.updateSlots("api-2", { title: "Shared title" });
@@ -13033,6 +13107,90 @@ describe("SessionService", () => {
     // The API response is always the caller's own view.
     expect(result.id).toBe("api-2");
     expect(result.slots?.title).toBe("Shared title");
+    // The write is authoritative in the workspace's own state file, not just
+    // mirrored onto the anchor record (Phase 2: single-writer workspace state).
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Shared title");
+    service.dispose();
+  });
+
+  it("seeds the workspace state file from the anchor's legacy slots on its first write", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      slots: { links: [{ label: "tracker", url: "https://tracker.example.com/1" }] },
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", deskId: "api-1" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+    expect(existsSync(join(TEST_DATA_DIR, "workspaces", "api-1.json"))).toBe(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-2", { title: "New title" });
+
+    // Nothing already on the legacy record was silently dropped by the
+    // first write: the new title lands alongside the pre-existing link.
+    const fileState = readWorkspaceState(TEST_DATA_DIR, "api-1");
+    expect(fileState?.slots?.title).toBe("New title");
+    expect(fileState?.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+    ]);
+    // Transitional mirror: the anchor's own record stays in sync with the file.
+    expect(store.get("api-1")?.slots?.title).toBe("New title");
+    expect(store.get("api-1")?.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+    ]);
+    service.dispose();
+  });
+
+  it("resolves workspace slots from the legacy owner record when no workspace file exists yet", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      slots: { title: "Legacy title", links: [] },
+    });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", deskId: "api-1" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect(existsSync(join(TEST_DATA_DIR, "workspaces", "api-1.json"))).toBe(false);
+    const anchorView = await service.get("api-1");
+    const siblingView = await service.get("api-2");
+    expect(anchorView.slots?.title).toBe("Legacy title");
+    expect(siblingView.slots?.title).toBe("Legacy title");
     service.dispose();
   });
 
@@ -13056,6 +13214,7 @@ describe("SessionService", () => {
     workspaceExistsMock.mockReturnValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.updateSlots("api-1", { title: "Solo title" });
@@ -13065,6 +13224,9 @@ describe("SessionService", () => {
     expect(store.get("api-1")?.slots?.title).toBe("Solo title");
     expect(result.id).toBe("api-1");
     expect(result.slots?.title).toBe("Solo title");
+    // Its workspace id is its own id, so it gets its own workspace file once
+    // it has slots.
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Solo title");
     service.dispose();
   });
 

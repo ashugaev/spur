@@ -1,10 +1,12 @@
 import type { SessionRecord, SidecarConfig } from "./types.js";
 
 // Shared-desk-workspace helpers (pure, no IO). Desk sibling sessions (same
-// `workspaceId`, shared git worktree) delegate shared state — slots,
-// artifacts, project sidecars — to the workspace-owning session's record
-// instead of duplicating it per sibling. See docs/configuration.md for the
-// desk-group model.
+// `workspaceId`, shared git worktree) delegate shared state — slots/pr,
+// artifacts, project sidecars — to the workspace instead of duplicating it
+// per sibling. Slots and the PR binding live in their own
+// `workspaces/<workspaceId>.json` file (see workspace-store.ts); artifacts
+// and project sidecars are still keyed by the workspace id directly. See
+// docs/configuration.md for the desk-group model.
 
 // `workspaceId` is written once at session creation
 // (session-service.ts resolveWorkspaceReuseContext) and session records are

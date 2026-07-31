@@ -97,7 +97,7 @@ Shared markdown memory: one `.md` file per key, body only, no tags/status/timest
 
 Scopes resolve server-side from the caller's session, never from client input:
 
-- `task` — `<dataDir>/memory/task/<deskId ?? sessionId>/<key>.md`, shared across desk-group siblings.
+- `task` — `<dataDir>/memory/task/<workspaceId>/<key>.md`, shared across every session in the same workspace.
 - `project` — `<dataDir>/memory/project/<projectId>/<key>.md`, shared across all sessions of a project.
 - `global` — `<dataDir>/memory/global/<key>.md`, one cell set for the whole Spur instance.
 

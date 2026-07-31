@@ -203,6 +203,12 @@ import {
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
+import {
+  deleteWorkspaceState,
+  resolveWorkspaceState,
+  writeWorkspaceState,
+  type WorkspaceState,
+} from "./workspace-store.js";
 import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
@@ -295,6 +301,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
@@ -3040,8 +3047,10 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    // PR binding is desk-shared: skip once any desk member already has one.
-    if (this.deskAnchorRecord(session).pr) {
+    // PR binding is workspace-owned: skip once any desk member already has
+    // one. resolveWorkspaceState is the dual-read (workspace file, else the
+    // legacy owning-record fallback) that replaces a plain anchor-record read.
+    if (resolveWorkspaceState(this.config.dataDir, session).pr) {
       return;
     }
     // Skip terminal states
@@ -3107,9 +3116,10 @@ export class SessionService {
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
     const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
-    // PR binding write lands on the anchor record so every desk member shares
-    // it. `workspaceIdOf(session) === session.id` for a non-desk session, so
-    // this is the same re-read as before (no extra IO added there).
+    // PR binding write lands on the workspace's own state so every desk
+    // member shares it. `workspaceIdOf(session) === session.id` for a
+    // non-desk session, so this is the same re-read as before (no extra IO
+    // added there).
     const anchorId = workspaceIdOf(session);
     if (binding) {
       const tracker = this.prCheckTrackers.get(session.id);
@@ -3118,15 +3128,22 @@ export class SessionService {
       }
 
       const current = readSession(this.config.dataDir, anchorId);
-      if (!current?.worktreePath || current.pr) {
+      if (!current?.worktreePath) {
+        return;
+      }
+      const resolved = resolveWorkspaceState(this.config.dataDir, current);
+      if (resolved.pr) {
         return;
       }
 
-      const updated: SessionRecord = {
-        ...current,
+      const nextState: WorkspaceState = {
+        ...(resolved.slots ? { slots: resolved.slots } : {}),
         pr: binding,
       };
-      writeSession(this.config.dataDir, updated);
+      writeWorkspaceState(this.config.dataDir, anchorId, nextState);
+      // Transitional mirror onto the owning session record: see updateSlots
+      // for why this keeps being written this release.
+      writeSession(this.config.dataDir, { ...current, pr: binding });
       this.logEvent("session.pr_auto_detect.found", {
         level: "info",
         sessionId: session.id,
@@ -3163,13 +3180,23 @@ export class SessionService {
 
     // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, anchorId);
-    if (!current?.worktreePath || current.pr) {
+    if (!current?.worktreePath) {
+      return;
+    }
+    const resolved = resolveWorkspaceState(this.config.dataDir, current);
+    if (resolved.pr) {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
+    const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: "pr", url: reviewUrl }],
     });
+    // No pr to preserve here: the early return above already covers
+    // `resolved.pr` being set.
+    const nextState: WorkspaceState = { ...(slots ? { slots } : {}) };
+    writeWorkspaceState(this.config.dataDir, anchorId, nextState);
+    // Transitional mirror onto the owning session record: see updateSlots
+    // for why this keeps being written this release.
     const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.pr_auto_detect.found", {
@@ -3682,10 +3709,20 @@ export class SessionService {
           reservedSession !== args.session
             ? args.session
             : (readSession(this.config.dataDir, args.session.id) ?? args.session);
-        const nextRecord = this.withUnlinkedSidecarSlot(baseRecord, args.sidecarName);
-        if (reservedSession !== args.session || nextRecord !== baseRecord) {
+        const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
+        const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
+        const slotsChanged = nextSlots !== resolved.slots;
+        if (reservedSession !== args.session || slotsChanged) {
+          if (slotsChanged) {
+            writeWorkspaceState(this.config.dataDir, workspaceIdOf(baseRecord), {
+              ...(nextSlots ? { slots: nextSlots } : {}),
+              ...(resolved.pr ? { pr: resolved.pr } : {}),
+            });
+          }
+          // Transitional mirror onto the owning session record: see
+          // updateSlots for why this keeps being written this release.
           writeSession(this.config.dataDir, {
-            ...nextRecord,
+            ...withSessionSlots(baseRecord, nextSlots),
             updatedAt: nowIso(),
           });
         }
@@ -3840,17 +3877,23 @@ export class SessionService {
   ): boolean {
     const link = this.resolveSidecarUrlLink(record, sidecarName, sidecar);
     if (!link) return false;
-    return !record.slots?.links.some(
+    const resolved = resolveWorkspaceState(this.config.dataDir, record);
+    return !resolved.slots?.links.some(
       (slotLink) => slotLink.label === sidecarName && slotLink.url === link.linkUrl,
     );
   }
 
-  private withUnlinkedSidecarSlot(record: SessionRecord, sidecarName: string): SessionRecord {
-    if (!record.slots?.links.some((link) => link.label === sidecarName)) {
-      return record;
+  // Pure slots transform: drops the named sidecar's link if present. Callers
+  // own resolving the current (workspace-file-or-legacy) slots and writing
+  // the result back to both the workspace file and the legacy mirror.
+  private withUnlinkedSidecarSlot(
+    slots: SessionSlots | undefined,
+    sidecarName: string,
+  ): SessionSlots | undefined {
+    if (!slots?.links.some((link) => link.label === sidecarName)) {
+      return slots;
     }
-    const nextSlots = applySlotsUpdate(record.slots, { unlinkLabels: [sidecarName] });
-    return nextSlots !== record.slots ? withSessionSlots(record, nextSlots) : record;
+    return applySlotsUpdate(slots, { unlinkLabels: [sidecarName] });
   }
 
   private writeSessionWithUnlinkedSidecarSlot(
@@ -3860,10 +3903,17 @@ export class SessionService {
     const latest = readSession(this.config.dataDir, sessionId);
     if (!latest) return undefined;
     if (isTerminalSessionStatus(latest.status)) return latest;
-    const nextRecord = this.withUnlinkedSidecarSlot(latest, sidecarName);
-    if (nextRecord !== latest) {
-      writeSession(this.config.dataDir, { ...nextRecord, updatedAt: nowIso() });
-    }
+    const resolved = resolveWorkspaceState(this.config.dataDir, latest);
+    const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, sidecarName);
+    if (nextSlots === resolved.slots) return latest;
+    writeWorkspaceState(this.config.dataDir, workspaceIdOf(latest), {
+      ...(nextSlots ? { slots: nextSlots } : {}),
+      ...(resolved.pr ? { pr: resolved.pr } : {}),
+    });
+    // Transitional mirror onto the owning session record: see updateSlots
+    // for why this keeps being written this release.
+    const nextRecord = withSessionSlots(latest, nextSlots);
+    writeSession(this.config.dataDir, { ...nextRecord, updatedAt: nowIso() });
     return nextRecord;
   }
 
@@ -4001,10 +4051,17 @@ export class SessionService {
     if (!latest) return;
     if (isTerminalSessionStatus(latest.status)) return;
     if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
-    const slots = applySlotsUpdate(latest.slots, {
+    const resolved = resolveWorkspaceState(this.config.dataDir, latest);
+    const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
+    writeWorkspaceState(this.config.dataDir, workspaceIdOf(latest), {
+      ...(slots ? { slots } : {}),
+      ...(resolved.pr ? { pr: resolved.pr } : {}),
+    });
+    // Transitional mirror onto the owning session record: see updateSlots
+    // for why this keeps being written this release.
     const updated = withSessionSlots(latest, slots);
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.link.published", {
@@ -7077,9 +7134,13 @@ export class SessionService {
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    // Slots (title/links/tags/pr) are desk-shared: mutations always land on
-    // the anchor record so every desk member sees the same slots.
+    // Slots (title/links/tags/pr) are workspace-owned: mutations always land
+    // on the workspace's own state so every desk member sees the same
+    // slots. `session` is still the anchor record — it, not the caller's own
+    // record, is the transitional legacy-mirror target below.
     const session = this.deskAnchorRecord(currentSession);
+    const workspaceId = workspaceIdOf(session);
+    const current = resolveWorkspaceState(this.config.dataDir, session);
     const normalized = normalizeSlotsUpdate(request);
     if (normalized.tags.length > 0) {
       const known = new Set(this.config.tags.map((tag) => tag.name));
@@ -7089,7 +7150,7 @@ export class SessionService {
         throw new Error(`Unknown tag(s): ${unknown.join(", ")}. Available tags: ${available}`);
       }
     }
-    const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
+    const hasGenericPrSlot = current.slots?.links.some((link) => link.label === "pr") ?? false;
     const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
     const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
@@ -7105,7 +7166,7 @@ export class SessionService {
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
     const slots = hasGenericChanges
-      ? applySlotsUpdate(session.slots, {
+      ? applySlotsUpdate(current.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
@@ -7113,26 +7174,30 @@ export class SessionService {
           ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
           ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
         })
-      : session.slots;
+      : current.slots;
+    const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
+    const nextState: WorkspaceState = {
+      ...(slots ? { slots } : {}),
+      ...(nextPr ? { pr: nextPr } : {}),
+    };
+    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
+    // Transitional mirror onto the owning session record: a rollback to the
+    // pre-workspace-file binary reads only this legacy field, so it keeps
+    // being written this release to avoid silently serving a stale title or
+    // link set on downgrade. A follow-up release drops this write.
     const updated: SessionRecord = {
       ...session,
-      ...(slots ? { slots } : {}),
-      ...(nativePr
-        ? { pr: nativePr }
-        : unlinksPr && !hasGenericPrSlot
-          ? {}
-          : session.pr
-            ? { pr: session.pr }
-            : {}),
+      ...(nextState.slots ? { slots: nextState.slots } : {}),
+      ...(nextState.pr ? { pr: nextState.pr } : {}),
     };
-    if (!slots) {
+    if (!nextState.slots) {
       delete updated.slots;
     }
-    if (prLink === undefined && unlinksPr && !hasGenericPrSlot) {
+    if (!nextState.pr) {
       delete updated.pr;
     }
     writeSession(this.config.dataDir, updated);
-    const displaySlots = deriveSessionSlots(updated);
+    const displaySlots = deriveSessionSlots(nextState);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
@@ -7236,9 +7301,18 @@ export class SessionService {
 
     const afterKill = readSession(this.config.dataDir, ownerId);
     if (!afterKill) return;
-    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
+    const resolved = resolveWorkspaceState(this.config.dataDir, afterKill);
+    const nextSlots = applySlotsUpdate(resolved.slots, { unlinkLabels: [sidecarName] });
+    if (nextSlots !== resolved.slots) {
+      writeWorkspaceState(this.config.dataDir, workspaceIdOf(afterKill), {
+        ...(nextSlots ? { slots: nextSlots } : {}),
+        ...(resolved.pr ? { pr: resolved.pr } : {}),
+      });
+    }
+    // Transitional mirror onto the owning session record: see updateSlots
+    // for why this keeps being written this release.
     const baseRecord =
-      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
+      nextSlots !== resolved.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
     writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
   }
 
@@ -7297,8 +7371,15 @@ export class SessionService {
       this.abortSidecarUrlProbe(ownerId, scName);
       const record = readSession(this.config.dataDir, ownerId);
       if (record) {
-        const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
-        if (next !== record.slots) {
+        const resolved = resolveWorkspaceState(this.config.dataDir, record);
+        const next = applySlotsUpdate(resolved.slots, { unlinkLabels: [scName] });
+        if (next !== resolved.slots) {
+          writeWorkspaceState(this.config.dataDir, workspaceIdOf(record), {
+            ...(next ? { slots: next } : {}),
+            ...(resolved.pr ? { pr: resolved.pr } : {}),
+          });
+          // Transitional mirror onto the owning session record: see
+          // updateSlots for why this keeps being written this release.
           const updated = withSessionSlots(record, next);
           writeSession(this.config.dataDir, updated);
         }
@@ -7392,6 +7473,9 @@ export class SessionService {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }
     removeSessionSlotTool(this.config.dataDir, anchorId);
+    // Last member's teardown: the workspace's shared slots/pr state goes
+    // with the rest of its shared state.
+    deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
   private async applyManualStatus(
@@ -10194,7 +10278,7 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
     );
-    const displaySlots = deriveSessionSlots(this.deskAnchorRecord(session));
+    const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
     // (it probes its own tmux id, which never has the pane). Resolving the
@@ -10271,8 +10355,11 @@ export class SessionService {
 
     const project = this.resolveProjectForSession(session);
     // Fetched at most once per enrich (zero extra IO for a non-desk session,
-    // where deskAnchorRecord returns `session` itself unchanged) and reused
-    // for both the sidecars' owner state and the shared slots below.
+    // where deskAnchorRecord returns `session` itself unchanged): reused for
+    // the sidecars' owner state (ports, still per-record) below. Passed into
+    // resolveWorkspaceState for the shared slots/pr too, so a sibling doesn't
+    // pay for a second read of the same anchor record when there's no
+    // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars: SessionSidecarView[] = [];
     for (const name of sessionSidecarNames(session, project)) {
@@ -10288,7 +10375,9 @@ export class SessionService {
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = deriveSessionSlots(anchorRecord);
+    const displaySlots = deriveSessionSlots(
+      resolveWorkspaceState(this.config.dataDir, anchorRecord),
+    );
     const deskGroupMembers = await this.buildDeskGroupMembers(session, {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
