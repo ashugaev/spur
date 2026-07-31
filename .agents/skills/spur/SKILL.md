@@ -21,7 +21,7 @@ Sections through `## Safety` describe Spur anywhere, no repo path needed. Sectio
 - `POST /sessions/:id/answer {optionIndex}` picks a claude AskUserQuestion menu option by keystroke. Claude only, no CLI equivalent.
 - Telegram: an allowed user binds a chat or forum topic with `/watch [sessionId]`; the agent answers that target with `spur source reply "..."`.
 - Hidden CLI commands, absent from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
-- Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH` and holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-branch`. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND` (points at `spur-slots`, takes `--title-if-absent`, `--link <label>=<url>`, `--tag`), `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+- Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH` and holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`. When the project sets `branchNaming.regex` it also holds `spur-branch` and a `git` wrapper that blocks a push off-pattern — a blocked push means that shim, not a real git failure. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND` (points at `spur-slots`, takes `--title-if-absent`, `--link <label>=<url>`, `--tag`), `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 
 ## Session lifecycle
 
@@ -42,7 +42,8 @@ spur send <sessionId> "message"
 - Steps pipeline: each phase arrives as `[Spur step N/M: <label>]` plus the task. The next phase is sent only after the agent returns to its prompt, then a 30s wait.
 - Owned worktree by default, `--worktree [baseBranch]` to override the base; `--shared` runs in the project path instead.
 - `status`: `spawning|running|stopped|paused|errored|completed|killed`. `state`: `working|waiting|needs_input|rate_limited|stopped|error|killed`.
-- `pause` keeps the worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs a non-terminal status plus a `stopped`/`error` state and an existing workspace, so `killed` and `completed` sessions are never restorable. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. `respawn` starts a fresh session from a terminal session's config.
+- `pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`.
+- `restore` needs status `running`/`stopped`/`paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed`/`completed` are never restorable. `respawn` starts a fresh session from a terminal session's config. `reopen <sessionId>` restarts a `completed` session in place instead: same id, same worktree, native conversation resumed, prompt not resent; refuses when the branch or worktree is gone (use `respawn`) or a reopen is already running.
 - `send` queues while the agent is busy and flushes at the next prompt, ahead of the next auto-step.
 - Model precedence: request `--model`, then project `defaultModels[agent]`, then Spur's own default (claude `opus`, cursor `auto`; codex has none). Claude ids: `opus|sonnet|haiku|fable`.
 
@@ -67,7 +68,7 @@ One shape only: `sources -> events -> triggers -> spawn|send`.
 
 ## Config
 
-Two YAML layers. Instance config `~/.spur/config.yaml` owns everything except `projects:`. Project config, the nearest `spur.yaml`/`spur.yml`, owns `projects:` only.
+Two YAML layers. Instance config `~/.spur/config.yaml` holds every key and may also declare `projects:`. Project config, the nearest `spur.yaml`/`spur.yml`, contributes more entries to `projects:` only; a project id or `sessionPrefix` duplicated across sources fails to load.
 
 Footgun: the merge keeps only `projects:` from a project config. Every other key there parses without error, then is discarded — `tags`, `authRotation`, `rateLimitReactivation`, `server`, `dataDir` in a project file do nothing.
 
@@ -146,4 +147,4 @@ projects:
 Update on any change to CLI commands or flags, daemon HTTP routes, config keys or defaults, source or event names, in-session tool or env contracts, or agent-facing safety rules. Skip internal refactors, file moves, tests, UI styling. Two constraints unique to this file:
 
 - Sections through `## Safety` stay repo-independent. Repo-relative paths live only in `## In this repo`.
-- Verify every stated default against source at edit time and name the file checked: config keys and defaults `v2/src/config.ts`, ports `v2/src/ports.ts`, source types and event names `v2/src/config.ts` and `v2/src/types.ts`, agent launch flags `v2/src/agents/`, project-config merge `v2/src/registry.ts`. Never copy a default from another doc's prose.
+- Verify every stated default against source at edit time and name the file checked: config keys and daemon defaults `v2/src/config.ts`, web UI port default `v2/src/ports.ts`, source types and event names `v2/src/config.ts` and `v2/src/types.ts`, agent launch flags `v2/src/agents/`, project-config merge `v2/src/registry.ts`. Never copy a default from another doc's prose.

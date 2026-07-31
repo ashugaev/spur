@@ -22,6 +22,7 @@ describe("spur help", () => {
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("service");

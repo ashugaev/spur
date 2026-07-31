@@ -324,6 +324,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchRefsExist,
   branchStatus,
   createWorktree,
   findWorktreePathForBranch,
@@ -335,6 +336,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
+  worktreePathFor,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -517,6 +519,10 @@ export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
 }
 
+export class SessionNotReopenableError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
@@ -572,6 +578,7 @@ interface SessionStateResult {
   // when the agent has no such artifact yet. Every value here is a byproduct of
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
+  liveModel?: string;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -1770,6 +1777,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // Session ids this process is actively reopening. Guards against two
+  // overlapping reopen() calls both passing the completed-status check and
+  // racing into restore() for the same tmux session and worktree.
+  private readonly reopensInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
@@ -7928,6 +7939,178 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
+  // Brings a `completed` session back to life on the same id: rebuild the
+  // worktree if it was reclaimed, flip the record to a restorable
+  // stopped/manual_pause state (so restore() below resumes the agent's own
+  // conversation without resending the original prompt), then delegate the
+  // whole launch transaction to restore(). Nothing completion destroyed
+  // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
+  async reopen(sessionId: string): Promise<SessionView> {
+    // Refuse a second concurrent reopen outright instead of narrowing the
+    // read-check-then-write window: two overlapping calls that both pass the
+    // `status !== "completed"` guard would otherwise race into restore() for
+    // the same tmux session and worktree.
+    if (this.reopensInFlight.has(sessionId)) {
+      throw new SessionNotReopenableError(`Session ${sessionId} is already being reopened`);
+    }
+    this.reopensInFlight.add(sessionId);
+    try {
+      return await this.reopenLocked(sessionId);
+    } finally {
+      this.reopensInFlight.delete(sessionId);
+    }
+  }
+
+  private async reopenLocked(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.status !== "completed") {
+      throw new SessionNotReopenableError(
+        `Session ${sessionId} is ${session.status}, not completed — use restore or respawn`,
+      );
+    }
+
+    const needsWorktree = session.worktree && !workspaceExists(session.worktreePath);
+    if (needsWorktree) {
+      const project = this.getProject(session.project);
+      // createWorktree always rebuilds at
+      // worktreePathFor(worktreeDir, projectId, sessionId). A desk member's
+      // record can carry the anchor's worktreePath instead (deskId set), so
+      // check the two paths BEFORE touching git — otherwise a mismatch would
+      // leave a stray worktree registered in git that blocks every later
+      // reopen/respawn on the branch.
+      const expectedWorktreePath = worktreePathFor(
+        this.config.worktreeDir,
+        session.project,
+        session.id,
+      );
+      if (expectedWorktreePath !== session.worktreePath) {
+        const deskNote = session.deskId ? " it belonged to this session's desk anchor;" : "";
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: its worktree at ${session.worktreePath} is gone and cannot be rebuilt at that path;${deskNote} use respawn`,
+        );
+      }
+      const refs = await branchRefsExist(project.path, session.branch);
+      if (!refs.exists && !refs.remote) {
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: branch ${session.branch} no longer exists locally or on origin — use respawn`,
+        );
+      }
+      let created: string;
+      try {
+        created = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: session.project,
+          sessionId: session.id,
+          defaultBranch: project.defaultBranch,
+          branch: session.branch,
+          symlinks: project.symlinks,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: failed to rebuild its worktree (${message}) — use respawn`,
+        );
+      }
+      this.logEvent("session.reopen.worktree_rebuilt", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Rebuilt worktree for ${sessionId}`,
+        details: {
+          worktreePath: created,
+          branch: session.branch,
+          localRef: refs.exists,
+          remoteRef: refs.remote,
+        },
+      });
+    }
+
+    const record: SessionRecord = {
+      ...copySessionWithoutSidecarPorts(session),
+      status: "stopped",
+      stopReason: "manual_pause",
+      updatedAt: nowIso(),
+    };
+    delete record.error;
+    // A completed record can still carry a queued message or a running
+    // pipeline step from before completion (applyManualStatus's completed
+    // branch does not clear either). Once restore() below flips status to
+    // "running", shouldRunDelivery would otherwise replay them — resending
+    // exactly the text this feature promises not to resend. The pipeline's
+    // `steps` still feed a later "Edit & Respawn" (resolveRespawnRequest),
+    // so stop the replay by flipping its status instead of deleting it.
+    delete record.queuedMessages;
+    if (record.pipeline) {
+      record.pipeline = { ...record.pipeline, status: "completed" };
+    }
+    writeSession(this.config.dataDir, record);
+    this.stateCache.delete(sessionId);
+    await this.refreshDashboardCacheEntry(record);
+
+    try {
+      return await this.restore(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // The completed record's Telegram binding, artifacts, and work-item
+      // completion are already destroyed, so leaving the flipped
+      // stopped/manual_pause record in place would make send/kill/sidecars
+      // legal on a gutted session. Roll back to completed instead — but
+      // read fresh, not from the pre-flip `session` snapshot: the record on
+      // disk is restorable (status stopped/manual_pause) the moment we wrote
+      // it above, so a concurrent send()/deliver() can legally queue a
+      // message, or restore() itself can persist status:"running" and then
+      // still throw from its own uncaught tail (most likely
+      // `await this.enrich(persistedRestored)`, its very last statement, but
+      // also captureAgentSessionId/writeSession/refreshDashboardCacheEntry
+      // just before it). Rolling back from the stale snapshot would discard
+      // whatever happened in that window instead of what's actually on disk.
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      if (latest.status === "running") {
+        // restore() got far enough to persist a genuinely live, running
+        // agent (writeSession succeeded) before failing afterward. That
+        // agent is real and working — killing its pane and stamping
+        // "completed" here would destroy a session that isn't actually
+        // broken just because the reopen call that revived it failed a step
+        // after the revival already landed. Leave it running.
+        this.logEvent("session.reopen.failed", {
+          level: "error",
+          sessionId,
+          projectId: session.project,
+          message: `Reopen of ${sessionId} errored after restore already brought it back to running: ${message}`,
+        });
+        throw error;
+      }
+      // restore() itself kills the tmux pane it created before rethrowing
+      // for every failure inside its own try/catch (including the fresh
+      // pane created by createTmuxSession). Tear down defensively here too —
+      // killTmuxSession/cleanupSessionServices are best-effort and safe to
+      // call on an already-dead pane — to cover a pane restore() created but
+      // didn't get to kill before this catch ran.
+      await killTmuxSession(latest.tmuxSession);
+      await this.cleanupSessionServices(latest);
+      const rolledBack: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(latest),
+        status: "completed",
+        updatedAt: nowIso(),
+      };
+      delete rolledBack.stopReason; // latest may still carry manual_pause
+      writeSession(this.config.dataDir, rolledBack);
+      this.stateCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(rolledBack);
+      this.logEvent("session.reopen.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to reopen ${sessionId}: ${message}`,
+      });
+      throw error;
+    }
+  }
+
   async switchAuth(
     sessionId: string,
     accountId: string,
@@ -8822,6 +9005,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
@@ -8858,6 +9042,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
     };
   }
 
@@ -9372,6 +9557,7 @@ export class SessionService {
     let state: SessionState;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
+    let liveModel: string | undefined;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -9420,6 +9606,7 @@ export class SessionService {
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
+          liveModel = jsonlResult.liveModel;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9463,6 +9650,7 @@ export class SessionService {
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
+        liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
@@ -9668,6 +9856,7 @@ export class SessionService {
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,
+      ...(liveModel ? { liveModel } : {}),
     };
   }
 
@@ -9716,6 +9905,7 @@ export class SessionService {
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 
@@ -9790,6 +9980,7 @@ export class SessionService {
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 

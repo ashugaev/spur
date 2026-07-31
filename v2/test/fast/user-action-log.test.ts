@@ -193,6 +193,13 @@ describe("buildUserActionRecord decoder", () => {
     expect(typeof result?.ts).toBe("string");
   });
 
+  it("decodes session.reopen with sessionId", () => {
+    expect(build({ path: "/sessions/demo-1/reopen" })).toMatchObject({
+      action: "session.reopen",
+      sessionId: "demo-1",
+    });
+  });
+
   it("matches nested routes before their prefixes", () => {
     expect(build({ path: "/sessions/demo-1/wake/cancel" })?.action).toBe("session.wake_cancel");
     expect(build({ path: "/sessions/demo-1/wake" })?.action).toBe("session.wake");

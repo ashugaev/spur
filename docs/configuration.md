@@ -221,6 +221,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
 - `projects.<id>.backlog.<backlogId>.intervalMs`: optional, default `60000`.
 - `projects.<id>.backlog.<backlogId>.runOnStart`: optional, default `false`.
+- `tags.<name>.description`: required. Sole agent-facing instruction for the tag; conditions (e.g. request-only) live here, not in source. Instance config only — a project-config `tags` block parses without error and is discarded.
+- `tags.<name>.color`: optional CSS color; auto-derived from the tag name (hashed hue) when omitted.
+- `authRotation.autoRotateOnRateLimit`: optional boolean, default `false`. Instance config only.
+- `authRotation.cooldownMinutes`: optional, default `60`.
+- `authRotation.maxRotationsPerEpisode`: optional, default `2`.
+- `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
+- `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 
 ## Events
 

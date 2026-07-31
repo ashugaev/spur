@@ -43,6 +43,18 @@ interface GitWorktreeEntry {
   branch?: string;
 }
 
+// The path `createWorktree` builds and creates a worktree at. Exported so
+// callers can compute the expected path up front (e.g. to refuse before
+// touching git) instead of discovering it only from `createWorktree`'s
+// return value.
+export function worktreePathFor(
+  worktreeBaseDir: string,
+  projectId: string,
+  sessionId: string,
+): string {
+  return join(worktreeBaseDir, projectId, sessionId);
+}
+
 interface LockOwner {
   pid: number;
   content: string;
@@ -426,7 +438,7 @@ function applySymlink(repoPath: string, worktreePath: string, relativePath: stri
 
 export async function createWorktree(input: CreateWorktreeInput): Promise<string> {
   const projectDir = join(input.worktreeBaseDir, input.projectId);
-  const worktreePath = join(projectDir, input.sessionId);
+  const worktreePath = worktreePathFor(input.worktreeBaseDir, input.projectId, input.sessionId);
   mkdirSync(projectDir, { recursive: true });
 
   await withWorkspaceGitLock(input.repoPath, async () => {

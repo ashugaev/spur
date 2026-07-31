@@ -11,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -71,6 +71,7 @@ import {
   canHandoff,
   canPause,
   canRecover,
+  canReopen,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
@@ -1846,7 +1847,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [session]);
 
   const handleAction = async (
-    action: "send" | "pause" | "restore" | "complete" | "kill",
+    action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
@@ -1901,6 +1902,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return true;
     } catch (actionError) {
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      // The server may have already moved (e.g. reopen's rollback flips the
+      // record back to completed on a failed restore) — refetch so the page
+      // never shows a stale view after a failed action.
+      await loadSession();
       return false;
     } finally {
       setBusyAction(null);
@@ -2501,9 +2506,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
               <span>{session.projectName}</span>
               <span>•</span>
-              <span>{session.agent}</span>
+              <span>{getAgentDisplayName(session.agent)}</span>
               <span>•</span>
               <span className="font-mono">{session.id}</span>
+              {session.model ? (
+                <>
+                  <span>•</span>
+                  <span>{session.model}</span>
+                </>
+              ) : null}
             </div>
 
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
@@ -2748,6 +2759,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canReopen(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("reopen")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
+              >
+                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
               </button>
             ) : null}
             {canRecover(session) ? (
