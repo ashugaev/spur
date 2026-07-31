@@ -2552,7 +2552,6 @@ describe("Spur web API routes", () => {
       expect(payload.fetchedAt).toBeUndefined();
     });
 
-    // Rate-limit tests must run last: they set module-level rateLimitResetAt
     it("returns a soft error while rate-limit window is active", async () => {
       const resetAt = Math.floor((Date.now() + 30_000) / 1000);
       fetchMock.mockResolvedValueOnce({
@@ -2579,6 +2578,189 @@ describe("Spur web API routes", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.state).toBeNull();
       expect(payload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window from a GraphQL rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "API rate limit exceeded for user" }],
+        }),
+      );
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const firstPayload = (await first.json()) as { state: null; error: string };
+      expect(first.status).toBe(200);
+      expect(firstPayload.error).toContain("API rate limit exceeded for user");
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: null; error: string };
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window from a structured RATE_LIMITED error type using the header's reset time", async () => {
+      const resetAt = Math.floor((Date.now() + 30_000) / 1000);
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "x-ratelimit-reset": String(resetAt) }),
+        json: async () => ({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "RATE_LIMITED", message: "You have exceeded a quota" }],
+        }),
+        text: async () => "",
+      });
+
+      await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const match = payload.error.match(/retry in (\d+)s/);
+      expect(match).not.toBeNull();
+      const waitSeconds = Number(match?.[1]);
+      expect(waitSeconds).toBeLessThanOrEqual(30);
+    });
+
+    it("does not arm the rate-limit window for a non-rate-limit GraphQL error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }],
+        }),
+      );
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql()));
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload1 = (await first.json()) as { error: string };
+      const payload2 = (await second.json()) as { state: string };
+
+      expect(payload1.error).toBe("Could not resolve to a Repository");
+      expect(payload2.state).toBe("open");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps resolved PR data when GraphQL also reports a rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          ...makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+          }),
+          errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        ciStatus: string;
+        error: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("open");
+      expect(payload.ciStatus).toBe("success");
+      expect(payload.error).toContain("API rate limit exceeded");
+
+      // The window must also be armed on the data-bearing path: a subsequent
+      // request for a different PR should short-circuit without hitting the network.
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const secondPayload = (await second.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(secondPayload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window and does not record a fake empty PR status for a message-less rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "RATE_LIMITED" }],
+        }),
+      );
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const firstPayload = (await first.json()) as {
+        state: null;
+        error?: string;
+        fetchedAt?: number;
+      };
+      expect(firstPayload.state).toBeNull();
+      expect(firstPayload.error).toBe("GitHub GraphQL error");
+      expect(firstPayload.fetchedAt).toBeUndefined();
+
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const secondPayload = (await second.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(secondPayload.error).toContain("GitHub rate limit");
+    });
+
+    it("joins every GraphQL error message into the payload error", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "first failure" }, { message: "second failure" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.error).toContain("first failure");
+      expect(payload.error).toContain("second failure");
+    });
+
+    it("caches a PR-present-with-error payload at the shorter error TTL, not the full success TTL", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          ...makePrGql(),
+          errors: [{ type: "NOT_FOUND", message: "partial data error" }],
+        }),
+      );
+
+      const url = nextPrUrl();
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const firstPayload = (await first.json()) as { error: string };
+      expect(firstPayload.error).toBe("partial data error");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 70_000;
+        await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`));
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        Date.now = realNow;
+      }
     });
   });
 
