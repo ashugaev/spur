@@ -188,14 +188,22 @@ describe("hasRecentSessionUserAction", () => {
 
   it("only scans the live shard, not archived ones: a match rotated into a .gz archive is not found", async () => {
     const dir = await makeDir();
-    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 2 });
-    // Push the matching entry into an archive by writing enough padding after it to
-    // force a rotation of the shard.
+    // retainArchives=5 with only 4 padding appends keeps the matching record inside
+    // retention (it lands in an archive, not evicted past it) — this matters because
+    // if the padding count evicted it past every retained archive, this test would
+    // pass identically whether hasRecentSessionUserAction correctly scans only the
+    // live shard or incorrectly still walks archives too: the record wouldn't exist
+    // anywhere either way. Each record here exceeds shardHotBytes on its own, so
+    // every append rotates a single record straight into .1.gz and shifts prior
+    // archives up by one; with retainArchives=5 the match survives through 4 shifts
+    // and is pruned on the 5th, so 4 padding appends keeps it discoverable in an
+    // archive (verified: reverting the live-shard-only fix makes this test fail).
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 5 });
     appendUserAction(
       dir,
       record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
     );
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 4; i += 1) {
       appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
     }
     const shardPath = sessionUserActionLogPath(dir, "demo-1");
