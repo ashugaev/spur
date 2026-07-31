@@ -24,6 +24,22 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
+function IconMergeReady() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
 export interface FiltersModalStatusOption {
   level: AttentionLevel;
   label: string;
@@ -177,7 +193,11 @@ export function FiltersModal({
 
           <div className="flex flex-col gap-2">
             <SectionLabel>Pull request</SectionLabel>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
+            {/* flex-wrap, not the auto-fit grid used by Status: with only one
+                button, an auto-fit grid track stretches to the full
+                container width and renders as a full-width bar instead of a
+                chip sized like its siblings. */}
+            <div className="flex flex-wrap gap-2">
               <button
                 aria-pressed={prReadyOnly}
                 className={optionClass(prReadyOnly)}
@@ -185,6 +205,7 @@ export function FiltersModal({
                 title="GitHub only"
                 type="button"
               >
+                <IconMergeReady />
                 <span>Ready to merge</span>
               </button>
             </div>

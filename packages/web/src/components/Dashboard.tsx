@@ -2119,7 +2119,7 @@ export function Dashboard() {
               </span>
             ) : null}
           </button>
-          <div className="relative flex min-w-0 flex-1 items-center">
+          <div className="relative flex min-w-0 max-w-[32rem] flex-1 items-center">
             <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2">
               <svg
                 aria-hidden="true"
@@ -2193,7 +2193,7 @@ export function Dashboard() {
           ) : null}
           <button
             aria-label="Spawn Shepherd"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
             onClick={openShepherdSpawnModal}
             title="Spawn Shepherd"
             type="button"
