@@ -3895,7 +3895,12 @@ export class SessionService {
   ): SessionRecord | undefined {
     const latest = readSession(this.config.dataDir, sessionId);
     if (!latest) return undefined;
-    if (isTerminalSessionStatus(latest.status)) return latest;
+    // The link belongs to the workspace, not to this session: a member going
+    // terminal while its probe was in flight must still drop the dead
+    // sidecar's link, or it lingers on every live member's page. Only a
+    // workspace with nobody left to see it is left alone.
+    const terminal = isTerminalSessionStatus(latest.status);
+    if (terminal && !this.hasActiveWorkspaceMembers(latest)) return latest;
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, sidecarName);
     if (nextSlots === resolved.slots) return latest;
@@ -3905,7 +3910,9 @@ export class SessionService {
         ...(nextSlots ? { slots: nextSlots } : {}),
         ...(resolved.pr ? { pr: resolved.pr } : {}),
       },
-      { touchUpdatedAt: true },
+      // A terminal record keeps its timestamps: bumping them would move it in
+      // activity-ordered views for a cleanup it did not do.
+      { touchUpdatedAt: !terminal },
     );
     return withSessionSlots(latest, nextSlots);
   }

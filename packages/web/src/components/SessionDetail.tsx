@@ -3360,7 +3360,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               titleSuffix={
                 requestedTerminalSessionId !== session.id
-                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  ? // A workspace-shared sidecar's pane is named after the
+                    // workspace, not this session, so stripping this
+                    // session's own prefix would leave the whole name. The
+                    // sidecar view already carries both.
+                    (session.sidecars.find((sc) => sc.tmuxSession === requestedTerminalSessionId)
+                      ?.name ?? requestedTerminalSessionId?.replace(`${session.id}--`, ""))
                   : undefined
               }
             />
