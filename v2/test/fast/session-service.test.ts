@@ -1378,6 +1378,39 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("batches multiple spawn-time subscriptions into a single write instead of one per entry", async () => {
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    sessions.set("watched-2", runningSession({ id: "watched-2" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    writeSessionMock.mockClear();
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [
+        { targetSessionId: "watched-1", states: ["needs_input"] },
+        { targetSessionId: "watched-2", states: ["stopped"] },
+      ],
+    });
+
+    expect(result.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1", targetSessionId: "watched-1" }),
+      expect.objectContaining({ id: "state-watched-2", targetSessionId: "watched-2" }),
+    ]);
+    const subscriptionWrites = writeSessionMock.mock.calls.filter(
+      ([, session]) => session.id === "api-1" && session.stateSubscriptions !== undefined,
+    );
+    expect(subscriptionWrites).toHaveLength(1);
+    expect(subscriptionWrites[0]?.[1].stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1" }),
+      expect.objectContaining({ id: "state-watched-2" }),
+    ]);
+    service.dispose();
+  });
+
   it("delivers exactly one message to a spawn-time subscriber on a matching target transition", async () => {
     // Subscriber spawns as codex so classifying it during delivery doesn't share
     // the claude jsonl mock being driven below to transition the claude target.

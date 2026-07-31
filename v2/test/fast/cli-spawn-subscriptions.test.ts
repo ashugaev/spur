@@ -104,6 +104,13 @@ describe("spawn CLI state subscriptions", () => {
     );
   });
 
+  it("rejects an empty --subscribe-to, no spawn", async () => {
+    await expect(
+      parseSpawn(["spawn", "demo", "do the thing", "--subscribe-to", "  ", "--json"]),
+    ).rejects.toThrow(/--subscribe-to must be a non-empty session id/);
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
   it("rejects --subscribe-state without --subscribe-to, no spawn", async () => {
     await expect(
       parseSpawn(["spawn", "demo", "do the thing", "--subscribe-state", "waiting", "--json"]),
@@ -132,5 +139,51 @@ describe("spawn CLI state subscriptions", () => {
       ]),
     ).rejects.toThrow(/state must be one of:/);
     expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a --subscribe-to target that doesn't exist, no spawn", async () => {
+    getJsonMock.mockRejectedValue(new Error("Session not found: bogus-target"));
+
+    await expect(
+      parseSpawn([
+        "spawn",
+        "demo",
+        "do the thing",
+        "--subscribe-to",
+        "bogus-target",
+        "--subscribe-state",
+        "waiting",
+        "--json",
+      ]),
+    ).rejects.toThrow(/--subscribe-to target session not found: bogus-target/);
+    expect(getJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/bogus-target",
+      "/tmp/spur.yaml",
+    );
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("validates the --subscribe-to target exists before spawning", async () => {
+    getJsonMock.mockResolvedValue({ id: "demo-1", project: "demo" });
+    postJsonMock.mockResolvedValue({ id: "demo-2", project: "demo" });
+
+    await parseSpawn([
+      "spawn",
+      "demo",
+      "do the thing",
+      "--subscribe-to",
+      "demo-1",
+      "--subscribe-state",
+      "waiting",
+      "--json",
+    ]);
+
+    expect(getJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/demo-1",
+      "/tmp/spur.yaml",
+    );
+    expect(postJsonMock).toHaveBeenCalled();
   });
 });

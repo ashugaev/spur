@@ -118,11 +118,11 @@ Watches another session's state and sends the subscriber a message on a matching
 
 One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing to the same target overwrites its states and message. Cannot subscribe to yourself.
 
-`--state` is repeatable. Valid states: `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, `killed`. Delivery fires once per matching transition, immediately after the target session's state settles — not on every poll. `--message` sets custom text appended after a blank line to the default `Session <targetSessionId> changed state: <from> -> <to> at <iso> (source: <src>).` line.
+`--state` is repeatable. Valid states: `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, `killed`. Delivery fires once per matching transition, immediately after the target session's state settles — not on every poll. If the target is already in a watched state when the subscription arms, nothing fires until the next transition into that state. `--message` sets custom text appended after a blank line to the default `Session <targetSessionId> changed state: <from> -> <to> at <iso> (source: <src>).` line.
 
 Delivery goes through the normal send path: a `stopped`/`paused` subscriber gets resumed (native conversation resume, then fresh launch fallback) to receive it. There is no retry — dispatch fires once per transition; a failed delivery logs `session.subscription.delivery_failed` and is dropped. Only a later transition fires again.
 
-`spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one subscription at spawn time — same target/state/message rules above. An invalid spawn-time target (unknown session id) doesn't fail the spawn — Spur logs `session.subscription.spawn_failed` instead.
+`spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one subscription at spawn time — same target/state/message rules above. The CLI checks the target session exists before spawning and fails with a clear error if it doesn't. Direct API/MCP callers that skip this check get the daemon's own non-fatal behavior instead: an invalid spawn-time target doesn't fail the spawn — Spur logs `session.subscription.spawn_failed` and the new session comes up with no subscription armed.
 
 ## Sidecars
 

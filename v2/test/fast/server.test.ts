@@ -1956,6 +1956,38 @@ describe("startServer", () => {
       );
       expect(backgroundInvalidResponse.status).toBe(400);
 
+      const duplicateTargetResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: [
+            { targetSessionId: "demo-2", states: ["waiting"] },
+            { targetSessionId: "demo-2", states: ["stopped"] },
+          ],
+        }),
+      });
+      expect(duplicateTargetResponse.status).toBe(400);
+      const duplicateTargetBody = (await duplicateTargetResponse.json()) as { error?: string };
+      expect(duplicateTargetBody.error).toMatch(/must not repeat targetSessionId/);
+
+      const tooManyResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: Array.from({ length: 21 }, (_, i) => ({
+            targetSessionId: `demo-${i}`,
+            states: ["waiting"],
+          })),
+        }),
+      });
+      expect(tooManyResponse.status).toBe(400);
+      const tooManyBody = (await tooManyResponse.json()) as { error?: string };
+      expect(tooManyBody.error).toMatch(/must not exceed 20 entries/);
+
       expect(spawnSpy).not.toHaveBeenCalled();
       expect(spawnInBackgroundSpy).not.toHaveBeenCalled();
     } finally {

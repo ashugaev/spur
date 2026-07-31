@@ -1665,6 +1665,9 @@ function resolveCliSpawnSubscriptions(options: {
   subscribeState?: string[];
   subscribeMessage?: string;
 }): SubscribeSessionStatesRequest[] | undefined {
+  if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
+    throw new Error("--subscribe-to must be a non-empty session id");
+  }
   const target = options.subscribeTo?.trim();
   if (!target) {
     if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
@@ -1680,6 +1683,35 @@ function resolveCliSpawnSubscriptions(options: {
       "--subscribe-to requires at least one --subscribe-state",
     ),
   ];
+}
+
+// Spawn-time subscribe targets fail silently on the server (spawn stays
+// non-fatal so a typo'd target never blocks the new session — see
+// applyRequestedStateSubscriptions). Validate here instead, before any
+// spawn side effect (tmux/worktree), so a bad --subscribe-to id is a clear
+// CLI error rather than a session that never gets its wakeup.
+async function ensureCliSpawnSubscriptionTargetsExist(
+  cliEntrypoint: string,
+  configPath: string,
+  subscriptions: SubscribeSessionStatesRequest[] | undefined,
+): Promise<void> {
+  if (!subscriptions) {
+    return;
+  }
+  for (const entry of subscriptions) {
+    try {
+      await getJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(entry.targetSessionId)}`,
+        configPath,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+      );
+    }
+  }
 }
 
 export function createProgram(cliEntrypoint: string): Command {
@@ -1881,6 +1913,7 @@ export function createProgram(cliEntrypoint: string): Command {
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      await ensureCliSpawnSubscriptionTargetsExist(cliEntrypoint, configPath, subscriptions);
 
       let branch: string | undefined = options.branch;
 
