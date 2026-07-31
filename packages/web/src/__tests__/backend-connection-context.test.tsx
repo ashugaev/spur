@@ -5,7 +5,9 @@ import {
   BackendConnectionProvider,
   FAILURE_THRESHOLD,
   HEARTBEAT_INTERVAL_MS,
+  PROBE_TIMEOUT_MS,
   RECONNECT_INTERVAL_MS,
+  retryIntervalMs,
   useBackendConnection,
 } from "@/lib/backend-connection-context";
 import { useVersionSwitch, VersionSwitchProvider } from "@/lib/version-switch-context";
@@ -46,15 +48,16 @@ async function flushMicrotasks() {
 // the currently-active cadence. This steps through exactly one probe per
 // call, using the cadence that's active at that point.
 function makeProbeStepper() {
-  let first = true;
+  let step = 0;
   return async () => {
-    if (first) {
-      first = false;
+    if (step === 0) {
+      step++;
       await flushMicrotasks();
       return;
     }
+    const n = step++;
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(n));
     });
   };
 }
@@ -222,9 +225,12 @@ describe("BackendConnectionProvider", () => {
     await flushMicrotasks(); // establishes the "1.4.2" baseline via a healthy mount probe
 
     ok = false;
-    for (let i = 0; i < FAILURE_THRESHOLD; i++) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
       });
     }
     expect(result.current.phase).toBe("disconnected");
@@ -251,9 +257,12 @@ describe("BackendConnectionProvider", () => {
     await flushMicrotasks(); // establishes the "1.4.2" baseline via a healthy mount probe
 
     ok = false;
-    for (let i = 0; i < FAILURE_THRESHOLD; i++) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
       });
     }
     expect(result.current.phase).toBe("disconnected");
@@ -314,6 +323,113 @@ describe("BackendConnectionProvider", () => {
       await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
     });
     expect(result.current.attempts).toBe(2);
+  });
+
+  it("stays connected through a backend stall shorter than the grace window", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    vi.spyOn(global, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve, reject) => {
+          if (Date.now() - start < 16_000) {
+            setTimeout(
+              () => reject(new DOMException("The operation was aborted.", "TimeoutError")),
+              PROBE_TIMEOUT_MS,
+            );
+          } else {
+            resolve(new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 }));
+          }
+        }),
+    );
+
+    const { result } = renderProvider();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(result.current.phase).toBe("connected");
+    expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
+  it("requires the full grace window of continuous failure before disconnecting", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(global, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((_, reject) => {
+          setTimeout(
+            () => reject(new DOMException("The operation was aborted.", "TimeoutError")),
+            PROBE_TIMEOUT_MS,
+          );
+        }),
+    );
+
+    const { result } = renderProvider();
+
+    const t0 = Date.now();
+    // p1 aborts at t=3_000; step through each probe individually so React
+    // commits effect cleanups between timer firings.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS);
+    });
+    // p2 fires at t=7_000, aborts at t=10_000
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(1) + PROBE_TIMEOUT_MS);
+    });
+    // p3 fires at t=18_000, aborts at t=21_000
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(2) + PROBE_TIMEOUT_MS);
+    });
+    // p4 fires at t=29_000; not yet aborted — advance to t=31_000
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(3) + 2_000);
+    });
+    expect(result.current.phase).toBe("connected");
+    expect(Date.now() - t0).toBe(31_000);
+
+    // p4 aborts at t=32_000 — advance past it
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(result.current.phase).toBe("disconnected");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(32_000);
+  });
+
+  it("requires the full confirmation window before disconnecting on instant failures", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(global, "fetch").mockImplementation(() =>
+      Promise.reject(new Error("connection refused")),
+    );
+
+    const { result } = renderProvider();
+
+    const t0 = Date.now();
+    // p1: mount probe fires immediately, fails instantly (0ms probe cost)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // p2: fires at retryIntervalMs(1), fails instantly
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(1));
+    });
+    // p3: fires at retryIntervalMs(2), fails instantly
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(2));
+    });
+    // p4 fires at 0+retryIntervalMs(1)+retryIntervalMs(2)+retryIntervalMs(3)=20_000;
+    // advance to just before it fires
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(retryIntervalMs(3) - 1);
+    });
+    expect(result.current.phase).toBe("connected");
+    expect(Date.now() - t0).toBe(19_999);
+
+    // p4 fires — threshold reached
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(result.current.phase).toBe("disconnected");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(20_000);
   });
 
   it("stays dormant (connected, no reload) while a version switch is in flight", async () => {

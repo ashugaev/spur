@@ -40,6 +40,7 @@ async function bootServer(): Promise<{
   const session: SessionRecord = {
     id: "demo-1",
     project: "demo",
+    workspaceId: "demo-1",
     agent: "claude",
     prompt: "ship it",
     branch: "demo-1",

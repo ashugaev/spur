@@ -205,6 +205,13 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
+import {
+  deleteWorkspaceState,
+  resolveWorkspaceState,
+  writeWorkspaceState,
+  type WorkspaceState,
+} from "./workspace-store.js";
 import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
@@ -280,6 +287,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarConfig,
   type SidecarMcpBinding,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
@@ -287,6 +295,7 @@ import {
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
+  type SessionSidecarView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
   type SharedMemoryEntryResponse,
@@ -295,6 +304,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
@@ -695,10 +705,10 @@ function assertValidSharedMemoryRequest(
   }
 }
 
-// task = desk-group anchor (matches listDeskSessions); project = session.project; global = constant.
+// task = workspace id (matches listDeskSessions); project = session.project; global = constant.
 function resolveSharedMemoryStoreId(session: SessionRecord, scope: SharedMemoryScope): string {
   if (scope === "task") {
-    return session.deskId ?? session.id;
+    return workspaceIdOf(session);
   }
   if (scope === "project") {
     return session.project;
@@ -722,13 +732,17 @@ function hasUnseenAttention(
   return Number.isFinite(openedMs) && Number.isFinite(attentionMs) && openedMs < attentionMs;
 }
 
+// The writing session's own id is embedded so desk siblings sharing an
+// artifacts dir (session-desk.ts) don't collide on indistinguishable history
+// dumps.
 function stateTransitionArtifactId(
+  sessionId: string,
   at: string,
   fromState: SessionState,
   toState: SessionState,
 ): string {
   const safeTimestamp = at.replaceAll(":", "-").replaceAll(".", "-");
-  return `agent-history-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
+  return `agent-history-${sessionId}-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
 }
 
 function tryRealpath(path: string): string {
@@ -1104,6 +1118,11 @@ function buildSessionEnv(args: {
   agent: SessionRecord["agent"];
   projectId: string;
   sessionId: string;
+  // Desk-shared artifacts dir owner — the desk anchor's id, or the session's
+  // own id when it is not a desk sibling. Kept separate from `sessionId`
+  // (which always stays the session's own id) so `SPUR_SESSION` never
+  // silently becomes another session's id.
+  artifactsSessionId: string;
   sessionToolDir: string;
   dataDir: string;
   repoPath: string;
@@ -1115,7 +1134,7 @@ function buildSessionEnv(args: {
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
-    SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.sessionId),
+    SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
@@ -1335,10 +1354,29 @@ function buildLastActivityAt(
   ).toISOString();
 }
 
-function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
-  const updated: SessionRecord = { ...session };
-  delete updated.sidecarPorts;
-  return updated;
+// A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
+// owned, non-mcp) and per-session (mcp) entries, so a going-terminal write
+// must strip per-name, not wholesale: an anchor-owned entry survives while
+// another desk member's agent is still running and using it; every mcp entry
+// (always per-session) is dropped along with the record it belongs to.
+// `project` undefined, or a name no longer present in it, drops that entry
+// too — no config to prove it is desk-shared. Returns undefined when nothing
+// survives, so callers can `delete` the field outright.
+function releasableSidecarPorts(
+  session: Pick<SessionRecord, "sidecarPorts">,
+  project: Pick<ProjectConfig, "sidecars"> | undefined,
+  hasRunningWorkspaceMembers: boolean,
+): SessionRecord["sidecarPorts"] {
+  if (!session.sidecarPorts || !hasRunningWorkspaceMembers) {
+    return undefined;
+  }
+  const kept = Object.fromEntries(
+    Object.entries(session.sidecarPorts).filter(([name]) => {
+      const sidecar = project?.sidecars[name];
+      return sidecar !== undefined && !sidecar.mcp;
+    }),
+  );
+  return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
 async function waitForRestorePlan(
@@ -1795,6 +1833,7 @@ export class SessionService {
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  private readonly prCheckRuns = new Set<Promise<void>>();
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
   // considered rate-limited; sessionId -> per-episode rotation count.
   private readonly claudeAccountRateLimit = new Map<string, number>();
@@ -1834,9 +1873,18 @@ export class SessionService {
     this.startReaperLoop();
   }
 
-  /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
+  /**
+   * Resolves once every in-flight fire-and-forget run has settled: background
+   * spawns, PR auto-detect checks, and the dashboard cache tick. Lets teardown
+   * drain async work whose writes and `gh` calls would otherwise land after the
+   * caller is gone.
+   */
   async settleBackgroundSpawns(): Promise<void> {
-    await Promise.allSettled([...this.backgroundSpawnRuns]);
+    await Promise.allSettled([
+      ...this.backgroundSpawnRuns,
+      ...this.prCheckRuns,
+      ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
+    ]);
   }
 
   dispose(): void {
@@ -2937,7 +2985,25 @@ export class SessionService {
           // under it breaks a live session as surely as killing its tmux would.
           continue;
         }
+        // A desk-shared sidecar's pane is named after the desk anchor, so on a
+        // terminal anchor this loop would otherwise reap the pane a live
+        // sibling is still using. Same rule as teardownSessionSidecars: the
+        // last running member releases it.
+        const deskSiblingsAlive =
+          (session.sidecarNames?.length ?? 0) > 0 && this.hasRunningWorkspaceMembers(session);
+        let reapProject: ProjectConfig | undefined;
+        if (deskSiblingsAlive) {
+          try {
+            reapProject = this.resolveProjectForSession(session);
+          } catch {
+            reapProject = undefined;
+          }
+        }
         for (const sidecarName of session.sidecarNames ?? []) {
+          const reapSidecar = reapProject?.sidecars[sidecarName];
+          if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
+            continue;
+          }
           if (await sidecarTmuxAlive(session.id, sidecarName)) {
             await killSidecarTmux(session.id, sidecarName);
             reaped += 1;
@@ -2984,7 +3050,10 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    if (session.pr) {
+    // PR binding is workspace-owned: skip once any desk member already has
+    // one. resolveWorkspaceState is the dual-read (workspace file, else the
+    // legacy owning-record fallback) that replaces a plain anchor-record read.
+    if (resolveWorkspaceState(this.config.dataDir, session).pr) {
       return;
     }
     // Skip terminal states
@@ -3033,8 +3102,9 @@ export class SessionService {
       tracker.waitingChecks += 1;
     }
 
-    // Fire and forget
-    void this.runPrCheck(session).catch((error) => {
+    // Fire and forget, but tracked so teardown can drain it — an unawaited
+    // `gh` call outliving its caller lands on whatever runs next.
+    const run = this.runPrCheck(session).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.pr_auto_detect.failed", {
         level: "warn",
@@ -3043,26 +3113,37 @@ export class SessionService {
         message: `PR auto-detect failed for ${session.id}: ${message}`,
       });
     });
+    this.prCheckRuns.add(run);
+    void run.finally(() => this.prCheckRuns.delete(run));
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
     const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+    // PR binding write lands on the workspace's own state so every desk
+    // member shares it. `workspaceIdOf(session) === session.id` for a
+    // non-desk session, so this is the same re-read as before (no extra IO
+    // added there).
+    const anchorId = workspaceIdOf(session);
     if (binding) {
       const tracker = this.prCheckTrackers.get(session.id);
       if (tracker) {
         tracker.found = true;
       }
 
-      const current = readSession(this.config.dataDir, session.id);
-      if (!current?.worktreePath || current.pr) {
+      const current = readSession(this.config.dataDir, anchorId);
+      if (!current?.worktreePath) {
+        return;
+      }
+      const resolved = resolveWorkspaceState(this.config.dataDir, current);
+      if (resolved.pr) {
         return;
       }
 
-      const updated: SessionRecord = {
-        ...current,
+      const nextState: WorkspaceState = {
+        ...(resolved.slots ? { slots: resolved.slots } : {}),
         pr: binding,
       };
-      writeSession(this.config.dataDir, updated);
+      this.writeWorkspaceStateWithLegacyMirror(current, nextState);
       this.logEvent("session.pr_auto_detect.found", {
         level: "info",
         sessionId: session.id,
@@ -3098,16 +3179,22 @@ export class SessionService {
     }
 
     // Re-read session to avoid stale overwrites
-    const current = readSession(this.config.dataDir, session.id);
-    if (!current?.worktreePath || current.pr) {
+    const current = readSession(this.config.dataDir, anchorId);
+    if (!current?.worktreePath) {
+      return;
+    }
+    const resolved = resolveWorkspaceState(this.config.dataDir, current);
+    if (resolved.pr) {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
+    const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: "pr", url: reviewUrl }],
     });
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
-    writeSession(this.config.dataDir, updated);
+    // No pr to preserve here: the early return above already covers
+    // `resolved.pr` being set.
+    const nextState: WorkspaceState = { ...(slots ? { slots } : {}) };
+    this.writeWorkspaceStateWithLegacyMirror(current, nextState);
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
@@ -3346,8 +3433,22 @@ export class SessionService {
         portOwnership.set(service.port, { owner: `service:${service.serviceId}` });
       }
     }
-    for (const liveSession of listSessions(this.config.dataDir)) {
-      if (isTerminalSessionStatus(liveSession.status)) {
+    // A terminal anchor still holds its shared sidecar ports while another
+    // desk member's agent is still running (single listSessions snapshot,
+    // O(N): a second pass would let a fresh session steal a shared port still
+    // in use by a live sibling of a completed anchor).
+    const allSessions = listSessions(this.config.dataDir);
+    const liveDeskAnchors = new Set<string>();
+    for (const candidate of allSessions) {
+      if (candidate.status === "running" || candidate.status === "spawning") {
+        liveDeskAnchors.add(workspaceIdOf(candidate));
+      }
+    }
+    for (const liveSession of allSessions) {
+      const holdsSidecarPorts =
+        !isTerminalSessionStatus(liveSession.status) ||
+        liveDeskAnchors.has(workspaceIdOf(liveSession));
+      if (!holdsSidecarPorts) {
         continue;
       }
       for (const [scName, scPorts] of Object.entries(liveSession.sidecarPorts ?? {})) {
@@ -3558,6 +3659,7 @@ export class SessionService {
         agent: reservedSession.agent,
         projectId: reservedSession.project,
         sessionId: reservedSession.id,
+        artifactsSessionId: workspaceIdOf(reservedSession),
         sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: args.project.path,
@@ -3603,12 +3705,22 @@ export class SessionService {
           reservedSession !== args.session
             ? args.session
             : (readSession(this.config.dataDir, args.session.id) ?? args.session);
-        const nextRecord = this.withUnlinkedSidecarSlot(baseRecord, args.sidecarName);
-        if (reservedSession !== args.session || nextRecord !== baseRecord) {
-          writeSession(this.config.dataDir, {
-            ...nextRecord,
-            updatedAt: nowIso(),
-          });
+        const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
+        const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
+        const slotsChanged = nextSlots !== resolved.slots;
+        if (reservedSession !== args.session || slotsChanged) {
+          // Rolls the reserved-port state back off this session's own record.
+          writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
+        }
+        if (slotsChanged) {
+          this.writeWorkspaceStateWithLegacyMirror(
+            baseRecord,
+            {
+              ...(nextSlots ? { slots: nextSlots } : {}),
+              ...(resolved.pr ? { pr: resolved.pr } : {}),
+            },
+            { touchUpdatedAt: true },
+          );
         }
         throw error;
       }
@@ -3761,17 +3873,23 @@ export class SessionService {
   ): boolean {
     const link = this.resolveSidecarUrlLink(record, sidecarName, sidecar);
     if (!link) return false;
-    return !record.slots?.links.some(
+    const resolved = resolveWorkspaceState(this.config.dataDir, record);
+    return !resolved.slots?.links.some(
       (slotLink) => slotLink.label === sidecarName && slotLink.url === link.linkUrl,
     );
   }
 
-  private withUnlinkedSidecarSlot(record: SessionRecord, sidecarName: string): SessionRecord {
-    if (!record.slots?.links.some((link) => link.label === sidecarName)) {
-      return record;
+  // Pure slots transform: drops the named sidecar's link if present. Callers
+  // own resolving the current (workspace-file-or-legacy) slots and writing
+  // the result back to both the workspace file and the legacy mirror.
+  private withUnlinkedSidecarSlot(
+    slots: SessionSlots | undefined,
+    sidecarName: string,
+  ): SessionSlots | undefined {
+    if (!slots?.links.some((link) => link.label === sidecarName)) {
+      return slots;
     }
-    const nextSlots = applySlotsUpdate(record.slots, { unlinkLabels: [sidecarName] });
-    return nextSlots !== record.slots ? withSessionSlots(record, nextSlots) : record;
+    return applySlotsUpdate(slots, { unlinkLabels: [sidecarName] });
   }
 
   private writeSessionWithUnlinkedSidecarSlot(
@@ -3780,12 +3898,62 @@ export class SessionService {
   ): SessionRecord | undefined {
     const latest = readSession(this.config.dataDir, sessionId);
     if (!latest) return undefined;
-    if (isTerminalSessionStatus(latest.status)) return latest;
-    const nextRecord = this.withUnlinkedSidecarSlot(latest, sidecarName);
-    if (nextRecord !== latest) {
-      writeSession(this.config.dataDir, { ...nextRecord, updatedAt: nowIso() });
+    // The link belongs to the workspace, not to this session: a member going
+    // terminal while its probe was in flight must still drop the dead
+    // sidecar's link, or it lingers on every live member's page. Only a
+    // workspace with nobody left to see it is left alone.
+    const terminal = isTerminalSessionStatus(latest.status);
+    if (terminal && !this.hasActiveWorkspaceMembers(latest)) return latest;
+    const resolved = resolveWorkspaceState(this.config.dataDir, latest);
+    const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, sidecarName);
+    if (nextSlots === resolved.slots) return latest;
+    this.writeWorkspaceStateWithLegacyMirror(
+      latest,
+      {
+        ...(nextSlots ? { slots: nextSlots } : {}),
+        ...(resolved.pr ? { pr: resolved.pr } : {}),
+      },
+      // A terminal record keeps its timestamps: bumping them would move it in
+      // activity-ordered views for a cleanup it did not do.
+      { touchUpdatedAt: !terminal },
+    );
+    return withSessionSlots(latest, nextSlots);
+  }
+
+  // Resolves the record that owns a sidecar's tmux pane and reserved ports:
+  // the in-hand record itself for a per-session (mcp) sidecar or a non-desk
+  // session (zero extra IO — sidecarOwnerId returns session.id unchanged),
+  // else a fresh read of the desk anchor's own record. Session records are
+  // never deleted from the store, so a missing anchor is an invariant break,
+  // not a fallback case.
+  private resolveSidecarOwnerRecord(
+    session: SessionRecord,
+    sidecar: Pick<SidecarConfig, "mcp">,
+  ): SessionRecord {
+    const ownerId = sidecarOwnerId(session, sidecar);
+    if (ownerId === session.id) {
+      return session;
     }
-    return nextRecord;
+    const anchor = readSession(this.config.dataDir, ownerId);
+    if (!anchor) {
+      throw new Error(
+        `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
+      );
+    }
+    return anchor;
+  }
+
+  // Owner id for a sidecar known only by name. A name with no config entry
+  // (a stale `session.sidecarNames` whose sidecar was dropped from the
+  // project since) resolves to the session itself — nothing proves it is
+  // desk-shared.
+  private sidecarOwnerIdForName(
+    session: SessionRecord,
+    project: ProjectConfig | undefined,
+    sidecarName: string,
+  ): string {
+    const sidecar = project?.sidecars[sidecarName];
+    return sidecar ? sidecarOwnerId(session, sidecar) : session.id;
   }
 
   private async startSidecarWithDependencies(args: {
@@ -3814,16 +3982,26 @@ export class SessionService {
         await start(dependency);
       }
 
-      const wasAlive = await sidecarTmuxAlive(currentSession.id, sidecarName);
+      // Non-mcp project sidecars are desk-shared: the owner is the anchor's
+      // own record (self for mcp sidecars and non-desk sessions), and
+      // startSidecarInternal operates entirely on that owner record. Only
+      // when the caller IS the owner does the running chain (and the value
+      // this function returns, persisted onto the caller's own record by
+      // every call site) get updated — a sibling starting an anchor-owned
+      // sidecar must get its own record back unchanged, never the anchor's.
+      const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
+      const wasAlive = await sidecarTmuxAlive(owner.id, sidecarName);
       const updated = await this.startSidecarInternal({
-        session: currentSession,
+        session: owner,
         project: args.project,
         sidecarName,
         sidecar,
         sidecarDepth: args.sidecarDepth,
         ...(clearPort !== undefined ? { clearPort } : {}),
       });
-      currentSession = updated;
+      if (owner.id === currentSession.id) {
+        currentSession = updated;
+      }
       if (!wasAlive) {
         args.onStarted(sidecarName, sidecar);
       }
@@ -3876,12 +4054,15 @@ export class SessionService {
     if (!latest) return;
     if (isTerminalSessionStatus(latest.status)) return;
     if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
-    const slots = applySlotsUpdate(latest.slots, {
+    const resolved = resolveWorkspaceState(this.config.dataDir, latest);
+    const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
-    const updated = withSessionSlots(latest, slots);
-    writeSession(this.config.dataDir, updated);
+    this.writeWorkspaceStateWithLegacyMirror(latest, {
+      ...(slots ? { slots } : {}),
+      ...(resolved.pr ? { pr: resolved.pr } : {}),
+    });
     this.logEvent("session.sidecar.link.published", {
       level: "info",
       sessionId,
@@ -4244,7 +4425,7 @@ export class SessionService {
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
-    const artifact = readSessionArtifact(this.config.dataDir, sessionId, artifactId);
+    const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(session), artifactId);
     if (!artifact) {
       throw new SessionResourceNotFoundError(`Artifact not found: ${sessionId}/${artifactId}`);
     }
@@ -4353,7 +4534,10 @@ export class SessionService {
                 command: startedSidecar.command,
                 manualOnly: false,
                 sidecarDepth,
-                tmuxSession: sidecarTmuxSession(session.id, startedName),
+                tmuxSession: sidecarTmuxSession(
+                  sidecarOwnerId(session, startedSidecar),
+                  startedName,
+                ),
               },
             });
           },
@@ -4733,6 +4917,12 @@ export class SessionService {
     let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
+    let reuseCtx: {
+      workspaceId: string;
+      workspacePath: string;
+      worktree: boolean;
+      resolvedBranch: ResolvedSpawnBranch;
+    } | null = null;
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
@@ -4745,7 +4935,7 @@ export class SessionService {
 
       const overrides = parseSpawnOverrides(request.overrides, "overrides");
       worktree = resolveSpawnWorktree(project, overrides);
-      const reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
+      reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
       resolvedModel = await resolveAgentLaunchModel(
@@ -4896,6 +5086,7 @@ export class SessionService {
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
@@ -4911,7 +5102,6 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
-        ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
           ? { sidecarNames: Object.keys(resolveSessionSidecars({ agent }, project)) }
           : {}),
@@ -4985,7 +5175,10 @@ export class SessionService {
           : taskPrompt;
       const inputKind = options?.promptKind ?? "spawn_prompt";
       const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
-      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const startupAttachments = this.storeAttachments(
+        workspaceIdOf(placeholder),
+        request.attachments,
+      );
       this.logUserInput(sessionId, request.project, {
         kind: inputKind,
         text: prompt,
@@ -5095,6 +5288,7 @@ export class SessionService {
         agent,
         projectId: request.project,
         sessionId,
+        artifactsSessionId: workspaceIdOf(runningRecord),
         sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
@@ -5182,10 +5376,43 @@ export class SessionService {
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
-        for (const scName of Object.keys(project.sidecars)) {
-          await killSidecarTmux(sessionId, scName).catch(() => {});
+        // Non-mcp project sidecars are desk-shared: a sibling can already be
+        // attached to this still-spawning anchor (or, for a failing sibling,
+        // the anchor/another sibling can still be live), so this session's
+        // own spawn failure must not kill them out from under a live desk
+        // member. Own mcp sidecars always die with this session.
+        const failedSpawnSession = {
+          id: sessionId,
+          project: request.project,
+          workspaceId: reuseCtx?.workspaceId ?? sessionId,
+        };
+        // Checked even when this spawn reused no workspace: a child can have
+        // attached to this session while it was still spawning, which makes
+        // this record the desk anchor whose panes that child is using.
+        const failedSpawnDeskAlive = this.hasRunningWorkspaceMembers(failedSpawnSession);
+        for (const [scName, sidecar] of Object.entries(project.sidecars)) {
+          if (!sidecar.mcp && failedSpawnDeskAlive) {
+            continue;
+          }
+          await killSidecarTmux(sidecarOwnerId(failedSpawnSession, sidecar), scName).catch(
+            () => {},
+          );
         }
-        this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+        // Startup attachments are preserved for a respawn, so the ids come
+        // from the persisted placeholder — they are out of scope here.
+        const persistedStartupIds = readSession(
+          this.config.dataDir,
+          sessionId,
+        )?.startupAttachmentIds;
+        this.removeSessionArtifacts(
+          {
+            id: sessionId,
+            project: request.project,
+            workspaceId: failedSpawnSession.workspaceId,
+            ...(persistedStartupIds ? { startupAttachmentIds: persistedStartupIds } : {}),
+          },
+          { preserveStartup: true },
+        );
         if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -5194,6 +5421,7 @@ export class SessionService {
         const erroredRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
+          workspaceId: failedSpawnSession.workspaceId,
           agent:
             agent ??
             parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
@@ -5267,11 +5495,19 @@ export class SessionService {
     finalFailure: boolean,
   ): Promise<void> {
     await killTmuxSession(prepared.sessionId);
-    for (const sidecarName of Object.keys(prepared.project.sidecars)) {
-      await killSidecarTmux(prepared.sessionId, sidecarName).catch(() => {});
+    // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
+    // project sidecars are desk-shared and must not die under a live sibling.
+    const deskAlive = this.hasRunningWorkspaceMembers(prepared.placeholder);
+    for (const [sidecarName, sidecar] of Object.entries(prepared.project.sidecars)) {
+      if (!sidecar.mcp && deskAlive) {
+        continue;
+      }
+      await killSidecarTmux(sidecarOwnerId(prepared.placeholder, sidecar), sidecarName).catch(
+        () => {},
+      );
     }
     if (finalFailure) {
-      this.removeSessionArtifacts(prepared.sessionId);
+      this.removeSessionArtifacts(prepared.placeholder);
     } else {
       this.resetSpawnAttemptArtifacts(prepared.sessionId);
     }
@@ -5285,7 +5521,7 @@ export class SessionService {
     project: ProjectConfig,
     worktree: boolean,
   ): {
-    deskId: string;
+    workspaceId: string;
     workspacePath: string;
     worktree: boolean;
     resolvedBranch: ResolvedSpawnBranch;
@@ -5319,7 +5555,7 @@ export class SessionService {
     }
 
     return {
-      deskId: parent.deskId ?? parent.id,
+      workspaceId: workspaceIdOf(parent),
       workspacePath: tryRealpath(path),
       worktree: parent.worktree,
       resolvedBranch: {
@@ -5330,12 +5566,12 @@ export class SessionService {
   }
 
   private listDeskSessions(session: SessionRecord): SessionRecord[] {
-    const anchor = session.deskId ?? session.id;
+    const anchor = workspaceIdOf(session);
     return listSessions(this.config.dataDir)
       .filter(
         (member) =>
           member.project === session.project &&
-          (member.deskId ?? member.id) === anchor &&
+          workspaceIdOf(member) === anchor &&
           member.status !== "killed",
       )
       .sort((a, b) => a.id.localeCompare(b.id));
@@ -5390,15 +5626,93 @@ export class SessionService {
     return members;
   }
 
-  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
-    const anchor = session.deskId ?? session.id;
+  private someDeskSibling(
+    session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
+    match: (sibling: SessionRecord) => boolean,
+  ): boolean {
+    const anchor = workspaceIdOf(session);
     return listSessions(this.config.dataDir).some(
       (s) =>
         s.id !== session.id &&
         s.project === session.project &&
-        (s.deskId ?? s.id) === anchor &&
-        !isTerminalSessionStatus(s.status),
+        workspaceIdOf(s) === anchor &&
+        match(s),
     );
+  }
+
+  // Another workspace member could still come back and need the workspace's
+  // persistent state: its worktree and the shared artifacts dir. A paused or
+  // errored member counts — restore brings it back into the same workspace.
+  private hasActiveWorkspaceMembers(
+    session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
+  ): boolean {
+    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status));
+  }
+
+  // Another workspace member has an agent running right now, so the
+  // workspace's shared sidecars and their reserved ports are actually in
+  // use. Deliberately narrower than hasActiveWorkspaceMembers: pausing a
+  // session already tears its own sidecars down, and a stopped or errored
+  // member holding a shared pane would leak it forever — handoff parks its
+  // predecessor as `stopped` and keeps it in the desk, so the workspace
+  // would never release the pane or its pool ports. Restore re-runs
+  // autostart, so releasing early self-heals.
+  private hasRunningWorkspaceMembers(
+    session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
+  ): boolean {
+    return this.someDeskSibling(session, (s) => s.status === "running" || s.status === "spawning");
+  }
+
+  // Resolves the record that owns a desk's shared state (slots, PR binding).
+  // Zero IO for a non-desk session or the anchor itself — it is already the
+  // in-hand record. Only a desk sibling costs an extra read, for the anchor.
+  private deskAnchorRecord(session: SessionRecord): SessionRecord {
+    const anchorId = workspaceIdOf(session);
+    if (anchorId === session.id) {
+      return session;
+    }
+    return readSession(this.config.dataDir, anchorId) ?? session;
+  }
+
+  // Persists workspace-owned state plus its transitional legacy mirror.
+  //
+  // The mirror has to land on the WORKSPACE OWNER's record, which is not
+  // always the record in hand: a sidecar callback holds the sidecar owner's
+  // record, and for an mcp sidecar that is the session itself rather than
+  // the workspace. Mirroring onto the wrong record would leave the legacy
+  // fields drifting from the file, which a rollback would then serve. Both
+  // fields are always written together for the same reason — mirroring only
+  // the half that changed lets the other half go stale.
+  // Returns the owner record as written, so a caller that is itself the owner
+  // can enrich from it instead of paying for a re-read.
+  private writeWorkspaceStateWithLegacyMirror(
+    member: SessionRecord,
+    state: WorkspaceState,
+    options?: { touchUpdatedAt?: boolean },
+  ): SessionRecord | null {
+    const workspaceId = workspaceIdOf(member);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
+    const owner =
+      member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
+    if (!owner) {
+      return null;
+    }
+    const mirrored: SessionRecord = {
+      ...owner,
+      ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
+    };
+    if (state.slots) {
+      mirrored.slots = state.slots;
+    } else {
+      delete mirrored.slots;
+    }
+    if (state.pr) {
+      mirrored.pr = state.pr;
+    } else {
+      delete mirrored.pr;
+    }
+    writeSession(this.config.dataDir, mirrored);
+    return mirrored;
   }
 
   private hasActiveWorktreePathPeers(session: SessionRecord): boolean {
@@ -5419,7 +5733,7 @@ export class SessionService {
       session.worktree &&
       session.worktreePath.trim().length > 0 &&
       workspaceExists(session.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(session) &&
+      !this.hasActiveWorkspaceMembers(session) &&
       !this.hasActiveWorktreePathPeers(session)
     );
   }
@@ -5443,7 +5757,7 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
-      deskId: string;
+      workspaceId: string;
       workspacePath: string;
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
@@ -5502,6 +5816,7 @@ export class SessionService {
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
@@ -5517,7 +5832,6 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
-        ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
           ? { sidecarNames: Object.keys(resolveSessionSidecars({ agent }, project)) }
           : {}),
@@ -5546,7 +5860,10 @@ export class SessionService {
         },
       });
 
-      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const startupAttachments = this.storeAttachments(
+        workspaceIdOf(placeholder),
+        request.attachments,
+      );
       this.logUserInput(sessionId, request.project, {
         kind: "spawn_prompt",
         text: prompt,
@@ -5576,12 +5893,18 @@ export class SessionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
-        this.removeSessionArtifacts(sessionId);
+        const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+        this.removeSessionArtifacts({
+          id: sessionId,
+          project: request.project,
+          workspaceId: erroredWorkspaceId,
+        });
         const erroredBranchSource =
           resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
         writeSession(this.config.dataDir, {
           id: sessionId,
           project: request.project,
+          workspaceId: erroredWorkspaceId,
           agent:
             agent ??
             parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
@@ -5894,6 +6217,7 @@ export class SessionService {
         agent,
         projectId: request.project,
         sessionId,
+        artifactsSessionId: workspaceIdOf(runningRecord),
         sessionToolDir: prepared.sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
@@ -6552,7 +6876,10 @@ export class SessionService {
   }
 
   private async captureStateTransitionArtifact(
-    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
+    session: Pick<
+      SessionRecord,
+      "agent" | "id" | "status" | "worktreePath" | "workspaceId" | "deskId"
+    >,
     transition: {
       at: string;
       fromState: SessionState;
@@ -6569,13 +6896,15 @@ export class SessionService {
     }
     try {
       const artifactId = stateTransitionArtifactId(
+        session.id,
         transition.at,
         transition.fromState,
         transition.toState,
       );
-      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
+      const anchorId = workspaceIdOf(session);
+      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
       copyFileSync(sourcePath, join(artifactDir, artifactId));
-      setSessionArtifactOrigin(this.config.dataDir, session.id, artifactId, "automatic");
+      setSessionArtifactOrigin(this.config.dataDir, anchorId, artifactId, "automatic");
       return artifactId;
     } catch {
       return null;
@@ -6583,7 +6912,10 @@ export class SessionService {
   }
 
   private async logStateTransition(
-    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
+    session: Pick<
+      SessionRecord,
+      "agent" | "id" | "project" | "status" | "worktreePath" | "workspaceId" | "deskId"
+    >,
     transition: {
       at: string;
       fromState: SessionState;
@@ -6613,7 +6945,7 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "id" | "project">,
+    session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
@@ -6627,7 +6959,7 @@ export class SessionService {
       return message;
     }
 
-    const stored = this.storeAttachments(session.id, request.attachments);
+    const stored = this.storeAttachments(workspaceIdOf(session), request.attachments);
     this.logUserInput(session.id, session.project, {
       kind: "send_message",
       source: request.queue === false ? "send_direct" : "send",
@@ -6830,15 +7162,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const anchor = session.deskId ?? session.id;
-    const candidates = listSessions(this.config.dataDir)
-      .filter(
-        (member) =>
-          member.project === session.project &&
-          (member.deskId ?? member.id) === anchor &&
-          member.status !== "killed",
-      )
-      .sort((a, b) => a.id.localeCompare(b.id));
+    const candidates = this.listDeskSessions(session);
 
     const completedIds: string[] = [];
     for (const candidate of candidates) {
@@ -6859,7 +7183,10 @@ export class SessionService {
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const session = currentSession;
+    // Slots (title/links/tags/pr) are workspace-owned: mutations always land
+    // on the workspace's own state, so every member sees the same slots.
+    const session = this.deskAnchorRecord(currentSession);
+    const current = resolveWorkspaceState(this.config.dataDir, session);
     const normalized = normalizeSlotsUpdate(request);
     if (normalized.tags.length > 0) {
       const known = new Set(this.config.tags.map((tag) => tag.name));
@@ -6869,7 +7196,7 @@ export class SessionService {
         throw new Error(`Unknown tag(s): ${unknown.join(", ")}. Available tags: ${available}`);
       }
     }
-    const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
+    const hasGenericPrSlot = current.slots?.links.some((link) => link.label === "pr") ?? false;
     const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
     const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
@@ -6885,7 +7212,7 @@ export class SessionService {
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
     const slots = hasGenericChanges
-      ? applySlotsUpdate(session.slots, {
+      ? applySlotsUpdate(current.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
@@ -6893,26 +7220,14 @@ export class SessionService {
           ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
           ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
         })
-      : session.slots;
-    const updated: SessionRecord = {
-      ...session,
+      : current.slots;
+    const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
+    const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
-      ...(nativePr
-        ? { pr: nativePr }
-        : unlinksPr && !hasGenericPrSlot
-          ? {}
-          : session.pr
-            ? { pr: session.pr }
-            : {}),
+      ...(nextPr ? { pr: nextPr } : {}),
     };
-    if (!slots) {
-      delete updated.slots;
-    }
-    if (prLink === undefined && unlinksPr && !hasGenericPrSlot) {
-      delete updated.pr;
-    }
-    writeSession(this.config.dataDir, updated);
-    const displaySlots = deriveSessionSlots(updated);
+    const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
+    const displaySlots = deriveSessionSlots(nextState);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
@@ -6923,7 +7238,14 @@ export class SessionService {
         linkCount: displaySlots?.links.length ?? 0,
       },
     });
-    return this.enrich(updated);
+    // The API response is always the CALLER's view, never the workspace
+    // owner's. When the caller IS the owner, the record just written is
+    // already the caller's; otherwise re-read the caller's own.
+    const callerRecord =
+      owner?.id === sessionId
+        ? owner
+        : (readSession(this.config.dataDir, sessionId) ?? currentSession);
+    return this.enrich(callerRecord);
   }
 
   async startSidecar(
@@ -6991,7 +7313,7 @@ export class SessionService {
             sidecarDepth,
             command: startedSidecar.command,
             manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
-            tmuxSession: sidecarTmuxSession(sessionId, startedName),
+            tmuxSession: sidecarTmuxSession(sidecarOwnerId(session, startedSidecar), startedName),
           },
         });
       },
@@ -6999,22 +7321,30 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  // Kills a sidecar's tmux pane, unlinks its slot, and persists the result.
-  // Used by stopSidecar before its own event-logged write.
-  private async killSidecarAndUnlinkSlot(
-    session: SessionRecord,
-    sidecarName: string,
-  ): Promise<SessionRecord> {
-    this.abortSidecarUrlProbe(session.id, sidecarName);
-    await killSidecarTmux(session.id, sidecarName);
+  // Kills a sidecar's tmux pane and unlinks its slot on the OWNER id (the
+  // anchor's record for a desk-shared project sidecar, else the session's
+  // own). Used by stopSidecar before its own event-logged write; the caller
+  // re-reads its own record afterward rather than trusting this return.
+  private async killSidecarAndUnlinkSlot(ownerId: string, sidecarName: string): Promise<void> {
+    this.abortSidecarUrlProbe(ownerId, sidecarName);
+    await killSidecarTmux(ownerId, sidecarName);
 
-    const afterKill = readSession(this.config.dataDir, session.id) ?? session;
-    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
-    const baseRecord: SessionRecord =
-      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
-    const updated: SessionRecord = { ...baseRecord, updatedAt: nowIso() };
-    writeSession(this.config.dataDir, updated);
-    return updated;
+    const afterKill = readSession(this.config.dataDir, ownerId);
+    if (!afterKill) return;
+    const resolved = resolveWorkspaceState(this.config.dataDir, afterKill);
+    const nextSlots = applySlotsUpdate(resolved.slots, { unlinkLabels: [sidecarName] });
+    if (nextSlots !== resolved.slots) {
+      this.writeWorkspaceStateWithLegacyMirror(
+        afterKill,
+        {
+          ...(nextSlots ? { slots: nextSlots } : {}),
+          ...(resolved.pr ? { pr: resolved.pr } : {}),
+        },
+        { touchUpdatedAt: true },
+      );
+    } else {
+      writeSession(this.config.dataDir, { ...afterKill, updatedAt: nowIso() });
+    }
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
@@ -7030,12 +7360,13 @@ export class SessionService {
     if (!sidecarNames.includes(sidecarName)) {
       throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
     }
+    const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
 
-    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+    if (!(await sidecarTmuxAlive(ownerId, sidecarName))) {
       return this.enrich(session);
     }
 
-    const updated = await this.killSidecarAndUnlinkSlot(session, sidecarName);
+    await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -7043,26 +7374,62 @@ export class SessionService {
       message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
       details: {
         sidecarName,
-        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+        tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
       },
     });
-    return this.enrich(updated);
+    return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
   }
 
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
+    // Resolved once for the whole teardown: re-reading it per sidecar would
+    // both cost a listSessions each time and let a sibling transitioning
+    // mid-loop leave the desk's sidecars half torn down.
+    const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
     for (const scName of sessionSidecarNames(session, project)) {
-      this.abortSidecarUrlProbe(session.id, scName);
-      const record = readSession(this.config.dataDir, session.id);
+      const sidecar = project?.sidecars[scName];
+      // Non-mcp project sidecars are desk-shared: while another desk member's
+      // agent is still running, this session's own teardown (paused, killed,
+      // completed, crashed) must not touch the shared pane, slot link, or
+      // ports — that member's own teardown handles it. Holds for the anchor's
+      // own teardown too, where the owner id is its own id. MCP sidecars are
+      // always per-session and tear down unconditionally.
+      const isDeskSharedSidecar = sidecar !== undefined && !sidecar.mcp;
+      if (isDeskSharedSidecar && deskSiblingsRunning) {
+        continue;
+      }
+      const ownerId = this.sidecarOwnerIdForName(session, project, scName);
+      this.abortSidecarUrlProbe(ownerId, scName);
+      const record = readSession(this.config.dataDir, ownerId);
       if (record) {
-        const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
-        if (next !== record.slots) {
-          const updated = withSessionSlots(record, next);
-          writeSession(this.config.dataDir, updated);
+        const resolved = resolveWorkspaceState(this.config.dataDir, record);
+        const next = applySlotsUpdate(resolved.slots, { unlinkLabels: [scName] });
+        if (next !== resolved.slots) {
+          this.writeWorkspaceStateWithLegacyMirror(record, {
+            ...(next ? { slots: next } : {}),
+            ...(resolved.pr ? { pr: resolved.pr } : {}),
+          });
         }
       }
-      await killSidecarTmux(session.id, scName).catch(() => {});
+      await killSidecarTmux(ownerId, scName).catch(() => {});
     }
+  }
+
+  // Strips sidecarPorts from a going-terminal record, keeping only the
+  // anchor-owned (non-mcp, desk-shared) entries while another desk member's
+  // agent is still running and using them. Route every terminal-write site
+  // through this instead of a wholesale delete.
+  private sessionWithReleasedSidecarPorts(session: SessionRecord): SessionRecord {
+    if (!session.sidecarPorts) {
+      return session;
+    }
+    const kept = releasableSidecarPorts(
+      session,
+      this.resolveProjectForSession(session),
+      this.hasRunningWorkspaceMembers(session),
+    );
+    const { sidecarPorts: _dropped, ...rest } = session;
+    return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
@@ -7086,17 +7453,56 @@ export class SessionService {
     });
   }
 
-  private removeSessionArtifacts(sessionId: string, options?: { preserveStartup?: boolean }): void {
-    const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
+  private removeSessionArtifacts(
+    session: Pick<
+      SessionRecord,
+      "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
+    >,
+    options?: { preserveStartup?: boolean },
+  ): void {
+    const sessionId = session.id;
+    // Per-session cleanup: unconditional, regardless of desk membership.
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
-    if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
-      deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
-    } else {
-      deleteSessionArtifactsDir(this.config.dataDir, sessionId);
+    const anchorId = workspaceIdOf(session);
+    // A desk sibling's own session-tools dir is per-session, so it goes now.
+    // The anchor's doubles as the tool dir of the desk's shared sidecars, so
+    // it is treated as shared state below.
+    if (sessionId !== anchorId) {
+      removeSessionSlotTool(this.config.dataDir, sessionId);
     }
-    removeSessionSlotTool(this.config.dataDir, sessionId);
+    // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
+    // are still in use by any other live desk member (an anchor-owned
+    // project sidecar runs with the anchor's SPUR_SESSION_TOOL_DIR), so only
+    // the last member's teardown may remove them. One snapshot serves both the
+    // guard and the keep-list below.
+    const deskMembers = listSessions(this.config.dataDir).filter(
+      (s) => s.id !== sessionId && s.project === session.project && workspaceIdOf(s) === anchorId,
+    );
+    if (deskMembers.some((s) => !isTerminalSessionStatus(s.status))) {
+      return;
+    }
+    // Startup attachments of EVERY member live in this one shared dir, and
+    // respawn re-clones them, so a member's keep-list is not enough: deleting
+    // another member's ids here would make its respawn fail permanently.
+    const preservedStartupIds = new Set(
+      deskMembers.flatMap((member) => member.startupAttachmentIds ?? []),
+    );
+    if (options?.preserveStartup) {
+      for (const id of session.startupAttachmentIds ?? []) {
+        preservedStartupIds.add(id);
+      }
+    }
+    if (preservedStartupIds.size > 0) {
+      deleteSessionArtifactsExcept(this.config.dataDir, anchorId, [...preservedStartupIds]);
+    } else {
+      deleteSessionArtifactsDir(this.config.dataDir, anchorId);
+    }
+    removeSessionSlotTool(this.config.dataDir, anchorId);
+    // Last member's teardown: the workspace's shared slots/pr state goes
+    // with the rest of its shared state.
+    deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
   private async applyManualStatus(
@@ -7112,7 +7518,7 @@ export class SessionService {
     let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
       const migrated: SessionRecord = {
-        ...copySessionWithoutSidecarPorts(session),
+        ...this.sessionWithReleasedSidecarPorts(session),
         status: "stopped",
         stopReason: "manual_pause",
         updatedAt: nowIso(),
@@ -7130,7 +7536,7 @@ export class SessionService {
     if (session.status === targetStatus) {
       if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
         const record: SessionRecord = {
-          ...copySessionWithoutSidecarPorts(session),
+          ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
           stopReason: "manual_pause",
           updatedAt: nowIso(),
@@ -7161,7 +7567,7 @@ export class SessionService {
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        this.removeSessionArtifacts(sessionId);
+        this.removeSessionArtifacts(session);
         await this.pushTelegramNotice(
           sessionId,
           { id: session.id, agent: session.agent, state: "stopped" },
@@ -7184,7 +7590,7 @@ export class SessionService {
     this.stateCache.delete(sessionId);
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
     const record: SessionRecord = {
-      ...copySessionWithoutSidecarPorts(cleanedSession),
+      ...this.sessionWithReleasedSidecarPorts(cleanedSession),
       status: targetStatus,
       ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
       updatedAt: nowIso(),
@@ -7266,7 +7672,7 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+      this.removeSessionArtifacts(session, { preserveStartup: true });
       await this.pushTelegramNotice(
         sessionId,
         { id: session.id, agent: session.agent, state: "killed" },
@@ -7299,7 +7705,7 @@ export class SessionService {
 
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
     const record: SessionRecord = {
-      ...copySessionWithoutSidecarPorts(cleanedSession),
+      ...this.sessionWithReleasedSidecarPorts(cleanedSession),
       status: "killed",
       updatedAt: nowIso(),
     };
@@ -7537,6 +7943,7 @@ export class SessionService {
       agent: session.agent,
       projectId: session.project,
       sessionId: session.id,
+      artifactsSessionId: workspaceIdOf(session),
       sessionToolDir,
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
@@ -7804,6 +8211,7 @@ export class SessionService {
         agent: current.agent,
         projectId: current.project,
         sessionId: current.id,
+        artifactsSessionId: workspaceIdOf(current),
         sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
@@ -7999,7 +8407,8 @@ export class SessionService {
         session.id,
       );
       if (expectedWorktreePath !== session.worktreePath) {
-        const deskNote = session.deskId ? " it belonged to this session's desk anchor;" : "";
+        const deskNote =
+          workspaceIdOf(session) !== session.id ? " it belonged to a shared workspace;" : "";
         throw new SessionNotReopenableError(
           `Session ${sessionId} cannot be reopened: its worktree at ${session.worktreePath} is gone and cannot be rebuilt at that path;${deskNote} use respawn`,
         );
@@ -8042,7 +8451,7 @@ export class SessionService {
     }
 
     const record: SessionRecord = {
-      ...copySessionWithoutSidecarPorts(session),
+      ...this.sessionWithReleasedSidecarPorts(session),
       status: "stopped",
       stopReason: "manual_pause",
       updatedAt: nowIso(),
@@ -8105,7 +8514,7 @@ export class SessionService {
       await killTmuxSession(latest.tmuxSession);
       await this.cleanupSessionServices(latest);
       const rolledBack: SessionRecord = {
-        ...copySessionWithoutSidecarPorts(latest),
+        ...this.sessionWithReleasedSidecarPorts(latest),
         status: "completed",
         updatedAt: nowIso(),
       };
@@ -8369,7 +8778,7 @@ export class SessionService {
       }
     }
     const clonedAttachments = this.cloneStartupAttachments(
-      session.id,
+      workspaceIdOf(session),
       requestedStartupAttachmentIds,
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
@@ -8413,7 +8822,7 @@ export class SessionService {
     const notes = request.notes?.trim();
     const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
     const clonedAttachments = this.cloneStartupAttachments(
-      session.id,
+      workspaceIdOf(session),
       session.startupAttachmentIds ?? [],
     );
     const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
@@ -8433,7 +8842,7 @@ export class SessionService {
     let sourceForSpawn = session;
     if (session.status === "running" || session.status === "spawning") {
       const stopped: SessionRecord = {
-        ...copySessionWithoutSidecarPorts(session),
+        ...this.sessionWithReleasedSidecarPorts(session),
         status: "stopped",
         stopReason: "manual_pause",
         updatedAt: nowIso(),
@@ -9405,8 +9814,9 @@ export class SessionService {
     // is completed|killed only), so any sidecarPorts left on the record would be
     // treated as still owned by a live session forever — release them here the
     // same way pause/kill already do, or the leak sweep can never reclaim the
-    // port and the pool eventually exhausts.
-    const latestNoPorts = copySessionWithoutSidecarPorts(latest);
+    // port and the pool eventually exhausts. Desk-shared entries are kept while
+    // another member is non-terminal: those ports really are still in use.
+    const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
     let updated: SessionRecord;
     if (terminalUnavailable) {
       const {
@@ -9925,17 +10335,34 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
     );
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
+    // Same owner resolution as enrich's sidecars loop: without it, every
+    // desk sibling would render the anchor-owned shared sidecar as offline
+    // (it probes its own tmux id, which never has the pane). Resolving the
+    // project re-reads and re-validates the config file, so this 2s-tick path
+    // only pays for it when the session is actually a desk member with
+    // sidecars — a non-desk session always owns its own panes.
+    const sidecarNames = session.sidecarNames ?? [];
+    const deskProject =
+      workspaceIdOf(session) !== session.id && sidecarNames.length > 0
+        ? this.resolveProjectForSession(session)
+        : undefined;
     const runningSidecarNames = (
       await Promise.all(
-        (session.sidecarNames ?? []).map(async (name) =>
-          (await sidecarTmuxAlive(session.id, name)) ? name : null,
-        ),
+        sidecarNames.map(async (name) => {
+          const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
+          return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
+        }),
       )
     ).filter((name): name is string => name !== null);
 
     return {
       ...dashboardSession,
+      // Always resolved for consumers, whatever shape the stored record is in.
+      // `deskId` rides along as a compat alias so a browser tab still running
+      // the previous bundle keeps grouping desks; drop it a release from now.
+      workspaceId: workspaceIdOf(dashboardSession),
+      deskId: workspaceIdOf(dashboardSession),
       planMode: resolvePlanMode(dashboardSession),
       restrictWrites: resolveRestrictWrites(dashboardSession),
       ...(displaySlots ? { slots: displaySlots } : {}),
@@ -9984,17 +10411,30 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
-    const sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[] = [];
+    // Fetched at most once per enrich (zero extra IO for a non-desk session,
+    // where deskAnchorRecord returns `session` itself unchanged): reused for
+    // the sidecars' owner state (ports, still per-record) below. Passed into
+    // resolveWorkspaceState for the shared slots/pr too, so a sibling doesn't
+    // pay for a second read of the same anchor record when there's no
+    // workspace file yet.
+    const anchorRecord = this.deskAnchorRecord(session);
+    const sidecars: SessionSidecarView[] = [];
     for (const name of sessionSidecarNames(session, project)) {
+      const sidecar = project?.sidecars[name];
+      const ownerId = this.sidecarOwnerIdForName(session, project, name);
+      const ownerRecord = ownerId === session.id ? session : anchorRecord;
       sidecars.push({
         name,
-        alive: await sidecarTmuxAlive(session.id, name),
-        ports: sidecarViewPorts(session, name, project?.sidecars[name]),
+        alive: await sidecarTmuxAlive(ownerId, name),
+        ports: sidecarViewPorts(ownerRecord, name, sidecar),
+        tmuxSession: sidecarTmuxSession(ownerId, name),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = deriveSessionSlots(
+      resolveWorkspaceState(this.config.dataDir, anchorRecord),
+    );
     const deskGroupMembers = await this.buildDeskGroupMembers(session, {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
@@ -10004,6 +10444,10 @@ export class SessionService {
 
     return {
       ...session,
+      // See enrichDashboard: always resolved, with `deskId` as a compat alias
+      // for a browser tab still running the previous bundle.
+      workspaceId: workspaceIdOf(session),
+      deskId: workspaceIdOf(session),
       planMode: resolvePlanMode(session),
       restrictWrites: resolveRestrictWrites(session),
       ...(displaySlots ? { slots: displaySlots } : {}),
@@ -10013,7 +10457,7 @@ export class SessionService {
       ...(history.length > 0 ? { stateHistory: history } : {}),
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      artifacts: listSessionArtifacts(this.config.dataDir, session.id),
+      artifacts: listSessionArtifacts(this.config.dataDir, workspaceIdOf(session)),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),

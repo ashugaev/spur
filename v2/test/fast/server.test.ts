@@ -449,7 +449,7 @@ describe("startServer", () => {
         lastActivityAt: "2026-04-15T00:00:00.000Z",
         artifacts: [],
         services: [],
-        sidecars: [{ name: "dev", alive: true, ports: [] }],
+        sidecars: [{ name: "dev", alive: true, ports: [], tmuxSession: "demo-1--dev" }],
       } satisfies SessionView;
     };
 

@@ -1198,6 +1198,42 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("opens a desk-shared sidecar's terminal using its published tmuxSession, not the session id prefix", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              {
+                name: "isolated-daemon",
+                alive: true,
+                tmuxSession: "desk-anchor--isolated-daemon",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const sidecarName = await screen.findByText("isolated-daemon");
+    const sidecarRow = sidecarName.closest("div")?.parentElement;
+    expect(sidecarRow).not.toBeNull();
+    fireEvent.click(within(sidecarRow as HTMLElement).getByRole("button", { name: "Terminal" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Direct terminal desk-anchor--isolated-daemon")).toBeInTheDocument();
+    });
+  });
+
   it("falls back to the agent when restored terminal suffix is empty", async () => {
     window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1--");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {

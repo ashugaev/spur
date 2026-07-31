@@ -54,6 +54,7 @@ function sourceSession(worktreePath: string): SessionRecord {
   return {
     id: "api-1",
     project: "api",
+    workspaceId: "api-1",
     agent: "claude",
     prompt: "hello",
     branch: "feature/test",

@@ -4,7 +4,7 @@ import { MEMORY_KEY_PATTERN, SESSION_ID_PATTERN, writeFileAtomic } from "./sessi
 import type { SharedMemoryEntry, SharedMemoryScope } from "./types.js";
 
 // Three shared markdown-memory scopes, one .md file per key:
-//   <dataDir>/memory/task/<deskId ?? sessionId>/<key>.md    — desk-group siblings
+//   <dataDir>/memory/task/<workspaceId>/<key>.md             — desk-group siblings
 //   <dataDir>/memory/project/<projectId>/<key>.md           — all sessions of a project
 //   <dataDir>/memory/global/<key>.md                        — whole Spur instance
 // Concurrency contract: last-writer-wins per key. No locking by design.

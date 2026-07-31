@@ -2406,7 +2406,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session &&
     (requestedTerminalSessionId === session.id ||
       (requestedTerminalSessionId !== null &&
-        requestedTerminalSessionId.startsWith(`${session.id}--`))),
+        requestedTerminalSessionId.startsWith(`${session.id}--`)) ||
+      (requestedTerminalSessionId !== null &&
+        session.sidecars.some((sc) => sc.tmuxSession === requestedTerminalSessionId))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
@@ -3265,7 +3267,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                                onClick={() => syncTerminalFilter(sc.tmuxSession)}
                               >
                                 Terminal
                               </button>
@@ -3358,7 +3360,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               titleSuffix={
                 requestedTerminalSessionId !== session.id
-                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  ? // A workspace-shared sidecar's pane is named after the
+                    // workspace, not this session, so stripping this
+                    // session's own prefix would leave the whole name. The
+                    // sidecar view already carries both.
+                    (session.sidecars.find((sc) => sc.tmuxSession === requestedTerminalSessionId)
+                      ?.name ?? requestedTerminalSessionId?.replace(`${session.id}--`, ""))
                   : undefined
               }
             />

@@ -61,7 +61,7 @@ import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
-import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
@@ -1307,7 +1307,7 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const scTmuxSession = sidecarTmuxSession(session.id, scName);
+    const scTmuxSession = firstSidecar.tmuxSession;
     try {
       if (!firstSidecar.alive) {
         await postJson<SessionView>(
