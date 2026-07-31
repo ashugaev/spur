@@ -1207,7 +1207,9 @@ describe("SessionService", () => {
     });
 
     expect(result.id).toBe("api-2");
-    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+    expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
+    // deskId is legacy-read-only now: a freshly spawned session must not get one.
+    expect(sessions.get("api-2")?.deskId).toBeUndefined();
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionName: "api-2",
@@ -1219,7 +1221,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("keeps deskId on the errored record left behind by a spawn failure that reused a workspace", async () => {
+  it("keeps workspaceId on the errored record left behind by a spawn failure that reused a workspace", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set(
@@ -1246,10 +1248,10 @@ describe("SessionService", () => {
     ).rejects.toThrow();
 
     expect(sessions.get("api-2")?.status).toBe("errored");
-    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+    expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
   });
 
-  it("keeps deskId on the errored record left behind by a background spawn preparation failure", async () => {
+  it("keeps workspaceId on the errored record left behind by a background spawn preparation failure", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set(
@@ -1279,7 +1281,7 @@ describe("SessionService", () => {
     ).rejects.toThrow();
 
     expect(sessions.get("api-2")?.status).toBe("errored");
-    expect(sessions.get("api-2")?.deskId).toBe("api-1");
+    expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
   });
 
   it("binds the launch to the requested claude account and persists the account id", async () => {
@@ -17938,10 +17940,10 @@ describe("SessionService", () => {
 
       await service.handoff("api-1", { agent: "cursor" });
 
-      // The handoff spawn reuses api-1's workspace, so api-2 is a desk
-      // sibling of api-1 (deskId === "api-1"): carried slots are desk-shared
-      // and land on the anchor (api-1), not on api-2's own record.
-      expect(sessions.get("api-2")?.deskId).toBe("api-1");
+      // The handoff spawn reuses api-1's workspace, so api-2 joins it
+      // (workspaceId === "api-1"): carried slots belong to the workspace and
+      // land on api-1's record, not on api-2's own.
+      expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
       expect(sessions.get("api-1")?.slots).toEqual({
         title: "Handoff task",
         links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],

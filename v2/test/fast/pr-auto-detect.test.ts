@@ -208,6 +208,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     id: "api-a1b2",
     project: "api",
+    workspaceId: overrides.workspaceId ?? "api-a1b2",
     agent: "claude",
     prompt: "fix the bug",
     branch: "spur/auto-detect-pr-slot",

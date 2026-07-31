@@ -1,25 +1,34 @@
 import type { SessionRecord, SidecarConfig } from "./types.js";
 
 // Shared-desk-workspace helpers (pure, no IO). Desk sibling sessions (same
-// `deskId` = same anchor session id, shared git worktree) delegate shared
-// state — slots, artifacts, project sidecars — to the anchor session's
-// record instead of duplicating it per sibling. See docs/configuration.md
-// for the desk-group model.
+// `workspaceId`, shared git worktree) delegate shared state — slots,
+// artifacts, project sidecars — to the workspace-owning session's record
+// instead of duplicating it per sibling. See docs/configuration.md for the
+// desk-group model.
 
-// `deskId` is set to the anchor session's own id at creation time
-// (session-service.ts resolveWorkspaceReuseContext), and session records are
-// never deleted from the store, so the anchor id is always a resolvable
-// storage key.
-export function deskAnchorId(session: Pick<SessionRecord, "id" | "deskId">): string {
-  return session.deskId ?? session.id;
+// `workspaceId` is written once at session creation
+// (session-service.ts resolveWorkspaceReuseContext) and session records are
+// never deleted from the store, so it is always a resolvable storage key.
+//
+// The `?? deskId ?? id` fallback below is the ONLY place in the codebase
+// that reads the legacy `deskId` field: it exists so records normalized
+// before this migration (on-disk legacy records handled by
+// metadata.ts's normalizeSessionRecord) and raw test-fixture records (which
+// bypass the normalizer entirely) still resolve to the right owner. All
+// other code must read `session.workspaceId` through this accessor, never
+// re-derive it.
+export function workspaceIdOf(
+  session: Pick<SessionRecord, "id" | "workspaceId" | "deskId">,
+): string {
+  return session.workspaceId ?? session.deskId ?? session.id;
 }
 
 // M2 (project sidecars): MCP sidecars (`sidecar.mcp` set, e.g. playwright)
 // stay per-session; non-mcp project sidecars are desk-shared and owned by
-// the anchor.
+// the workspace.
 export function sidecarOwnerId(
-  session: Pick<SessionRecord, "id" | "deskId">,
+  session: Pick<SessionRecord, "id" | "workspaceId" | "deskId">,
   sidecar: Pick<SidecarConfig, "mcp">,
 ): string {
-  return sidecar.mcp ? session.id : deskAnchorId(session);
+  return sidecar.mcp ? session.id : workspaceIdOf(session);
 }

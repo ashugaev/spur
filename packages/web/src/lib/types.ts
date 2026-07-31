@@ -284,6 +284,10 @@ export interface SpurSessionView {
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  // The workspace (shared worktree) this session lives in; equals its own id
+  // when it shares with nobody. `deskId` is the legacy alias for the same
+  // fact, still sent for one release.
+  workspaceId?: string;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: SpurClaudeAccount[];
@@ -513,7 +517,9 @@ export function toDashboardSession(
     tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
-    deskKey: session.deskId?.trim() || session.id,
+    // `workspaceId` is the daemon's own name for the group; `deskId` is the
+    // legacy alias it still sends for one release.
+    deskKey: session.workspaceId?.trim() || session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
     ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
