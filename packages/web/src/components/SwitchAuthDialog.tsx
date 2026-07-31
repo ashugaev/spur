@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { INPUT_CLASS } from "@/design/classes";
 import type { SpurClaudeAccount } from "@/lib/types";
 
 interface SwitchAuthDialogProps {
@@ -104,7 +105,7 @@ export function SwitchAuthDialog({
         <label className="mb-3 block normal-case tracking-normal text-[var(--color-text-secondary)]">
           Account
           <select
-            className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2 py-1 text-[var(--color-text-primary)] outline-none"
+            className={`mt-1 block w-full ${INPUT_CLASS}`}
             data-testid="switch-auth-account"
             disabled={status === "pending"}
             value={selected}
@@ -138,7 +139,7 @@ export function SwitchAuthDialog({
         <div className="flex items-center justify-end gap-2">
           <button
             ref={cancelRef}
-            className="border border-[var(--color-border-default)] px-3 py-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="uppercase border border-[var(--color-border-default)] px-3 py-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={status === "pending"}
             type="button"
             onClick={onCancel}
@@ -146,7 +147,7 @@ export function SwitchAuthDialog({
             Cancel
           </button>
           <button
-            className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="uppercase border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={status === "pending" || !selected}
             type="button"
             onClick={() => onConfirm(selected, force)}
