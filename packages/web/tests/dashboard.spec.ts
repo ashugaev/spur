@@ -3229,9 +3229,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
 
 // D8: Switch Claude account dialog
 test.describe("D8: Switch Claude account dialog", () => {
-  test("switch-auth succeeds for a Shepherd (no-worktree) session without worktree-missing error", async ({
-    page,
-  }) => {
+  test("switch-auth dialog completes for a Shepherd (no-worktree) session", async ({ page }) => {
     const session = makeWorkingSession({
       id: "shp-test",
       project: "spur-shepherd",

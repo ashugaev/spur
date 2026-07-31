@@ -4280,6 +4280,26 @@ describe("SessionService", () => {
       ).toEqual({});
       expect(seedSessionHomeMock).not.toHaveBeenCalled();
     });
+
+    it("throws a readiness error when the bound account is not ready", async () => {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: false,
+        },
+      ];
+      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
+      expect(() =>
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          id: "sess-1",
+          agent: "claude",
+          claudeAccountId: "acc-1",
+        }),
+      ).toThrow("is not ready (credentials or onboarding incomplete)");
+      expect(seedSessionHomeMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("removeClaudeAccount", () => {
@@ -19217,7 +19237,14 @@ describe("SessionService", () => {
       // rateLimitedAt stays set so the per-episode cap stays keyed on this episode;
       // classification clears it once the session leaves rate_limited.
       expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
-      expect(reactivationQueued(sessions)).toBe(true);
+      // Nudge is delivered directly to the tmux pane, not queued, so it reaches
+      // the process even while stateHistory still shows rate_limited.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining(REACTIVATION_MARKER),
+        expect.objectContaining({ agent: "claude" }),
+      );
+      expect(reactivationQueued(sessions)).toBe(false);
       // With afterHours=0 the delayed reactivation path never fires.
       expect(reactivationEventCount()).toBe(0);
       service.dispose();

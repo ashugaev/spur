@@ -200,7 +200,7 @@ resolves the same transcript; history preserved on rotation.
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;
 the account store is currently claude-only). When on,
-a claude session that hits `rate_limited` rotates to the next authenticated,
+a claude session that hits `rate_limited` rotates to the next ready,
 non-cooldown account and receives an immediate reactivation prompt. Guards: `cooldownMinutes` (per-account skip window after a
 limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
 limited -> falls through to the reactivation nudge.

@@ -1056,6 +1056,11 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
+  if (!isAccountReady(account)) {
+    throw new Error(
+      `Claude account ${session.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
+    );
+  }
   const sessionToolDir = join(dataDir, "session-tools", session.id);
   const sessionHome = sessionClaudeHome(sessionToolDir);
   seedSessionHome(sessionHome, account);
@@ -8179,16 +8184,15 @@ export class SessionService {
       return this.enrich(updated);
     }
 
+    // Install target credentials before persisting the record or killing the pane.
+    // If the swap throws, the persisted account and running pane remain old.
+    mkdirSync(sessionHome, { recursive: true });
+    swapSessionCredentials(sessionHome, account);
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
     // Session was launched against an account dir directly.
     // Relaunch once to migrate onto the new account's session home.
     await killTmuxSession(updated.tmuxSession);
-    // Install target account credentials into the session home before relaunch so
-    // a home that already exists (from a prior seed or migration) does not keep
-    // stale credentials from the previous account.
-    mkdirSync(sessionHome, { recursive: true });
-    swapSessionCredentials(sessionHome, account);
     const relaunched = await this.ensureSessionReadyForSend(updated);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -8200,7 +8204,7 @@ export class SessionService {
     return this.enrich(relaunched);
   }
 
-  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Rotate a rate-limited claude session onto the next ready account.
   // Returns true when a rotation happened; false when disabled, capped, or no
   // fresh candidate exists (caller then falls through to the reactivation nudge).
   private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
@@ -8232,16 +8236,21 @@ export class SessionService {
     }
     await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
     this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
-    try {
-      await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.auth.auto_rotate_nudge_failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
-      });
+    // send() queues with awaitingPrompt=true when stateHistory still shows rate_limited,
+    // causing the nudge to never reach the pane. Send directly to bypass that check.
+    const current = readSession(this.config.dataDir, session.id);
+    if (current) {
+      try {
+        await this.sendAgentMessage(current, RATE_LIMIT_REACTIVATION_PROMPT, { interrupt: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.auth.auto_rotate_nudge_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
+        });
+      }
     }
     this.logEvent("session.auth.auto_rotated", {
       level: "info",
