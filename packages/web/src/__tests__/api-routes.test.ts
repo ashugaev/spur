@@ -2942,6 +2942,25 @@ describe("Spur web API routes", () => {
       expect(payload.results[failUrl]?.error).toContain("Could not resolve to a PullRequest");
     });
 
+    it("attaches a matching GraphQL error to a resolved node instead of dropping it", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: makePrNode() } },
+          errors: [{ message: "partial data error", path: ["pr0", "pullRequest", "commits"] }],
+        }),
+      );
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBe("open");
+      expect(payload.results[url]?.error).toBe("partial data error");
+    });
+
     it("maps a GraphQL error to only its own alias, leaving an unrelated null node genuinely absent", async () => {
       const errorUrl = nextPrUrl();
       const absentUrl = nextPrUrl();

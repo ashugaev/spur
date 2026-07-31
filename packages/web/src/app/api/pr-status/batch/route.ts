@@ -160,7 +160,7 @@ export async function POST(request: NextRequest) {
       const aliasError = errorsByAlias.get(entry.alias);
       let response: PrStatusResponse;
       if (isGitHubPrNode(node)) {
-        response = recordGitHubPrNode(entry.key, node);
+        response = recordGitHubPrNode(entry.key, node, aliasError);
       } else if (aliasError) {
         response = recordGitHubPrError(entry.key, aliasError);
       } else {
