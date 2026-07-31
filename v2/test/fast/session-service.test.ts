@@ -4280,26 +4280,6 @@ describe("SessionService", () => {
       ).toEqual({});
       expect(seedSessionHomeMock).not.toHaveBeenCalled();
     });
-
-    it("throws a readiness error when the bound account is not ready", async () => {
-      testAccounts = [
-        {
-          id: "acc-1",
-          configDir: "/abs/acc-1",
-          createdAt: "2026-03-18T09:00:00.000Z",
-          authenticated: false,
-        },
-      ];
-      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
-      expect(() =>
-        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
-          id: "sess-1",
-          agent: "claude",
-          claudeAccountId: "acc-1",
-        }),
-      ).toThrow("is not ready (credentials or onboarding incomplete)");
-      expect(seedSessionHomeMock).not.toHaveBeenCalled();
-    });
   });
 
   describe("removeClaudeAccount", () => {
@@ -19379,6 +19359,107 @@ describe("SessionService", () => {
       };
 
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
+      (service as unknown as { dispose(): void }).dispose();
+    });
+
+    const USAGE_LIMIT_MENU_PANE = [
+      "What do you want to do?",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+      "Enter to confirm | Esc to cancel",
+    ].join("\n");
+
+    it("sends reactivation nudge directly after menu is dismissed on rotation", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({ maxRotationsPerEpisode: 1 }));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      const session = runningSession({
+        claudeAccountId: "acc-1",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+      });
+      sessions.set("api-1", session);
+      mockClaudeJsonlState("waiting");
+      // First captureTmuxPane: menu present; second: cleared after confirm.
+      captureTmuxPaneMock.mockResolvedValueOnce(USAGE_LIMIT_MENU_PANE).mockResolvedValueOnce("");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        tryAutoRotateClaudeAccount(record: SessionRecord): Promise<boolean>;
+      };
+
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
+      // Confirm (Enter) was sent to dismiss the menu.
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+      // After the menu cleared, the reactivation prompt went to the pane.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining(REACTIVATION_MARKER),
+        expect.objectContaining({ agent: "claude" }),
+      );
+      (service as unknown as { dispose(): void }).dispose();
+    });
+
+    it("skips reactivation nudge and does not type into the usage-limit menu when it stays showing after confirm", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({ maxRotationsPerEpisode: 1 }));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      const session = runningSession({
+        claudeAccountId: "acc-1",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+      });
+      sessions.set("api-1", session);
+      mockClaudeJsonlState("waiting");
+      // Both pane captures return the menu (stuck).
+      captureTmuxPaneMock.mockResolvedValue(USAGE_LIMIT_MENU_PANE);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        tryAutoRotateClaudeAccount(record: SessionRecord): Promise<boolean>;
+      };
+
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
+      // Confirm was attempted.
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+      // No typed sentence was sent to the pane (would garble the modal).
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      // Skip event logged.
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+        ),
+      ).toBe(true);
+      // Rotation still counted — episode cap advances.
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
       (service as unknown as { dispose(): void }).dispose();
     });

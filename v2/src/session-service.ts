@@ -1056,11 +1056,6 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
-  if (!isAccountReady(account)) {
-    throw new Error(
-      `Claude account ${session.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
-    );
-  }
   const sessionToolDir = join(dataDir, "session-tools", session.id);
   const sessionHome = sessionClaudeHome(sessionToolDir);
   seedSessionHome(sessionHome, account);
@@ -8238,19 +8233,37 @@ export class SessionService {
     this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
     // send() queues with awaitingPrompt=true when stateHistory still shows rate_limited,
     // causing the nudge to never reach the pane. Send directly to bypass that check.
+    // Dismiss the interactive usage-limit menu first if still showing so the prompt
+    // reaches the chat input, not the modal.
     const current = readSession(this.config.dataDir, session.id);
-    if (current) {
-      try {
-        await this.sendAgentMessage(current, RATE_LIMIT_REACTIVATION_PROMPT, { interrupt: false });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logEvent("session.auth.auto_rotate_nudge_failed", {
-          level: "warn",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
-        });
+    try {
+      if (!current) {
+        throw new Error(`Session ${session.id} not found after auth switch`);
       }
+      let skipNudge = false;
+      if (detectClaudeUsageLimitMenu(await captureTmuxPane(current.tmuxSession))?.limited) {
+        await this.confirmClaudeUsageLimitMenu(current);
+        if (detectClaudeUsageLimitMenu(await captureTmuxPane(current.tmuxSession))?.limited) {
+          this.logEvent("session.rate_limit.reactivation_skipped", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Skipped reactivation nudge for ${session.id} after rotation: usage-limit menu still showing`,
+          });
+          skipNudge = true;
+        }
+      }
+      if (!skipNudge) {
+        await this.sendAgentMessage(current, RATE_LIMIT_REACTIVATION_PROMPT, { interrupt: false });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.auth.auto_rotate_nudge_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
+      });
     }
     this.logEvent("session.auth.auto_rotated", {
       level: "info",
