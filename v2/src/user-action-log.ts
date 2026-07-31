@@ -145,13 +145,7 @@ export function hasRecentSessionUserAction(
   actions: ReadonlySet<string>,
   sinceMs: number,
 ): boolean {
-  let shardExists: boolean;
-  try {
-    shardExists = existsSync(sessionShardDir(dataDir, sessionId));
-  } catch {
-    return false;
-  }
-  if (!shardExists) return false;
+  if (!existsSync(sessionShardDir(dataDir, sessionId))) return false;
 
   for (const line of iterArchivedThenLive(
     sessionUserActionLogPath(dataDir, sessionId),
