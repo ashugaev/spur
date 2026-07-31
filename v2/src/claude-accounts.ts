@@ -183,7 +183,7 @@ export function removeAccount(dataDir: string, id: string): void {
   }
 }
 
-export function isAccountAuthenticated(account: Pick<ClaudeAccount, "configDir">): boolean {
+export function isAccountAuthenticated(account: ClaudeAccount): boolean {
   return existsSync(join(account.configDir, ".credentials.json"));
 }
 
@@ -250,7 +250,7 @@ export function ensureDefaultAccount(
   dataDir: string,
   defaultConfigDir: string = join(homedir(), ".claude"),
 ): void {
-  if (!isAccountAuthenticated({ configDir: defaultConfigDir })) return;
+  if (!existsSync(join(defaultConfigDir, ".credentials.json"))) return;
   const existing = listAccounts(dataDir);
   if (existing.some((a) => a.configDir === defaultConfigDir)) return;
   const account: ClaudeAccount = {

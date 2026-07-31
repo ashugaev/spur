@@ -151,7 +151,6 @@ const isAccountReadyMock = vi.fn();
 const addAccountMock = vi.fn();
 const removeAccountMock = vi.fn();
 const touchAccountUsedMock = vi.fn();
-const ensureAccountProjectsLinkMock = vi.fn();
 const ensureDefaultAccountMock = vi.fn();
 const seedSessionHomeMock = vi.fn();
 const swapSessionCredentialsMock = vi.fn();
@@ -183,7 +182,6 @@ function resetAccountStoreMocks(): void {
   });
   addAccountMock.mockReset();
   removeAccountMock.mockReset();
-  ensureAccountProjectsLinkMock.mockReset();
   ensureDefaultAccountMock.mockReset();
   seedSessionHomeMock.mockReset();
   swapSessionCredentialsMock.mockReset();
@@ -262,7 +260,6 @@ vi.mock("../../src/claude-accounts.js", () => ({
   addAccount: addAccountMock,
   removeAccount: removeAccountMock,
   touchAccountUsed: touchAccountUsedMock,
-  ensureAccountProjectsLink: ensureAccountProjectsLinkMock,
   ensureDefaultAccount: ensureDefaultAccountMock,
   seedSessionHome: seedSessionHomeMock,
   swapSessionCredentials: swapSessionCredentialsMock,
@@ -1224,6 +1221,25 @@ describe("SessionService", () => {
           session.claudeAccountId === "acc-2",
       ),
     ).toBe(true);
+    service.dispose();
+  });
+
+  it("rejects spawn with a not-ready claude account", async () => {
+    mockClaudeJsonlState("waiting");
+    testAccounts = [
+      {
+        id: "acc-2",
+        configDir: "/abs/acc-2",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        authenticated: false,
+      },
+    ];
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({ project: "api", prompt: "hello", claudeAccountId: "acc-2" }),
+    ).rejects.toThrow(/not ready/);
     service.dispose();
   });
 
@@ -4104,6 +4120,9 @@ describe("SessionService", () => {
         expectedHome,
         expect.objectContaining({ id: "backup" }),
       );
+      const swapOrder = swapSessionCredentialsMock.mock.invocationCallOrder[0] ?? 0;
+      const seedOrder = seedSessionHomeMock.mock.invocationCallOrder[0] ?? Infinity;
+      expect(swapOrder).toBeLessThan(seedOrder);
       expect(
         writeSessionMock.mock.calls.some(
           ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
@@ -4114,6 +4133,9 @@ describe("SessionService", () => {
         "session-uuid",
         expect.any(String),
         expect.anything(),
+      );
+      expect(setupAgentHooksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ claudeConfigDir: expectedHome }),
       );
       service.dispose();
     });
@@ -4147,6 +4169,49 @@ describe("SessionService", () => {
         sessionHome,
         expect.objectContaining({ id: "backup" }),
       );
+      service.dispose();
+    });
+
+    it("in-place swap: dirty worktree does not require force", async () => {
+      const sessions = createSessionStore();
+      const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      sessions.set(
+        "api-1",
+        runningSession({
+          launchCommand: `CLAUDE_CONFIG_DIR='${sessionHome}' claude --dangerously-skip-permissions`,
+        }),
+      );
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      mkdirSync(sessionHome, { recursive: true });
+      hasUncommittedChangesMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("migration: dirty worktree without force is rejected", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      mkdirSync(expectedHome, { recursive: true });
+      hasUncommittedChangesMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /Kill confirmation required/,
+      );
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
       service.dispose();
     });
   });

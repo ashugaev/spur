@@ -2162,7 +2162,7 @@ export class SessionService {
         // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
         // cooldown, per-episode cap, and all-accounts-limited fall-through) and
         // returns true only when a rotation happened. A successful rotation
-        // relaunches the session and suppresses the afterHours nudge below.
+        // suppresses the afterHours nudge below.
         // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
         // dirty-worktree kill-confirmation, a stale-liveState race, or a
         // concurrently-removed account. Scope the catch to this session so one
@@ -5038,6 +5038,14 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      if (request.claudeAccountId) {
+        const account = findAccount(this.config.dataDir, request.claudeAccountId);
+        if (!account || !isAccountReady(account)) {
+          throw new Error(
+            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
+          );
+        }
+      }
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
@@ -8148,8 +8156,6 @@ export class SessionService {
         );
       }
     }
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
-
     const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
     const sessionHome = sessionClaudeHome(sessionToolDir);
     const usesSessionHome = session.launchCommand.startsWith(
@@ -8179,6 +8185,7 @@ export class SessionService {
       return this.enrich(updated);
     }
 
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
     // Install target credentials before persisting the record or killing the pane.
     // If the swap throws, the persisted account and running pane remain old.
     mkdirSync(sessionHome, { recursive: true });
@@ -8288,8 +8295,8 @@ export class SessionService {
 
   // Host an interactive OAuth login pane for an account in an isolated
   // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
-  // operator completes the browser sign-in and onboarding there;
-  // finishAccountLogin tears it down once the account is ready.
+  // operator completes the browser sign-in there; finishAccountLogin tears it
+  // down once .credentials.json lands.
   async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
     const account = findAccount(this.config.dataDir, accountId);
     if (!account) {

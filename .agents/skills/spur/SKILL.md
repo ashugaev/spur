@@ -192,7 +192,7 @@ active account; remove drops it. The default ~/.claude login is auto-adopted as 
 
 Per-session switch auth (claude sessions only): atomically swaps credentials in the per-session
 claude home (`<dataDir>/session-tools/<id>/claude-home/`) — no kill or relaunch; the live process
-rereads credentials on its next request. Sessions launched before the session-home design
+rereads credentials on its next request. Ready = credentials + onboarding complete. Sessions launched before the session-home design
 (launch command not bound to the session home) relaunch once as migration. Force switches even while the session is
 working. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>`
 resolves the same transcript; history preserved on rotation.
@@ -200,7 +200,7 @@ resolves the same transcript; history preserved on rotation.
 Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
 rotation policy (the config carries no agent name so it extends to other agents;
 the account store is currently claude-only). When on,
-a claude session that hits `rate_limited` rotates to the next ready,
+a claude session that hits `rate_limited` rotates to the next ready (credentials + onboarding complete),
 non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
 limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
 limited -> falls through to the reactivation nudge.
