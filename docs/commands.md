@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `service`, `memory`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
+`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -58,7 +58,7 @@ TTY opens a live selector: `Enter` attach in place, `l` log view, `p` pause, `c`
 
 Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex signals. The log view combines key session events with a live tail of the main agent pane.
 
-`pause` keeps the worktree; `complete` and `kill` remove owned artifacts but persist different statuses. Shared-workspace sessions keep the project path on `kill` and are not restorable.
+`pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed` and `completed` sessions are never restorable.
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
