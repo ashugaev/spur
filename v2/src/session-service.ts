@@ -572,6 +572,7 @@ interface SessionStateResult {
   // when the agent has no such artifact yet. Every value here is a byproduct of
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
+  liveModel?: string;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -8822,6 +8823,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
@@ -8858,6 +8860,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
     };
   }
 
@@ -9372,6 +9375,7 @@ export class SessionService {
     let state: SessionState;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
+    let liveModel: string | undefined;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -9420,6 +9424,7 @@ export class SessionService {
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
+          liveModel = jsonlResult.liveModel;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9463,6 +9468,7 @@ export class SessionService {
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
+        liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
@@ -9668,6 +9674,7 @@ export class SessionService {
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,
+      ...(liveModel ? { liveModel } : {}),
     };
   }
 
@@ -9716,6 +9723,7 @@ export class SessionService {
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 
@@ -9790,6 +9798,7 @@ export class SessionService {
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 
