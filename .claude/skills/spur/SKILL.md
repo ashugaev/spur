@@ -186,8 +186,8 @@ Rotate Claude login accounts across the rate limit. Each account is an isolated
 `<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
 
 Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
-accounts. Add or Login opens an interactive login terminal; operator completes OAuth and onboarding;
-Spur auto-detects the account once credentials and onboarding are complete (`isAccountReady`). Select sets the
+accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
+Spur auto-detects the account once `.credentials.json` lands. Select sets the
 active account; remove drops it. The default ~/.claude login is auto-adopted as an account named "default" when its .credentials.json exists.
 
 Per-session switch auth (claude sessions only): atomically swaps credentials in the per-session
@@ -201,7 +201,7 @@ Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnosti
 rotation policy (the config carries no agent name so it extends to other agents;
 the account store is currently claude-only). When on,
 a claude session that hits `rate_limited` rotates to the next ready,
-non-cooldown account and receives an immediate reactivation prompt. Guards: `cooldownMinutes` (per-account skip window after a
+non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
 limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
 limited -> falls through to the reactivation nudge.
 

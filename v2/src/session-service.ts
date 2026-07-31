@@ -81,6 +81,7 @@ import {
   addAccount,
   ensureDefaultAccount,
   findAccount,
+  isAccountAuthenticated,
   isAccountReady,
   listAccounts,
   removeAccount,
@@ -2161,7 +2162,7 @@ export class SessionService {
         // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
         // cooldown, per-episode cap, and all-accounts-limited fall-through) and
         // returns true only when a rotation happened. A successful rotation
-        // sends an immediate reactivation nudge and suppresses the afterHours nudge below.
+        // relaunches the session and suppresses the afterHours nudge below.
         // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
         // dirty-worktree kill-confirmation, a stale-liveState race, or a
         // concurrently-removed account. Scope the catch to this session so one
@@ -7418,7 +7419,7 @@ export class SessionService {
     if (session.status === "completed") {
       throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
-    if (session.worktree && (!session.worktreePath || !workspacePresent)) {
+    if (!session.worktree || !session.worktreePath || !workspacePresent) {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
     }
 
@@ -8151,13 +8152,12 @@ export class SessionService {
 
     const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
     const sessionHome = sessionClaudeHome(sessionToolDir);
-    const active = await this.ensureSessionReadyForSend(session);
-    const usesSessionHome = active.launchCommand.startsWith(
+    const usesSessionHome = session.launchCommand.startsWith(
       `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
     );
 
     const updated: SessionRecord = {
-      ...active,
+      ...session,
       claudeAccountId: accountId,
       updatedAt: nowIso(),
     };
@@ -8231,40 +8231,6 @@ export class SessionService {
     }
     await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
     this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
-    // send() queues with awaitingPrompt=true when stateHistory still shows rate_limited,
-    // causing the nudge to never reach the pane. Send directly to bypass that check.
-    // Dismiss the interactive usage-limit menu first if still showing so the prompt
-    // reaches the chat input, not the modal.
-    const current = readSession(this.config.dataDir, session.id);
-    try {
-      if (!current) {
-        throw new Error(`Session ${session.id} not found after auth switch`);
-      }
-      let skipNudge = false;
-      if (detectClaudeUsageLimitMenu(await captureTmuxPane(current.tmuxSession))?.limited) {
-        await this.confirmClaudeUsageLimitMenu(current);
-        if (detectClaudeUsageLimitMenu(await captureTmuxPane(current.tmuxSession))?.limited) {
-          this.logEvent("session.rate_limit.reactivation_skipped", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Skipped reactivation nudge for ${session.id} after rotation: usage-limit menu still showing`,
-          });
-          skipNudge = true;
-        }
-      }
-      if (!skipNudge) {
-        await this.sendAgentMessage(current, RATE_LIMIT_REACTIVATION_PROMPT, { interrupt: false });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.auth.auto_rotate_nudge_failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Rotation succeeded but reactivation nudge failed for ${session.id}: ${message}`,
-      });
-    }
     this.logEvent("session.auth.auto_rotated", {
       level: "info",
       sessionId: session.id,
@@ -8289,7 +8255,7 @@ export class SessionService {
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountReady(account),
+      authenticated: isAccountAuthenticated(account),
       ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
     }));
   }
@@ -8344,7 +8310,7 @@ export class SessionService {
     if (!account) {
       throw new Error(`Unknown claude account: ${accountId}`);
     }
-    const authenticated = isAccountReady(account);
+    const authenticated = isAccountAuthenticated(account);
     await killTmuxSession(`claude-login-${accountId}`);
     return { authenticated };
   }
@@ -8357,7 +8323,7 @@ export class SessionService {
       throw new Error(`Unknown claude account: ${accountId}`);
     }
     const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
-    return { authenticated: isAccountReady(account), loginActive };
+    return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -9984,7 +9950,7 @@ export class SessionService {
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountReady(account),
+      authenticated: isAccountAuthenticated(account),
     }));
   }
 

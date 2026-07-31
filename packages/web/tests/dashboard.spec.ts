@@ -1863,80 +1863,13 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
     ).toBeVisible();
 
-    // No label falls back to the first 8 chars of the id, with the "not ready" badge.
+    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
     const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
-    await expect(shortIdRow).toContainText("not ready");
+    await expect(shortIdRow).toContainText("not logged in");
     await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
     await expect(
       shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
     ).toBeVisible();
-  });
-
-  test("not-ready account shows a Login button that relaunches the login terminal", async ({
-    page,
-  }) => {
-    await mockSessions(page, []);
-
-    let startLoginCalled = false;
-    let finishLoginCalled = false;
-    let loginStatusCalls = 0;
-
-    await page.route("/api/claude-accounts", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          accounts: [{ id: "incomplete-1", label: "incomplete", authenticated: false }],
-        }),
-      });
-    });
-    await page.route("/api/claude-accounts/incomplete-1/start-login", (route) => {
-      startLoginCalled = true;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ loginTmuxSession: "claude-login-incomplete-1" }),
-      });
-    });
-    await page.route("/api/claude-accounts/incomplete-1/login-status", (route) => {
-      loginStatusCalls += 1;
-      const authenticated = loginStatusCalls > 1;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
-      });
-    });
-    await page.route("/api/claude-accounts/incomplete-1/finish-login", (route) => {
-      finishLoginCalled = true;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authenticated: true }),
-      });
-    });
-
-    await page.goto("/");
-    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
-
-    const row = page.getByRole("listitem").filter({ hasText: "incomplete" });
-    await expect(
-      row.getByRole("button", { name: "Complete login for Claude account incomplete" }),
-    ).toBeVisible();
-    await row.getByTestId("complete-login-incomplete-1").focus();
-    await page.keyboard.press("Enter");
-
-    expect(startLoginCalled).toBe(true);
-
-    // Terminal modal opens on the returned tmux session.
-    const loginTerminal = page.getByRole("dialog", {
-      name: "Terminal claude-login-incomplete-1",
-    });
-    await expect(loginTerminal).toBeVisible();
-
-    // Polling flips authenticated → auto-close via finish-login.
-    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
-    expect(finishLoginCalled).toBe(true);
   });
 
   test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
@@ -3224,53 +3157,5 @@ test.describe("D7d: Sessions list cache on revisit", () => {
 
     await expect(page.getByText("Loading...")).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
-  });
-});
-
-// D8: Switch Claude account dialog
-test.describe("D8: Switch Claude account dialog", () => {
-  test("switch-auth dialog completes for a Shepherd (no-worktree) session", async ({ page }) => {
-    const session = makeWorkingSession({
-      id: "shp-test",
-      project: "spur-shepherd",
-      worktree: false,
-      worktreePath: "/workspace/spur-shepherd",
-      workspaceExists: true,
-      prompt: "Shepherd session task",
-      claudeAccounts: [
-        { id: "acc-primary", label: "Primary", authenticated: true },
-        { id: "acc-backup", label: "Backup", authenticated: true },
-      ],
-      activeClaudeAccountId: "acc-primary",
-    });
-
-    await mockSessions(page, [session]);
-    await page.route(`**/api/sessions/${session.id}`, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(session),
-      });
-    });
-    await page.route(`**/api/sessions/${session.id}/switch-auth`, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ...session, activeClaudeAccountId: "acc-backup" }),
-      });
-    });
-
-    await page.goto("/");
-    await page.getByRole("link", { name: session.prompt }).first().click();
-    await expect(page.getByRole("button", { name: "Switch auth" })).toBeVisible();
-
-    await page.getByRole("button", { name: "Switch auth" }).click();
-    const dialog = page.getByRole("dialog", { name: "Switch Claude account" });
-    await expect(dialog).toBeVisible();
-
-    await dialog.getByRole("button", { name: "Switch" }).click();
-
-    await expect(dialog).toBeHidden();
-    await expect(page.getByTestId("switch-auth-error")).toHaveCount(0);
   });
 });

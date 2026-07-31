@@ -24,12 +24,9 @@ interface AccountsResponse {
   accounts: ClaudeAccountSummary[];
 }
 
-interface LoginResult {
-  loginTmuxSession: string;
-}
-
-interface AddAccountResult extends LoginResult {
+interface AddAccountResult {
   account: ClaudeAccountSummary;
+  loginTmuxSession: string;
 }
 
 interface LoginStatusResult {
@@ -50,15 +47,14 @@ function isAccountsResponse(value: unknown): value is AccountsResponse {
   );
 }
 
-function isLoginResult(value: unknown): value is LoginResult {
-  if (typeof value !== "object" || value === null) return false;
-  return typeof (value as { loginTmuxSession?: unknown }).loginTmuxSession === "string";
-}
-
 function isAddAccountResult(value: unknown): value is AddAccountResult {
-  if (!isLoginResult(value)) return false;
-  const account = (value as { account?: unknown }).account;
-  return typeof account === "object" && account !== null;
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as { account?: unknown; loginTmuxSession?: unknown };
+  return (
+    typeof record.loginTmuxSession === "string" &&
+    typeof record.account === "object" &&
+    record.account !== null
+  );
 }
 
 function isLoginStatusResult(value: unknown): value is LoginStatusResult {
@@ -177,24 +173,6 @@ export function ClaudeAccountsMenu() {
     },
   });
 
-  const startLoginMutation = useMutation<LoginResult, Error, ClaudeAccountSummary>({
-    mutationFn: async (account) => {
-      const response = await fetch(
-        `/api/claude-accounts/${encodeURIComponent(account.id)}/start-login`,
-        { method: "POST" },
-      );
-      const payload = await readResponsePayload(response);
-      if (!response.ok || !isLoginResult(payload)) {
-        throw new Error(responseErrorMessage(payload, "Failed to start account login"));
-      }
-      return payload;
-    },
-    onSuccess: (result, account) => {
-      queryClient.removeQueries({ queryKey: ["claude-account-login", account.id] });
-      setLogin({ account, tmuxSession: result.loginTmuxSession });
-    },
-  });
-
   // Poll the pending login until the account authenticates, then auto-close.
   const loginStatusQuery = useQuery<LoginStatusResult>({
     queryKey: ["claude-account-login", login?.account.id],
@@ -227,7 +205,6 @@ export function ClaudeAccountsMenu() {
 
   const addError = addMutation.error?.message ?? null;
   const removeError = removeMutation.error?.message ?? null;
-  const startLoginError = startLoginMutation.error?.message ?? null;
 
   return (
     <div
@@ -284,7 +261,7 @@ export function ClaudeAccountsMenu() {
                           : "text-[var(--color-status-attention)]"
                       }
                     >
-                      {account.authenticated ? "ready" : "not ready"}
+                      {account.authenticated ? "ready" : "not logged in"}
                     </span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
@@ -299,21 +276,6 @@ export function ClaudeAccountsMenu() {
                     >
                       Use
                     </button>
-                    {!account.authenticated ? (
-                      <button
-                        aria-label={`Complete login for Claude account ${accountName(account)}`}
-                        className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-                        data-testid={`complete-login-${account.id}`}
-                        disabled={
-                          startLoginMutation.isPending &&
-                          startLoginMutation.variables?.id === account.id
-                        }
-                        type="button"
-                        onClick={() => startLoginMutation.mutate(account)}
-                      >
-                        Login
-                      </button>
-                    ) : null}
                     <button
                       aria-label={`Remove Claude account ${accountName(account)}`}
                       className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -332,11 +294,6 @@ export function ClaudeAccountsMenu() {
           {removeError ? (
             <div className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]">
               {removeError}
-            </div>
-          ) : null}
-          {startLoginError ? (
-            <div className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]">
-              {startLoginError}
             </div>
           ) : null}
           <div className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] pt-2">
