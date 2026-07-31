@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { BackendConnectionOverlay } from "@/components/BackendConnectionOverlay";
 import { VersionSwitchOverlay } from "@/components/VersionSwitchOverlay";
-import { useSuppressIOSAutoZoom } from "@/hooks/useSuppressIOSAutoZoom";
 import { BackendConnectionProvider, useBackendConnection } from "@/lib/backend-connection-context";
 import { ThemeProvider } from "@/lib/theme-context";
 import { useVersionSwitch, VersionSwitchProvider } from "@/lib/version-switch-context";
@@ -26,7 +25,6 @@ function AppContent({ children }: { children: ReactNode }) {
 }
 
 export default function Providers({ children }: { children: ReactNode }) {
-  useSuppressIOSAutoZoom();
   const [client] = useState(
     () =>
       new QueryClient({

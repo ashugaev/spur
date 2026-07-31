@@ -51,20 +51,44 @@ test.describe("R1: Mobile viewport", () => {
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
   });
 
-  test("inputs and selects have font-size >= 16px to prevent auto-zoom", async ({ page }) => {
+  test("viewport pins maximum-scale=1 to prevent auto-zoom", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
 
-    const minFontSize = await page.evaluate(() => {
-      const els = Array.from(document.querySelectorAll("input, select, textarea"));
-      if (els.length === 0) return 16;
-      return els.reduce((min, el) => {
-        const size = parseFloat(window.getComputedStyle(el).fontSize);
-        return size < min ? size : min;
-      }, Infinity);
-    });
+    const content = await page
+      .locator('meta[name="viewport"]')
+      .getAttribute("content", { timeout: 5000 });
 
-    expect(minFontSize).toBeGreaterThanOrEqual(16);
+    expect(content).toContain("maximum-scale=1");
+  });
+
+  test("fields keep their design font size instead of a 16px override", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    const sizes = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input, select, textarea")).map((el) => ({
+        fontSize: parseFloat(window.getComputedStyle(el).fontSize),
+        zoom: window.getComputedStyle(el).zoom,
+      })),
+    );
+
+    expect(sizes.length).toBeGreaterThan(0);
+    for (const { fontSize, zoom } of sizes) {
+      expect(fontSize).toBeLessThan(16);
+      expect(zoom).toBe("1");
+    }
+  });
+
+  test("focusing a field does not scale the visual viewport", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    const field = page.getByLabel("Filter sessions");
+    await field.click();
+
+    const scale = await page.evaluate(() => window.visualViewport?.scale ?? 1);
+    expect(scale).toBe(1);
   });
 
   test("attention zone collapses and expands on tap at mobile", async ({ page }) => {
