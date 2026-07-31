@@ -34,6 +34,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
@@ -116,6 +117,12 @@ const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 // Bound the shutdown drain of in-flight background spawns so teardown never hangs
 // on a spawn that fails to settle.
 const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
+
+// Sandbox flags for served HTML artifacts. allow-same-origin is deliberately absent:
+// scripts run, but in an opaque origin with no access to Spur's cookies or storage.
+// The web preview frames mirror this flag list in packages/web/src/lib/artifact-html.ts;
+// the server test above asserts the two stay identical.
+const ARTIFACT_HTML_SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals";
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -914,6 +921,76 @@ export async function startServer(
         return;
       }
 
+      const sharedMemoryListMatch = path.match(/^\/sessions\/([^/]+)\/shared-memory\/([^/]+)$/);
+      if (method === "GET" && sharedMemoryListMatch?.[1] && sharedMemoryListMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.listSharedMemory(
+            decodeURIComponent(sharedMemoryListMatch[1]),
+            decodeURIComponent(sharedMemoryListMatch[2]),
+          ),
+        );
+        return;
+      }
+
+      const sharedMemoryEntryMatch = path.match(
+        /^\/sessions\/([^/]+)\/shared-memory\/([^/]+)\/([^/]+)$/,
+      );
+      if (
+        method === "GET" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.getSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+      if (
+        method === "POST" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          service.setSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+            body,
+          ),
+        );
+        return;
+      }
+      if (
+        method === "DELETE" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.removeSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+
       const logsSessionId = path.match(/^\/sessions\/([^/]+)\/logs$/)?.[1];
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
@@ -1012,14 +1089,20 @@ export async function startServer(
           decodeURIComponent(artifactMatch[1]),
           decodeURIComponent(artifactMatch[2]),
         );
+        // An SVG opened as a top-level document runs its own scripts on Spur's origin,
+        // and browsers ignore a CSP sandbox on image documents, so hand it over as a
+        // download instead. <img> previews ignore content-disposition and still render.
+        const renderInline = artifact.kind !== "download" && artifact.mimeType !== "image/svg+xml";
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition":
-            artifact.kind === "download"
-              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
-              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
           "cache-control": "no-store",
+          // Artifact HTML is agent-authored: render it in an opaque origin so it can
+          // never read Spur's storage or call the API with the operator's session.
+          ...(artifact.mimeType.startsWith("text/html")
+            ? { "content-security-policy": ARTIFACT_HTML_SANDBOX }
+            : {}),
         });
         const stream = createReadStream(artifact.path);
         stream.on("error", () => {
@@ -1145,6 +1228,12 @@ export async function startServer(
         return;
       }
 
+      const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
+      if (method === "POST" && reopenSessionId) {
+        sendJson(response, 200, await service.reopen(reopenSessionId));
+        return;
+      }
+
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
@@ -1266,7 +1355,8 @@ export async function startServer(
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
-        error instanceof SessionRateLimitedError
+        error instanceof SessionRateLimitedError ||
+        error instanceof SessionNotReopenableError
       ) {
         logEvent("http.request.failed", {
           level: "warn",

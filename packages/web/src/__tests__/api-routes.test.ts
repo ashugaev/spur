@@ -66,6 +66,7 @@ import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { GET as getArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { POST as diagnoseUpdate } from "@/app/api/diagnose-update/route";
@@ -79,6 +80,7 @@ import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
+import { POST as reopenSession } from "@/app/api/sessions/[id]/reopen/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as handoffSession } from "@/app/api/sessions/[id]/handoff/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
@@ -269,6 +271,65 @@ describe("Spur web API routes", () => {
     });
 
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
+  });
+
+  // ── GET /api/sessions/:id/artifacts/:artifactId ────────────────────────
+
+  it("GET /api/sessions/:id/artifacts/:artifactId keeps the daemon sandbox on html artifacts", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("<h1>Report</h1>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "content-disposition": 'inline; filename="report.html"',
+          "content-security-policy": "sandbox allow-scripts",
+        },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+    );
+
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/report.html");
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("content-disposition")).toBe('inline; filename="report.html"');
+    expect(response.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId sandboxes html a daemon served without a CSP", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("<h1>Report</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-modals",
+    );
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId leaves non-html artifacts unsandboxed", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("png-bytes", {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBeNull();
   });
 
   // ── POST /api/spawn ────────────────────────────────────────────────────
@@ -697,6 +758,7 @@ describe("Spur web API routes", () => {
       [completeSession, "complete"],
       [killSession, "kill"],
       [restoreSession, "restore"],
+      [reopenSession, "reopen"],
     ] as const;
 
     for (const [route, action] of routes) {
@@ -725,6 +787,32 @@ describe("Spur web API routes", () => {
     );
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("reopen forwards a 409 not-reopenable conflict body and status verbatim", async () => {
+    const conflict = { error: "Session api-a1 is running, not completed — use restore or respawn" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await reopenSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/reopen", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
       expect.objectContaining({ method: "POST" }),
     );
   });

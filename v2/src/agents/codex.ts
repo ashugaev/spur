@@ -804,6 +804,12 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  model?: string;
+}
+
+interface CodexRolloutCandidate {
+  result: CodexRolloutReadResult;
+  mtimeMs: number;
 }
 
 function readRolloutString(value: unknown): string | undefined {
@@ -828,18 +834,20 @@ function codexRolloutStateRecord(
   };
 }
 
+function extractCodexTurnContextModel(parsed: Record<string, unknown>): string | undefined {
+  if (parsed["type"] !== "turn_context") {
+    return undefined;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  return readRolloutString(payload["model"]);
+}
+
 function extractCodexRolloutStateLine(
-  line: string,
+  parsed: Record<string, unknown>,
 ): Omit<CodexRolloutStateRecord, "filePath"> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
   const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
   if (!timestamp) {
     return null;
@@ -936,14 +944,8 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-function extractCodexRateLimitsLine(line: string): unknown {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
+  if (parsed["type"] !== "event_msg") {
     return null;
   }
   const payload = parsed["payload"];
@@ -957,32 +959,42 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
+  let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
+    // Rollout files are re-scanned on every dashboard poll, so each line is
+    // parsed once here and shared by all three extractors below.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index] ?? "");
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
     if (rateLimit === null) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
       if (detection) {
         rateLimit = detection;
       }
     }
     if (rollout === null) {
-      const state = extractCodexRolloutStateLine(line);
-      if (!state) {
-        continue;
+      const state = extractCodexRolloutStateLine(parsed);
+      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+        rollout = {
+          ...state,
+          filePath,
+        };
       }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      rollout = {
-        ...state,
-        filePath,
-      };
     }
-    if (rateLimit) {
+    if (model === undefined) {
+      model = extractCodexTurnContextModel(parsed);
+    }
+    if (rollout && rateLimit && model !== undefined) {
       break;
     }
   }
-  return { rollout, rateLimit };
+  return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
 export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
@@ -1006,7 +1018,7 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
-      if (!result.rollout && !result.rateLimit) {
+      if (!result.rollout && !result.rateLimit && !result.model) {
         return null;
       }
       let mtimeMs: number;
@@ -1019,13 +1031,24 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
     }),
   );
   const existing = candidates.filter(
-    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
-      candidate !== null,
+    (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
   if (existing.length === 0) {
     return { rollout: null, rateLimit: null };
   }
-  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  // A just-started rollout file can carry a `turn_context` model before it has
+  // any state or rate-limit line, so it loses both selections below. Rank the
+  // model on its own to keep the live model available from the first turn.
+  const model = existing
+    .filter((candidate) => candidate.result.model)
+    .reduce<CodexRolloutCandidate | null>(
+      (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+      null,
+    )?.result.model;
+  const stateful = existing.filter(
+    (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
+  );
+  const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
   if (withRollout.length > 0) {
     const best = withRollout.reduce((left, right) => {
       const leftTs = left.result.rollout?.timestampMs ?? 0;
@@ -1035,12 +1058,17 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
-    return best.result;
+    return { ...best.result, ...(model ? { model } : {}) };
   }
-  const newestByMtime = existing.reduce((left, right) =>
-    right.mtimeMs > left.mtimeMs ? right : left,
+  const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
+    (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+    null,
   );
-  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
+  return {
+    rollout: null,
+    rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(model ? { model } : {}),
+  };
 }
 
 // ── Transcript entries (unified message/tool/question timeline) ──────

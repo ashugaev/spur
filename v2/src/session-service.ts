@@ -33,7 +33,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
-import { collectMcpBindings, resolveSessionSidecars } from "./sidecars/index.js";
+import {
+  collectMcpBindings,
+  manualSidecarNames,
+  resolveSessionSidecars,
+} from "./sidecars/index.js";
 import {
   deleteAgentHookState,
   readAgentHookState,
@@ -210,6 +214,15 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  assertValidSharedMemoryScope,
+  getSharedMemory as getSharedMemoryEntry,
+  listSharedMemoryKeys,
+  removeSharedMemory as removeSharedMemoryEntry,
+  setSharedMemory as setSharedMemoryEntry,
+  validateSharedMemoryKey,
+  withSharedMemoryInstructions,
+} from "./shared-memory.js";
+import {
   closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
@@ -275,6 +288,10 @@ import {
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -309,6 +326,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchRefsExist,
   branchStatus,
   createWorktree,
   findWorktreePathForBranch,
@@ -320,6 +338,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
+  worktreePathFor,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -502,6 +521,10 @@ export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
 }
 
+export class SessionNotReopenableError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
@@ -557,6 +580,7 @@ interface SessionStateResult {
   // when the agent has no such artifact yet. Every value here is a byproduct of
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
+  liveModel?: string;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -653,6 +677,32 @@ function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
     const message = error instanceof Error ? error.message : String(error);
     throw new InvalidSessionMemoryInputError(message);
   }
+}
+
+function assertValidSharedMemoryRequest(
+  scope: string,
+  key?: string,
+): asserts scope is SharedMemoryScope {
+  try {
+    assertValidSharedMemoryScope(scope);
+    if (key !== undefined) {
+      validateSharedMemoryKey(key);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMemoryInputError(message);
+  }
+}
+
+// task = desk-group anchor (matches listDeskSessions); project = session.project; global = constant.
+function resolveSharedMemoryStoreId(session: SessionRecord, scope: SharedMemoryScope): string {
+  if (scope === "task") {
+    return session.deskId ?? session.id;
+  }
+  if (scope === "project") {
+    return session.project;
+  }
+  return "global";
 }
 
 function hasUnseenAttention(
@@ -902,7 +952,9 @@ function buildInitialMessage(
 ): string {
   if (!initialMessage.trim()) return "";
   let base = withSelfDestructInstructions(
-    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    withSharedMemoryInstructions(
+      withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    ),
     selfDestruct,
   );
   if (branchNamingRegex) {
@@ -1730,6 +1782,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // Session ids this process is actively reopening. Guards against two
+  // overlapping reopen() calls both passing the completed-status check and
+  // racing into restore() for the same tmux session and worktree.
+  private readonly reopensInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
@@ -1836,8 +1892,16 @@ export class SessionService {
     this.sidecarReaperRunning = true;
     try {
       const builtinNames = Object.keys(BUILTIN_SIDECARS);
+      // Also protect a session mid restore/recover: its on-disk status stays
+      // stopped/errored until the restore completes, but startMcpSidecars may
+      // already have started its sidecar tmux pane (see restore() and
+      // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
+      // call for exactly this gap).
       const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) => session.status === "running" || session.status === "spawning",
+        (session) =>
+          session.status === "running" ||
+          session.status === "spawning" ||
+          this.isInRestoreWarmup(session.id),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -3468,6 +3532,11 @@ export class SessionService {
         return args.session;
       }
 
+      // Built-ins may defer command resolution (e.g. a bundle-resolved bin
+      // path) to this point instead of config load — see BuiltinSidecarDef.
+      const resolvedCommand =
+        BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
+
       const agentConfig = this.sessionAgentConfig(args.session);
       const reservedSession = await this.ensureSidecarReservation(
         args.session,
@@ -3500,7 +3569,7 @@ export class SessionService {
           sessionId: reservedSession.id,
           sidecarName: args.sidecarName,
           cwd: reservedSession.worktreePath,
-          command: args.sidecar.command,
+          command: resolvedCommand,
           env: buildSidecarRuntimeEnv(
             sessionEnv,
             reservedSession,
@@ -4089,6 +4158,59 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
     }
     return { record };
+  }
+
+  listSharedMemory(sessionId: string, scope: string): SharedMemoryListResponse {
+    assertValidSharedMemoryRequest(scope);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    return { scope, keys: listSharedMemoryKeys(this.config.dataDir, scope, storeId) };
+  }
+
+  getSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = getSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!entry) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, entry };
+  }
+
+  setSharedMemory(
+    sessionId: string,
+    scope: string,
+    key: string,
+    request: unknown,
+  ): SharedMemoryEntryResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    if (!isRecord(request)) {
+      throw new InvalidSessionMemoryInputError("request body must be a JSON object");
+    }
+    const body = request["body"];
+    if (typeof body !== "string") {
+      throw new InvalidSessionMemoryInputError("body must be a string");
+    }
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const entry = setSharedMemoryEntry(this.config.dataDir, scope, storeId, key, body);
+    return { scope, entry };
+  }
+
+  removeSharedMemory(sessionId: string, scope: string, key: string): SharedMemoryRemoveResponse {
+    assertValidSharedMemoryRequest(scope, key);
+    const session = this.requireSession(sessionId);
+    const storeId = resolveSharedMemoryStoreId(session, scope);
+    const removed = removeSharedMemoryEntry(this.config.dataDir, scope, storeId, key);
+    if (!removed) {
+      throw new SessionResourceNotFoundError(
+        `Shared memory key not found: ${scope}/${storeId}/${key}`,
+      );
+    }
+    return { scope, key };
   }
 
   async markOpened(sessionId: string): Promise<SessionView> {
@@ -4873,7 +4995,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const composedInitialMessage = [...startupAttachmentLines, initialMessage]
         .filter((line) => line.trim())
         .join("\n");
@@ -5695,7 +5817,7 @@ export class SessionService {
         agent,
         startupAttachments,
       );
-      const sidecarNames = Object.keys(resolveSessionSidecars({ agent }, project));
+      const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
@@ -6836,6 +6958,11 @@ export class SessionService {
     if (!sidecar) {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
+    if (!resolveSessionSidecars(session, project)[sidecarName]) {
+      throw new Error(
+        `Sidecar "${sidecarName}" is not available to agent "${session.agent}" for session ${sessionId}`,
+      );
+    }
 
     const updated = await this.startSidecarWithDependencies({
       session,
@@ -7063,7 +7190,6 @@ export class SessionService {
     if (targetStatus === "stopped") {
       delete record.error;
     }
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7169,7 +7295,6 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.retainInList;
-    delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -7298,7 +7423,21 @@ export class SessionService {
     }
 
     const project = this.getProject(session.project);
-    const recovered = await this.relaunchSessionInPlace(session, project);
+    // Same restore-warmup protection as restore() above: relaunchSessionInPlace
+    // starts the MCP sidecar before this session's status is guaranteed
+    // running|spawning on disk, and the reaper's default filter would not
+    // otherwise protect that window. Cleared immediately after (not left for
+    // the usual RESTORE_WARMUP_MS) — callers of ensureSessionReadyForSend
+    // (send, tryDeliverQueuedMessage, switchAuth) classify the session's real
+    // state right after this returns and must not have that forced to
+    // "working" the way a genuine post-restore warmup intentionally does.
+    this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    let recovered: SessionRecord;
+    try {
+      recovered = await this.relaunchSessionInPlace(session, project);
+    } finally {
+      this.restoreWarmupUntil.delete(session.id);
+    }
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -7535,6 +7674,12 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    // Set before startMcpSidecars below: the on-disk status stays
+    // stopped/errored until the restore completes (~50 lines down), so the
+    // sidecar reaper's normal running|spawning filter would not protect the
+    // MCP sidecar tmux pane this starts. The reaper additionally checks this
+    // warmup window (see reapDeadSessionSidecars) for exactly this gap.
+    this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
 
@@ -7643,7 +7788,9 @@ export class SessionService {
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(resolveSessionSidecars(current, restoreProject));
+      const restoreSidecarNames = manualSidecarNames(
+        resolveSessionSidecars(current, restoreProject),
+      );
       const env = buildSessionEnv({
         agent: current.agent,
         projectId: current.project,
@@ -7693,6 +7840,12 @@ export class SessionService {
         }
       }
     } catch (error) {
+      // Drop the warmup set before startMcpSidecars: every exit from here
+      // either killed the pane below or returns an already-live session, so
+      // leaving it would make classifySessionRecord report "working" with
+      // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
+      // path after this block intentionally keeps its own warmup.
+      this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
         const recovered: SessionRecord = this.applyReservedSidecars(
@@ -7787,6 +7940,178 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  // Brings a `completed` session back to life on the same id: rebuild the
+  // worktree if it was reclaimed, flip the record to a restorable
+  // stopped/manual_pause state (so restore() below resumes the agent's own
+  // conversation without resending the original prompt), then delegate the
+  // whole launch transaction to restore(). Nothing completion destroyed
+  // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
+  async reopen(sessionId: string): Promise<SessionView> {
+    // Refuse a second concurrent reopen outright instead of narrowing the
+    // read-check-then-write window: two overlapping calls that both pass the
+    // `status !== "completed"` guard would otherwise race into restore() for
+    // the same tmux session and worktree.
+    if (this.reopensInFlight.has(sessionId)) {
+      throw new SessionNotReopenableError(`Session ${sessionId} is already being reopened`);
+    }
+    this.reopensInFlight.add(sessionId);
+    try {
+      return await this.reopenLocked(sessionId);
+    } finally {
+      this.reopensInFlight.delete(sessionId);
+    }
+  }
+
+  private async reopenLocked(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.status !== "completed") {
+      throw new SessionNotReopenableError(
+        `Session ${sessionId} is ${session.status}, not completed — use restore or respawn`,
+      );
+    }
+
+    const needsWorktree = session.worktree && !workspaceExists(session.worktreePath);
+    if (needsWorktree) {
+      const project = this.getProject(session.project);
+      // createWorktree always rebuilds at
+      // worktreePathFor(worktreeDir, projectId, sessionId). A desk member's
+      // record can carry the anchor's worktreePath instead (deskId set), so
+      // check the two paths BEFORE touching git — otherwise a mismatch would
+      // leave a stray worktree registered in git that blocks every later
+      // reopen/respawn on the branch.
+      const expectedWorktreePath = worktreePathFor(
+        this.config.worktreeDir,
+        session.project,
+        session.id,
+      );
+      if (expectedWorktreePath !== session.worktreePath) {
+        const deskNote = session.deskId ? " it belonged to this session's desk anchor;" : "";
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: its worktree at ${session.worktreePath} is gone and cannot be rebuilt at that path;${deskNote} use respawn`,
+        );
+      }
+      const refs = await branchRefsExist(project.path, session.branch);
+      if (!refs.exists && !refs.remote) {
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: branch ${session.branch} no longer exists locally or on origin — use respawn`,
+        );
+      }
+      let created: string;
+      try {
+        created = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: session.project,
+          sessionId: session.id,
+          defaultBranch: project.defaultBranch,
+          branch: session.branch,
+          symlinks: project.symlinks,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new SessionNotReopenableError(
+          `Session ${sessionId} cannot be reopened: failed to rebuild its worktree (${message}) — use respawn`,
+        );
+      }
+      this.logEvent("session.reopen.worktree_rebuilt", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Rebuilt worktree for ${sessionId}`,
+        details: {
+          worktreePath: created,
+          branch: session.branch,
+          localRef: refs.exists,
+          remoteRef: refs.remote,
+        },
+      });
+    }
+
+    const record: SessionRecord = {
+      ...copySessionWithoutSidecarPorts(session),
+      status: "stopped",
+      stopReason: "manual_pause",
+      updatedAt: nowIso(),
+    };
+    delete record.error;
+    // A completed record can still carry a queued message or a running
+    // pipeline step from before completion (applyManualStatus's completed
+    // branch does not clear either). Once restore() below flips status to
+    // "running", shouldRunDelivery would otherwise replay them — resending
+    // exactly the text this feature promises not to resend. The pipeline's
+    // `steps` still feed a later "Edit & Respawn" (resolveRespawnRequest),
+    // so stop the replay by flipping its status instead of deleting it.
+    delete record.queuedMessages;
+    if (record.pipeline) {
+      record.pipeline = { ...record.pipeline, status: "completed" };
+    }
+    writeSession(this.config.dataDir, record);
+    this.stateCache.delete(sessionId);
+    await this.refreshDashboardCacheEntry(record);
+
+    try {
+      return await this.restore(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // The completed record's Telegram binding, artifacts, and work-item
+      // completion are already destroyed, so leaving the flipped
+      // stopped/manual_pause record in place would make send/kill/sidecars
+      // legal on a gutted session. Roll back to completed instead — but
+      // read fresh, not from the pre-flip `session` snapshot: the record on
+      // disk is restorable (status stopped/manual_pause) the moment we wrote
+      // it above, so a concurrent send()/deliver() can legally queue a
+      // message, or restore() itself can persist status:"running" and then
+      // still throw from its own uncaught tail (most likely
+      // `await this.enrich(persistedRestored)`, its very last statement, but
+      // also captureAgentSessionId/writeSession/refreshDashboardCacheEntry
+      // just before it). Rolling back from the stale snapshot would discard
+      // whatever happened in that window instead of what's actually on disk.
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      if (latest.status === "running") {
+        // restore() got far enough to persist a genuinely live, running
+        // agent (writeSession succeeded) before failing afterward. That
+        // agent is real and working — killing its pane and stamping
+        // "completed" here would destroy a session that isn't actually
+        // broken just because the reopen call that revived it failed a step
+        // after the revival already landed. Leave it running.
+        this.logEvent("session.reopen.failed", {
+          level: "error",
+          sessionId,
+          projectId: session.project,
+          message: `Reopen of ${sessionId} errored after restore already brought it back to running: ${message}`,
+        });
+        throw error;
+      }
+      // restore() itself kills the tmux pane it created before rethrowing
+      // for every failure inside its own try/catch (including the fresh
+      // pane created by createTmuxSession). Tear down defensively here too —
+      // killTmuxSession/cleanupSessionServices are best-effort and safe to
+      // call on an already-dead pane — to cover a pane restore() created but
+      // didn't get to kill before this catch ran.
+      await killTmuxSession(latest.tmuxSession);
+      await this.cleanupSessionServices(latest);
+      const rolledBack: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(latest),
+        status: "completed",
+        updatedAt: nowIso(),
+      };
+      delete rolledBack.stopReason; // latest may still carry manual_pause
+      writeSession(this.config.dataDir, rolledBack);
+      this.stateCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(rolledBack);
+      this.logEvent("session.reopen.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to reopen ${sessionId}: ${message}`,
+      });
+      throw error;
+    }
   }
 
   async switchAuth(
@@ -8726,6 +9051,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
@@ -8762,6 +9088,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
     };
   }
 
@@ -9079,9 +9406,19 @@ export class SessionService {
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
+    // Neither "stopped" nor "errored" is a terminal status (isTerminalSessionStatus
+    // is completed|killed only), so any sidecarPorts left on the record would be
+    // treated as still owned by a live session forever — release them here the
+    // same way pause/kill already do, or the leak sweep can never reclaim the
+    // port and the pool eventually exhausts.
+    const latestNoPorts = copySessionWithoutSidecarPorts(latest);
     let updated: SessionRecord;
     if (terminalUnavailable) {
-      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      const {
+        error: _ignoredError,
+        stopReason: _ignoredStopReason,
+        ...stoppedBase
+      } = latestNoPorts;
       updated = {
         ...stoppedBase,
         status: "stopped",
@@ -9089,7 +9426,7 @@ export class SessionService {
       };
     } else {
       updated = {
-        ...latest,
+        ...latestNoPorts,
         status: "errored",
         error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
         updatedAt,
@@ -9266,6 +9603,7 @@ export class SessionService {
     let state: SessionState;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
+    let liveModel: string | undefined;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -9314,6 +9652,7 @@ export class SessionService {
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
+          liveModel = jsonlResult.liveModel;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -9357,6 +9696,7 @@ export class SessionService {
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
+        liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
@@ -9562,6 +9902,7 @@ export class SessionService {
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,
+      ...(liveModel ? { liveModel } : {}),
     };
   }
 
@@ -9610,6 +9951,7 @@ export class SessionService {
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 
@@ -9684,6 +10026,7 @@ export class SessionService {
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
   }
 

@@ -193,6 +193,13 @@ describe("buildUserActionRecord decoder", () => {
     expect(typeof result?.ts).toBe("string");
   });
 
+  it("decodes session.reopen with sessionId", () => {
+    expect(build({ path: "/sessions/demo-1/reopen" })).toMatchObject({
+      action: "session.reopen",
+      sessionId: "demo-1",
+    });
+  });
+
   it("matches nested routes before their prefixes", () => {
     expect(build({ path: "/sessions/demo-1/wake/cancel" })?.action).toBe("session.wake_cancel");
     expect(build({ path: "/sessions/demo-1/wake" })?.action).toBe("session.wake");
@@ -201,6 +208,16 @@ describe("buildUserActionRecord decoder", () => {
       "session.memory_resolve",
     );
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
+  });
+
+  it("decodes shared-memory writes and removals with sessionId, not falling into session-memory", () => {
+    const set = build({ path: "/sessions/demo-1/shared-memory/task/decision.api" });
+    expect(set).toMatchObject({ action: "shared.memory_set", sessionId: "demo-1" });
+    const remove = build({
+      method: "DELETE",
+      path: "/sessions/demo-1/shared-memory/project/gotcha.env",
+    });
+    expect(remove).toMatchObject({ action: "shared.memory_remove", sessionId: "demo-1" });
   });
 
   it("sub-decodes /slots by body keys", () => {

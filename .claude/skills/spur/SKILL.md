@@ -21,6 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
 - `list` hides `completed` and `killed` sessions by default.
+- `reopen` revives a `completed` session on its own id via the restore path; `completed` stays terminal for `send`, `deliver`, and sidecar actions.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
 - Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
@@ -55,10 +56,14 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - When a self-update reaches the `failed` phase, `VersionSwitchOverlay` in `packages/web` shows a `Diagnose update` button that POSTs `{ target }` to web route `POST /api/diagnose-update`. The route builds a diagnostic prompt server-side and spawns the built-in Shepherd through daemon `POST /shepherd/spawn`, which is project-independent and works on a clean install with no configured projects.
 - Built-in MCP sidecars: a `sidecars.<name>` entry can carry code-only MCP wiring (command/ports/
   MCP injection) that YAML cannot express; a built-in name (currently only `playwright`) needs no
-  `command` — YAML only overrides `autoStart`/`dependsOn`. `sidecars.playwright.autoStart: true`
-  gates the built-in, Spur-owned playwright MCP sidecar for `claude`/`codex` sessions; `cursor`
-  never gets it (agent-scoped via `SidecarConfig.agents`). Enablement is config-only, re-resolved
-  fresh at every spawn/restore/recover — no per-session toggle, no `spur playwright` command.
+  `command` and rejects any key besides `autoStart` (`dependsOn` included — MCP sidecars start
+  ahead of the dependency-aware autostart pass, so a dependency on one could never be satisfied).
+  `sidecars.playwright.autoStart: true` gates the built-in, Spur-owned playwright MCP sidecar for
+  `claude`/`codex` sessions; `cursor` never gets it (agent-scoped via `SidecarConfig.agents`).
+  Enablement is config-only, re-resolved fresh at every spawn/restore/recover — no per-session
+  toggle, no `spur playwright` command. Enabling it for claude launches with `--mcp-config
+  --strict-mcp-config`, dropping any MCP server not already merged into that generated config. See
+  `docs/commands.md#built-in-mcp-sidecars` for the merge sources and the fresh-worktree gap.
 
 ## Current config shape
 
@@ -249,6 +254,7 @@ cron source
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
 - Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
+- Cross-agent coordination: `spur memory set|get|list|rm --scope task|project|global` gives sibling desk agents, all sessions of a project, and the whole instance a shared markdown cell store (one `.md` file per key, server-derived store id, last-writer-wins). See `docs/commands.md`.
 
 ## CLI Convention
 

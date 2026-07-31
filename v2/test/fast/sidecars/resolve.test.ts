@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { collectMcpBindings, resolveSessionSidecars } from "../../../src/sidecars/index.js";
+import {
+  collectMcpBindings,
+  manualSidecarNames,
+  resolveSessionSidecars,
+} from "../../../src/sidecars/index.js";
 import type { ProjectConfig, SidecarConfig } from "../../../src/types.js";
 
 const PLAYWRIGHT_SIDECAR: SidecarConfig = {
@@ -57,6 +61,22 @@ describe("resolveSessionSidecars", () => {
 
   it("returns an empty map when project is undefined", () => {
     expect(resolveSessionSidecars({ agent: "claude" }, undefined)).toEqual({});
+  });
+});
+
+describe("manualSidecarNames", () => {
+  it("excludes an MCP-bound sidecar (started automatically, pre-launch)", () => {
+    expect(manualSidecarNames({ playwright: PLAYWRIGHT_SIDECAR })).toEqual([]);
+  });
+
+  it("keeps a plain sidecar with no mcp wiring", () => {
+    expect(manualSidecarNames({ dev: DEV_SIDECAR })).toEqual(["dev"]);
+  });
+
+  it("keeps only the non-mcp entries when both are configured", () => {
+    expect(manualSidecarNames({ dev: DEV_SIDECAR, playwright: PLAYWRIGHT_SIDECAR })).toEqual([
+      "dev",
+    ]);
   });
 });
 

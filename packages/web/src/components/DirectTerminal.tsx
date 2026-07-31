@@ -36,6 +36,7 @@ interface DirectTerminalProps {
   apiSessionId?: string;
   agentInputEnabled?: boolean;
   agent?: AgentName;
+  model?: string;
   activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
@@ -196,6 +197,7 @@ export function DirectTerminal({
   apiSessionId,
   agentInputEnabled = true,
   agent = "claude",
+  model,
   activity,
   title,
   onClose,
@@ -805,13 +807,18 @@ export function DirectTerminal({
             {title}
           </div>
         ) : null}
+        {/* Never truncates: the title yields space, this label just butts against it. */}
+        <div
+          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+          data-testid="direct-terminal-header-agent"
+        >
+          {getAgentDisplayName(agent)}
+          {model ? ` • ${model}` : null}
+        </div>
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className={cn(
-              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
-              !title && "ml-auto",
-            )}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >

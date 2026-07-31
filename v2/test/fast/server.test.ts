@@ -9,6 +9,7 @@ import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SidecarPortConflictError,
@@ -656,6 +657,67 @@ describe("startServer", () => {
     }
   });
 
+  it("routes POST /sessions/:id/reopen and forwards a refusal as 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalReopen = SessionService.prototype.reopen;
+    const calls: string[] = [];
+    SessionService.prototype.reopen = async function mockReopen(sessionId) {
+      calls.push(sessionId);
+      if (sessionId === "demo-1") {
+        throw new SessionNotReopenableError(
+          "Session demo-1 is running, not completed — use restore or respawn",
+        );
+      }
+      return { id: sessionId, status: "running" } as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const refused = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/reopen`, {
+        method: "POST",
+      });
+      expect(refused.status).toBe(409);
+      await expect(refused.json()).resolves.toEqual({
+        error: "Session demo-1 is running, not completed — use restore or respawn",
+      });
+
+      const accepted = await fetch(`http://127.0.0.1:${port}/sessions/demo-2/reopen`, {
+        method: "POST",
+      });
+      expect(accepted.status).toBe(200);
+      await expect(accepted.json()).resolves.toEqual({ id: "demo-2", status: "running" });
+      expect(calls).toEqual(["demo-1", "demo-2"]);
+    } finally {
+      SessionService.prototype.reopen = originalReopen;
+      await server.stop();
+    }
+  });
+
   it("returns 409 when sending to a rate-limited session with queue: false", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1124,7 +1186,145 @@ describe("startServer", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("image/png");
       expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBeNull();
       await expect(response.text()).resolves.toBe("artifact-bytes");
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("keeps the html artifact sandbox identical to the web preview frames", async () => {
+    // The web package cannot import from v2, so the flag list exists twice. Drift
+    // between the CSP header and the iframe sandbox must fail here, not in a browser.
+    const flagPattern = /ARTIFACT_HTML_SANDBOX = "([^"]+)"/;
+    const daemonSource = await readFile(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const webSource = await readFile(
+      new URL("../../../packages/web/src/lib/artifact-html.ts", import.meta.url),
+      "utf8",
+    );
+
+    const daemonPolicy = daemonSource.match(flagPattern)?.[1];
+    const webFlags = webSource.match(flagPattern)?.[1];
+
+    expect(webFlags).toBeTruthy();
+    expect(daemonPolicy).toBe(`sandbox ${webFlags}`);
+    expect(daemonPolicy).not.toContain("allow-same-origin");
+  });
+
+  it("hands SVG artifacts over as downloads so they never render on Spur's origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "chart.svg");
+    await writeFile(artifactPath, "<svg xmlns='http://www.w3.org/2000/svg'/>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "chart.svg",
+        name: "chart.svg",
+        size: 38,
+        mimeType: "image/svg+xml",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/artifacts/chart.svg`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/svg+xml");
+      expect(response.headers.get("content-disposition")).toContain("attachment");
+      await response.text();
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("sandboxes HTML artifacts served through GET /sessions/:id/artifacts/:artifactId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "report.html");
+    await writeFile(artifactPath, "<h1>Report</h1>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "report.html",
+        name: "report.html",
+        size: 15,
+        mimeType: "text/html; charset=utf-8",
+        kind: "text",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/artifacts/report.html`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBe(
+        "sandbox allow-scripts allow-forms allow-popups allow-modals",
+      );
+      await expect(response.text()).resolves.toBe("<h1>Report</h1>");
     } finally {
       SessionService.prototype.getArtifact = getArtifact;
       await server.stop();
@@ -1348,6 +1548,123 @@ describe("startServer", () => {
         `http://127.0.0.1:${port}/sessions/bad%2Fid/session-memory`,
       );
       expect(invalidSessionResponse.status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("serves shared memory routes with validation and missing-key errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const setResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Use HTTP API" }),
+        },
+      );
+      expect(setResponse.status).toBe(200);
+      await expect(setResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const listResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project`,
+      );
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toEqual({
+        scope: "project",
+        keys: ["decision.api"],
+      });
+
+      const getResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const removeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(removeResponse.status).toBe(200);
+      await expect(removeResponse.json()).resolves.toEqual({
+        scope: "project",
+        key: "decision.api",
+      });
+
+      const missingKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(missingKeyResponse.status).toBe(404);
+
+      const missingKeyRemoveResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(missingKeyRemoveResponse.status).toBe(404);
+
+      const missingSessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/missing/shared-memory/project`,
+      );
+      expect(missingSessionResponse.status).toBe(404);
+
+      const invalidScopeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/bogus`,
+      );
+      expect(invalidScopeResponse.status).toBe(400);
+
+      const invalidKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/Bad`,
+      );
+      expect(invalidKeyResponse.status).toBe(400);
     } finally {
       await server.stop();
     }

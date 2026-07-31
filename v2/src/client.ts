@@ -392,6 +392,15 @@ export async function postJson<T>(
   });
 }
 
+export async function deleteJson<T>(
+  cliEntrypoint: string,
+  path: string,
+  configPath?: string,
+): Promise<T> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestJson<T>(baseUrl, path, { method: "DELETE" });
+}
+
 export async function postPreflight(
   cliEntrypoint: string,
   projectId: string,
