@@ -185,6 +185,50 @@ describe("hasRecentSessionUserAction", () => {
     const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
     expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
   });
+
+  it("only scans the live shard, not archived ones: a match rotated into a .gz archive is not found", async () => {
+    const dir = await makeDir();
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 2 });
+    // Push the matching entry into an archive by writing enough padding after it to
+    // force a rotation of the shard.
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    for (let i = 0; i < 40; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("finds a matching entry still in the live shard after other entries have rotated out", async () => {
+    const dir = await makeDir();
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 2 });
+    for (let i = 0; i < 40; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    // Raise the threshold so this append lands in — and stays in — the live shard
+    // instead of immediately triggering another rotation.
+    setUserActionLogConfig({
+      hotBytes: 1024 * 1024,
+      shardHotBytes: 1024 * 1024,
+      retainArchives: 2,
+    });
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
+  });
 });
 
 describe("deleteSessionUserActions", () => {
