@@ -92,7 +92,7 @@ import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
   expandHome,
-  findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadProjectConfig,
   PROJECT_ID_PATTERN,
 } from "./config.js";
@@ -1809,6 +1809,16 @@ export class SessionService {
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private sidecarReaperRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  // Local (in-worktree) project config resolved per session. The 2s dashboard
+  // tick resolves a project for every session, so without this each tick
+  // re-parsed the same YAML for the whole fleet — and re-logged the same parse
+  // failure forever. A cache hit costs one statSync and no parse. Keyed by
+  // session id, invalidated by config path or mtime change, pruned against the
+  // live id set in runDashboardCacheTick.
+  private readonly sessionProjectCache = new Map<
+    string,
+    { configPath: string; mtimeMs: number; project: ProjectConfig | undefined }
+  >();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
@@ -2464,6 +2474,9 @@ export class SessionService {
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
     this.config = config;
+    // Local project configs are parsed with the daemon config as defaults, so
+    // every cached resolution is stale the moment the daemon config changes.
+    this.sessionProjectCache.clear();
     this.registryPaths = [...new Set(registryPaths)];
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
@@ -2914,6 +2927,11 @@ export class SessionService {
           this.dashboardCache.delete(id);
         }
       }
+      for (const id of this.sessionProjectCache.keys()) {
+        if (!liveIds.has(id)) {
+          this.sessionProjectCache.delete(id);
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.failed", {
@@ -3326,21 +3344,38 @@ export class SessionService {
       return buildShepherdProject(this.config.dataDir);
     }
     const daemonProject = this.config.projects[session.project];
+    // Only a config that lives in the session's own worktree counts. Walking
+    // up the tree escapes a deleted or config-less worktree and lands on an
+    // unrelated ancestor spur.yaml (the shared worktree root, say), which then
+    // fails project-mode validation on every single call.
     const projectConfigPath = session.worktreePath
-      ? findProjectConfigPath(session.worktreePath)
+      ? findProjectConfigPathInDirectory(session.worktreePath)
       : undefined;
     if (!projectConfigPath) {
+      this.sessionProjectCache.delete(session.id);
       return daemonProject;
     }
 
+    // mtime is the cache key. It is only missing when the file is unlinked
+    // between the lookup and this stat, and the next call resolves no path at
+    // all — so that race parses uncached once rather than caching a lie.
+    const mtimeMs = statSync(projectConfigPath, { throwIfNoEntry: false })?.mtimeMs;
+    const cached = this.sessionProjectCache.get(session.id);
+    if (
+      cached &&
+      mtimeMs !== undefined &&
+      cached.configPath === projectConfigPath &&
+      cached.mtimeMs === mtimeMs
+    ) {
+      return cached.project ?? daemonProject;
+    }
+
+    let localProject: ProjectConfig | undefined;
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
-        session.project
-      ];
-      if (localProject) {
-        return localProject;
-      }
+      localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
     } catch (error) {
+      // Logged only on a cache miss, so a permanently broken config warns once
+      // per (session, config mtime) instead of once per tick.
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.project_config.local.failed", {
         level: "warn",
@@ -3349,8 +3384,17 @@ export class SessionService {
         message: `Failed to load local project config for ${session.id}: ${message}`,
       });
     }
+    if (mtimeMs === undefined) {
+      this.sessionProjectCache.delete(session.id);
+    } else {
+      this.sessionProjectCache.set(session.id, {
+        configPath: projectConfigPath,
+        mtimeMs,
+        project: localProject,
+      });
+    }
 
-    return daemonProject;
+    return localProject ?? daemonProject;
   }
 
   private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
@@ -10297,10 +10341,9 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
-    // (it probes its own tmux id, which never has the pane). Resolving the
-    // project re-reads and re-validates the config file, so this 2s-tick path
-    // only pays for it when the session is actually a desk member with
-    // sidecars — a non-desk session always owns its own panes.
+    // (it probes its own tmux id, which never has the pane). Still gated on
+    // being a desk member with sidecars — a non-desk session always owns its
+    // own panes, so this 2s-tick path skips even the cached lookup.
     const sidecarNames = session.sidecarNames ?? [];
     const deskProject =
       workspaceIdOf(session) !== session.id && sidecarNames.length > 0

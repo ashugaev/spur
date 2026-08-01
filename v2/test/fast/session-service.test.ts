@@ -1,7 +1,15 @@
 import type * as cryptoModule from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,7 +65,7 @@ const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
-const findProjectConfigPathMock = vi.fn();
+const findProjectConfigPathInDirectoryMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readAvailableBacklogItemsMock = vi.fn();
@@ -301,7 +309,7 @@ vi.mock("../../src/config.js", () => ({
       : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
-  findProjectConfigPath: findProjectConfigPathMock,
+  findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
   deriveProjectIdFromDisplayName: (value: string) =>
@@ -939,7 +947,7 @@ describe("SessionService", () => {
     writeTelegramBindingsMock.mockReset();
     writeTelegramReplyTargetMock.mockReset();
     loadProjectConfigMock.mockReset();
-    findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
+    findProjectConfigPathInDirectoryMock.mockReset().mockReturnValue(undefined);
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
     listSessionMemoryRecordsMock.mockReset().mockReturnValue([]);
     getSessionMemoryRecordMock.mockReset().mockReturnValue(null);
@@ -15141,9 +15149,82 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("skips local project config entirely when the session worktree is gone", async () => {
+    const missingWorktree = join(TEST_DATA_DIR, "worktrees", "api", "api-1");
+    // Real lookup semantics: a config only counts when it sits in the
+    // worktree itself, so a deleted worktree resolves nothing at all instead
+    // of walking up into an unrelated ancestor spur.yaml.
+    findProjectConfigPathInDirectoryMock.mockImplementation((directory: string) => {
+      const candidate = join(directory, "spur.yaml");
+      return existsSync(candidate) ? candidate : undefined;
+    });
+    const session = runningSession({ worktreePath: missingWorktree });
+    readSessionMock.mockReturnValue(session);
+    listSessionsMock.mockReturnValue([session]);
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    loadProjectConfigMock.mockClear();
+    logSpurEventMock.mockClear();
+
+    await service.get("api-1");
+    await service.get("api-1");
+    await service.get("api-1");
+
+    expect(loadProjectConfigMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.project_config.local.failed",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("parses and warns once per config mtime for a broken worktree config", async () => {
+    const worktreePath = join(TEST_DATA_DIR, "worktrees", "api", "api-1");
+    mkdirSync(worktreePath, { recursive: true });
+    const configPath = join(worktreePath, "spur.yaml");
+    writeFileSync(configPath, "broken: true\n", "utf8");
+    findProjectConfigPathInDirectoryMock.mockImplementation((directory: string) => {
+      const candidate = join(directory, "spur.yaml");
+      return existsSync(candidate) ? candidate : undefined;
+    });
+    loadProjectConfigMock.mockImplementation(() => {
+      throw new Error("projects must be an object");
+    });
+    const session = runningSession({ worktreePath });
+    readSessionMock.mockReturnValue(session);
+    listSessionsMock.mockReturnValue([session]);
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    loadProjectConfigMock.mockClear();
+    logSpurEventMock.mockClear();
+
+    const failures = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.project_config.local.failed",
+      );
+
+    await service.get("api-1");
+    await service.get("api-1");
+    await service.get("api-1");
+
+    expect(loadProjectConfigMock).toHaveBeenCalledTimes(1);
+    expect(failures()).toHaveLength(1);
+
+    const rewrittenAt = new Date("2026-03-18T11:00:00.000Z");
+    utimesSync(configPath, rewrittenAt, rewrittenAt);
+    await service.get("api-1");
+
+    expect(loadProjectConfigMock).toHaveBeenCalledTimes(2);
+    expect(failures()).toHaveLength(2);
+  });
+
   it("startSidecar reserves ports before launching a sidecar from the session worktree config", async () => {
     const sessions = createSessionStore();
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    findProjectConfigPathInDirectoryMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -15211,7 +15292,7 @@ describe("SessionService", () => {
     const reservedPort = 3000;
     isHostPortFreeMock.mockResolvedValue(false);
     const sessions = createSessionStore();
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    findProjectConfigPathInDirectoryMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -15286,7 +15367,7 @@ describe("SessionService", () => {
     const reservedPort = 3000;
     isHostPortFreeMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const sessions = createSessionStore();
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    findProjectConfigPathInDirectoryMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -16130,7 +16211,7 @@ describe("SessionService", () => {
   });
 
   it("startSidecar prefers sidecars from the session worktree config", async () => {
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    findProjectConfigPathInDirectoryMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -16317,7 +16398,7 @@ describe("SessionService", () => {
         },
       },
     });
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    findProjectConfigPathInDirectoryMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {

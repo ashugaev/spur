@@ -9,6 +9,8 @@ Two layers:
 
 `spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present.
 
+A running session reads only the `spur.yaml` at its own worktree root — never a parent's. Worktree without one falls back to the project as the daemon has it.
+
 ## Local project config
 
 `spur doctor --scaffold` writes the minimal shape:
