@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -206,7 +207,7 @@ function isEnoentCause(error: unknown): boolean {
 
 function tryReadSessionFile(path: string): SessionRecord | null {
   try {
-    return readSessionFile(path);
+    return readSessionFileCached(path);
   } catch (error) {
     if (isEnoentCause(error)) {
       return null;
@@ -233,6 +234,75 @@ function readSessionFile(path: string): SessionRecord {
     writeJsonFile(path, normalizedSession);
   }
   return normalizedSession;
+}
+
+// listSessions() re-reads and re-parses every session file every call — on a
+// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
+// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// writeJsonFile always renames a freshly created inode (never edits in
+// place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
+// last read" fingerprint — cheaper and safer than an mtime-only key, which
+// can't distinguish two writes landing in the same millisecond. The cache is
+// internal to this module: no export changes, so callers and their tests are
+// unaffected except that unchanged records are now the SAME object across
+// calls (see the "no in-place mutation of a listed record" contract).
+interface CachedSessionFile {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+  record: SessionRecord;
+}
+
+const sessionFileCache = new Map<string, CachedSessionFile>();
+
+function readSessionFileCached(path: string): SessionRecord {
+  let preStat: ReturnType<typeof statSync>;
+  try {
+    preStat = statSync(path);
+  } catch {
+    // File vanished (or was never there) between readdir and this stat.
+    // Fall through to the raw read so the caller sees today's exact error.
+    return readSessionFile(path);
+  }
+
+  const cached = sessionFileCache.get(path);
+  if (
+    cached &&
+    cached.ino === preStat.ino &&
+    cached.mtimeMs === preStat.mtimeMs &&
+    cached.size === preStat.size
+  ) {
+    return cached.record;
+  }
+
+  const record = readSessionFile(path);
+
+  // Stat again: readSessionFile's legacy-PR self-heal rewrite (above) can
+  // change the inode mid-call. If the file moved under us, don't cache a
+  // record that no longer matches what's on disk now — the NEXT call will
+  // re-parse once and settle, rather than caching a stale pairing forever.
+  let postStat: ReturnType<typeof statSync>;
+  try {
+    postStat = statSync(path);
+  } catch {
+    sessionFileCache.delete(path);
+    return record;
+  }
+  if (
+    postStat.ino === preStat.ino &&
+    postStat.mtimeMs === preStat.mtimeMs &&
+    postStat.size === preStat.size
+  ) {
+    sessionFileCache.set(path, {
+      ino: postStat.ino,
+      mtimeMs: postStat.mtimeMs,
+      size: postStat.size,
+      record,
+    });
+  } else {
+    sessionFileCache.delete(path);
+  }
+  return record;
 }
 
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
@@ -643,16 +713,24 @@ export function listSessions(dataDir: string): SessionRecord[] {
   if (!existsSync(rootDir)) return [];
 
   const sessions: SessionRecord[] = [];
+  const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
     for (const fileName of readdirSync(projectDir)) {
       if (!fileName.endsWith(".json")) continue;
       const filePath = join(projectDir, fileName);
+      visited.add(filePath);
       const session = tryReadSessionFile(filePath);
       if (session) {
         sessions.push(session);
       }
+    }
+  }
+
+  for (const cachedPath of sessionFileCache.keys()) {
+    if (cachedPath.startsWith(join(rootDir, "")) && !visited.has(cachedPath)) {
+      sessionFileCache.delete(cachedPath);
     }
   }
 

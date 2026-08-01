@@ -408,6 +408,12 @@ const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Idle (non-live) dashboard entries can only drift from filesystem state
+// (workspaceExists, hasServiceIssues, workspace slots), never from agent
+// activity, so they don't need every-tick re-enrichment — a small bounded
+// round-robin corrects that drift without making the tick cost scale with
+// total record count.
+const DASHBOARD_IDLE_REFRESH_PER_TICK = 4;
 // Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
 // with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
 // showing the corrected needs_input state between live pane scans instead of
@@ -1819,6 +1825,15 @@ export class SessionService {
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  // Records the exact record object last handed to enrichDashboard for each
+  // id. Since listSessions() now returns the SAME object for an unchanged
+  // file (see metadata.ts), object-identity inequality against this map is an
+  // exact, free "did this session's record change since we last enriched it"
+  // check — no re-serialisation, no extra reads.
+  private readonly dashboardEnrichedRecords = new Map<string, SessionRecord>();
+  // Rotating cursor into the idle (non-live) id array for the bounded
+  // round-robin refresh; see DASHBOARD_IDLE_REFRESH_PER_TICK.
+  private dashboardIdleCursor = 0;
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
@@ -1981,11 +1996,8 @@ export class SessionService {
       // already have started its sidecar tmux pane (see restore() and
       // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
       // call for exactly this gap).
-      const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) =>
-          session.status === "running" ||
-          session.status === "spawning" ||
-          this.isInRestoreWarmup(session.id),
+      const liveSessions = listSessions(this.config.dataDir).filter((session) =>
+        this.isLiveSessionRecord(session),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -2992,19 +3004,69 @@ export class SessionService {
         }
         return session.status !== "killed" || session.retainInList === true;
       });
-      const liveIds = new Set(sessions.map((session) => session.id));
-      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
+      const includedIds = new Set(sessions.map((session) => session.id));
+
+      // A session is due for enrichment when it can still change on its own
+      // (isLiveSessionRecord), when its on-disk record object changed since
+      // we last enriched it (recordChanged is exact object-identity
+      // inequality, made free by listSessions' stat-gated parse cache — see
+      // metadata.ts), or when it has no cached view yet. Everything else is
+      // idle: its dashboard view can only drift from filesystem state, not
+      // agent activity, so it only needs the bounded round-robin below.
+      const due: SessionRecord[] = [];
+      const idle: SessionRecord[] = [];
+      for (const session of sessions) {
+        const recordChanged = this.dashboardEnrichedRecords.get(session.id) !== session;
+        if (
+          this.isLiveSessionRecord(session) ||
+          recordChanged ||
+          !this.dashboardCache.has(session.id)
+        ) {
+          due.push(session);
+        } else {
+          idle.push(session);
+        }
+      }
+
+      // Bounded round-robin over the idle set: a fixed few least-recently-
+      // visited entries per tick via a rotating cursor (O(1), no sort), so
+      // filesystem-only drift still eventually surfaces without making the
+      // tick's cost scale with the idle set's size.
+      if (idle.length > 0) {
+        const quota = Math.min(DASHBOARD_IDLE_REFRESH_PER_TICK, idle.length);
+        for (let offset = 0; offset < quota; offset += 1) {
+          const roundRobinSession = idle[(this.dashboardIdleCursor + offset) % idle.length];
+          if (roundRobinSession) {
+            due.push(roundRobinSession);
+          }
+        }
+        this.dashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
+      }
+
+      const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
       for (const view of enriched) {
         this.dashboardCache.set(view.id, view);
       }
+      for (const session of due) {
+        this.dashboardEnrichedRecords.set(session.id, session);
+      }
+
+      // Prune off the enumerated+filtered set, never off the enriched
+      // subset, so an idle entry that was seeded once and then never due
+      // again is not evicted just because this tick skipped it.
       for (const id of this.dashboardCache.keys()) {
-        if (!liveIds.has(id)) {
+        if (!includedIds.has(id)) {
           this.dashboardCache.delete(id);
         }
       }
       for (const id of this.sessionProjectCache.keys()) {
-        if (!liveIds.has(id)) {
+        if (!includedIds.has(id)) {
           this.sessionProjectCache.delete(id);
+        }
+      }
+      for (const id of this.dashboardEnrichedRecords.keys()) {
+        if (!includedIds.has(id)) {
+          this.dashboardEnrichedRecords.delete(id);
         }
       }
     } catch (error) {
@@ -9749,6 +9811,19 @@ export class SessionService {
     if (until !== undefined && Date.now() < until) return true;
     this.restoreWarmupUntil.delete(sessionId);
     return false;
+  }
+
+  // Same "can this session's dashboard view still change from agent
+  // activity" predicate as reapDeadSessionSidecars' inline filter. The
+  // short-circuit order matters: isInRestoreWarmup mutates (it clears an
+  // expired warmup entry), so running/spawning sessions must never reach it,
+  // exactly as the sidecar reaper already relies on.
+  private isLiveSessionRecord(session: Pick<SessionRecord, "id" | "status">): boolean {
+    return (
+      session.status === "running" ||
+      session.status === "spawning" ||
+      this.isInRestoreWarmup(session.id)
+    );
   }
 
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
