@@ -1462,6 +1462,63 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
   };
 }
 
+const SESSION_GC_STATUSES = ["completed", "killed", "stopped"] as const;
+
+export const DEFAULT_SESSION_GC: AppConfig["sessionGc"] = {
+  enabled: false,
+  olderThanDays: 30,
+  intervalMinutes: 360,
+  maxGroupsPerSweep: 20,
+  statuses: [...SESSION_GC_STATUSES],
+};
+
+function isSessionGcStatus(value: unknown): value is (typeof SESSION_GC_STATUSES)[number] {
+  return (
+    typeof value === "string" && (SESSION_GC_STATUSES as readonly string[]).includes(value)
+  );
+}
+
+function parseSessionGcStatuses(value: unknown): AppConfig["sessionGc"]["statuses"] {
+  if (value === undefined) {
+    return [...DEFAULT_SESSION_GC.statuses];
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("sessionGc.statuses must be a non-empty array of completed|killed|stopped");
+  }
+  return value.map((entry) => {
+    if (!isSessionGcStatus(entry)) {
+      throw new Error(
+        `sessionGc.statuses must only contain completed|killed|stopped (got ${JSON.stringify(entry)})`,
+      );
+    }
+    return entry;
+  });
+}
+
+// Instance-only, same footgun as authRotation/rateLimitReactivation: parsed
+// only when mode === "instance", so a per-project sessionGc block is
+// silently ignored (the daemon sweep and `spur gc` both always read the
+// merged instance config, never a project one).
+function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
+  if (value === undefined) {
+    return DEFAULT_SESSION_GC;
+  }
+  const root = asObject(value, "sessionGc");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "sessionGc.enabled") ?? DEFAULT_SESSION_GC.enabled,
+    olderThanDays:
+      asNonNegativeNumber(root["olderThanDays"], "sessionGc.olderThanDays") ??
+      DEFAULT_SESSION_GC.olderThanDays,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "sessionGc.intervalMinutes") ??
+      DEFAULT_SESSION_GC.intervalMinutes,
+    maxGroupsPerSweep:
+      asOptionalPositiveInteger(root["maxGroupsPerSweep"], "sessionGc.maxGroupsPerSweep") ??
+      DEFAULT_SESSION_GC.maxGroupsPerSweep,
+    statuses: parseSessionGcStatuses(root["statuses"]),
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1695,6 +1752,7 @@ function parseConfigFile(
         : { afterHours: 0 },
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
+    sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
     projects: normalizedProjects,
     tags,
   };
