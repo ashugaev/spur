@@ -20542,6 +20542,72 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("does not let a session with a malformed dailyAt starve a later session's wake in the same tick", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      sessions.set("shp-2", {
+        id: "shp-2",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-2",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd-2",
+        tmuxSession: "shp-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        scheduledWake: {
+          dueAt: "2026-03-18T10:00:00.000Z",
+          message: "Due one-shot wake",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.wake.monitor_failed",
+        ),
+      ).toBe(false);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ),
+      ).toBe(true);
+      expect(sessions.get("shp-2")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-2",
+        expect.stringContaining("Due one-shot wake"),
+        { agent: "claude", interrupt: false },
+      );
+      service.dispose();
+    });
+
     it("requires a stop condition for daily wakes", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {

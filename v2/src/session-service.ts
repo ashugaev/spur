@@ -2395,7 +2395,31 @@ export class SessionService {
           currentDailyWakeSession.dailyWake.message === dailyWake.message &&
           currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
         if (dailyWakeClaimed) {
-          const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          // Resolving the next occurrence can throw on a malformed dailyAt
+          // (e.g. a stray "99:99" that slipped into an existing record
+          // before validation covered it). Scope this to the session,
+          // mirroring the auto-rotate catch above: one bad record must not
+          // escape the loop and starve every later session's wake
+          // processing this tick.
+          let nextDueAt: Date | undefined;
+          try {
+            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          }
+          if (!nextDueAt) {
+            continue;
+          }
           const updated: SessionRecord = {
             ...currentDailyWakeSession,
             dailyWake: {
