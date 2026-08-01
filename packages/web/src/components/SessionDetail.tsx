@@ -2738,7 +2738,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   setSwitchAuthError(null);
                   setSwitchAuthOpen(true);
                 }}
-                title="Relaunch this Claude session under a different logged-in account"
+                title="Switch credentials in place — the live process rereads the new account on its next request"
               >
                 Switch auth
               </button>

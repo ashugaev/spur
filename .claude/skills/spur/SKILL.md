@@ -149,3 +149,40 @@ Update on any change to CLI commands or flags, daemon HTTP routes, config keys o
 
 - Sections through `## Safety` stay repo-independent. Repo-relative paths live only in `## In this repo`.
 - Verify every stated default against source at edit time and name the file checked: config keys and daemon defaults `v2/src/config.ts`, web UI port default `v2/src/ports.ts`, source types and event names `v2/src/config.ts` and `v2/src/types.ts`, agent launch flags `v2/src/agents/`, project-config merge `v2/src/registry.ts`. Never copy a default from another doc's prose.
+
+### Claude auth rotation
+
+Rotate Claude login accounts across the rate limit. Each account is an isolated
+`CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` +
+`<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
+
+Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
+accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
+Spur auto-detects the account once `.credentials.json` lands. Select sets the
+active account; remove drops it. The default ~/.claude login is auto-adopted as an account named "default" when its .credentials.json exists.
+
+Per-session switch auth (claude sessions only): atomically swaps credentials in the per-session
+claude home (`<dataDir>/session-tools/<id>/claude-home/`) — no kill or relaunch; the live process
+rereads credentials on its next request. Ready = credentials + onboarding complete. Sessions launched before the session-home design
+(launch command not bound to the session home) relaunch once as migration. Force switches even while the session is
+working. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>`
+resolves the same transcript; history preserved on rotation.
+
+Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
+rotation policy (the config carries no agent name so it extends to other agents;
+the account store is currently claude-only). When on,
+a claude session that hits `rate_limited` rotates to the next ready (credentials + onboarding complete),
+non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
+limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
+limited -> falls through to the reactivation nudge.
+
+Instance-only, same footgun as `rateLimitReactivation`/`tags`: this block is
+parsed only in instance config. A per-project `spur.yaml authRotation:` is
+silently ignored.
+
+```yaml
+authRotation:
+  autoRotateOnRateLimit: true
+  cooldownMinutes: 60
+  maxRotationsPerEpisode: 2
+```

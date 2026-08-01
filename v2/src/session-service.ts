@@ -79,12 +79,15 @@ import {
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   addAccount,
-  ensureAccountProjectsLink,
   ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
+  isAccountReady,
   listAccounts,
   removeAccount,
+  seedSessionHome,
+  sessionClaudeHome,
+  swapSessionCredentials,
   touchAccountUsed,
   type ClaudeAccount,
 } from "./claude-accounts.js";
@@ -1053,12 +1056,13 @@ function withQueuedMessages(
 }
 
 // Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
-// store. Back-compat: when the session has no bound account (or it was removed),
-// returns {} so claude launches byte-identical to today. Non-claude agents
-// always return {}.
+// store. When an account is bound, seeds the per-session claude home under
+// session-tools/<id>/claude-home and returns it as claudeConfigDir. Session
+// homes isolate credential writeback from the source account directory.
+// Returns {} when no account is bound or the account no longer exists.
 export function resolveClaudeAuthPlanOptions(
   dataDir: string,
-  session: Pick<SessionRecord, "agent" | "claudeAccountId">,
+  session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
 ): { claudeConfigDir?: string } {
   if (session.agent !== "claude" || !session.claudeAccountId) {
     return {};
@@ -1067,8 +1071,10 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
-  ensureAccountProjectsLink(account);
-  return { claudeConfigDir: account.configDir };
+  const sessionToolDir = join(dataDir, "session-tools", session.id);
+  const sessionHome = sessionClaudeHome(sessionToolDir);
+  seedSessionHome(sessionHome, account);
+  return { claudeConfigDir: sessionHome };
 }
 
 export function isRestorableSession(
@@ -2204,7 +2210,7 @@ export class SessionService {
         // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
         // cooldown, per-episode cap, and all-accounts-limited fall-through) and
         // returns true only when a rotation happened. A successful rotation
-        // relaunches the session and suppresses the afterHours nudge below.
+        // suppresses the afterHours nudge below.
         // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
         // dirty-worktree kill-confirmation, a stale-liveState race, or a
         // concurrently-removed account. Scope the catch to this session so one
@@ -2764,12 +2770,9 @@ export class SessionService {
     });
   }
 
-  // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
-  // Back-compat: when the session has no bound account, returns {} so claude
-  // launches byte-identical to today. Non-claude agents always return {}.
-  private resolveClaudeAuthPlanOptions(session: Pick<SessionRecord, "agent" | "claudeAccountId">): {
-    claudeConfigDir?: string;
-  } {
+  private resolveClaudeAuthPlanOptions(
+    session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
+  ): { claudeConfigDir?: string } {
     return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
@@ -5228,9 +5231,18 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      if (request.claudeAccountId) {
+        const account = findAccount(this.config.dataDir, request.claudeAccountId);
+        if (!account || !isAccountReady(account)) {
+          throw new Error(
+            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
+          );
+        }
+      }
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
+          id: sessionId,
           agent,
           ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         }),
@@ -8538,8 +8550,10 @@ export class SessionService {
     if (!account) {
       throw new Error(`Unknown claude account: ${accountId}`);
     }
-    if (!isAccountAuthenticated(account)) {
-      throw new Error(`Claude account ${accountId} is not logged in`);
+    if (!isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
     }
 
     const force = opts.force === true;
@@ -8551,30 +8565,57 @@ export class SessionService {
         );
       }
     }
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
+    const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    const usesSessionHome = session.launchCommand.startsWith(
+      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
+    );
 
     const updated: SessionRecord = {
       ...session,
       claudeAccountId: accountId,
       updatedAt: nowIso(),
     };
+
+    if (usesSessionHome) {
+      // Session launched against its session home: atomically swap credentials in place.
+      // The live Claude process rereads credentials on its next request,
+      // so no kill/relaunch is needed.
+      swapSessionCredentials(sessionHome, account);
+      writeSession(this.config.dataDir, updated);
+      touchAccountUsed(this.config.dataDir, accountId);
+      this.logEvent("session.auth.switched", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Switched claude account for ${sessionId} to ${accountId}`,
+        details: { accountId, reason: opts.reason, forced: force, method: "in_place" },
+      });
+      return this.enrich(updated);
+    }
+
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
+    // Install target credentials before persisting the record or killing the pane.
+    // If the swap throws, the persisted account and running pane remain old.
+    mkdirSync(sessionHome, { recursive: true });
+    swapSessionCredentials(sessionHome, account);
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
-
+    // Session was launched against an account dir directly.
+    // Relaunch once to migrate onto the new account's session home.
     await killTmuxSession(updated.tmuxSession);
     const relaunched = await this.ensureSessionReadyForSend(updated);
-
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Switched claude account for ${sessionId} to ${accountId}`,
-      details: { accountId, reason: opts.reason, forced: force },
+      details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
     });
     return this.enrich(relaunched);
   }
 
-  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Rotate a rate-limited claude session onto the next ready account.
   // Returns true when a rotation happened; false when disabled, capped, or no
   // fresh candidate exists (caller then falls through to the reactivation nudge).
   private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
@@ -8597,7 +8638,7 @@ export class SessionService {
     }
     const next = listAccounts(this.config.dataDir).find((account) => {
       if (account.id === session.claudeAccountId) return false;
-      if (!isAccountAuthenticated(account)) return false;
+      if (!isAccountReady(account)) return false;
       const limitedUntil = this.claudeAccountRateLimit.get(account.id);
       return limitedUntil === undefined || limitedUntil <= now;
     });
