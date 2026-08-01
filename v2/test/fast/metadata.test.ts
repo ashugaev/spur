@@ -924,3 +924,104 @@ describe("listSessions concurrency", () => {
     expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
   });
 });
+
+describe("listSessions record cache", () => {
+  function fixtureSession(id: string): SessionRecord {
+    return {
+      id,
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: id,
+      worktree: true,
+      worktreePath: `/tmp/spur-worktrees/api/${id}`,
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("keeps record identity for unchanged session files", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    writeSession(dataDir, fixtureSession("api-2"));
+
+    const first = listSessions(dataDir);
+    const second = listSessions(dataDir);
+    expect(second.find((s) => s.id === "api-1")).toBe(first.find((s) => s.id === "api-1"));
+    expect(second.find((s) => s.id === "api-2")).toBe(first.find((s) => s.id === "api-2"));
+
+    // After a write to only one record, that record is a new object and the
+    // untouched one is still the same object reference.
+    writeSession(dataDir, { ...fixtureSession("api-1"), status: "completed" });
+    const third = listSessions(dataDir);
+    const thirdApi1 = third.find((s) => s.id === "api-1");
+    const thirdApi2 = third.find((s) => s.id === "api-2");
+    expect(thirdApi1).not.toBe(second.find((s) => s.id === "api-1"));
+    expect(thirdApi1?.status).toBe("completed");
+    expect(thirdApi2).toBe(second.find((s) => s.id === "api-2"));
+  });
+
+  it("settles after the legacy pr-slot rewrite", async () => {
+    const dataDir = await createTempDir("spur-metadata-cache-");
+    tempDirs.push(dataDir);
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-a1b2.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify(
+        {
+          id: "api-a1b2",
+          project: "api",
+          agent: "claude",
+          prompt: "fix the bug",
+          branch: "feature/native-pr-binding",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api-a1b2",
+          tmuxSession: "api-a1b2",
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-04-26T09:00:00.000Z",
+          updatedAt: "2026-04-26T09:00:00.000Z",
+          slots: {
+            links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    // 1st call reads the legacy shape, which readSessionFile rewrites in
+    // place (a new inode) — the pre/post stat mismatch means this call's
+    // result is never cached.
+    const first = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(first?.pr).toMatchObject({ number: 42, repo: "acme/api" });
+
+    // 2nd call reads the now-native shape with no further rewrite, so its
+    // pre/post stat matches and the result is cached this time.
+    const second = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(second).not.toBe(first);
+
+    // 3rd call is a pure cache hit: same object as the 2nd call, proving no
+    // permanent re-parse loop.
+    const third = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(third).toBe(second);
+  });
+
+  it("lists a session file that has no index entry", async () => {
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "api-1.json"),
+      `${JSON.stringify(fixtureSession("api-1"), null, 2)}\n`,
+    );
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+  });
+});

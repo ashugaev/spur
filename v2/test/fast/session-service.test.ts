@@ -625,6 +625,14 @@ function sessionRecord(
 
 function createSessionStore() {
   const sessions = new Map<string, SessionRecord>();
+  // listSessionsMock mirrors metadata.ts' real stat-gated parse cache: an
+  // unchanged record returns the SAME object on every call, a changed one
+  // gets a fresh clone. Without this, every session would look changed on
+  // every call (clone() always allocates a new object), which contradicts
+  // the real listSessions() and would make the tick's record-change
+  // detection untestable. readSessionMock/writeSessionMock stay a raw clone
+  // per call, mirroring production where only listSessions is stat-gated.
+  const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
     return session ? clone(session) : undefined;
@@ -633,7 +641,16 @@ function createSessionStore() {
     sessions.set(session.id, clone(session));
   });
   listSessionsMock.mockImplementation(() =>
-    [...sessions.values()].map((session) => clone(session)),
+    [...sessions.values()].map((session) => {
+      const json = JSON.stringify(session);
+      const existing = published.get(session.id);
+      if (existing && existing.json === json) {
+        return existing.record;
+      }
+      const record = clone(session);
+      published.set(session.id, { json, record });
+      return record;
+    }),
   );
   return sessions;
 }
@@ -19361,7 +19378,7 @@ describe("SessionService", () => {
   });
 
   describe("dashboard cache", () => {
-    function seedDashboardSessions(count: number): Map<string, SessionRecord> {
+    function seedDashboardSessions(count: number, idleCount = 0): Map<string, SessionRecord> {
       const sessions = createSessionStore();
       for (let index = 1; index <= count; index += 1) {
         const id = `api-${index}`;
@@ -19378,6 +19395,29 @@ describe("SessionService", () => {
           status: "running",
           createdAt: "2026-03-18T10:00:00.000Z",
           updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      // Idle (terminal, kept in list) sessions inserted after the running
+      // ones so insertion order — which the mock preserves — puts them last.
+      // killed+retainInList is kept by both the tick's inclusion filter and
+      // list()'s own filter, so these count toward the idle round-robin set
+      // without being pruned as terminal-and-dropped.
+      for (let index = 1; index <= idleCount; index += 1) {
+        const id = `done-${index}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: `finished task ${index}`,
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "killed",
+          retainInList: true,
+          createdAt: "2026-03-18T09:00:00.000Z",
+          updatedAt: "2026-03-18T09:01:00.000Z",
         });
       }
       return sessions;
@@ -19490,6 +19530,65 @@ describe("SessionService", () => {
 
       const afterRecovery = await service.list({ view: "dashboard" });
       expect(afterRecovery.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
+    });
+
+    it("tick enrich count tracks live sessions, not total records", async () => {
+      async function countTickEnrichCalls(liveCount: number, idleCount: number): Promise<number> {
+        seedDashboardSessions(liveCount, idleCount);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        // Drain the boot tick: it enriches every included record once
+        // (O(total)) before any cache entry exists.
+        await service.list({ view: "dashboard" });
+
+        const spy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
+        await vi.advanceTimersByTimeAsync(2_000);
+        const calls = spy.mock.calls.length;
+        service.dispose();
+        return calls;
+      }
+
+      const small = await countTickEnrichCalls(2, 10);
+      const large = await countTickEnrichCalls(2, 100);
+
+      // liveCount (2) + the bounded idle round-robin quota. Hardcoded as 4
+      // here rather than importing DASHBOARD_IDLE_REFRESH_PER_TICK, which is
+      // not exported.
+      expect(small).toBe(2 + 4);
+      expect(large).toBe(small);
+    });
+
+    it("re-enriches a terminal session whose record changed without an eager refresh", async () => {
+      const sessions = seedDashboardSessions(1, 20);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard" });
+
+      // Mutate the record directly in the store, the same shape as the
+      // reconcileStaleStoppedSession/reconcileStaleErroredSession/
+      // writeServerErrorMarker bypasses: a status transition written without
+      // going through refreshDashboardCacheEntry.
+      const existing = sessions.get("done-20");
+      if (!existing) {
+        throw new Error("done-20 was not seeded");
+      }
+      sessions.set("done-20", {
+        ...existing,
+        status: "completed",
+        updatedAt: "2026-03-18T11:00:00.000Z",
+      });
+
+      // done-20 is last in insertion order and the idle cursor starts at 0,
+      // so the round-robin only covers done-1..done-4 this tick — any
+      // refresh of done-20 can only come from the record-change path.
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const listed = await service.list({ view: "dashboard", includeCompleted: true });
+      const view = listed.find((entry) => entry.id === "done-20");
+      expect(view).toMatchObject({ status: "completed", state: "stopped" });
       service.dispose();
     });
   });
