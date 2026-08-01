@@ -750,6 +750,20 @@ function tryRealpath(path: string): string {
   }
 }
 
+// Cache stamp for a config file: mtime alone can repeat when two writes land
+// inside the filesystem's mtime resolution, so size rides along. Any stat
+// failure (unlinked mid-call, EACCES, a flaky network mount) yields no stamp
+// rather than throwing — callers on the 2s dashboard tick must not abort a
+// whole cycle over one unreadable file.
+function tryConfigStamp(path: string): string | undefined {
+  try {
+    const stats = statSync(path);
+    return `${stats.mtimeMs}:${stats.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeSpawnRequest(
   request: SpawnSessionRequest,
   defaultSteps?: string[],
@@ -1813,11 +1827,11 @@ export class SessionService {
   // tick resolves a project for every session, so without this each tick
   // re-parsed the same YAML for the whole fleet — and re-logged the same parse
   // failure forever. A cache hit costs one statSync and no parse. Keyed by
-  // session id, invalidated by config path or mtime change, pruned against the
-  // live id set in runDashboardCacheTick.
+  // session id, invalidated by config path or stamp change (see
+  // tryConfigStamp), pruned against the live id set in runDashboardCacheTick.
   private readonly sessionProjectCache = new Map<
     string,
-    { configPath: string; mtimeMs: number; project: ProjectConfig | undefined }
+    { configPath: string; stamp: string; project: ProjectConfig | undefined }
   >();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
@@ -3356,16 +3370,16 @@ export class SessionService {
       return daemonProject;
     }
 
-    // mtime is the cache key. It is only missing when the file is unlinked
-    // between the lookup and this stat, and the next call resolves no path at
-    // all — so that race parses uncached once rather than caching a lie.
-    const mtimeMs = statSync(projectConfigPath, { throwIfNoEntry: false })?.mtimeMs;
+    // No stamp means the file went unreadable between the lookup and the stat.
+    // Parse uncached that once rather than cache a lie; the next call either
+    // resolves no path at all or gets a real stamp.
+    const stamp = tryConfigStamp(projectConfigPath);
     const cached = this.sessionProjectCache.get(session.id);
     if (
       cached &&
-      mtimeMs !== undefined &&
+      stamp !== undefined &&
       cached.configPath === projectConfigPath &&
-      cached.mtimeMs === mtimeMs
+      cached.stamp === stamp
     ) {
       return cached.project ?? daemonProject;
     }
@@ -3375,7 +3389,7 @@ export class SessionService {
       localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
     } catch (error) {
       // Logged only on a cache miss, so a permanently broken config warns once
-      // per (session, config mtime) instead of once per tick.
+      // per (session, config stamp) instead of once per tick.
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.project_config.local.failed", {
         level: "warn",
@@ -3384,10 +3398,10 @@ export class SessionService {
         message: `Failed to load local project config for ${session.id}: ${message}`,
       });
     }
-    if (mtimeMs !== undefined) {
+    if (stamp !== undefined) {
       this.sessionProjectCache.set(session.id, {
         configPath: projectConfigPath,
-        mtimeMs,
+        stamp,
         project: localProject,
       });
     }

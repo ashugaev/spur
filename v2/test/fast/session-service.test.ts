@@ -15220,6 +15220,68 @@ describe("SessionService", () => {
 
     expect(loadProjectConfigMock).toHaveBeenCalledTimes(2);
     expect(failures()).toHaveLength(2);
+
+    // Size is part of the stamp, so a rewrite that lands inside the
+    // filesystem's mtime resolution is still seen.
+    writeFileSync(configPath, "broken: true\nagain: true\n", "utf8");
+    utimesSync(configPath, rewrittenAt, rewrittenAt);
+    await service.get("api-1");
+
+    expect(loadProjectConfigMock).toHaveBeenCalledTimes(3);
+    expect(failures()).toHaveLength(3);
+  });
+
+  it("re-resolves the project config after a daemon config reload", async () => {
+    const worktreePath = join(TEST_DATA_DIR, "worktrees", "api", "api-1");
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(worktreePath, "spur.yaml"), "projects: {}\n", "utf8");
+    findProjectConfigPathInDirectoryMock.mockImplementation((directory: string) => {
+      const candidate = join(directory, "spur.yaml");
+      return existsSync(candidate) ? candidate : undefined;
+    });
+    loadProjectConfigMock.mockReturnValue(baseConfig());
+    const session = runningSession({ worktreePath });
+    readSessionMock.mockReturnValue(session);
+    listSessionsMock.mockReturnValue([session]);
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    loadProjectConfigMock.mockClear();
+
+    await service.get("api-1");
+    await service.get("api-1");
+    expect(loadProjectConfigMock).toHaveBeenCalledTimes(1);
+
+    // Local configs parse with the daemon config as defaults, so a reload has
+    // to drop every cached resolution even though no spur.yaml changed.
+    service.applyConfig(baseConfig() as unknown as AppConfig, ["/tmp/spur.yaml"]);
+    await service.get("api-1");
+
+    expect(loadProjectConfigMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps enriching when the worktree config cannot be stat-ed", async () => {
+    // A path statSync always rejects, standing in for EACCES/EIO on a flaky
+    // worktree mount: the failure must not escape resolveProjectForSession and
+    // abort the caller (a dashboard tick enriches every session in one batch).
+    findProjectConfigPathInDirectoryMock.mockReturnValue(
+      "/tmp/spur-worktrees/api/api-1/spur\0yaml",
+    );
+    loadProjectConfigMock.mockImplementation(() => {
+      throw new Error("projects must be an object");
+    });
+    const session = runningSession();
+    readSessionMock.mockReturnValue(session);
+    listSessionsMock.mockReturnValue([session]);
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+
+    expect(view.id).toBe("api-1");
   });
 
   it("startSidecar reserves ports before launching a sidecar from the session worktree config", async () => {
