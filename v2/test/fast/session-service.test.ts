@@ -20101,7 +20101,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a scheduled wake queued when delivery fails", async () => {
+    it("consumes a one-shot wake and keeps the message queued when delivery fails", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20129,16 +20129,16 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.scheduledWake).toEqual({
-        dueAt: "2026-03-18T10:05:05.000Z",
-        message: "Retry wake",
-      });
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.queuedMessages?.messages).toContain("Retry wake");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.failed")
+          .length,
+      ).toBe(1);
       service.dispose();
     });
 
@@ -20452,7 +20452,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a daily wake queued when delivery fails", async () => {
+    it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20481,13 +20481,64 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(1_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
+      expect(sessions.get("shp-1")?.queuedMessages?.messages.join("\n")).toContain(
+        "Retry daily wake",
+      );
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
+      service.dispose();
+    });
+
+    it("logs one daily wake failure for a session that cannot receive", async () => {
+      const sessions = seedShepherdSession({
+        status: "completed",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("fires a far-past-due daily wake once and jumps to the next occurrence", async () => {
+      const sessions = seedShepherdSession({
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
       service.dispose();
     });
 

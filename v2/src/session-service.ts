@@ -2132,37 +2132,42 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          try {
-            await this.send(session.id, { message: scheduledWake.message });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-              current.scheduledWake.message === scheduledWake.message
-            ) {
-              const { scheduledWake: _scheduledWake, ...base } = current;
-              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-              writeSession(this.config.dataDir, cleared);
+          // Claim the due occurrence BEFORE sending: clear scheduledWake and
+          // persist it first. A slow or failing send must not leave the wake
+          // due, or the `<= now` guard stays true and it re-fires every tick
+          // forever.
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message;
+          if (claimed) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            try {
+              await this.send(session.id, { message: scheduledWake.message });
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
             }
-            this.logEvent("session.wake.sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent scheduled wake to ${session.id}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
           }
         }
 
@@ -2378,54 +2383,59 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        try {
-          await this.send(session.id, {
-            message: this.formatDailyWakeMessage(
-              session.id,
-              dailyWake.message,
-              dailyWake.stopCondition,
-            ),
-          });
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          if (
-            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-            current.dailyWake.message === dailyWake.message &&
-            current.dailyWake.stopCondition === dailyWake.stopCondition
-          ) {
-            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-            const updated: SessionRecord = {
-              ...current,
-              dailyWake: {
-                ...dailyWake,
-                nextDueAt: nextDueAt.toISOString(),
+        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+        // next future scheduled time and persist it first. A slow or failing
+        // send must not leave the wake due, or the `<= now` guard stays true
+        // and it re-fires every tick forever.
+        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+        const dailyWakeClaimed =
+          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+        if (dailyWakeClaimed) {
+          const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          const updated: SessionRecord = {
+            ...currentDailyWakeSession,
+            dailyWake: {
+              ...dailyWake,
+              nextDueAt: nextDueAt.toISOString(),
+            },
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, updated);
+          try {
+            await this.send(session.id, {
+              message: this.formatDailyWakeMessage(
+                session.id,
+                dailyWake.message,
+                dailyWake.stopCondition,
+              ),
+            });
+            this.logEvent("session.wake.daily_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent daily wake to ${session.id}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
               },
-              updatedAt: nowIso(),
-            };
-            writeSession(this.config.dataDir, updated);
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send daily wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
           }
-          this.logEvent("session.wake.daily_sent", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Sent daily wake to ${session.id}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.daily_failed", {
-            level: "error",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Failed to send daily wake to ${session.id}: ${message}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
         }
       }
     } finally {

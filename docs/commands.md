@@ -51,7 +51,7 @@ spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message..
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit).
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a daily wake that fails (session not running) skips straight to its next scheduled time instead of retrying.
 
 ## list
 
