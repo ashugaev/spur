@@ -20589,16 +20589,17 @@ describe("SessionService", () => {
       await advanceSeconds(5);
 
       expect(
-        logSpurEventMock.mock.calls.some(
+        logSpurEventMock.mock.calls.filter(
           ([, entry]) => entry.event === "session.wake.monitor_failed",
-        ),
-      ).toBe(false);
+        ).length,
+      ).toBe(0);
       expect(
-        logSpurEventMock.mock.calls.some(
+        logSpurEventMock.mock.calls.filter(
           ([, entry]) =>
             entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
-        ),
-      ).toBe(true);
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-bad-daily")?.dailyWake).toBeUndefined();
       expect(sessions.get("shp-2")?.scheduledWake).toBeUndefined();
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-2",
