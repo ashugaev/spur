@@ -3384,9 +3384,7 @@ export class SessionService {
         message: `Failed to load local project config for ${session.id}: ${message}`,
       });
     }
-    if (mtimeMs === undefined) {
-      this.sessionProjectCache.delete(session.id);
-    } else {
+    if (mtimeMs !== undefined) {
       this.sessionProjectCache.set(session.id, {
         configPath: projectConfigPath,
         mtimeMs,
