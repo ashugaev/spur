@@ -37,6 +37,21 @@ function sessionIndexFilePath(dataDir: string): string {
   return join(dataDir, "sessions", ".index.json");
 }
 
+// dataDir/sessions-archive/ is a sibling of dataDir/sessions/, never nested
+// inside it — findSessionFilePath's readdir of dataDir/sessions/ and
+// listSessions' scan of the same dir must never see archived records.
+function archivedSessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, `${sessionId}.json`);
+}
+
+function sessionShardDir(dataDir: string, sessionId: string): string {
+  return join(dataDir, "sessions", sessionId);
+}
+
+function archivedSessionShardDir(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, sessionId);
+}
+
 function reviewSnapshotDir(
   dataDir: string,
   providerId: ReviewProviderId,
@@ -176,6 +191,28 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
 
 function isSessionRecord(value: unknown): value is SessionRecord {
   return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+}
+
+// Distinguishes "file vanished between readdir and read" (a benign race with
+// a concurrent GC archive) from every other read failure, which must still
+// surface — a corrupt record on disk is a real problem, not a race.
+// readSessionFile wraps every failure from its inner try (including a
+// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
+// error code only survives on `cause`, never on the thrown error itself.
+function isEnoentCause(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return isRecord(cause) && cause["code"] === "ENOENT";
+}
+
+function tryReadSessionFile(path: string): SessionRecord | null {
+  try {
+    return readSessionFile(path);
+  } catch (error) {
+    if (isEnoentCause(error)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function readSessionFile(path: string): SessionRecord {
@@ -612,7 +649,10 @@ export function listSessions(dataDir: string): SessionRecord[] {
     for (const fileName of readdirSync(projectDir)) {
       if (!fileName.endsWith(".json")) continue;
       const filePath = join(projectDir, fileName);
-      sessions.push(readSessionFile(filePath));
+      const session = tryReadSessionFile(filePath);
+      if (session) {
+        sessions.push(session);
+      }
     }
   }
 
@@ -623,6 +663,49 @@ export function listSessions(dataDir: string): SessionRecord[] {
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
   return path ? readSessionFile(path) : null;
+}
+
+// Group-atomic archival for session GC: moves every member's record (and its
+// per-session log shard dir, if any) out of dataDir/sessions/ into the
+// sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files
+// move first, the index second — a crash in between leaves stale index
+// entries that findSessionFilePath already self-heals (it deletes an
+// indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
+// into sessions/<project>/<id>.json; the next findSessionFilePath scan or
+// writeSession repairs the index.
+export function archiveSessions(
+  dataDir: string,
+  members: readonly Pick<SessionRecord, "id" | "project">[],
+): { archivedIds: string[]; archiveDir: string } {
+  const archiveDir = join(dataDir, "sessions-archive");
+  const archivedIds: string[] = [];
+  for (const member of members) {
+    const sourcePath = sessionFilePath(dataDir, member.project, member.id);
+    if (!existsSync(sourcePath)) {
+      continue;
+    }
+    const targetPath = archivedSessionFilePath(dataDir, member.project, member.id);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    renameSync(sourcePath, targetPath);
+
+    const shardDir = sessionShardDir(dataDir, member.id);
+    if (existsSync(shardDir)) {
+      const targetShardDir = archivedSessionShardDir(dataDir, member.project, member.id);
+      mkdirSync(dirname(targetShardDir), { recursive: true });
+      renameSync(shardDir, targetShardDir);
+    }
+    archivedIds.push(member.id);
+  }
+
+  if (archivedIds.length > 0) {
+    const index = readSessionIndex(dataDir);
+    for (const id of archivedIds) {
+      delete index[id];
+    }
+    writeJsonFile(sessionIndexFilePath(dataDir), index);
+  }
+
+  return { archivedIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {

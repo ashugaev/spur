@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  archiveSessions,
   deletePendingSendBatch,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
@@ -23,6 +24,7 @@ import {
   writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
+import { appendEventLog } from "../../src/event-log.js";
 import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -823,5 +825,100 @@ describe("session metadata PR migration", () => {
     expect(listSessions(dataDir)).toEqual([
       expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
     ]);
+  });
+});
+
+const sessionBase = {
+  project: "api",
+  agent: "claude" as const,
+  prompt: "ship it",
+  branch: "api-1",
+  worktree: true,
+  worktreePath: "/tmp/spur-worktrees/api/api-1",
+  launchCommand: "claude",
+  status: "completed" as const,
+  createdAt: "2026-03-18T10:00:00.000Z",
+  updatedAt: "2026-03-18T10:01:00.000Z",
+};
+
+describe("archiveSessions", () => {
+  it("moves a member's record and log shard out of listSessions/readSession/.index.json in one rewrite", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    appendEventLog(dataDir, {
+      event: "session.test",
+      level: "info",
+      sessionId: "api-1",
+      message: "hello",
+    });
+    const shardDir = join(dataDir, "sessions", "api-1");
+    expect(existsSync(shardDir)).toBe(true);
+
+    const result = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(result.archivedIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")).toBeNull();
+    expect(listSessions(dataDir)).toEqual([]);
+    expect(existsSync(shardDir)).toBe(false);
+    expect(
+      existsSync(join(result.archiveDir, "api", "api-1", "events.jsonl")),
+    ).toBe(true);
+    const index = JSON.parse(
+      readFileSync(join(dataDir, "sessions", ".index.json"), "utf-8"),
+    ) as Record<string, string>;
+    expect(index["api-1"]).toBeUndefined();
+  });
+
+  it("restores an archived record by moving the file back", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const { archiveDir } = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+    expect(readSession(dataDir, "api-1")).toBeNull();
+
+    mkdirSync(join(dataDir, "sessions", "api"), { recursive: true });
+    const { renameSync } = await import("node:fs");
+    renameSync(
+      join(archiveDir, "api", "api-1.json"),
+      join(dataDir, "sessions", "api", "api-1.json"),
+    );
+
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+  });
+
+  it("archives every member of a group and leaves other records untouched", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    writeSession(dataDir, { ...sessionBase, id: "api-3", tmuxSession: "api-3" });
+
+    archiveSessions(dataDir, [
+      { id: "api-1", project: "api" },
+      { id: "api-2", project: "api" },
+    ]);
+
+    expect(listSessions(dataDir).map((s) => s.id).sort()).toEqual(["api-3"]);
+    expect(readSession(dataDir, "api-3")?.id).toBe("api-3");
+  });
+});
+
+describe("listSessions concurrency", () => {
+  it("skips a record file removed mid-scan", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    const { rmSync } = await import("node:fs");
+    rmSync(path);
+
+    expect(listSessions(dataDir)).toEqual([]);
+  });
+
+  it("still throws on a corrupt record file", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "sessions", "api");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "api-1.json"), "{not json", "utf-8");
+
+    expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
   });
 });
