@@ -2313,13 +2313,21 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("reopen")
     .description("Restart a completed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
+    .option(
+      "--force",
+      "Reopen even if a live agent process for this session id already exists outside its pane",
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true } = {};
+      if (options.force) {
+        body.force = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "reopening session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath, body),
         success: (session) => `Reopened ${session.id}.`,
         render: renderSessionCard,
       });
