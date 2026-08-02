@@ -39,7 +39,7 @@ import {
   resolveSessionSidecars,
 } from "./sidecars/index.js";
 import {
-  buildSidecarClaims,
+  assembleSidecarSweepClaims,
   confirmReaps,
   reapRecordedIdentity,
   reapSidecarPane,
@@ -7500,25 +7500,15 @@ export class SessionService {
   // and never reaches this method, keeping doctor read-only.
   async sweepSidecarProcesses(reap: boolean): Promise<SidecarSweepResult> {
     const sessions = listSessions(this.config.dataDir);
-    const claims = buildSidecarClaims(sessions, isTerminalSessionStatus);
-    const worktreePaths: string[] = [];
-    for (const session of sessions) {
-      if (!session.worktreePath) {
-        continue;
-      }
-      try {
-        worktreePaths.push(realpathSync(session.worktreePath));
-      } catch {
-        continue;
-      }
-    }
-    let worktreeDirRealpath: string;
-    try {
-      worktreeDirRealpath = realpathSync(this.config.worktreeDir);
-    } catch {
+    const assembled = assembleSidecarSweepClaims(
+      sessions,
+      this.config.worktreeDir,
+      isTerminalSessionStatus,
+    );
+    if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }
-    return sweepSidecars({ claims, worktreePaths, worktreeDirRealpath, reap });
+    return sweepSidecars({ ...assembled, reap });
   }
 
   // Signals every torn-down sidecar's pane first, then confirms the whole

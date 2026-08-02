@@ -20,9 +20,9 @@ const execFileAsync = promisify(execFile);
 // the pane-group signal stays as a free, correct addition for anything the
 // snapshot could not see fork yet.
 
-export const REAP_GRACE_MS = 1500;
-export const REAP_CONFIRM_INTERVAL_MS = 100;
-export const REAP_CONFIRM_TIMEOUT_MS = 2000;
+const REAP_GRACE_MS = 1500;
+const REAP_CONFIRM_INTERVAL_MS = 100;
+const REAP_CONFIRM_TIMEOUT_MS = 2000;
 export const SWEEP_DETAIL_MAX_TREES = 10;
 
 export interface ProcessInfo {
@@ -99,6 +99,21 @@ export interface SidecarSweepResult {
   leaked: LeakedSidecarTree[];
   /** Non-empty only when the caller asked to reap. */
   reaped: ReapOutcome[];
+}
+
+/**
+ * Terminal-for-sidecar-claims predicate: a session in this state can no
+ * longer claim a sidecar process. session-service.ts keeps its own
+ * pre-existing `isTerminalSessionStatus` (gates ~15 unrelated session-
+ * lifecycle call sites); this copy is the one primitive every OTHER
+ * `buildSidecarClaims`/`assembleSidecarSweepClaims` caller — currently
+ * host-install.ts's doctor check — should import, instead of hand-copying
+ * the same one-liner.
+ */
+export function isTerminalSessionStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
@@ -608,6 +623,47 @@ export function buildSidecarClaims(
     result.set(worktreePath, { worktreePath, ...claim });
   }
   return result;
+}
+
+export interface SidecarSweepClaims {
+  claims: ReadonlyMap<string, SidecarClaim>;
+  /** realpath'd worktreePath from every session record, any status. */
+  worktreePaths: readonly string[];
+  /** realpath'd worktreeDir. */
+  worktreeDirRealpath: string;
+}
+
+/**
+ * Shared assembly for both sweep callers — session-service.ts's `--reap`
+ * sweep and host-install.ts's read-only doctor check — so the
+ * claims/worktreePaths/worktreeDirRealpath trio has exactly one build path.
+ * Returns null when `worktreeDir` itself is unreadable, the one case
+ * neither caller can proceed from.
+ */
+export function assembleSidecarSweepClaims(
+  sessions: readonly SessionRecord[],
+  worktreeDir: string,
+  isTerminalStatus: (status: SessionRecord["status"]) => boolean,
+): SidecarSweepClaims | null {
+  const claims = buildSidecarClaims(sessions, isTerminalStatus);
+  const worktreePaths: string[] = [];
+  for (const session of sessions) {
+    if (!session.worktreePath) {
+      continue;
+    }
+    try {
+      worktreePaths.push(realpathSync(session.worktreePath));
+    } catch {
+      continue;
+    }
+  }
+  let worktreeDirRealpath: string;
+  try {
+    worktreeDirRealpath = realpathSync(worktreeDir);
+  } catch {
+    return null;
+  }
+  return { claims, worktreePaths, worktreeDirRealpath };
 }
 
 export interface FindLeakedSidecarTreesInput {
