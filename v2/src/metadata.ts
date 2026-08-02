@@ -493,7 +493,6 @@ function normalizeSidecarProcs(
   const normalized: Record<string, SidecarProcessIdentity> = {};
   for (const [name, identity] of Object.entries(sidecarProcs)) {
     if (
-      identity &&
       isPositiveInt(identity.pid) &&
       isPositiveInt(identity.pgid) &&
       isPositiveInt(identity.starttime)

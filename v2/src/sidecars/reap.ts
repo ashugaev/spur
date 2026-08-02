@@ -451,6 +451,16 @@ async function readProcStarttime(pid: number): Promise<StarttimeProbe> {
   return Number.isFinite(starttime) ? { kind: "ok", starttime } : { kind: "unknown" };
 }
 
+/**
+ * /proc/<pid>/stat field 22, or null when unreadable/unparsable. Callers
+ * (e.g. recording a freshly started sidecar's identity) must treat null as
+ * "cannot record identity right now", never as "process is gone".
+ */
+export async function readProcessStarttime(pid: number): Promise<number | null> {
+  const probe = await readProcStarttime(pid);
+  return probe.kind === "ok" ? probe.starttime : null;
+}
+
 async function readProcCwdRealpath(pid: number): Promise<string | null> {
   try {
     return await realpath(`/proc/${pid}/cwd`);
