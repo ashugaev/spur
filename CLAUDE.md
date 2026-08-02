@@ -15,36 +15,38 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claude/agents/).
 
-| Agent                                                            | Use when                                                                                                      |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| [`researcher`](.claude/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence                                                    |
-| [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos                                                       |
-| [`critic`](.claude/agents/critic.md)                             | Verify researcher claims, score options, select winner                                                        |
-| [`architect`](.claude/agents/architect.md)                       | Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification |
-| [`developer`](.claude/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                                                                   |
-| [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                                                                |
-| [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                                                                             |
-| [`tester`](.claude/agents/tester.md)                             | Validation gate at the cheapest crossing tier                                                                 |
-| [`curator`](.claude/agents/curator.md)                           | Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)    |
+| Agent                                                            | Use when                                                                                                                                    |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`researcher`](.claude/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence                                                                                  |
+| [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos                                                                                     |
+| [`critic`](.claude/agents/critic.md)                             | Verify researcher claims, score options, select winner                                                                                      |
+| [`architect`](.claude/agents/architect.md)                       | Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification                               |
+| [`developer`](.claude/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                                                                                                 |
+| [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                                                                                              |
+| [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                                                                                                           |
+| [`design-author`](.claude/agents/design-author.md)               | Author and export a UI design before implementation (Claude Design); drive approval; hand a runtime-neutral design-spec to any coding agent |
+| [`tester`](.claude/agents/tester.md)                             | Validation gate at the cheapest crossing tier                                                                                               |
+| [`curator`](.claude/agents/curator.md)                           | Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)                                  |
 
 ## Skills
 
 Capabilities loaded by description match. Source: [.claude/skills/](.claude/skills/).
 
-| Skill                                                              | Load when                                                                     |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
-| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                                    |
-| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface                          |
-| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                                   |
-| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions              |
-| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                                            |
-| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                             |
-| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius               |
-| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                               |
-| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                   |
-| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                            |
-| [`docs`](.claude/skills/docs/SKILL.md)                             | Task touches published docs under `docs/` or the root doc files               |
-| [`clean-install-test`](.claude/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release |
+| Skill                                                              | Load when                                                                                 |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| [`manager`](.claude/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                                                |
+| [`spur`](.claude/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface                                      |
+| [`frontend-codestyle`](.claude/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                                               |
+| [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions                          |
+| [`design`](.claude/skills/design/SKILL.md)                         | Producing or exporting a design via Claude Design, or defining the design export contract |
+| [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                                                        |
+| [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                                         |
+| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius                           |
+| [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                                           |
+| [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                                               |
+| [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                                                        |
+| [`docs`](.claude/skills/docs/SKILL.md)                             | Task touches published docs under `docs/` or the root doc files                           |
+| [`clean-install-test`](.claude/skills/clean-install-test/SKILL.md) | Clean-room test the npm server install on a throwaway cloud VM before release             |
 
 ## Response style
 
@@ -79,8 +81,8 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
 - Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
-- Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.claude/skills/spur/SKILL.md` Agent Isolation for detail.
+- Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.claude/skills/spur/SKILL.md` Safety and In this repo for detail.
 - Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
 - No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.
-- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI, API, config-driven behavior) must be recorded in the config docs in the same change. Canonical docs: `docs/configuration.md` (config) and `docs/commands.md` (CLI); mirror the change to both `spur` SKILL.md files. Re-review these docs for drift whenever config or interface changes.
+- Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI commands and flags, daemon HTTP routes, source and event names, in-session tool and env contracts, config-driven behavior) must be recorded in the config docs in the same change. Canonical docs: `docs/configuration.md` (config) and `docs/commands.md` (CLI); mirror the change to both `spur` SKILL.md files, which stay byte-identical. Verify every default you state against current source in the same change; never copy one from another doc's prose. Re-review these docs for drift whenever config or interface changes.
 - Document user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) in the same change; never ship it undocumented. Any published-doc edit loads the `docs` skill and follows it — the skill owns the doc standards (single source, granular, link don't restate).

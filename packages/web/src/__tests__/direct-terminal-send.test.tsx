@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVoiceState = {
@@ -179,6 +179,39 @@ describe("DirectTerminal send failures", () => {
       expect(mockVoiceState.confirmDraft).toHaveResolved();
     });
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("DirectTerminal header agent and model", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("shows the agent display name and model when both are provided", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="codex" model="gpt-5-codex" sessionId="labeled-session" />);
+    });
+
+    const header = screen.getByTestId("direct-terminal-header");
+    expect(within(header).getByText(/codex/)).toBeInTheDocument();
+    expect(within(header).getByText(/gpt-5-codex/)).toBeInTheDocument();
+    expect(header.textContent).not.toContain("undefined");
+  });
+
+  it("shows only the agent label when model is omitted", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="unlabeled-session" />);
+    });
+
+    const header = screen.getByTestId("direct-terminal-header");
+    expect(within(header).getByText(/claude/)).toBeInTheDocument();
+    expect(header.textContent).not.toContain("undefined");
   });
 });
 

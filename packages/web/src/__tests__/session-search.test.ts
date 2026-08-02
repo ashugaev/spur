@@ -33,7 +33,7 @@ function makeSession(overrides: Partial<DashboardSession> = {}): DashboardSessio
       { label: "gitlab-pr", url: "https://gitlab.com/acme/api/-/merge_requests/81" },
       { label: "tracker", url: "https://jira.example.com/browse/PAY-319" },
     ],
-    tags: [],
+    tags: ["backend-review"],
     hasServiceIssues: false,
     deskKey: "api-42",
     ...overrides,
@@ -73,6 +73,7 @@ Your terminal output is invisible to them. Reply when you need input and when th
     ["runtime-only-instruction", "raw runtime prompt"],
     ["github.com/acme/api", "link URL"],
     ["github-pr", "link label"],
+    ["backend-review", "tag"],
     ["task", "generic tracker fallback"],
     ["unrelated", "unrelated text"],
   ])("does not match %s from %s", (query) => {
@@ -97,6 +98,16 @@ Your terminal output is invisible to them. Reply when you need input and when th
     expect(matchesSessionSearch(session, "PR")).toBe(false);
     expect(matchesSessionSearch(session, "task")).toBe(false);
     expect(matchesSessionSearch(session, "reviews/42")).toBe(false);
+  });
+
+  it("does not crash when originalTaskPrompt is null", () => {
+    const session = makeSession({
+      prompt: "runtime only",
+      originalTaskPrompt: null,
+    });
+
+    expect(() => matchesSessionSearch(session, "anything")).not.toThrow();
+    expect(matchesSessionSearch(session, "anything")).toBe(false);
   });
 
   it("matches every session for a blank query", () => {

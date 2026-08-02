@@ -11,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -35,6 +35,7 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -43,6 +44,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { ARTIFACT_HTML_SANDBOX, isHtmlMimeType } from "@/lib/artifact-html";
 import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
@@ -69,6 +71,7 @@ import {
   canHandoff,
   canPause,
   canRecover,
+  canReopen,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
@@ -247,6 +250,25 @@ function ArtifactDownloadIcon() {
       <path d="M12 4v12" />
       <path d="m6 12 6 6 6-6" />
       <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+function ArtifactOpenExternalIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M14 4h6v6" />
+      <path d="m20 4-8 8" />
+      <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
     </svg>
   );
 }
@@ -432,6 +454,14 @@ function artifactExtension(name: string): string {
   return ext ? ext.toUpperCase() : "FILE";
 }
 
+function isMarkdownArtifact(artifact: SessionArtifact): boolean {
+  return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/markdown";
+}
+
+function isHtmlArtifact(artifact: SessionArtifact): boolean {
+  return isHtmlMimeType(artifact.mimeType);
+}
+
 function artifactKindLabel(artifact: SessionArtifact): string {
   if (artifact.addedByUser && artifact.kind === "image") return "Attached Image";
   if (artifact.addedByUser) return "Attached";
@@ -458,6 +488,73 @@ function overlayButtonClass(primary = false): string {
   ].join(" ");
 }
 
+function ArtifactHtmlFrame({
+  artifact,
+  artifactHref,
+  className,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  className: string;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  // An iframe fires onLoad for any delivered body, including an error page, so a
+  // failed artifact would otherwise read as a successful preview. Probe the status
+  // first and only frame the artifact once the response is good.
+  const [reachable, setReachable] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReachable(false);
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, {
+          method: "HEAD",
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!response.ok) {
+          onPreviewError(artifact.id);
+          return;
+        }
+        setReachable(true);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact.id, artifactHref]);
+
+  if (!reachable) {
+    return null;
+  }
+
+  return (
+    <iframe
+      className={className}
+      data-artifact-lightbox-interactive
+      loading="lazy"
+      onError={() => onPreviewError(artifact.id)}
+      onLoad={() => onPreviewReady(artifact.id)}
+      sandbox={ARTIFACT_HTML_SANDBOX}
+      src={artifactHref}
+      title={`${artifact.name} preview`}
+    />
+  );
+}
+
 function ArtifactCard({
   artifact,
   artifactHref,
@@ -475,10 +572,14 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const html = isHtmlArtifact(artifact);
+  // A grid thumbnail runs the artifact's own scripts, so oversized pages wait for an
+  // explicit preview click; the lightbox still frames them at full size.
+  const htmlThumbnail = html && artifact.size <= TEXT_ARTIFACT_MAX_BYTES;
   const PreviewIcon =
     artifact.kind === "video"
       ? ArtifactPreviewIcon
-      : artifact.kind === "image"
+      : artifact.kind === "image" || html
         ? ArtifactImagePreviewIcon
         : ArtifactFileIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
@@ -534,7 +635,23 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind !== "image" && artifact.kind !== "video" ? (
+        {htmlThumbnail ? (
+          <>
+            <ArtifactHtmlFrame
+              artifact={artifact}
+              artifactHref={artifactHref}
+              className={`pointer-events-none absolute left-0 top-0 h-[200%] w-[200%] origin-top-left scale-50 border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onPreviewError={onPreviewError}
+              onPreviewReady={onPreviewReady}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind !== "image" && artifact.kind !== "video" && !htmlThumbnail ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -566,6 +683,18 @@ function ArtifactCard({
           >
             <PreviewIcon />
           </button>
+          {html ? (
+            <a
+              aria-label={`Open ${artifact.name} in a new tab`}
+              className={overlayButtonClass(false)}
+              href={artifactHref}
+              onClick={(event) => event.stopPropagation()}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <ArtifactOpenExternalIcon />
+            </a>
+          ) : null}
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
@@ -851,7 +980,8 @@ function ArtifactLightbox({
     setTextPreviewState("loading");
     setCopyState("idle");
 
-    if (!artifact || !artifactHref || artifact.kind !== "text") {
+    // HTML renders in a sandboxed frame instead of a source dump, so it needs no fetch.
+    if (!artifact || !artifactHref || artifact.kind !== "text" || isHtmlArtifact(artifact)) {
       return;
     }
 
@@ -888,18 +1018,30 @@ function ArtifactLightbox({
     return () => {
       controller.abort();
     };
-  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+  }, [artifact?.id, artifact?.kind, artifact?.mimeType, artifact?.size, artifactHref]);
+
+  const isOpen = Boolean(artifact && artifactHref);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
 
   if (!artifact || !artifactHref) return null;
 
+  const html = isHtmlArtifact(artifact);
   const previewStatusMessage =
-    artifact.kind === "text"
+    artifact.kind === "text" && !html
       ? textPreviewState === "loading"
         ? "Loading preview"
         : textPreviewState === "error"
           ? "Preview unavailable"
           : null
-      : artifact.kind === "image" || artifact.kind === "video"
+      : artifact.kind === "image" || artifact.kind === "video" || html
         ? previewState !== "ready"
           ? previewState === "error"
             ? "Preview unavailable"
@@ -1012,6 +1154,18 @@ function ArtifactLightbox({
                 {COPY_TEXT_LABELS[copyState]}
               </button>
             ) : null}
+            {html ? (
+              <a
+                aria-label={`Open ${artifact.name} in a new tab`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                href={artifactHref}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <ArtifactOpenExternalIcon />
+                Open
+              </a>
+            ) : null}
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
@@ -1068,19 +1222,38 @@ function ArtifactLightbox({
                 preload="metadata"
                 src={artifactHref}
               />
+            ) : html ? (
+              <ArtifactHtmlFrame
+                artifact={artifact}
+                artifactHref={artifactHref}
+                className={`absolute inset-0 h-full w-full border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+              />
             ) : artifact.kind === "text" ? (
-              <>
+              <div
+                className={`absolute inset-0 overflow-auto overscroll-contain p-3 text-[var(--color-text-primary)] [-webkit-overflow-scrolling:touch] sm:p-4 ${
+                  textPreviewState === "ready" && textContent
+                    ? isMarkdownArtifact(artifact)
+                      ? "bg-[var(--color-bg-elevated)]"
+                      : ""
+                    : "pointer-events-none"
+                }`}
+                data-artifact-lightbox-interactive
+              >
                 {textPreviewState === "oversize" ? (
-                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                     File exceeds 1 MiB preview limit. Download to view the full content.
                   </div>
                 ) : null}
                 {textPreviewState === "ready" && textContent ? (
-                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                    {textContent}
-                  </pre>
+                  isMarkdownArtifact(artifact) ? (
+                    <MarkdownMessage text={textContent} />
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-mono">{textContent}</pre>
+                  )
                 ) : null}
-              </>
+              </div>
             ) : (
               <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
                 <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
@@ -1674,7 +1847,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [session]);
 
   const handleAction = async (
-    action: "send" | "pause" | "restore" | "complete" | "kill",
+    action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
@@ -1729,6 +1902,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return true;
     } catch (actionError) {
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      // The server may have already moved (e.g. reopen's rollback flips the
+      // record back to completed on a failed restore) — refetch so the page
+      // never shows a stale view after a failed action.
+      await loadSession();
       return false;
     } finally {
       setBusyAction(null);
@@ -2229,7 +2406,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session &&
     (requestedTerminalSessionId === session.id ||
       (requestedTerminalSessionId !== null &&
-        requestedTerminalSessionId.startsWith(`${session.id}--`))),
+        requestedTerminalSessionId.startsWith(`${session.id}--`)) ||
+      (requestedTerminalSessionId !== null &&
+        session.sidecars.some((sc) => sc.tmuxSession === requestedTerminalSessionId))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
@@ -2329,9 +2508,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
               <span>{session.projectName}</span>
               <span>•</span>
-              <span>{session.agent}</span>
+              <span>{getAgentDisplayName(session.agent)}</span>
               <span>•</span>
               <span className="font-mono">{session.id}</span>
+              {session.model ? (
+                <>
+                  <span>•</span>
+                  <span>{session.model}</span>
+                </>
+              ) : null}
             </div>
 
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
@@ -2553,7 +2738,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   setSwitchAuthError(null);
                   setSwitchAuthOpen(true);
                 }}
-                title="Relaunch this Claude session under a different logged-in account"
+                title="Switch credentials in place — the live process rereads the new account on its next request"
               >
                 Switch auth
               </button>
@@ -2576,6 +2761,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canReopen(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("reopen")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
+              >
+                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
               </button>
             ) : null}
             {canRecover(session) ? (
@@ -3071,7 +3267,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                                onClick={() => syncTerminalFilter(sc.tmuxSession)}
                               >
                                 Terminal
                               </button>
@@ -3164,7 +3360,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               titleSuffix={
                 requestedTerminalSessionId !== session.id
-                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  ? // A workspace-shared sidecar's pane is named after the
+                    // workspace, not this session, so stripping this
+                    // session's own prefix would leave the whole name. The
+                    // sidecar view already carries both.
+                    (session.sidecars.find((sc) => sc.tmuxSession === requestedTerminalSessionId)
+                      ?.name ?? requestedTerminalSessionId?.replace(`${session.id}--`, ""))
                   : undefined
               }
             />

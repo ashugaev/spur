@@ -13,11 +13,10 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { playwrightMcpUrl } from "./playwright-mcp.js";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { TranscriptEntry } from "../types.js";
+import type { TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -538,19 +537,18 @@ export function appendCodexTrustedProjects(
   return result;
 }
 
-const CODEX_PLAYWRIGHT_TABLE = "[mcp_servers.playwright]";
-
-// Remove an inherited [mcp_servers.playwright] table (header through the line
+// Remove an inherited [mcp_servers.<server>] table (header through the line
 // before the next "[" table header or EOF). Parse-aware so adjacent tables stay
 // intact. Only strips this exact table, never partial matches like
-// [mcp_servers.playwright_x].
-function stripCodexPlaywrightTable(configText: string): string {
+// [mcp_servers.<server>_x].
+function stripCodexMcpTable(configText: string, server: string): string {
+  const header = `[mcp_servers.${server}]`;
   const lines = configText.split("\n");
   const result: string[] = [];
   let inTable = false;
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed === CODEX_PLAYWRIGHT_TABLE) {
+    if (trimmed === header) {
       inTable = true;
       continue;
     }
@@ -566,24 +564,22 @@ function stripCodexPlaywrightTable(configText: string): string {
   return result.join("\n");
 }
 
-function withCodexPlaywrightServer(configText: string, port: number): string {
-  const stripped = stripCodexPlaywrightTable(configText);
+function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): string {
+  const stripped = stripCodexMcpTable(configText, binding.server);
   const trimmed = stripped.trimEnd();
   const separator = trimmed ? "\n\n" : "";
-  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "${playwrightMcpUrl(port)}"\n`;
+  const table = `[mcp_servers.${binding.server}]\nurl = "${binding.url}"\n`;
   return `${trimmed}${separator}${table}`;
 }
 
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
-  playwrightPort?: number,
+  mcpBindings: readonly SidecarMcpBinding[] = [],
 ): Promise<string> {
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
-  return playwrightPort === undefined
-    ? stripCodexPlaywrightTable(withTrust)
-    : withCodexPlaywrightServer(withTrust, playwrightPort);
+  return mcpBindings.reduce((text, binding) => withCodexMcpServer(text, binding), withTrust);
 }
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
@@ -621,7 +617,7 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; playwrightPort?: number },
+  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[] },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -632,7 +628,7 @@ export async function ensureCodexHooksConfig(
     next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
   }
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.playwrightPort);
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.mcpBindings ?? []);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
@@ -808,6 +804,12 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  model?: string;
+}
+
+interface CodexRolloutCandidate {
+  result: CodexRolloutReadResult;
+  mtimeMs: number;
 }
 
 function readRolloutString(value: unknown): string | undefined {
@@ -832,18 +834,20 @@ function codexRolloutStateRecord(
   };
 }
 
+function extractCodexTurnContextModel(parsed: Record<string, unknown>): string | undefined {
+  if (parsed["type"] !== "turn_context") {
+    return undefined;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  return readRolloutString(payload["model"]);
+}
+
 function extractCodexRolloutStateLine(
-  line: string,
+  parsed: Record<string, unknown>,
 ): Omit<CodexRolloutStateRecord, "filePath"> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
   const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
   if (!timestamp) {
     return null;
@@ -940,14 +944,8 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-function extractCodexRateLimitsLine(line: string): unknown {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
+  if (parsed["type"] !== "event_msg") {
     return null;
   }
   const payload = parsed["payload"];
@@ -961,32 +959,42 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
+  let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
+    // Rollout files are re-scanned on every dashboard poll, so each line is
+    // parsed once here and shared by all three extractors below.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index] ?? "");
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
     if (rateLimit === null) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
       if (detection) {
         rateLimit = detection;
       }
     }
     if (rollout === null) {
-      const state = extractCodexRolloutStateLine(line);
-      if (!state) {
-        continue;
+      const state = extractCodexRolloutStateLine(parsed);
+      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+        rollout = {
+          ...state,
+          filePath,
+        };
       }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      rollout = {
-        ...state,
-        filePath,
-      };
     }
-    if (rateLimit) {
+    if (model === undefined) {
+      model = extractCodexTurnContextModel(parsed);
+    }
+    if (rollout && rateLimit && model !== undefined) {
       break;
     }
   }
-  return { rollout, rateLimit };
+  return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
 export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
@@ -1010,7 +1018,7 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
-      if (!result.rollout && !result.rateLimit) {
+      if (!result.rollout && !result.rateLimit && !result.model) {
         return null;
       }
       let mtimeMs: number;
@@ -1023,13 +1031,24 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
     }),
   );
   const existing = candidates.filter(
-    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
-      candidate !== null,
+    (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
   if (existing.length === 0) {
     return { rollout: null, rateLimit: null };
   }
-  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  // A just-started rollout file can carry a `turn_context` model before it has
+  // any state or rate-limit line, so it loses both selections below. Rank the
+  // model on its own to keep the live model available from the first turn.
+  const model = existing
+    .filter((candidate) => candidate.result.model)
+    .reduce<CodexRolloutCandidate | null>(
+      (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+      null,
+    )?.result.model;
+  const stateful = existing.filter(
+    (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
+  );
+  const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
   if (withRollout.length > 0) {
     const best = withRollout.reduce((left, right) => {
       const leftTs = left.result.rollout?.timestampMs ?? 0;
@@ -1039,12 +1058,17 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
-    return best.result;
+    return { ...best.result, ...(model ? { model } : {}) };
   }
-  const newestByMtime = existing.reduce((left, right) =>
-    right.mtimeMs > left.mtimeMs ? right : left,
+  const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
+    (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+    null,
   );
-  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
+  return {
+    rollout: null,
+    rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(model ? { model } : {}),
+  };
 }
 
 // ── Transcript entries (unified message/tool/question timeline) ──────

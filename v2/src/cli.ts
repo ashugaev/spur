@@ -8,7 +8,7 @@ import {
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +16,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   connectProjectConfig,
+  deleteJson,
   disconnectProjectConfig,
   getJson,
   listProjects,
@@ -56,11 +57,13 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
-import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
@@ -85,15 +88,20 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
+  type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
 } from "./types.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -288,6 +296,34 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSharedMemoryList(
+  scope: SharedMemoryScope,
+  response: SharedMemoryListResponse,
+): string {
+  if (response.keys.length === 0) {
+    return dimText(`No ${scope} memory.`);
+  }
+  return response.keys.map((key) => `- ${key}`).join("\n");
+}
+
+function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
+  return `${boldText(response.entry.key)}\n${response.entry.body}`;
+}
+
+function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
+  return `Removed ${response.key}.`;
+}
+
+function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
+  const scope = typeof value === "string" ? value : "";
+  try {
+    assertValidSharedMemoryScope(scope);
+  } catch {
+    throw new Error("--scope must be task, project, or global");
+  }
+  return scope;
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -520,7 +556,7 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill",
+  action: "pause" | "complete" | "kill" | "reopen",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -928,7 +964,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -1271,7 +1307,7 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const scTmuxSession = sidecarTmuxSession(session.id, scName);
+    const scTmuxSession = firstSidecar.tmuxSession;
     try {
       if (!firstSidecar.alive) {
         await postJson<SessionView>(
@@ -1606,6 +1642,84 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function buildSubscriptionRequest(
+  targetSessionId: string,
+  rawStates: string[] | undefined,
+  rawMessage: string | undefined,
+  emptyStatesError: string,
+): SubscribeSessionStatesRequest {
+  const states = (rawStates ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error(emptyStatesError);
+  }
+  const message = rawMessage?.trim();
+  return {
+    targetSessionId,
+    states,
+    ...(message ? { message } : {}),
+  };
+}
+
+function resolveCliSpawnSubscriptions(options: {
+  subscribeTo?: string;
+  subscribeState?: string[];
+  subscribeMessage?: string;
+}): SubscribeSessionStatesRequest[] | undefined {
+  if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
+    throw new Error("--subscribe-to must be a non-empty session id");
+  }
+  const target = options.subscribeTo?.trim();
+  if (!target) {
+    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
+      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    }
+    return undefined;
+  }
+  return [
+    buildSubscriptionRequest(
+      target,
+      options.subscribeState,
+      options.subscribeMessage,
+      "--subscribe-to requires at least one --subscribe-state",
+    ),
+  ];
+}
+
+// Spawn-time subscribe targets fail silently on the server (spawn stays
+// non-fatal so a typo'd target never blocks the new session — see
+// applyRequestedStateSubscriptions). Validate here instead, before any
+// spawn side effect (tmux/worktree), so a bad --subscribe-to id is a clear
+// CLI error rather than a session that never gets its wakeup.
+async function ensureCliSpawnSubscriptionTargetsExist(
+  cliEntrypoint: string,
+  configPath: string,
+  subscriptions: SubscribeSessionStatesRequest[] | undefined,
+): Promise<void> {
+  if (!subscriptions) {
+    return;
+  }
+  for (const entry of subscriptions) {
+    try {
+      await getJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(entry.targetSessionId)}`,
+        configPath,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/session not found/i.test(message)) {
+        // Not a 404 for this target — a daemon-start failure, 500, or
+        // transport error shouldn't be relabeled as an unknown target.
+        throw error;
+      }
+      throw new Error(
+        `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+        { cause: error },
+      );
+    }
+  }
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -1617,14 +1731,14 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version(version, "-V, --version", "Show version");
+    .version(getVersion(), "-V, --version", "Show version");
 
   program
     .command("init")
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
-    .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--web-port <port>", "Web listen port (default 5555)")
     .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
@@ -1768,6 +1882,16 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--subscribe-to <sessionId>",
+      "Subscribe the new session to another session's state transitions",
+    )
+    .option(
+      "--subscribe-state <state>",
+      "State to watch for --subscribe-to; repeatable",
+      appendOptionValue,
+    )
+    .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1786,6 +1910,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
+      const subscriptions = resolveCliSpawnSubscriptions(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
@@ -1794,6 +1919,7 @@ export function createProgram(cliEntrypoint: string): Command {
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      await ensureCliSpawnSubscriptionTargetsExist(cliEntrypoint, configPath, subscriptions);
 
       let branch: string | undefined = options.branch;
 
@@ -1832,6 +1958,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(subscriptions ? { subscriptions } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -2060,7 +2187,7 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("subscribe", { hidden: true })
+    .command("subscribe")
     .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
@@ -2117,16 +2244,12 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!target) {
           throw new Error("subscribe requires a targetSessionId, --list, or --remove");
         }
-        const states = (options.state ?? []).map(parseSubscriptionState);
-        if (states.length === 0) {
-          throw new Error("subscribe requires at least one --state");
-        }
-        const message = options.message?.trim();
-        const payload: SubscribeSessionStatesRequest = {
-          targetSessionId: target,
-          states,
-          ...(message ? { message } : {}),
-        };
+        const payload = buildSubscriptionRequest(
+          target,
+          options.state,
+          options.message,
+          "subscribe requires at least one --state",
+        );
         await outputResult({
           json: Boolean(options.json),
           label: "subscribing",
@@ -2243,6 +2366,22 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("reopen")
+    .description("Restart a completed session in place, keeping its id and history.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "reopening session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        success: (session) => `Reopened ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -2374,6 +2513,120 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("memory")
+    .description("Manage shared markdown memory across task, project, and global scopes.")
+    .usage("<set|get|list|rm> [key] [body] --scope <task|project|global>")
+    .argument("<action>", "set, get, list, or rm")
+    .argument("[key]", "Memory key")
+    .argument("[body]", "Body for set (or use --file)")
+    .requiredOption("--scope <scope>", "task, project, or global")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--file <path>", "Read the set body from a file instead of the body argument")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        action: string,
+        key: string | undefined,
+        body: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const scope = parseSharedMemoryScope(options.scope);
+        const sessionId = options.session?.trim() || runningSessionId();
+        if (!sessionId) {
+          throw new Error("memory requires --session or SPUR_SESSION");
+        }
+
+        if (action === "list") {
+          if (key !== undefined || body !== undefined) {
+            throw new Error("memory list does not accept extra arguments");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading ${scope} memory`,
+            action: () =>
+              getJson<SharedMemoryListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}`,
+                configPath,
+              ),
+            render: (response) => renderSharedMemoryList(scope, response),
+          });
+          return;
+        }
+
+        if (!key) {
+          throw new Error(`memory ${action} requires a key`);
+        }
+
+        if (action === "get") {
+          if (body !== undefined) {
+            throw new Error("memory get accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading memory ${key}`,
+            action: () =>
+              getJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "set") {
+          const filePath = options.file?.trim();
+          if (body !== undefined && filePath) {
+            throw new Error("memory set accepts a body argument or --file, not both");
+          }
+          if (body === undefined && !filePath) {
+            throw new Error("memory set requires a body argument or --file");
+          }
+          const resolvedBody = filePath ? readFileSync(filePath, "utf-8") : (body as string);
+          const payload: SetSharedMemoryRequest = { body: resolvedBody };
+          await outputResult({
+            json: Boolean(options.json),
+            label: `saving memory ${key}`,
+            action: () =>
+              postJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                payload,
+                configPath,
+              ),
+            success: (response) => `Saved ${response.entry.key}.`,
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "rm") {
+          if (body !== undefined) {
+            throw new Error("memory rm accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `removing memory ${key}`,
+            action: () =>
+              deleteJson<SharedMemoryRemoveResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryRemoveResponse,
+          });
+          return;
+        }
+
+        throw new Error("memory action must be set, get, list, or rm");
+      },
+    );
 
   program
     .command("actions")
@@ -2761,6 +3014,20 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: a source-install / main-deploy host that never runs
+      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
+      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // permissions error writing into `<home>/.spur/` must never abort
+      // daemon boot, so failures are reported and swallowed, not thrown.
+      try {
+        ensureNpmPinFile();
+      } catch (error) {
+        writeStderr(
+          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",

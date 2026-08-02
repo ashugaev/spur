@@ -1,3 +1,4 @@
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "./self-destruct";
 import type { DashboardSession } from "./types";
 
 const HANDOFF_HEADER_RE = /^Task handoff from session (\S+) \((\w+)\)\./m;
@@ -164,7 +165,7 @@ export function parseSessionPromptView(session: DashboardSession): SessionPrompt
     : null;
 
   const selfDestructLabel = session.selfDestruct?.enabled
-    ? session.selfDestruct.conditions?.trim() || "the assigned task is complete"
+    ? session.selfDestruct.conditions?.trim() || DEFAULT_SELF_DESTRUCT_CONDITION
     : null;
 
   return {

@@ -349,7 +349,7 @@ describe("reinitUnits", () => {
     });
   });
 
-  it("defaults to loopback:4311 when the web unit carries no overrides", async () => {
+  it("defaults to loopback:5555 when the web unit carries no overrides", async () => {
     const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
     const unitDir = join(home, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -368,7 +368,7 @@ describe("reinitUnits", () => {
     reinitUnits("/tmp/cli.js");
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
-      webPort: "4311",
+      webPort: "5555",
       exposeWeb: false,
       tailscale: false,
     });

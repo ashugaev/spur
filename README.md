@@ -26,6 +26,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/voice.md](docs/voice.md) — voice input setup
+- [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
 - [docs/install-from-source.md](docs/install-from-source.md) — install from source
 - [SETUP.md](SETUP.md) — contributor bootstrap and local web UI development
@@ -33,6 +34,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — fixes for common local failures
 - [SECURITY.md](SECURITY.md) — reporting and network posture
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
+- [docs/design-workflow.md](docs/design-workflow.md) — Claude Design pre-implementation gate
 
 ## Repo layout
 

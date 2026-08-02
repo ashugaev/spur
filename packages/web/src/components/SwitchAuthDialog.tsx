@@ -98,8 +98,8 @@ export function SwitchAuthDialog({
           Switch Claude account
         </h2>
         <p className="mb-3 normal-case tracking-normal text-[var(--color-text-secondary)]">
-          Relaunch this Claude session under a different logged-in account. The session restarts and
-          resumes in the same worktree.
+          Session-home sessions swap credentials in place — no restart. Legacy sessions (not yet
+          launched against a session home) may relaunch once to migrate.
         </p>
         <label className="mb-3 block normal-case tracking-normal text-[var(--color-text-secondary)]">
           Account

@@ -4,13 +4,12 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
-import { shellEscape } from "./shell-escape.js";
+import { shellEscape } from "../agents/shell-escape.js";
 
 const execFileAsync = promisify(execFile);
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
-export const SPUR_PLAYWRIGHT_SESSION_ENV = "SPUR_PLAYWRIGHT_SESSION";
 
 const PLAYWRIGHT_PORT_RANGE = { start: 8730, end: 8799 } as const;
 // Host used to BIND the server process (--host). Keep on loopback IP.
@@ -30,14 +29,25 @@ let memoizedBinPath: string | undefined;
 /**
  * Resolve the absolute JS entry for the pinned @playwright/mcp bin. Runs the
  * bin directly via `node <entry>` rather than npx, so signals reach the process
- * and it does not re-resolve on every launch.
+ * and it does not re-resolve on every launch. Touches the filesystem
+ * (require.resolve) — callers must only invoke this at sidecar-start time,
+ * never at module import or config parse time (see PLAYWRIGHT_SIDECAR_CONFIG).
  */
 export function resolvePlaywrightMcpBin(): string {
   if (memoizedBinPath) {
     return memoizedBinPath;
   }
   const require = createRequire(import.meta.url);
-  const pkgJsonPath = require.resolve("@playwright/mcp/package.json");
+  let pkgJsonPath: string;
+  try {
+    pkgJsonPath = require.resolve("@playwright/mcp/package.json");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Playwright MCP sidecar unavailable: @playwright/mcp is not installed (${message})`,
+      { cause: error },
+    );
+  }
   const pkgDir = dirname(pkgJsonPath);
   const pkg = require("@playwright/mcp/package.json") as { bin?: Record<string, string> | string };
   const binField = pkg.bin;
@@ -52,27 +62,52 @@ export function playwrightMcpUrl(port: number): string {
   return `http://${PLAYWRIGHT_CLIENT_HOST}:${port}${PLAYWRIGHT_ENDPOINT_PATH}`;
 }
 
-/**
- * Built-in implicit sidecar for one Spur-owned playwright MCP server bound to
- * loopback. Built per session so the marker env carries the concrete session id
- * (tmux -e passes literal values, not shell-expanded). The port env is expanded
- * at runtime inside the sidecar pane (`bash -lc "exec ..."`).
- */
-export function buildPlaywrightSidecarConfig(sessionId: string): SidecarConfig {
-  const bin = resolvePlaywrightMcpBin();
-  return {
-    command: `node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
-    autoStart: true,
-    env: { [SPUR_PLAYWRIGHT_SESSION_ENV]: sessionId },
-    ports: {
-      http: {
-        env: SPUR_RESERVED_PORT_PLAYWRIGHT,
-        start: PLAYWRIGHT_PORT_RANGE.start,
-        end: PLAYWRIGHT_PORT_RANGE.end,
-      },
-    },
-  };
+function buildPlaywrightCommand(bin: string): string {
+  return `node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`;
 }
+
+/**
+ * Resolve the real launch command at sidecar-start time. Touches the
+ * filesystem (via resolvePlaywrightMcpBin) and throws a clear error if
+ * @playwright/mcp is not installed. Wired in as BUILTIN_SIDECARS.resolveCommand
+ * (builtins.ts) and called generically by session-service right before the
+ * sidecar pane actually starts — never at config load.
+ */
+export function resolvePlaywrightSidecarCommand(): string {
+  return buildPlaywrightCommand(resolvePlaywrightMcpBin());
+}
+
+/**
+ * Built-in implicit sidecar def for one Spur-owned playwright MCP server bound
+ * to loopback. A static template (no per-session state): the port env is
+ * expanded at runtime inside the sidecar pane (`sh -lc <command>`, no `exec`).
+ * Off by default; a project opts in via `sidecars.playwright.autoStart: true`,
+ * and `agents` scopes it to claude/codex — cursor never gets it.
+ *
+ * `command` here is a static placeholder (the bin path is never resolved from
+ * the filesystem) so importing this module, and loading config for any
+ * project, never pays the @playwright/mcp resolution cost or fails when it is
+ * missing. The real command is resolved lazily via
+ * resolvePlaywrightSidecarCommand right before the sidecar actually starts.
+ */
+export const PLAYWRIGHT_SIDECAR_CONFIG: SidecarConfig = {
+  command: buildPlaywrightCommand("@playwright/mcp/cli.js"),
+  autoStart: false,
+  agents: ["claude", "codex"],
+  ports: {
+    http: {
+      env: SPUR_RESERVED_PORT_PLAYWRIGHT,
+      start: PLAYWRIGHT_PORT_RANGE.start,
+      end: PLAYWRIGHT_PORT_RANGE.end,
+    },
+  },
+  mcp: {
+    server: PLAYWRIGHT_SIDECAR_NAME,
+    portId: "http",
+    path: PLAYWRIGHT_ENDPOINT_PATH,
+    clientHost: PLAYWRIGHT_CLIENT_HOST,
+  },
+};
 
 const READINESS_ATTEMPTS = 8;
 const READINESS_INTERVAL_MS = 250;
@@ -115,7 +150,7 @@ export interface ProcessInfo {
 /**
  * Enumerate live processes via `ps` (no shell). Malformed lines are skipped.
  */
-export async function listProcesses(): Promise<ProcessInfo[]> {
+async function listProcesses(): Promise<ProcessInfo[]> {
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="]));
@@ -212,7 +247,7 @@ const KILL_TREE_GRACE_MS = 1000;
  * SIGTERM the process and all descendants (catches chromium children), wait a
  * grace period, then SIGKILL survivors. Guards ESRCH for already-dead pids.
  */
-export async function killProcessTree(pid: number): Promise<void> {
+async function killProcessTree(pid: number): Promise<void> {
   const processes = await listProcesses();
   const tree = collectDescendants(pid, processes);
   // Kill leaves first so parents do not respawn children mid-teardown.
@@ -233,6 +268,16 @@ export async function killProcessTree(pid: number): Promise<void> {
  * roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
+  // Nothing this daemon started can be running if the package cannot be
+  // resolved, so there is nothing to sweep. Bail before isLeakedManagedPlaywright
+  // resolves it per process and throws: this runs from the boot sweep (whose
+  // caller would leave driftedSessions empty and silently skip
+  // restoreAfterReboot) and from every 60s reaper tick.
+  try {
+    resolvePlaywrightMcpBin();
+  } catch {
+    return 0;
+  }
   const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
