@@ -92,6 +92,10 @@ server {
     listen <private-ip>:5555;
     server_name _;
 
+    # Image attachments (spawn, session send, respawn) go inline as base64 in
+    # the request body. nginx's 1m default rejects them with a raw HTML 413.
+    client_max_body_size 20m;
+
     # One upstream serves the UI and the terminal WebSocket (/ws); the
     # Upgrade/Connection headers let the WS handshake pass through `/`.
     location / {

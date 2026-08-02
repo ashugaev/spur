@@ -29,8 +29,14 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
+import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
   type FileAttachment,
@@ -1665,6 +1671,7 @@ export function Dashboard() {
       };
       if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
       if (normalizedBranch) payload.branch = normalizedBranch;
@@ -1687,7 +1694,9 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn Spur session"));
+      }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
@@ -1957,7 +1966,9 @@ export function Dashboard() {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+      }
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);

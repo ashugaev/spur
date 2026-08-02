@@ -19,6 +19,7 @@ import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   imageFilesFromDataTransfer,
   fileAttachmentsFromFiles,
@@ -326,6 +327,7 @@ export function DirectTerminal({
       options: { queue: boolean; interrupt?: boolean },
     ) => {
       const encodedAttachments = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
       const body: Record<string, unknown> = {
