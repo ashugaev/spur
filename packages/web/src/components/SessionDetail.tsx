@@ -46,7 +46,7 @@ import {
 } from "@/lib/format";
 import { ARTIFACT_HTML_SANDBOX, isHtmlMimeType } from "@/lib/artifact-html";
 import { parseSessionPromptView } from "@/lib/session-prompt";
-import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
+import { isReviewLinkLabel, isTrackerLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -107,7 +107,7 @@ function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorab
 }
 
 function displayLinkLabel(label: string, url: string): string {
-  if (label === "github-pr") return "github pr";
+  if (label === "github-pr" || label === "github_pr") return "github pr";
   if (label === "gitlab-pr") return "gitlab mr";
   if (label === "pr") {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
@@ -127,7 +127,7 @@ function splitSessionLinks(
   const surfacedUrls = new Set<string>();
 
   for (const link of links) {
-    if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+    if (isTrackerLinkLabel(link.label) || isReviewLinkLabel(link.label)) {
       if (!surfacedUrls.has(link.url)) {
         surfacedLinks.push(link);
         surfacedUrls.add(link.url);

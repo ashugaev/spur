@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { renderBootstrapPrompt } from "../../../../v2/src/bootstrap-prompt.js";
 import { matchesSessionSearch } from "@/lib/session-search.js";
 import type { DashboardSession } from "@/lib/types.js";
 
@@ -32,6 +33,8 @@ function makeSession(overrides: Partial<DashboardSession> = {}): DashboardSessio
       { label: "github-pr", url: "https://github.com/acme/api/pull/742" },
       { label: "gitlab-pr", url: "https://gitlab.com/acme/api/-/merge_requests/81" },
       { label: "tracker", url: "https://jira.example.com/browse/PAY-319" },
+      { label: "github_pr", url: "https://github.com/acme/api/pull/743" },
+      { label: "jira", url: "https://jira.example.com/browse/PAY-320" },
     ],
     tags: ["backend-review"],
     hasServiceIssues: false,
@@ -50,6 +53,9 @@ describe("matchesSessionSearch", () => {
     ["#742", "GitHub pull request"],
     ["!81", "GitLab merge request"],
     ["pay-319", "tracker item"],
+    ["#743", "GitHub pull request alias"],
+    ["pay-320", "Jira link alias"],
+    ["backend-review", "tag"],
   ])("matches %s against the %s", (query) => {
     expect(matchesSessionSearch(makeSession(), query)).toBe(true);
   });
@@ -73,7 +79,8 @@ Your terminal output is invisible to them. Reply when you need input and when th
     ["runtime-only-instruction", "raw runtime prompt"],
     ["github.com/acme/api", "link URL"],
     ["github-pr", "link label"],
-    ["backend-review", "tag"],
+    ["github_pr", "link label alias"],
+    ["jira", "tracker link label alias"],
     ["task", "generic tracker fallback"],
     ["unrelated", "unrelated text"],
   ])("does not match %s from %s", (query) => {
@@ -108,6 +115,20 @@ Your terminal output is invisible to them. Reply when you need input and when th
 
     expect(() => matchesSessionSearch(session, "anything")).not.toThrow();
     expect(matchesSessionSearch(session, "anything")).toBe(false);
+  });
+
+  it("does not index generated bootstrap prompt text", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: "Payments API",
+      prefix: "pay",
+      path: "/repo/payments",
+      port: 3000,
+    });
+
+    expect(matchesSessionSearch(makeSession({ prompt, originalTaskPrompt: prompt }), "spur.yaml")).toBe(
+      false,
+    );
   });
 
   it("matches every session for a blank query", () => {

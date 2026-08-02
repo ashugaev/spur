@@ -1,5 +1,5 @@
 import { extractLinkId } from "@/lib/link-icons";
-import { parseSessionPromptView } from "@/lib/session-prompt";
+import { isGeneratedBootstrapPrompt, parseSessionPromptView } from "@/lib/session-prompt";
 import type { DashboardSession } from "@/lib/types";
 
 const VISIBLE_WORK_ITEM_ID_RE = /^(?:#\d+|!\d+|[A-Z]+-\d+)$/;
@@ -13,12 +13,14 @@ export function matchesSessionSearch(session: DashboardSession, query: string): 
   const workItemIds = session.links
     .map(extractLinkId)
     .filter((identifier) => VISIBLE_WORK_ITEM_ID_RE.test(identifier));
+  const task = parseSessionPromptView(session).task;
   const corpus = [
     session.id,
     session.title ?? "",
     session.projectName,
     session.branch ?? "",
-    parseSessionPromptView(session).task,
+    isGeneratedBootstrapPrompt(task) ? "" : task,
+    ...session.tags,
     ...workItemIds,
   ];
 

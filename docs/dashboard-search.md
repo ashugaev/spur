@@ -8,6 +8,7 @@ Session matches:
 - title
 - project name
 - branch
+- tags
 - canonical user task
 - visible GitHub pull request (`#123`), GitLab merge request (`!123`), and Jira-style tracker (`PROJ-123`) identifiers
 

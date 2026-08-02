@@ -64,7 +64,7 @@ function stripTelegramReplySuffix(text: string): string {
     : text;
 }
 
-function isBootstrapPrompt(text: string): boolean {
+export function isGeneratedBootstrapPrompt(text: string): boolean {
   if (!text.startsWith(BOOTSTRAP_HEADER_PREFIX)) {
     return false;
   }
@@ -99,9 +99,6 @@ function isBootstrapPrompt(text: string): boolean {
 
 function canonicalizeTask(text: string): string {
   const trimmed = text.trim();
-  if (isBootstrapPrompt(trimmed)) {
-    return "";
-  }
   return stripTelegramReplySuffix(trimmed);
 }
 

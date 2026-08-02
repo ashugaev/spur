@@ -374,19 +374,19 @@ Your terminal output is invisible to them. Reply when you need input and when th
     const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
     await searchInput.fill("settlement export");
 
-    await expect(page.getByText(root.id, { exact: true })).toBeVisible();
-    await expect(page.getByText(child.id, { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
     await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
 
     await searchInput.fill("#742");
 
-    await expect(page.getByText(root.id, { exact: true })).toBeVisible();
-    await expect(page.getByText(child.id, { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
     await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
 
     await searchInput.fill("terminal output");
-    await expect(page.getByText(root.id, { exact: true })).toHaveCount(0);
-    await expect(page.getByText("No matching sessions.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toHaveCount(0);
+    await expect(page.getByText("No sessions match this filter")).toBeVisible();
   });
 
   test("dashboard search shows voice controls when voice is available", async ({ page }) => {

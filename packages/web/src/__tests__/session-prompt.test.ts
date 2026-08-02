@@ -130,7 +130,7 @@ Then update the docs.`;
     expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt);
   });
 
-  it("excludes generated bootstrap configuration prompts from the user task", () => {
+  it("keeps generated bootstrap configuration prompts available for display", () => {
     expect(
       parseSessionPromptView(
         makeSession({
@@ -138,10 +138,10 @@ Then update the docs.`;
           prompt: BOOTSTRAP_PROMPT,
         }),
       ).task,
-    ).toBe("");
+    ).toBe(BOOTSTRAP_PROMPT);
   });
 
-  it("excludes generated bootstrap prompts whose display name contains quotes", () => {
+  it("keeps generated bootstrap prompts whose display name contains quotes available for display", () => {
     const prompt = renderBootstrapPrompt({
       id: "api",
       displayName: 'Bob’s "API"',
@@ -150,7 +150,7 @@ Then update the docs.`;
       port: 3000,
     });
 
-    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe("");
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt.trim());
   });
 
   it("preserves user tasks that only resemble bootstrap prose", () => {
