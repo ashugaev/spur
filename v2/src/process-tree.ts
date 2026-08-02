@@ -97,14 +97,10 @@ export function parseElapsedSeconds(etime: string): number {
     return 0;
   }
   const numbers = parts.map((part) => Number.parseInt(part, 10));
-  const [hours, minutes, seconds] =
-    numbers.length === 3 ? numbers : [0, numbers[0], numbers[1]];
-  if (
-    !Number.isFinite(days) ||
-    hours === undefined ||
-    minutes === undefined ||
-    seconds === undefined
-  ) {
+  const hours = numbers.length === 3 ? (numbers[0] ?? 0) : 0;
+  const minutes = numbers.length === 3 ? numbers[1] : numbers[0];
+  const seconds = numbers.length === 3 ? numbers[2] : numbers[1];
+  if (!Number.isFinite(days) || minutes === undefined || seconds === undefined) {
     return 0;
   }
   return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
