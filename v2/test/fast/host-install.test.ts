@@ -1005,6 +1005,82 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
   });
 });
 
+describe("collectHostInstallChecks: sidecar-orphans", () => {
+  it("reports ok:true when no leaked sidecar process trees exist", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+  });
+
+  it("degrades to ok:true when the worktree dir itself is unreadable, instead of reporting a leak", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        "worktreeDir: /nonexistent/spur-host-install-worktree-dir",
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    });
+  });
+
+  it("never writes or signals — collectHostInstallChecks stays read-only", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const killSpy = vi.spyOn(process, "kill");
+
+    await collectHostInstallChecks(fakeHome);
+
+    expect(killSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
+  });
+});
+
 describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
   it("warns when configured ui.port differs from the web unit's actual PORT", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");

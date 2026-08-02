@@ -5,7 +5,15 @@ import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
+import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import {
+  buildSidecarClaims,
+  findLeakedSidecarTrees,
+  snapshotProcesses,
+  SWEEP_DETAIL_MAX_TREES,
+} from "./sidecars/reap.js";
+import type { AppConfig, SessionStatus } from "./types.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
@@ -945,6 +953,8 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
           }
         : {}),
     });
+
+    checks.push(await checkLeakedSidecars(instanceConfig.config));
   }
 
   const daemonHost =
@@ -961,6 +971,91 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   if (drift) checks.push(drift);
 
   return checks;
+}
+
+function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
+}
+
+function formatSweepTreeLine(tree: {
+  rootPid: number;
+  pgid: number;
+  rssKb: number;
+  ageSeconds: number;
+  worktreePath: string;
+  sidecarName: string | null;
+}): string {
+  const ageMinutes = Math.floor(tree.ageSeconds / 60);
+  const hours = Math.floor(ageMinutes / 60);
+  const minutes = ageMinutes % 60;
+  const rssMb = Math.round(tree.rssKb / 1024);
+  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  age ${hours}h${minutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
+}
+
+// Read-only doctor check: calls findLeakedSidecarTrees only, never
+// sweepSidecars(reap: true) — doctor performs zero writes and zero signals.
+async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck> {
+  const sessions = listSessions(config.dataDir);
+  const claims = buildSidecarClaims(sessions, isTerminalSessionStatus);
+  const worktreePaths: string[] = [];
+  for (const session of sessions) {
+    if (!session.worktreePath) {
+      continue;
+    }
+    try {
+      worktreePaths.push(realpathSync(session.worktreePath));
+    } catch {
+      continue;
+    }
+  }
+  let worktreeDirRealpath: string;
+  try {
+    worktreeDirRealpath = realpathSync(config.worktreeDir);
+  } catch {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    };
+  }
+  const snapshot = await snapshotProcesses();
+  const { supported, leaked } = await findLeakedSidecarTrees({
+    snapshot,
+    claims,
+    worktreePaths,
+    worktreeDirRealpath,
+  });
+  if (!supported) {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: process table unreadable, sweep skipped",
+    };
+  }
+  if (leaked.length === 0) {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: none found",
+    };
+  }
+  const shown = leaked.slice(0, SWEEP_DETAIL_MAX_TREES);
+  const remaining = leaked.length - shown.length;
+  const detail = [
+    `sidecar-orphans: ${leaked.length} leaked sidecar process tree(s) found`,
+    ...shown.map(formatSweepTreeLine),
+    ...(remaining > 0 ? [`  +${remaining} more`] : []),
+  ].join("\n");
+  return {
+    id: "sidecar-orphans",
+    ok: false,
+    severity: "warn",
+    detail,
+    fix: "spur sidecar sweep --reap",
+  };
 }
 
 export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
