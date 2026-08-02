@@ -865,8 +865,10 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       : tree.reapable
         ? "reapable"
         : "report-only";
+    // Tree total, not the root pid's own rss — the root alone understated
+    // the measured 863333/863351 leak by 17x.
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.rssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`,
     );
   });
   return lines.join("\n");

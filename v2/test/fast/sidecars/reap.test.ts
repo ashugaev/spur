@@ -9,12 +9,13 @@ import {
   findLeakedSidecarTrees,
   reapRecordedIdentity,
   snapshotProcesses,
+  _isPathInsideForTests,
   _parsePsOutputForTests,
   type ProcSnapshot,
   type ProcessInfo,
   type SidecarClaim,
 } from "../../../src/sidecars/reap.js";
-import type { SessionRecord, SessionStatus } from "../../../src/types.js";
+import type { SessionRecord } from "../../../src/types.js";
 import { createTempDir } from "../../helpers/common.js";
 
 // Narrows `T | undefined` without a non-null assertion.
@@ -145,7 +146,6 @@ describe("findLeakedSidecarTrees", () => {
       [
         worktreePath,
         {
-          worktreePath,
           sidecarNames: new Set(["dev"]),
           livePgids: new Set(pgid !== undefined ? [pgid] : []),
           identityRecorded,
@@ -222,6 +222,9 @@ describe("findLeakedSidecarTrees", () => {
     expect(leaked.tree).toEqual([500, 501]);
     expect(leaked.sidecarName).toBe("dev");
     expect(leaked.reapable).toBe(true);
+    // Sum of the whole tree's rss (root 4000 + child's default 1000), not
+    // just the root pid's own 4000 — the root alone understates a leak.
+    expect(leaked.treeRssKb).toBe(5000);
   });
 
   it("flags an orphan on a worktree with no non-terminal session at all", async () => {
@@ -257,10 +260,6 @@ describe("buildSidecarClaims", () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  function isTerminal(status: SessionStatus): boolean {
-    return status === "completed" || status === "killed";
-  }
-
   function session(overrides: Partial<SessionRecord> & { id: string }): SessionRecord {
     return {
       project: "api",
@@ -282,22 +281,19 @@ describe("buildSidecarClaims", () => {
     const dir = await createTempDir("spur-reap-claims-");
     tempDirs.push(dir);
     const real = realpathSync(dir);
-    const claims = buildSidecarClaims(
-      [
-        session({
-          id: "api-1",
-          worktreePath: dir,
-          sidecarNames: ["dev"],
-          sidecarProcs: { dev: { pid: 111, pgid: 111, starttime: 1 } },
-        }),
-        session({
-          id: "api-2",
-          worktreePath: dir,
-          sidecarNames: ["preview"],
-        }),
-      ],
-      isTerminal,
-    );
+    const claims = buildSidecarClaims([
+      session({
+        id: "api-1",
+        worktreePath: dir,
+        sidecarNames: ["dev"],
+        sidecarProcs: { dev: { pid: 111, pgid: 111, starttime: 1 } },
+      }),
+      session({
+        id: "api-2",
+        worktreePath: dir,
+        sidecarNames: ["preview"],
+      }),
+    ]);
     const claim = claims.get(real);
     expect(claim?.sidecarNames).toEqual(new Set(["dev", "preview"]));
     expect(claim?.livePgids).toEqual(new Set([111]));
@@ -307,18 +303,16 @@ describe("buildSidecarClaims", () => {
   it("excludes terminal sessions from the claim set", async () => {
     const dir = await createTempDir("spur-reap-claims-");
     tempDirs.push(dir);
-    const claims = buildSidecarClaims(
-      [session({ id: "api-1", worktreePath: dir, status: "completed", sidecarNames: ["dev"] })],
-      isTerminal,
-    );
+    const claims = buildSidecarClaims([
+      session({ id: "api-1", worktreePath: dir, status: "completed", sidecarNames: ["dev"] }),
+    ]);
     expect(claims.size).toBe(0);
   });
 
   it("skips a session whose worktreePath does not resolve", () => {
-    const claims = buildSidecarClaims(
-      [session({ id: "api-1", worktreePath: "/nonexistent/path/for/spur/test" })],
-      isTerminal,
-    );
+    const claims = buildSidecarClaims([
+      session({ id: "api-1", worktreePath: "/nonexistent/path/for/spur/test" }),
+    ]);
     expect(claims.size).toBe(0);
   });
 });
@@ -365,7 +359,42 @@ describe("confirmReaps", () => {
   });
 });
 
+describe("isPathInside", () => {
+  it("never treats an empty or root parent as containing", () => {
+    expect(_isPathInsideForTests("/anything", "")).toBe(false);
+    expect(_isPathInsideForTests("/anything", "/")).toBe(false);
+  });
+
+  it("still matches a real parent/child pair", () => {
+    expect(_isPathInsideForTests("/a/b", "/a")).toBe(true);
+    expect(_isPathInsideForTests("/a", "/a")).toBe(true);
+    expect(_isPathInsideForTests("/ab", "/a")).toBe(false);
+  });
+});
+
 describe("reapRecordedIdentity", () => {
+  it("refuses to signal a leaderless group when worktreePath is empty", async () => {
+    // Backgrounds `sleep 30` and exits immediately: the child keeps the
+    // parent's pgid (no setsid), but once bash exits the group leader is
+    // gone while the group still has a live member — the exact leaderless-
+    // group shape reapLeaderlessGroup exists to handle.
+    const child = spawn("bash", ["-c", "sleep 30 & exit 0"], {
+      stdio: "ignore",
+      detached: true,
+      cwd: "/tmp",
+    });
+    const pid = must(child.pid, "expected a spawned pid");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    try {
+      const outcome = await reapRecordedIdentity({ pid, pgid: pid, starttime: 0 }, "");
+      expect(outcome).toBeNull();
+      // Nothing was signaled — the orphaned group member is still alive.
+      expect(() => process.kill(-pid, 0)).not.toThrow();
+    } finally {
+      killGroupSafely(pid);
+    }
+  });
+
   it("does not signal when the recorded starttime no longer matches (pid reused)", async () => {
     const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
     const pid = must(child.pid, "expected a spawned pid");

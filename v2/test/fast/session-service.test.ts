@@ -15323,6 +15323,47 @@ describe("SessionService", () => {
     );
   });
 
+  it("does not resurrect a stale sidecarProcs entry when the fresh pane pid is unreadable", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      // The identity clearSidecarProcEntry is supposed to drop once the
+      // dead pane is reaped. getTmuxPanePidMock defaults to null (see
+      // beforeEach), so the restart below can never read a fresh identity —
+      // this stale entry must stay cleared, not get re-persisted by the
+      // final write.
+      sidecarProcs: { dev: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarProcs");
+  });
+
   it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

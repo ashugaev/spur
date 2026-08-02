@@ -59,14 +59,11 @@ export interface PendingReap {
 export interface ReapOutcome {
   sessionName: string;
   panePid: number | null;
-  treeSize: number;
   /** Pids still alive after SIGKILL and the confirmation window. */
   survivors: readonly number[];
 }
 
 export interface SidecarClaim {
-  /** realpath of a worktree with at least one non-terminal session. */
-  worktreePath: string;
   /** Sidecar names claimed by any non-terminal session on this worktree. */
   sidecarNames: ReadonlySet<string>;
   /** pgids from `sidecarProcs` of every non-terminal session on this worktree. */
@@ -78,7 +75,6 @@ export interface SidecarClaim {
 export interface LeakedSidecarTree {
   rootPid: number;
   pgid: number;
-  rssKb: number;
   ageSeconds: number;
   /** realpath of /proc/<rootPid>/cwd. A leak is never reported without it. */
   worktreePath: string;
@@ -103,12 +99,10 @@ export interface SidecarSweepResult {
 
 /**
  * Terminal-for-sidecar-claims predicate: a session in this state can no
- * longer claim a sidecar process. session-service.ts keeps its own
- * pre-existing `isTerminalSessionStatus` (gates ~15 unrelated session-
- * lifecycle call sites); this copy is the one primitive every OTHER
- * `buildSidecarClaims`/`assembleSidecarSweepClaims` caller — currently
- * host-install.ts's doctor check — should import, instead of hand-copying
- * the same one-liner.
+ * longer claim a sidecar process. The one definition, imported by
+ * session-service.ts (which also gates ~15 unrelated session-lifecycle call
+ * sites with it) and host-install.ts's doctor check, so a "session is
+ * terminal" decision never drifts between the two copies.
  */
 export function isTerminalSessionStatus(
   status: SessionRecord["status"],
@@ -364,7 +358,6 @@ export async function confirmReaps(
     return pendings.map((pending) => ({
       sessionName: pending.sessionName,
       panePid: pending.panePid,
-      treeSize: 0,
       survivors: [],
     }));
   }
@@ -376,7 +369,6 @@ export async function confirmReaps(
       outcomes.push({
         sessionName: pending.sessionName,
         panePid: pending.panePid,
-        treeSize: 0,
         survivors: [],
       });
       continue;
@@ -417,7 +409,6 @@ export async function confirmReaps(
     outcomes.push({
       sessionName: pending.sessionName,
       panePid: pending.panePid,
-      treeSize: pending.tree.length,
       survivors,
     });
   }
@@ -432,7 +423,6 @@ export async function reapSidecarPane(sessionName: string): Promise<ReapOutcome>
     outcome ?? {
       sessionName,
       panePid: pending.panePid,
-      treeSize: pending.tree.length,
       survivors: [],
     }
   );
@@ -486,13 +476,23 @@ async function readProcCwdRealpath(pid: number): Promise<string | null> {
   }
 }
 
+// An empty or root parent is never a valid containment bound — without this
+// guard `${parent}/` normalizes to "/" and every absolute path passes. This
+// is the sole containment proof before a negative-pid signal in
+// reapLeaderlessGroup, so a vacuous-true here is a kill-safety bug.
 function isPathInside(child: string, parent: string): boolean {
+  if (!parent || parent === "/") {
+    return false;
+  }
   if (child === parent) {
     return true;
   }
   const normalizedParent = parent.endsWith("/") ? parent : `${parent}/`;
   return child.startsWith(normalizedParent);
 }
+
+// Test-only: exercises the containment guard directly.
+export const _isPathInsideForTests = isPathInside;
 
 async function reapLeaderlessGroup(
   identity: SidecarProcessIdentity,
@@ -581,10 +581,7 @@ export async function reapRecordedIdentity(
  * (session-desk.ts), so this union is exactly "all non-terminal workspace
  * members" with no workspace resolution inside this module.
  */
-export function buildSidecarClaims(
-  sessions: readonly SessionRecord[],
-  isTerminalStatus: (status: SessionRecord["status"]) => boolean,
-): Map<string, SidecarClaim> {
+export function buildSidecarClaims(sessions: readonly SessionRecord[]): Map<string, SidecarClaim> {
   interface MutableClaim {
     sidecarNames: Set<string>;
     livePgids: Set<number>;
@@ -592,7 +589,7 @@ export function buildSidecarClaims(
   }
   const claims = new Map<string, MutableClaim>();
   for (const session of sessions) {
-    if (isTerminalStatus(session.status) || !session.worktreePath) {
+    if (isTerminalSessionStatus(session.status) || !session.worktreePath) {
       continue;
     }
     let worktreePath: string;
@@ -620,7 +617,7 @@ export function buildSidecarClaims(
   }
   const result = new Map<string, SidecarClaim>();
   for (const [worktreePath, claim] of claims) {
-    result.set(worktreePath, { worktreePath, ...claim });
+    result.set(worktreePath, claim);
   }
   return result;
 }
@@ -643,9 +640,8 @@ export interface SidecarSweepClaims {
 export function assembleSidecarSweepClaims(
   sessions: readonly SessionRecord[],
   worktreeDir: string,
-  isTerminalStatus: (status: SessionRecord["status"]) => boolean,
 ): SidecarSweepClaims | null {
-  const claims = buildSidecarClaims(sessions, isTerminalStatus);
+  const claims = buildSidecarClaims(sessions);
   const worktreePaths: string[] = [];
   for (const session of sessions) {
     if (!session.worktreePath) {
@@ -730,7 +726,6 @@ export async function findLeakedSidecarTrees(
     leaked.push({
       rootPid: info.pid,
       pgid: info.pgid,
-      rssKb: info.rssKb,
       ageSeconds: info.etimes,
       worktreePath: owner,
       args: info.args,

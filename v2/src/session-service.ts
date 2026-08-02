@@ -41,6 +41,7 @@ import {
 import {
   assembleSidecarSweepClaims,
   confirmReaps,
+  isTerminalSessionStatus,
   reapRecordedIdentity,
   reapSidecarPane,
   readProcessStarttime,
@@ -611,10 +612,6 @@ function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: st
     return symlinks;
   }
   return [...symlinks, ".cursor/.workspace-trusted"];
-}
-
-function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
-  return status === "completed" || status === "killed";
 }
 
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
@@ -3722,21 +3719,34 @@ export class SessionService {
             : undefined;
 
         const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+        // clearSidecarProcEntry above already dropped this name from disk
+        // when the pane was dead — reservedSession can still be a stale
+        // in-memory copy from before that write (ensureSidecarReservation
+        // returns the untouched `session` param when the sidecar has no
+        // ports to reserve). Build sidecarProcs explicitly rather than
+        // trusting the `...reservedSession` spread, so an unreadable
+        // identity persists as cleared instead of resurrecting the stale
+        // pgid clearSidecarProcEntry just removed.
+        const sidecarProcsWithoutStale = Object.fromEntries(
+          Object.entries(reservedSession.sidecarProcs ?? {}).filter(
+            ([name]) => name !== args.sidecarName,
+          ),
+        );
+        const nextSidecarProcs = identity
+          ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
+          : sidecarProcsWithoutStale;
         const updated: SessionRecord = {
           ...reservedSession,
           updatedAt: nowIso(),
           ...(sidecarNames.includes(args.sidecarName)
             ? {}
             : { sidecarNames: [...sidecarNames, args.sidecarName] }),
-          ...(identity
-            ? {
-                sidecarProcs: {
-                  ...(reservedSession.sidecarProcs ?? {}),
-                  [args.sidecarName]: identity,
-                },
-              }
-            : {}),
         };
+        if (Object.keys(nextSidecarProcs).length > 0) {
+          updated.sidecarProcs = nextSidecarProcs;
+        } else {
+          delete updated.sidecarProcs;
+        }
         writeSession(this.config.dataDir, updated);
         this.scheduleSidecarUrlReadyAndPublish(
           reservedSession.id,
@@ -7500,11 +7510,7 @@ export class SessionService {
   // and never reaches this method, keeping doctor read-only.
   async sweepSidecarProcesses(reap: boolean): Promise<SidecarSweepResult> {
     const sessions = listSessions(this.config.dataDir);
-    const assembled = assembleSidecarSweepClaims(
-      sessions,
-      this.config.worktreeDir,
-      isTerminalSessionStatus,
-    );
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
     if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }

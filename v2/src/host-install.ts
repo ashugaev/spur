@@ -10,7 +10,6 @@ import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
   assembleSidecarSweepClaims,
   findLeakedSidecarTrees,
-  isTerminalSessionStatus,
   snapshotProcesses,
   SWEEP_DETAIL_MAX_TREES,
 } from "./sidecars/reap.js";
@@ -977,7 +976,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
 function formatSweepTreeLine(tree: {
   rootPid: number;
   pgid: number;
-  rssKb: number;
+  treeRssKb: number;
   ageSeconds: number;
   worktreePath: string;
   sidecarName: string | null;
@@ -985,7 +984,9 @@ function formatSweepTreeLine(tree: {
   const ageMinutes = Math.floor(tree.ageSeconds / 60);
   const hours = Math.floor(ageMinutes / 60);
   const minutes = ageMinutes % 60;
-  const rssMb = Math.round(tree.rssKb / 1024);
+  // Tree total, not the root pid's own rss — the root alone understated the
+  // measured 863333/863351 leak by 17x.
+  const rssMb = Math.round(tree.treeRssKb / 1024);
   return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  age ${hours}h${minutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
 }
 
@@ -993,11 +994,7 @@ function formatSweepTreeLine(tree: {
 // sweepSidecars(reap: true) — doctor performs zero writes and zero signals.
 async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck> {
   const sessions = listSessions(config.dataDir);
-  const assembled = assembleSidecarSweepClaims(
-    sessions,
-    config.worktreeDir,
-    isTerminalSessionStatus,
-  );
+  const assembled = assembleSidecarSweepClaims(sessions, config.worktreeDir);
   if (!assembled) {
     return {
       id: "sidecar-orphans",
