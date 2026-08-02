@@ -43,6 +43,7 @@ import {
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
+import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -55,7 +56,6 @@ import {
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
-  sessionMatchesQuery,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -156,7 +156,7 @@ function sessionMatchesFacetFilters(
   ) {
     return false;
   }
-  if (filters.searchQuery && !sessionMatchesQuery(session, filters.searchQuery)) {
+  if (filters.searchQuery && !matchesSessionSearch(session, filters.searchQuery)) {
     return false;
   }
   if (exclude !== "prReady" && filters.prReadyOnly && filters.prReady.loaded) {
@@ -1335,9 +1335,10 @@ export function Dashboard() {
   }, [agentFilteredSessions, prReadyOnly, prReady]);
 
   const sessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return prReadyFilteredSessions;
-    const narrowed = prReadyFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
+    if (!searchQuery.trim()) return prReadyFilteredSessions;
+    const narrowed = prReadyFilteredSessions.filter((session) =>
+      matchesSessionSearch(session, searchQuery),
+    );
     const keys = new Set(narrowed.map((s) => s.deskKey));
     return prReadyFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [prReadyFilteredSessions, searchQuery]);

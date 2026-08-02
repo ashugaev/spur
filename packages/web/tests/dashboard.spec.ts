@@ -341,6 +341,54 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
   });
 
+  test("dashboard search matches canonical tasks and work items while preserving desks", async ({
+    page,
+  }) => {
+    const telegramSuffix = `
+
+Source: telegram. The requester only sees messages you send with:
+spur source reply "<message>"
+Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
+    const root = makeWorkingSession({
+      id: "search-desk-root",
+      prompt: `Repair settlement export${telegramSuffix}`,
+      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      slots: {
+        title: "Settlement repair",
+        links: [{ label: "github-pr", url: "https://github.com/acme/payments/pull/742" }],
+      },
+    });
+    const child = makeWorkingSession({
+      id: "search-desk-child",
+      deskId: root.id,
+      prompt: "Validate downstream ledger",
+      slots: { title: "Ledger validation", links: [] },
+    });
+    const unrelated = makeWorkingSession({
+      id: "search-unrelated",
+      prompt: "Update dependency pins",
+    });
+    await mockSessions(page, [root, child, unrelated]);
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await searchInput.fill("settlement export");
+
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
+    await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
+
+    await searchInput.fill("#742");
+
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
+    await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
+
+    await searchInput.fill("terminal output");
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toHaveCount(0);
+    await expect(page.getByText("No sessions match this filter")).toBeVisible();
+  });
+
   test("dashboard search shows voice controls when voice is available", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
     await page.route("**/api/runtime/voice", (route) => {
