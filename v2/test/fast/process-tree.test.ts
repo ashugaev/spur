@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   canReadProcessTree,
   classifyProcessOwnership,
+  collectDescendants,
+  parseElapsedSeconds,
+  type ProcessSnapshotEntry,
   type PpidReader,
 } from "../../src/process-tree.js";
 
@@ -48,5 +51,50 @@ describe("canReadProcessTree", () => {
 
   it("is false when procfs cannot be read", async () => {
     expect(await canReadProcessTree(999, reader)).toBe(false);
+  });
+});
+
+describe("parseElapsedSeconds", () => {
+  it("parses MM:SS", () => {
+    expect(parseElapsedSeconds("05:03")).toBe(5 * 60 + 3);
+  });
+
+  it("parses HH:MM:SS", () => {
+    expect(parseElapsedSeconds("01:05:03")).toBe(1 * 3_600 + 5 * 60 + 3);
+  });
+
+  it("parses D-HH:MM:SS", () => {
+    expect(parseElapsedSeconds("2-01:05:03")).toBe(2 * 86_400 + 1 * 3_600 + 5 * 60 + 3);
+  });
+
+  it("returns 0 on an unparseable token", () => {
+    expect(parseElapsedSeconds("garbage")).toBe(0);
+    expect(parseElapsedSeconds("")).toBe(0);
+    expect(parseElapsedSeconds("1:2:3:4")).toBe(0);
+  });
+});
+
+describe("collectDescendants", () => {
+  const table: ProcessSnapshotEntry[] = [
+    { pid: 100, ppid: 1, rssKb: 1000, elapsedSeconds: 10, args: "root" },
+    { pid: 200, ppid: 100, rssKb: 1000, elapsedSeconds: 10, args: "child" },
+    { pid: 300, ppid: 200, rssKb: 1000, elapsedSeconds: 10, args: "grandchild" },
+    { pid: 400, ppid: 1, rssKb: 1000, elapsedSeconds: 10, args: "unrelated" },
+  ];
+
+  it("collects root plus descendants, root first", () => {
+    expect(collectDescendants(100, table)).toEqual([100, 200, 300]);
+  });
+
+  it("excludes unrelated processes", () => {
+    expect(collectDescendants(100, table)).not.toContain(400);
+  });
+
+  it("is bounded against a ppid cycle", () => {
+    const cyclic: ProcessSnapshotEntry[] = [
+      { pid: 500, ppid: 600, rssKb: 1000, elapsedSeconds: 10, args: "a" },
+      { pid: 600, ppid: 500, rssKb: 1000, elapsedSeconds: 10, args: "b" },
+    ];
+    expect(collectDescendants(500, cyclic).sort()).toEqual([500, 600]);
   });
 });

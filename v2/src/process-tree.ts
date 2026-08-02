@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 // Resolves a process' parent pid. Returns null when the pid cannot be read
 // (dead process, proc race, or no procfs on this platform).
@@ -69,4 +73,154 @@ export async function canReadProcessTree(
   readPpid: PpidReader = readPpidFromProc,
 ): Promise<boolean> {
   return (await readPpid(pid)) !== null;
+}
+
+export interface ProcessSnapshotEntry {
+  pid: number;
+  ppid: number;
+  rssKb: number;
+  elapsedSeconds: number;
+  args: string;
+}
+
+// Parses a POSIX `ps -o etime=` token: "MM:SS", "HH:MM:SS", or
+// "D-HH:MM:SS". Returns 0 on anything that does not match — callers use this
+// as "age unknown", never as a hard failure (etime formatting is
+// procps-specific and not worth failing the whole snapshot over).
+export function parseElapsedSeconds(etime: string): number {
+  const trimmed = etime.trim();
+  const dayMatch = /^(\d+)-(.+)$/.exec(trimmed);
+  const days = dayMatch ? Number.parseInt(dayMatch[1] ?? "", 10) : 0;
+  const rest = dayMatch ? (dayMatch[2] ?? "") : trimmed;
+  const parts = rest.split(":");
+  if (parts.length < 2 || parts.length > 3 || !parts.every((part) => /^\d+$/.test(part))) {
+    return 0;
+  }
+  const numbers = parts.map((part) => Number.parseInt(part, 10));
+  const [hours, minutes, seconds] =
+    numbers.length === 3 ? numbers : [0, numbers[0], numbers[1]];
+  if (
+    !Number.isFinite(days) ||
+    hours === undefined ||
+    minutes === undefined ||
+    seconds === undefined
+  ) {
+    return 0;
+  }
+  return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
+// One `ps -eo pid=,ppid=,rss=,etime=,args=` fork (execFile, no shell).
+// Malformed rows are skipped. Never throws — a failed `ps` reads as "no
+// processes", the same degrade-quietly contract as the rest of this module.
+export async function listProcesses(): Promise<ProcessSnapshotEntry[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,rss=,etime=,args="]));
+  } catch {
+    return [];
+  }
+  const processes: ProcessSnapshotEntry[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const rssKb = Number(match[3]);
+    const etime = match[4] ?? "";
+    const args = match[5] ?? "";
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isInteger(rssKb)) continue;
+    processes.push({ pid, ppid, rssKb, elapsedSeconds: parseElapsedSeconds(etime), args });
+  }
+  return processes;
+}
+
+// BFS over ppid links, root first (root included). A cycle cannot loop
+// forever: `seen` is checked before a pid is queued.
+export function collectDescendants(
+  rootPid: number,
+  processes: readonly ProcessSnapshotEntry[],
+): number[] {
+  const childrenByPpid = new Map<number, number[]>();
+  for (const proc of processes) {
+    const list = childrenByPpid.get(proc.ppid) ?? [];
+    list.push(proc.pid);
+    childrenByPpid.set(proc.ppid, list);
+  }
+  const ordered: number[] = [];
+  const seen = new Set<number>([rootPid]);
+  const queue: number[] = [rootPid];
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (pid === undefined) break;
+    ordered.push(pid);
+    for (const child of childrenByPpid.get(pid) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+    }
+  }
+  return ordered;
+}
+
+// Alive unless the signal-0 probe fails with ESRCH. EPERM (or any other
+// errno) counts as alive: the process exists, this caller just cannot signal
+// it. This is the canonical copy — playwright.ts's leak sweep uses it.
+// workspace.ts:100, ids.ts:20 and update.ts:139 each keep a deliberately
+// different errno policy for their own call site (rethrow-unknown,
+// EPERM-only, etc.) and are intentionally NOT consolidated onto this one.
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+// Best-effort signal send. Swallows ESRCH (already dead) and any other
+// errno — the caller is doing a best-effort teardown sweep, not depending on
+// the signal landing.
+export function signalPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Not actionable here; the poll loop that follows observes the outcome.
+  }
+}
+
+// "ok" = the read succeeded, `value` is the var's value (or undefined if the
+// var is absent from that process' environment) — distinct from "unreadable"
+// (dead pid, a proc race, permission, or no procfs at all).
+export type ProcessEnvRead =
+  | { status: "ok"; value: string | undefined }
+  | { status: "unreadable" };
+
+// Linux /proc/<pid>/environ only: a NUL-separated KEY=VALUE blob. There is no
+// portable equivalent (macOS does not expose another process' environment to
+// an unprivileged reader), so this is deliberately Linux-only.
+export async function readProcessEnvValue(pid: number, key: string): Promise<ProcessEnvRead> {
+  let content: string;
+  try {
+    content = await readFile(`/proc/${pid}/environ`, "utf8");
+  } catch {
+    return { status: "unreadable" };
+  }
+  const prefix = `${key}=`;
+  for (const entry of content.split("\0")) {
+    if (entry.startsWith(prefix)) {
+      return { status: "ok", value: entry.slice(prefix.length) };
+    }
+  }
+  return { status: "ok", value: undefined };
+}
+
+// Platform capability probe: can this process read process environments at
+// all, evaluated against itself (always readable if procfs exists and is
+// readable). False on macOS or anywhere without procfs; callers must treat
+// that as "cannot tell", never as "no processes found".
+export async function canReadProcessEnv(): Promise<boolean> {
+  return (await readProcessEnvValue(process.pid, "PATH")).status === "ok";
 }
