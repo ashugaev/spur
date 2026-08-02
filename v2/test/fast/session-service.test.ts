@@ -15364,6 +15364,58 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarProcs");
   });
 
+  it("reaps the recorded sidecar identity before restarting when the tmux session is gone entirely, not merely pane-dead", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      // A pid this improbable is certain to be unreadable in /proc — the
+      // reap degrades to "do not signal", but the stale identity must still
+      // be cleared instead of silently carried into the new instance.
+      sidecarProcs: { dev: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+    });
+    // The tmux session/window is gone entirely — sidecarTmuxAlive is false,
+    // so paneDead short-circuits to false too. Before this fix, that skipped
+    // both the paneDead reap branch AND the !alive one, starting a new
+    // instance on the same reserved port without ever consulting the
+    // recorded sidecarProcs identity.
+    sidecarTmuxAliveMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+    );
+    expect(
+      writeSessionMock.mock.calls.some((call) => {
+        const record = call[1] as { sidecarProcs?: Record<string, unknown> } | undefined;
+        return record?.sidecarProcs?.["dev"] !== undefined;
+      }),
+    ).toBe(false);
+  });
+
   it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

@@ -3652,6 +3652,20 @@ export class SessionService {
       if (paneDead) {
         await this.reapSidecarByName(args.session.id, args.sidecarName);
         this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+      } else if (!alive) {
+        // tmux session/window is gone entirely (killed externally, crashed)
+        // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
+        // fall through to the recorded sidecarProcs identity — the exact
+        // leak shape reapRecordedIdentity targets — before reserving the
+        // port for a new instance, or a still-live escapee tree from the
+        // old instance keeps running under the reused port.
+        const owner = readSession(this.config.dataDir, args.session.id);
+        const identity = owner?.sidecarProcs?.[args.sidecarName];
+        if (owner && identity) {
+          const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+          this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
+        }
+        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
       }
 
       // Built-ins may defer command resolution (e.g. a bundle-resolved bin
@@ -3720,7 +3734,8 @@ export class SessionService {
 
         const sidecarNames = sessionSidecarNames(reservedSession, args.project);
         // clearSidecarProcEntry above already dropped this name from disk
-        // when the pane was dead — reservedSession can still be a stale
+        // when the pane was dead or the tmux session was gone —
+        // reservedSession can still be a stale
         // in-memory copy from before that write (ensureSidecarReservation
         // returns the untouched `session` param when the sidecar has no
         // ports to reserve). Build sidecarProcs explicitly rather than
