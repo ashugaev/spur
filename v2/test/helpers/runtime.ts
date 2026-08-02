@@ -123,7 +123,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+function fakeAgentScript(
+  agentName: "claude" | "codex" | "cursor",
+  options?: { hupResistant?: boolean },
+): string {
+  // Opt-in only: real agents don't ignore SIGHUP, and the terminate-then-
+  // confirm guard's own default grace windows assume it lands. This exists
+  // solely so a runtime test can force the SIGKILL path deterministically.
+  const hupTrap = options?.hupResistant ? "\ntrap '' HUP" : "";
   const header =
     agentName === "claude"
       ? "Claude Code"
@@ -155,7 +162,7 @@ fi
 # the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
 # action kills the script, so the interrupt drops the process instead of
 # just clearing its input line, and the send never reaches the read loop.
-trap '' INT
+trap '' INT${hupTrap}
 mode="launch"
 resume_id=""
 pinned_session_id=""
@@ -446,7 +453,7 @@ $extra"
   esac
 done`
       : agentName === "codex"
-        ? `trap '' INT
+        ? `trap '' INT${hupTrap}
 codex_paste_start=$'\\e[200~'
 codex_paste_end=$'\\e[201~'
 codex_buffer=""
@@ -906,7 +913,7 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 
 export async function createRuntimeTestContext(
   port: number,
-  options?: { useFakeTools?: boolean },
+  options?: { useFakeTools?: boolean; hupResistantAgents?: boolean },
 ): Promise<RuntimeTestContext> {
   _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
@@ -917,14 +924,19 @@ export async function createRuntimeTestContext(
   const agentLogDir = join(rootDir, "agent-logs");
   const ghStateFile = join(rootDir, "gh-state.json");
   const useFakeTools = options?.useFakeTools ?? true;
+  const hupResistant = options?.hupResistantAgents ?? false;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
   await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
   if (useFakeTools) {
-    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
-    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
-    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
-    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
+    const agentScriptOptions = { hupResistant };
+    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude", agentScriptOptions));
+    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex", agentScriptOptions));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor", agentScriptOptions));
+    await writeExecutable(
+      join(fakeBinDir, "cursor-agent"),
+      fakeAgentScript("cursor", agentScriptOptions),
+    );
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
