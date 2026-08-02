@@ -480,6 +480,33 @@ describe("sidecarProcs", () => {
 
     expect(readSession(dataDir, "api-1")?.sidecarProcs).toBeUndefined();
   });
+
+  it("drops a null entry instead of throwing on read (hand-edited/corrupted JSON)", async () => {
+    // writeSession's own normalizeSessionRecord would filter this out before
+    // it ever hits disk, so a bad entry can only originate from a file
+    // written outside that path — write raw JSON directly to simulate it.
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-1.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify({
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarProcs: {
+          dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+          broken: null,
+        },
+      })}\n`,
+    );
+
+    expect(() => readSession(dataDir, "api-1")).not.toThrow();
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
 });
 
 describe("session metadata PR migration", () => {
