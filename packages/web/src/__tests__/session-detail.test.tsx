@@ -982,6 +982,58 @@ describe("SessionDetail voice input", () => {
     expect(respawnPosts).toBe(1);
   });
 
+  it("asks to force-kill and discard the worktree when the daemon requires kill confirmation", async () => {
+    // readApiErrorMessage unwraps the JSON {error: "..."} body, so this prefix
+    // match can finally fire (previously `await response.text()` returned the
+    // whole JSON string and the prefix check silently never matched).
+    const respawnCalls: Array<Record<string, unknown>> = [];
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        respawnCalls.push(body);
+        if (!body.forceKillSource) {
+          return new Response(
+            JSON.stringify({
+              error: "Kill confirmation required: worktree has uncommitted changes",
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), {
+          status: 200,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+    });
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "Kill confirmation required: worktree has uncommitted changes\n\nRespawn anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?",
+    );
+    expect(respawnCalls).toHaveLength(2);
+    expect(respawnCalls[0]?.forceKillSource).toBeUndefined();
+    expect(respawnCalls[1]?.forceKillSource).toBe(true);
+  });
+
   it("defaults the respawn agent select to the session agent", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

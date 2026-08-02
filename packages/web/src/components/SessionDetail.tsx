@@ -54,11 +54,18 @@ import {
   withTerminalQuery,
 } from "@/lib/project-routes";
 import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import {
@@ -1515,27 +1522,6 @@ interface SessionDetailProps {
   projectId?: string;
 }
 
-async function readApiError(response: Response, fallback: string): Promise<string> {
-  const text = await response.text();
-  if (!text) {
-    return fallback;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    try {
-      const payload = JSON.parse(text) as unknown;
-      if (typeof payload === "object" && payload !== null && "error" in payload) {
-        return String((payload as { error?: unknown }).error ?? fallback);
-      }
-    } catch {
-      return fallback;
-    }
-  }
-
-  return text;
-}
-
 function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
   if (typeof value !== "object" || value === null) return false;
   const payload = value as Partial<SpurSidecarPortConflict>;
@@ -1686,7 +1672,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         return;
       }
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to load session"));
+        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
       if (
@@ -1729,7 +1715,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           body: JSON.stringify(change),
         });
         if (!response.ok) {
-          throw new Error(await readApiError(response, "Failed to update tags"));
+          throw new Error(await readApiErrorMessage(response, "Failed to update tags"));
         }
         await loadSession();
       } catch (tagError) {
@@ -1968,6 +1954,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeFileAttachments(respawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
@@ -1977,7 +1964,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to respawn session"));
+      }
       const data = (await response.json()) as SpurSessionView;
       respawnHistory.saveEntry(nextPrompt);
       setRespawnOpen(false);
@@ -2020,7 +2009,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
+      }
       const data = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(data));
       setSwitchAuthOpen(false);
@@ -2055,7 +2046,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to hand off session"));
+        throw new Error(await readApiErrorMessage(response, "Failed to hand off session"));
       }
       const data = (await response.json()) as SpurSessionView;
       setHandoffOpen(false);
@@ -2088,6 +2079,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     deskSpawningRef.current = true;
     setDeskSpawning(true);
     try {
+      assertAttachmentsWithinLimit(encodedAttachments);
       const payload: Record<string, unknown> = {
         projectId: session.projectId,
         prompt: nextPrompt,
@@ -2106,7 +2098,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to spawn desk agent"));
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn desk agent"));
       }
       const created = (await response.json()) as SpurSessionView;
       deskSpawnHistory.saveEntry(nextPrompt);
@@ -2148,7 +2140,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             return;
           }
         }
-        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+        throw new Error(
+          await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
+        );
       }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
@@ -2179,19 +2173,46 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const addFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addRespawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setRespawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addDeskSpawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setDeskSpawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
@@ -2217,11 +2238,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sendingRef.current = true;
     try {
       const encoded = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encoded);
       const body: Record<string, unknown> = { message: trimmed };
       if (encoded.length > 0) body.attachments = encoded;
       if (options?.queue !== undefined) body.queue = options.queue;
       if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
       await handleAction("send", body);
+    } catch (sendError) {
+      showErrorToast(errorMessage(sendError, "Failed to send session message"));
     } finally {
       sendingRef.current = false;
     }
