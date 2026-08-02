@@ -110,6 +110,13 @@ function emptySnapshot(): ProcSnapshot {
 }
 
 const PS_SNAPSHOT_ARGS = ["-eo", "pid=,ppid=,pgid=,rss=,etimes=,args="];
+// Node's execFile default is 1 MiB; a busy host's full process table can
+// exceed that and hit ENOBUFS, which this module's catch degrades to a
+// silent empty snapshot (report-first design: never a false leak, but also
+// never a log). 10 MiB matches this repo's other execFile callers (gh.ts).
+// Exported so every `ps` invocation in the sidecar sweep family (including
+// playwright.ts's portable fallback) shares the one buffer policy.
+export const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const PS_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/;
 
 function parsePsOutput(stdout: string): ProcSnapshot {
@@ -152,7 +159,10 @@ export const _parsePsOutputForTests = parsePsOutput;
 export async function snapshotProcesses(): Promise<ProcSnapshot> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("ps", PS_SNAPSHOT_ARGS, { timeout: 5_000 }));
+    ({ stdout } = await execFileAsync("ps", PS_SNAPSHOT_ARGS, {
+      timeout: 5_000,
+      maxBuffer: PS_MAX_BUFFER_BYTES,
+    }));
   } catch {
     return emptySnapshot();
   }
@@ -713,20 +723,27 @@ export async function findLeakedSidecarTrees(
     const matchingNames = claim
       ? [...claim.sidecarNames].filter((name) => info.args.includes(name))
       : [];
-    // Worktree-level trust boundary, not per-tree: identityRecorded says this
-    // worktree has ever tracked sidecar identity, not that this specific
-    // orphan tree was ever tracked. A worktree with one identity-recorded
-    // sidecar and a second, unrelated untracked leak marks both reapable.
-    // Correct by construction for a true orphan (nothing left to correlate
-    // against) but worth remembering when reading `reapable` in isolation.
-    const reapable = claim === undefined || claim.identityRecorded === true;
+    const sidecarName = matchingNames.length === 1 ? (matchingNames[0] ?? null) : null;
+    // Two independent gates, both required when a live claim exists:
+    // - identityRecorded: the worktree's session has ever recorded sidecar
+    //   identity at all. False means it predates identity recording — the
+    //   accepted limitation is that such leaks are report-only, never
+    //   reapable, no matter what.
+    // - sidecarName !== null: this specific orphan's own args name one of
+    //   the worktree's known sidecars. Without it, `identityRecorded` alone
+    //   would let any unrelated orphan under the worktree (e.g. an agent's
+    //   stray `nohup ... &`) ride along once the worktree has recorded
+    //   identity for some other, unrelated sidecar.
+    // With no claim at all (worktree has no non-terminal session), there's
+    // nothing left to attribute against, so any orphan there is fair game.
+    const reapable = claim === undefined || (claim.identityRecorded && sidecarName !== null);
     leaked.push({
       rootPid: info.pid,
       pgid: info.pgid,
       ageSeconds: info.etimes,
       worktreePath: owner,
       args: info.args,
-      sidecarName: matchingNames.length === 1 ? (matchingNames[0] ?? null) : null,
+      sidecarName,
       tree,
       treeRssKb,
       reapable,

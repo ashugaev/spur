@@ -252,6 +252,27 @@ describe("findLeakedSidecarTrees", () => {
     expect(result.leaked).toHaveLength(1);
     expect(must(result.leaked[0], "expected one leaked tree").reapable).toBe(false);
   });
+
+  it("reports but refuses to reap an unrelated orphan even when the worktree has recorded identity", async () => {
+    // identityRecorded=true (some other sidecar on this worktree has been
+    // tracked), but this orphan's own args don't name any known sidecar —
+    // e.g. a stray `nohup ... &` left behind by an agent. identityRecorded
+    // alone must not be enough to sweep it.
+    const snapshot = snapshotFrom([
+      info({ pid: 800, ppid: 1, pgid: 800, args: "nohup some-unrelated-script.sh" }),
+    ]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: claimsWithLivePgid(999, true),
+      worktreePaths: [worktreePath],
+      worktreeDirRealpath: worktreeDir,
+      readCwd: async () => worktreePath,
+    });
+    expect(result.leaked).toHaveLength(1);
+    const leaked = must(result.leaked[0], "expected one leaked tree");
+    expect(leaked.sidecarName).toBeNull();
+    expect(leaked.reapable).toBe(false);
+  });
 });
 
 describe("buildSidecarClaims", () => {
