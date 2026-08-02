@@ -8,7 +8,8 @@ import {
   fileAttachmentsFromFiles,
   filesFromDataTransfer,
   imageFilesFromDataTransfer,
-  MAX_ATTACHMENTS_PAYLOAD_BYTES,
+  MAX_ATTACHMENT_COUNT,
+  MAX_ATTACHMENT_DECODED_BYTES,
   shouldDownscaleImage,
 } from "@/lib/file-attachments";
 
@@ -176,18 +177,62 @@ describe("assertAttachmentsWithinLimit", () => {
     ).not.toThrow();
   });
 
-  it("throws the shared oversize message when the encoded payload exceeds the limit", () => {
-    const encoded = [{ name: "a.png", data: "a".repeat(MAX_ATTACHMENTS_PAYLOAD_BYTES + 1) }];
+  // Each attachment below stays at or under the per-file decoded cap (item 4)
+  // so these tests isolate the aggregate check; sizing one attachment past
+  // the aggregate cap alone would also trip the per-file cap first.
+  const AT_CAP_BASE64_LENGTH = Math.floor((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3);
+
+  it("throws the shared oversize message when the aggregate exceeds the limit though every attachment is within the per-file cap", () => {
+    const encoded = [
+      { name: "a.png", data: "a".repeat(AT_CAP_BASE64_LENGTH) },
+      { name: "b.png", data: "b".repeat(AT_CAP_BASE64_LENGTH) },
+      { name: "c.png", data: "c".repeat(AT_CAP_BASE64_LENGTH) },
+    ];
     expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(ATTACHMENTS_TOO_LARGE_MESSAGE);
   });
 
   it("sums bytes across multiple attachments", () => {
-    const half = Math.ceil(MAX_ATTACHMENTS_PAYLOAD_BYTES / 2) + 1;
+    const each = 4_000_000; // safely under the per-file cap on its own
     const encoded = [
-      { name: "a.png", data: "a".repeat(half) },
-      { name: "b.png", data: "b".repeat(half) },
+      { name: "a.png", data: "a".repeat(each) },
+      { name: "b.png", data: "b".repeat(each) },
+      { name: "c.png", data: "c".repeat(each) },
+      { name: "d.png", data: "d".repeat(each) },
     ];
     expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  });
+
+  it("throws naming the offending file when one attachment's decoded size exceeds the per-file cap", () => {
+    // v2/src/session-service.ts rejects a single attachment whose decoded
+    // bytes exceed 5 MB even if the aggregate request is small.
+    const oversizedBase64Length = Math.ceil((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3) + 100;
+    const encoded = [
+      { name: "small.png", data: "a".repeat(100) },
+      { name: "huge-screenshot.gif", data: "b".repeat(oversizedBase64Length) },
+    ];
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(/huge-screenshot\.gif/);
+  });
+
+  it("does not throw when a single attachment's decoded size is exactly at the per-file cap", () => {
+    const atCapBase64Length = Math.floor((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3);
+    const encoded = [{ name: "a.png", data: "a".repeat(atCapBase64Length) }];
+    expect(() => assertAttachmentsWithinLimit(encoded)).not.toThrow();
+  });
+
+  it("throws when the attachment count exceeds the server's per-request cap", () => {
+    const encoded = Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, i) => ({
+      name: `a${i}.png`,
+      data: "a".repeat(10),
+    }));
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(/too many attachments/i);
+  });
+
+  it("does not throw at exactly the attachment count cap", () => {
+    const encoded = Array.from({ length: MAX_ATTACHMENT_COUNT }, (_, i) => ({
+      name: `a${i}.png`,
+      data: "a".repeat(10),
+    }));
+    expect(() => assertAttachmentsWithinLimit(encoded)).not.toThrow();
   });
 });
 
@@ -222,6 +267,8 @@ class FakeImage {
 function stubCanvasEncoding(resultForType: (type: string) => Blob | null): void {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
     drawImage: () => undefined,
+    fillRect: () => undefined,
+    set fillStyle(_value: string) {},
   } as unknown as CanvasRenderingContext2D);
   vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function (
     callback: BlobCallback,
@@ -248,13 +295,17 @@ describe("fileAttachmentsFromFiles (canvas boundary stubbed)", () => {
     FakeImage.nextHeight = 100;
   });
 
+  // Larger than any stubbed re-encoded blob in these tests, so the
+  // smaller-of-the-two-wins check (item 2) doesn't mask the re-encode itself.
+  const LARGE_ORIGINAL_BYTES = "x".repeat(5000);
+
   it("re-encodes an oversized image to webp and renames the extension to match", async () => {
     FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
     FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
     stubCanvasEncoding((type) =>
       type === "image/webp" ? new Blob(["webp-bytes"], { type: "image/webp" }) : null,
     );
-    const original = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
 
     const [attachment] = await fileAttachmentsFromFiles([original]);
 
@@ -273,12 +324,60 @@ describe("fileAttachmentsFromFiles (canvas boundary stubbed)", () => {
       if (type === "image/jpeg") return new Blob(["jpeg-bytes"], { type: "image/jpeg" });
       return null;
     });
-    const original = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
 
     const [attachment] = await fileAttachmentsFromFiles([original]);
 
     expect(attachment?.file.name).toBe("screenshot.jpg");
     expect(attachment?.file.type).toBe("image/jpeg");
+  });
+
+  it("keeps the original file when the re-encoded blob is not smaller", async () => {
+    // A flat, small screenshot can come out bigger after lossy re-encoding —
+    // the original must win rather than adopting a larger/blurrier result.
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    stubCanvasEncoding((type) =>
+      type === "image/webp" ? new Blob(["a".repeat(200)], { type: "image/webp" }) : null,
+    );
+    const original = new File(["small"], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+  });
+
+  it("fills a white background before the jpeg fallback but not before the webp attempt", async () => {
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    const fillRectCallsByCanvas: boolean[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function () {
+      const callIndex = fillRectCallsByCanvas.push(false) - 1;
+      return {
+        drawImage: () => undefined,
+        fillRect: () => {
+          fillRectCallsByCanvas[callIndex] = true;
+        },
+        set fillStyle(_value: string) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function (
+      callback: BlobCallback,
+      type?: string,
+    ) {
+      // Simulate no webp support (silently returns png on the unfilled
+      // webp-attempt canvas) so the jpeg fallback canvas gets exercised too.
+      if (type === "image/webp") return callback(new Blob(["png"], { type: "image/png" }));
+      callback(new Blob(["jpeg-bytes"], { type: "image/jpeg" }));
+    });
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file.type).toBe("image/jpeg");
+    // First canvas (webp attempt) must stay transparent; only the second
+    // (jpeg fallback) is filled white before drawing.
+    expect(fillRectCallsByCanvas).toEqual([false, true]);
   });
 
   it("falls back to the original file when the canvas 2d context is unavailable", async () => {

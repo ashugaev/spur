@@ -11,15 +11,19 @@ export async function readRequestRecord(request: Request): Promise<Record<string
   return raw as Record<string, unknown>;
 }
 
-const MAX_ERROR_TEXT_LENGTH = 300;
-
 function isLikelyHtml(text: string, contentType: string): boolean {
   if (/text\/html/i.test(contentType)) return true;
   const trimmed = text.trimStart().toLowerCase();
   return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
 }
 
-/** Collapses a non-JSON error body (proxy HTML pages, oversize rejections) into a short message. */
+/**
+ * Collapses a non-JSON error body into a message. Proxy HTML pages and 413
+ * oversize rejections are collapsed to a short fixed message so raw markup
+ * never lands in a toast. Any other plain-text body (e.g. a long daemon
+ * error) is passed through as-is — the toast UI is built to scroll long
+ * daemon errors, so truncating here would regress that.
+ */
 function sanitizeNonJsonBody(text: string, response: Response): string {
   if (response.status === 413) {
     return "Request rejected: payload too large. Try smaller or fewer attachments.";
@@ -28,10 +32,7 @@ function sanitizeNonJsonBody(text: string, response: Response): string {
   if (isLikelyHtml(text, contentType)) {
     return `Request failed (HTTP ${response.status}).`;
   }
-  const trimmed = text.trim();
-  return trimmed.length > MAX_ERROR_TEXT_LENGTH
-    ? `${trimmed.slice(0, MAX_ERROR_TEXT_LENGTH)}…`
-    : trimmed;
+  return text.trim();
 }
 
 export async function readResponsePayload(response: Response): Promise<unknown> {

@@ -51,14 +51,20 @@ describe("readResponsePayload", () => {
     expect(await readResponsePayload(response)).toEqual({ error: "Session not found" });
   });
 
-  it("truncates an overly long non-JSON error body", async () => {
-    const response = new Response("x".repeat(1000), {
-      status: 500,
+  it("keeps a long non-JSON, non-HTML error body untruncated", async () => {
+    // The toast UI is built to scroll long daemon errors (see
+    // session-detail.spec.ts "long persistent error toast"); truncating here
+    // would regress that.
+    const longBody = Array.from({ length: 80 }, (_, i) => `Restore failed line ${i + 1}`).join(
+      "\n",
+    );
+    const response = new Response(longBody, {
+      status: 502,
       headers: { "content-type": "text/plain" },
     });
     const payload = (await readResponsePayload(response)) as { error: string };
-    expect(payload.error.length).toBeLessThan(1000);
-    expect(payload.error.endsWith("…")).toBe(true);
+    expect(payload.error).toBe(longBody);
+    expect(payload.error).toContain("Restore failed line 80");
   });
 
   it("returns an empty object for an empty body", async () => {

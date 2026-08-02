@@ -28,6 +28,19 @@ export const MAX_ATTACHMENTS_PAYLOAD_BYTES = 14 * 1024 * 1024;
 export const ATTACHMENTS_TOO_LARGE_MESSAGE =
   "Attachments too large to send — try a smaller image or fewer files.";
 
+// Mirrors v2/src/session-service.ts MAX_DECODED_SIZE / MAX_ATTACHMENTS —
+// the server rejects an over-limit attachment regardless of the aggregate
+// request size, so the client pre-flight must check both.
+export const MAX_ATTACHMENT_DECODED_BYTES = 5 * 1024 * 1024;
+export const MAX_ATTACHMENT_COUNT = 10;
+
+// Base64 encodes 3 bytes as 4 characters; this is an upper-bound estimate of
+// the decoded size (padding aside) — safe to overestimate for a pre-flight
+// check that exists to fail fast before the server's exact byte count.
+function estimateDecodedBytes(base64Length: number): number {
+  return Math.ceil((base64Length * 3) / 4);
+}
+
 export interface FileAttachment {
   file: File;
   preview: string;
@@ -119,28 +132,47 @@ function canvasToBlob(
   });
 }
 
-async function reencodeImage(
+// JPEG has no alpha channel: dropping it composites transparent pixels onto
+// black by default, which turns transparent screenshots (common on macOS)
+// black. Fill white first so transparent regions land on a white backdrop
+// instead. Webp keeps transparency, so it must not be pre-filled.
+function drawToCanvas(
   image: HTMLImageElement,
   width: number,
   height: number,
-): Promise<{ blob: Blob; extension: string } | null> {
+  fillWhite: boolean,
+): HTMLCanvasElement | null {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
+  if (fillWhite) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
   ctx.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
 
-  const webpBlob = await canvasToBlob(canvas, WEBP_MIME, REENCODE_QUALITY);
-  const blob =
-    webpBlob && webpBlob.type === WEBP_MIME
-      ? webpBlob
-      : await canvasToBlob(canvas, JPEG_MIME, REENCODE_QUALITY);
-  if (!blob) return null;
+async function reencodeImage(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+): Promise<{ blob: Blob; extension: string } | null> {
+  const webpCanvas = drawToCanvas(image, width, height, false);
+  const webpBlob = webpCanvas ? await canvasToBlob(webpCanvas, WEBP_MIME, REENCODE_QUALITY) : null;
+  if (webpBlob && webpBlob.type === WEBP_MIME) {
+    return { blob: webpBlob, extension: "webp" };
+  }
 
-  const extension = EXTENSION_BY_BLOB_MIME[blob.type];
+  const jpegCanvas = drawToCanvas(image, width, height, true);
+  const jpegBlob = jpegCanvas ? await canvasToBlob(jpegCanvas, JPEG_MIME, REENCODE_QUALITY) : null;
+  if (!jpegBlob) return null;
+
+  const extension = EXTENSION_BY_BLOB_MIME[jpegBlob.type];
   if (!extension) return null;
-  return { blob, extension };
+  return { blob: jpegBlob, extension };
 }
 
 async function downscaleImageFile(file: File): Promise<File> {
@@ -155,7 +187,10 @@ async function downscaleImageFile(file: File): Promise<File> {
     const scaled = computeScaledDimensions(width, height, DOWNSCALE_MAX_DIMENSION);
     const reencoded = await reencodeImage(image, scaled.width, scaled.height);
     revoke();
-    if (!reencoded) {
+    // A flat, wide screenshot can re-encode larger and blurrier than the
+    // original (lossy compression vs. a small lossless PNG) — keep whichever
+    // is actually smaller.
+    if (!reencoded || reencoded.blob.size >= file.size) {
       return file;
     }
     return new File([reencoded.blob], withExtension(file.name, reencoded.extension), {
@@ -237,6 +272,14 @@ export function encodeFileAttachments(
 
 /** Throws with a user-facing message when the encoded payload would be rejected server-side. */
 export function assertAttachmentsWithinLimit(encoded: Array<{ name: string; data: string }>): void {
+  if (encoded.length > MAX_ATTACHMENT_COUNT) {
+    throw new Error(`Too many attachments — max ${MAX_ATTACHMENT_COUNT} files.`);
+  }
+  for (const attachment of encoded) {
+    if (estimateDecodedBytes(attachment.data.length) > MAX_ATTACHMENT_DECODED_BYTES) {
+      throw new Error(`Attachment "${attachment.name}" is too large — max 5 MB per file.`);
+    }
+  }
   const totalBytes = encoded.reduce((sum, attachment) => sum + attachment.data.length, 0);
   if (totalBytes > MAX_ATTACHMENTS_PAYLOAD_BYTES) {
     throw new Error(ATTACHMENTS_TOO_LARGE_MESSAGE);
