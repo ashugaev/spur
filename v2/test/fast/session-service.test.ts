@@ -1,5 +1,6 @@
 import type * as cryptoModule from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
+import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -1946,6 +1947,36 @@ describe("SessionService", () => {
         }),
       }),
     );
+  });
+
+  it("records sidecarProcs{pid,pgid,starttime} on the owner record once the sidecar pane is up", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    // A real, readable pid (this test process itself) so readProcessStarttime
+    // succeeds against a genuine /proc/<pid>/stat instead of racing a fake one.
+    getTmuxPanePidMock.mockResolvedValue(process.pid);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    const written = writeSessionMock.mock.calls.find(
+      ([, session]) => session.sidecarProcs?.dev !== undefined,
+    )?.[1];
+    expect(written?.sidecarProcs?.dev?.pid).toBe(process.pid);
+    expect(written?.sidecarProcs?.dev?.pgid).toBe(process.pid);
+    expect(written?.sidecarProcs?.dev?.starttime).toEqual(expect.any(Number));
   });
 
   describe("MCP sidecar (built-in playwright, config-driven)", () => {
@@ -9984,6 +10015,69 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("completed");
     });
 
+    it("teardown of a 3-sidecar session sleeps one shared grace window, not three", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              a: { command: "pnpm a", autoStart: false },
+              b: { command: "pnpm b", autoStart: false },
+              c: { command: "pnpm c", autoStart: false },
+            },
+          },
+        },
+      });
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        sidecarNames: ["a", "b", "c"],
+      });
+      // A real, disposable, group-isolated child so the reap's pre-signal ps
+      // snapshot actually has a non-empty tree to confirm — an all-null pane
+      // pid would short-circuit confirmReaps before it ever sleeps, proving
+      // nothing about batching. `detached: true` keeps its pgid exclusively
+      // its own, never the test runner's.
+      const child = spawnChildProcess("bash", ["-c", "sleep 30"], {
+        stdio: "ignore",
+        detached: true,
+      });
+      const childPid = child.pid;
+      expect(childPid).toBeDefined();
+      getTmuxPanePidMock.mockResolvedValue(childPid ?? null);
+
+      try {
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const completePromise = service.complete("api-1");
+        await vi.advanceTimersByTimeAsync(1_500);
+        await completePromise;
+
+        const graceSleeps = timerPromisesSleepMock.mock.calls.filter(([ms]) => ms === 1_500);
+        expect(graceSleeps).toHaveLength(1);
+      } finally {
+        if (childPid !== undefined) {
+          try {
+            process.kill(-childPid, "SIGKILL");
+          } catch {
+            // already gone (the reap itself should have killed it)
+          }
+        }
+      }
+    });
+
     it("refuses a fresh reservation on a completed anchor's shared port while a member is live, and accepts it once every member is terminal", async () => {
       loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
       const sessions = createSessionStore();
@@ -15190,6 +15284,48 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("restarts a sidecar whose pane is dead instead of treating it as already alive", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    // remain-on-exit leaves a pane_dead=1 pane that still reports the tmux
+    // session as existing — must be treated as not-alive, not as "already
+    // running". Only the FIRST check (the stale pane) is dead; the freshly
+    // launched pane afterward (verifySidecarStartup's own check) is alive.
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+    );
+  });
+
   it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -16366,6 +16502,46 @@ describe("SessionService", () => {
 
     expect(killSidecarTmuxMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
+  });
+
+  it("stopSidecar reaps the recorded sidecar identity when the tmux session is already gone", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      // A pid this improbable is certain to be unreadable in /proc — the
+      // reap degrades to "do not signal" and stopSidecar still cleans up
+      // the stale identity instead of returning early.
+      sidecarProcs: { dev: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(result.id).toBe("api-1");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarProcs");
   });
 
   it("stopSidecar kills the sidecar tmux session and logs the stop event", async () => {
