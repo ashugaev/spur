@@ -361,7 +361,9 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 import { getVersion } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
-const FOREIGN_AGENT_PROCESS_PREFIX = "already has a live agent process";
+// Not a message prefix (the message starts with "Session <id> ...") — a
+// substring marker matched via .includes() in isForeignAgentProcessMessage.
+const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
@@ -1122,11 +1124,11 @@ export function isKillConfirmationRequiredMessage(message: string): boolean {
 }
 
 export function buildForeignAgentProcessMessage(sessionId: string, pid: number): string {
-  return `Session ${sessionId} ${FOREIGN_AGENT_PROCESS_PREFIX} (pid ${pid}) outside its pane; restore with force to override`;
+  return `Session ${sessionId} ${FOREIGN_AGENT_PROCESS_MARKER} (pid ${pid}) outside its pane; restore with force to override`;
 }
 
 export function isForeignAgentProcessMessage(message: string): boolean {
-  return message.includes(FOREIGN_AGENT_PROCESS_PREFIX);
+  return message.includes(FOREIGN_AGENT_PROCESS_MARKER);
 }
 
 function buildSessionEnv(args: {
