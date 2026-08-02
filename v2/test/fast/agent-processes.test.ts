@@ -14,6 +14,12 @@ interface FakeProc {
 let fakeTable: FakeProc[] = [];
 let envReadable = true;
 let deadPids = new Set<number>();
+// terminateAgentProcesses tests: force every queried pid alive regardless of
+// deadPids, simulating a process that received every signal and never died.
+let forceAllAlive = false;
+// Simulates snapshotProcessLiveness's own fail-safe contract: "unavailable"
+// must never read as "found nobody, so treat every pid as dead".
+let snapshotUnavailable = false;
 
 const listProcessesMock = vi.fn(async () =>
   fakeTable.map(({ pid, ppid, rssKb, elapsedSeconds, args }) => ({
@@ -31,7 +37,15 @@ const readProcessEnvValueMock = vi.fn(async (pid: number, key: string) => {
   return { status: "ok" as const, value: proc.env?.[key] };
 });
 const canReadProcessEnvMock = vi.fn(async () => envReadable);
-const isPidAliveMock = vi.fn((pid: number) => !deadPids.has(pid));
+const snapshotProcessLivenessMock = vi.fn(async () => {
+  if (snapshotUnavailable) {
+    return { status: "unavailable" as const };
+  }
+  const alivePids: ReadonlySet<number> = {
+    has: (pid: number) => forceAllAlive || !deadPids.has(pid),
+  } as ReadonlySet<number>;
+  return { status: "ok" as const, alivePids };
+});
 const signalPidMock = vi.fn((pid: number) => {
   deadPids.add(pid);
 });
@@ -43,7 +57,7 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => {
     listProcesses: listProcessesMock,
     readProcessEnvValue: readProcessEnvValueMock,
     canReadProcessEnv: canReadProcessEnvMock,
-    isPidAlive: isPidAliveMock,
+    snapshotProcessLiveness: snapshotProcessLivenessMock,
     signalPid: signalPidMock,
   };
 });
@@ -91,10 +105,12 @@ beforeEach(() => {
   fakeTable = [];
   envReadable = true;
   deadPids = new Set();
+  forceAllAlive = false;
+  snapshotUnavailable = false;
   listProcessesMock.mockClear();
   readProcessEnvValueMock.mockClear();
   canReadProcessEnvMock.mockClear();
-  isPidAliveMock.mockClear();
+  snapshotProcessLivenessMock.mockClear();
   signalPidMock.mockClear();
   listSessionsMock.mockReset().mockReturnValue([]);
 });
@@ -146,7 +162,7 @@ describe("terminateAgentProcesses", () => {
   });
 
   it("reports survivors when the pid never dies", async () => {
-    isPidAliveMock.mockImplementation(() => true);
+    forceAllAlive = true;
     const outcome = await terminateAgentProcesses([{ pid: 9 }], {
       hupGraceMs: 5,
       termGraceMs: 5,
@@ -156,6 +172,20 @@ describe("terminateAgentProcesses", () => {
     expect(signalPidMock).toHaveBeenCalledWith(9, "SIGHUP");
     expect(signalPidMock).toHaveBeenCalledWith(9, "SIGTERM");
     expect(signalPidMock).toHaveBeenCalledWith(9, "SIGKILL");
+  });
+
+  it("treats an unavailable liveness snapshot as still alive, not clear — the fail-safe this guard depends on", async () => {
+    // If a snapshot failure (fork pressure: EAGAIN/EMFILE) ever collapsed
+    // into "found nobody, so everyone is dead", a live agent would read as
+    // a clean "clear" and a failOnSurvivors:true caller would launch a real
+    // duplicate over it — exactly the bug this whole guard exists to close.
+    snapshotUnavailable = true;
+    const outcome = await terminateAgentProcesses([{ pid: 99 }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
+    expect(outcome).toEqual({ status: "survivors", pids: [99] });
   });
 });
 

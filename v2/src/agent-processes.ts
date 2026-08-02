@@ -12,10 +12,10 @@ import { listSessions } from "./metadata.js";
 import {
   canReadProcessEnv,
   collectDescendants,
-  isPidAlive,
   listProcesses,
   readProcessEnvValue,
   signalPid,
+  snapshotProcessLiveness,
   type ProcessSnapshotEntry,
 } from "./process-tree.js";
 import type { AgentName } from "./types.js";
@@ -92,9 +92,17 @@ function collapseToShallowest(
   return pids.filter((pid) => !covered.has(pid));
 }
 
+// ONE ps snapshot per call, not one fork per pid — the poll loop below can
+// run this up to 21 times per grace window per stage. "unavailable" (the
+// snapshot could not be taken) must never read as "everyone died this
+// round": every pid is kept as still alive so the poll keeps going instead
+// of falsely declaring a survivor gone.
 async function filterAlivePids(pids: readonly number[]): Promise<number[]> {
-  const flags = await Promise.all(pids.map((pid) => isPidAlive(pid)));
-  return pids.filter((_pid, index) => flags[index]);
+  const snapshot = await snapshotProcessLiveness();
+  if (snapshot.status === "unavailable") {
+    return [...pids];
+  }
+  return pids.filter((pid) => snapshot.alivePids.has(pid));
 }
 
 async function pollUntilDead(pids: number[], graceMs: number, pollMs: number): Promise<number[]> {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type * as childProcessModule from "node:child_process";
 import {
   canReadProcessTree,
   classifyProcessOwnership,
@@ -6,6 +7,7 @@ import {
   isPidAlive,
   isZombieProcessState,
   parseElapsedSeconds,
+  snapshotProcessLiveness,
   type ProcessSnapshotEntry,
   type PpidReader,
 } from "../../src/process-tree.js";
@@ -132,5 +134,49 @@ describe("isPidAlive", () => {
     // Reserved/unlikely-to-exist on any real host; pid_max never reaches
     // this on Linux (32-bit ceiling, default max is far lower) or macOS.
     expect(await isPidAlive(2_147_483_647)).toBe(false);
+  });
+});
+
+describe("snapshotProcessLiveness", () => {
+  it("takes one batch ps fork covering the whole table and finds this test process alive", async () => {
+    const snapshot = await snapshotProcessLiveness();
+    expect(snapshot.status).toBe("ok");
+    if (snapshot.status !== "ok") throw new Error("unreachable");
+    expect(snapshot.alivePids.has(process.pid)).toBe(true);
+  });
+
+  it("is unavailable, not 'found nobody', when ps cannot be forked at all", async () => {
+    // EAGAIN/EMFILE-under-fork-pressure simulation: execFile's callback
+    // fires with an error and no stdout, exactly what a failed fork looks
+    // like. This must NOT collapse into an empty (all-dead) snapshot.
+    vi.resetModules();
+    vi.doMock("node:child_process", async (importOriginal) => {
+      const actual = await importOriginal<typeof childProcessModule>();
+      return {
+        ...actual,
+        execFile: (
+          _file: string,
+          _args: string[],
+          callback: (error: NodeJS.ErrnoException | null) => void,
+        ) => {
+          const error = new Error(
+            "EAGAIN: resource temporarily unavailable, fork",
+          ) as NodeJS.ErrnoException;
+          error.code = "EAGAIN";
+          callback(error);
+        },
+      };
+    });
+    try {
+      const mod = await import("../../src/process-tree.js");
+      const snapshot = await mod.snapshotProcessLiveness();
+      expect(snapshot).toEqual({ status: "unavailable" });
+      // The single-pid convenience wrapper must fail open too: an
+      // indeterminate result reads as alive, never as dead.
+      expect(await mod.isPidAlive(process.pid)).toBe(true);
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
   });
 });

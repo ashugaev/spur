@@ -174,33 +174,69 @@ export function isZombieProcessState(state: string): boolean {
   return state.trim().startsWith("Z");
 }
 
-// Alive unless `ps` has no row for the pid, or reports it as a zombie. A
-// signal-0 probe (kill(pid, 0)) is NOT enough here: a zombie still answers
-// it (the kernel keeps the pid entry until the parent reaps it), so a
-// captured agent that exited but was left unreaped would report "alive"
-// forever — wedging every failOnSurvivors:true caller (restore/relaunch/
-// switchAuth) with no bypass, since `force` only gates the separate P2 scan,
-// never a P1 survivor. `ps -o stat=` is the portable way to see through
-// that on both Linux and macOS, so this stays a leaf `ps` call rather than a
-// /proc read. This is the canonical copy — playwright.ts's leak sweep uses
-// it. workspace.ts:100, ids.ts:20 and update.ts:139 each keep a deliberately
-// different kill(pid,0)-based errno policy for their own call site
-// (rethrow-unknown, EPERM-only, etc.) and are intentionally NOT consolidated
-// onto this one — they answer a different question (can THIS process signal
-// that pid) than the one this copy now answers (is the pid a live,
-// non-zombie process at all).
-export async function isPidAlive(pid: number): Promise<boolean> {
+export type ProcessLivenessSnapshot =
+  | { status: "ok"; alivePids: ReadonlySet<number> }
+  | { status: "unavailable" };
+
+// ONE `ps -eo pid=,stat=` fork covering every process on the host, instead
+// of one fork per pid. A poll loop tracking N still-alive pids across up to
+// 21 rounds per grace window (measured: 14.5ms per fork) would otherwise
+// cost 14.5ms * N per round; this costs one fork total, regardless of N —
+// see filterAlivePids in agent-processes.ts, the hot-path caller
+// (killAgentPaneAndConfirmExit runs on pause/complete/kill/restore/
+// relaunch/switchAuth and both spawn-failure teardowns).
+//
+// "unavailable" on ANY exec failure (spawn error, EAGAIN/EMFILE under fork
+// pressure, timeout) — never on "ps ran and found nothing", since `-eo`
+// with no `-p` filter has no "no such pid" failure mode of its own to
+// confuse with a real exec failure. A snapshot that could not be taken must
+// never be read as "found nobody, so everyone is dead": the caller MUST
+// treat every pid it was tracking as still alive. A captured agent falsely
+// read as dead lets a failOnSurvivors:true caller (restore/relaunch/
+// switchAuth) launch a real duplicate over a live one — refusing to
+// relaunch is recoverable, launching a duplicate is not.
+//
+// A zombie still holds its pid entry (the kernel keeps it until the parent
+// reaps it) but answers a signal-0 probe, which is why this reads `ps`'s
+// state column instead of using kill(pid, 0): a captured agent left
+// unreaped would otherwise report "alive" forever.
+export async function snapshotProcessLiveness(): Promise<ProcessLivenessSnapshot> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("ps", ["-o", "stat=", "-p", String(pid)]));
+    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,stat="]));
   } catch {
-    return false;
+    return { status: "unavailable" };
   }
-  const state = stdout.trim();
-  if (!state) {
-    return false;
+  const alivePids = new Set<number>();
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = /^(\d+)\s+(\S+)$/.exec(trimmed);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const state = match[2] ?? "";
+    if (!Number.isInteger(pid)) continue;
+    if (!isZombieProcessState(state)) {
+      alivePids.add(pid);
+    }
   }
-  return !isZombieProcessState(state);
+  return { status: "ok", alivePids };
+}
+
+// Single-pid convenience, for a caller outside a poll loop: playwright.ts's
+// leak sweep checks each leaked descendant once after a single grace sleep,
+// not across repeated rounds, so batching would not save anything there.
+// Built on the same snapshot and the same fail-safe contract — an
+// indeterminate result reads as alive, never as dead. This is the canonical
+// copy; workspace.ts:100, ids.ts:20 and update.ts:139 each keep a
+// deliberately different kill(pid,0)-based errno policy for their own call
+// site (rethrow-unknown, EPERM-only, etc.) and are intentionally NOT
+// consolidated onto this one — they answer a different question (can THIS
+// process signal that pid) than the one this copy answers (is the pid a
+// live, non-zombie process at all).
+export async function isPidAlive(pid: number): Promise<boolean> {
+  const snapshot = await snapshotProcessLiveness();
+  return snapshot.status === "unavailable" || snapshot.alivePids.has(pid);
 }
 
 // Best-effort signal send. Swallows ESRCH (already dead) and any other
