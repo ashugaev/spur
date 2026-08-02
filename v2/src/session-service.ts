@@ -32,6 +32,11 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  capturePaneAgentProcesses,
+  findForeignAgentProcessesForSession,
+  terminateAgentProcesses,
+} from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
   collectMcpBindings,
@@ -279,6 +284,7 @@ import {
   type ProjectConfig,
   type HandoffSessionRequest,
   type RespawnSessionRequest,
+  type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type RuntimeInfo,
@@ -7505,6 +7511,76 @@ export class SessionService {
     deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
+  // The single path for killing an agent pane. relaunchSessionInPlace,
+  // restore(), the resume-fallback inside it, and switchAuth all reuse the
+  // SAME tmux session name and session id for the pane they create next, so
+  // a survivor of the kill below is indistinguishable from its own
+  // replacement to every existing probe (isProcessRunningInTmux keys on tty,
+  // confirmAgentExited keys on tmux session name — neither can tell them
+  // apart). Capturing the pane's own process tree BEFORE the kill, then
+  // polling those exact pids after it, is the only way to know the kill
+  // actually landed.
+  private async killAgentPaneAndConfirmExit(
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    options: { failOnSurvivors: boolean },
+  ): Promise<void> {
+    const panePid = await getTmuxPanePid(session.tmuxSession);
+    const processes = await capturePaneAgentProcesses({
+      panePid,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    await killTmuxSession(session.tmuxSession);
+    const outcome = await terminateAgentProcesses(processes);
+    if (outcome.status === "clear") {
+      return;
+    }
+    this.logEvent("session.agent_process.survivors", {
+      level: "error",
+      sessionId: session.id,
+      message: `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL`,
+      details: { pids: outcome.pids },
+    });
+    if (options.failOnSurvivors) {
+      throw new Error(
+        `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL; refusing to launch a replacement`,
+      );
+    }
+  }
+
+  // P2 launch guard: refuses to launch a replacement pane over a live
+  // foreign agent process still carrying this session's id (a prior
+  // instance whose pane P1 could not see, e.g. its tmux pane is already
+  // gone). Never blocks on a scan it could not perform — "unavailable" and
+  // "no findings" both proceed. `force` bypasses this guard only; it never
+  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
+  private async assertNoForeignAgentForSession(
+    session: Pick<SessionRecord, "id" | "agent" | "launchCommand">,
+    panePid: number | null,
+    force: boolean,
+  ): Promise<void> {
+    if (force) {
+      return;
+    }
+    const scan = await findForeignAgentProcessesForSession({
+      sessionId: session.id,
+      processMatchers: sessionProcessMatchers(session),
+      excludePanePid: panePid,
+    });
+    if (scan.status !== "ok" || scan.processes.length === 0) {
+      return;
+    }
+    const pid = scan.processes[0]?.pid;
+    this.logEvent("session.agent_process.foreign", {
+      level: "warn",
+      sessionId: session.id,
+      message: `Session ${session.id} already has a live agent process outside its pane`,
+      details: { pids: scan.processes.map((proc) => proc.pid) },
+    });
+    throw new Error(
+      `Session ${session.id} already has a live agent process (pid ${pid}) outside its pane; restore with force to override`,
+    );
+  }
+
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
@@ -7563,7 +7639,7 @@ export class SessionService {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
       if (!request.skipRuntimeTeardown) {
-        await killTmuxSession(session.tmuxSession);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
@@ -7670,7 +7746,7 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       await this.pushTelegramNotice(
@@ -7877,7 +7953,9 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    await killTmuxSession(session.tmuxSession);
+    const panePid = await getTmuxPanePid(session.tmuxSession);
+    await this.assertNoForeignAgentForSession(session, panePid, false);
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
@@ -7996,7 +8074,7 @@ export class SessionService {
           failure,
         },
       });
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
       // Reuse the pinned claude id on the fresh relaunch so the session stays
       // bound to its native id; legacy (unpinned) sessions relaunch without one.
       const freshPlan = pinnedClaudeId
@@ -8050,7 +8128,7 @@ export class SessionService {
     );
   }
 
-  async restore(sessionId: string): Promise<SessionView> {
+  async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -8090,6 +8168,8 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    const restorePanePid = await getTmuxPanePid(current.tmuxSession);
+    await this.assertNoForeignAgentForSession(current, restorePanePid, request.force === true);
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -8151,7 +8231,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
       const pinnedClaudeId =
@@ -8306,7 +8386,7 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
@@ -8365,7 +8445,7 @@ export class SessionService {
   // conversation without resending the original prompt), then delegate the
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
-  async reopen(sessionId: string): Promise<SessionView> {
+  async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -8375,13 +8455,16 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.reopenLocked(sessionId);
+      return await this.reopenLocked(sessionId, request);
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
   }
 
-  private async reopenLocked(sessionId: string): Promise<SessionView> {
+  private async reopenLocked(
+    sessionId: string,
+    request: RestoreSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -8473,7 +8556,7 @@ export class SessionService {
     await this.refreshDashboardCacheEntry(record);
 
     try {
-      return await this.restore(sessionId);
+      return await this.restore(sessionId, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The completed record's Telegram binding, artifacts, and work-item
@@ -8508,10 +8591,10 @@ export class SessionService {
       // restore() itself kills the tmux pane it created before rethrowing
       // for every failure inside its own try/catch (including the fresh
       // pane created by createTmuxSession). Tear down defensively here too —
-      // killTmuxSession/cleanupSessionServices are best-effort and safe to
-      // call on an already-dead pane — to cover a pane restore() created but
-      // didn't get to kill before this catch ran.
-      await killTmuxSession(latest.tmuxSession);
+      // killAgentPaneAndConfirmExit/cleanupSessionServices are best-effort and
+      // safe to call on an already-dead pane — to cover a pane restore()
+      // created but didn't get to kill before this catch ran.
+      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
       await this.cleanupSessionServices(latest);
       const rolledBack: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(latest),
@@ -8602,8 +8685,12 @@ export class SessionService {
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
     // Session was launched against an account dir directly.
-    // Relaunch once to migrate onto the new account's session home.
-    await killTmuxSession(updated.tmuxSession);
+    // Relaunch once to migrate onto the new account's session home. This is
+    // the pane's real teardown — the kill below must carry the P1
+    // survivor guard itself: by the time ensureSessionReadyForSend below
+    // reaches relaunchSessionInPlace, the pane is already gone, so its own
+    // pane-pid capture would find nothing to check.
+    await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
     const relaunched = await this.ensureSessionReadyForSend(updated);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -8783,6 +8870,13 @@ export class SessionService {
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
+    // A completed record is never killed by the branch below (it's gated on
+    // status !== "completed"), so it can still legitimately own a live agent
+    // pane. Close that source out before spawning its replacement, or the
+    // fleet ends up with two live agents on the same original session id.
+    if (session.status === "completed") {
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    }
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
@@ -8850,7 +8944,7 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, stopped);
       this.stateCache.delete(sessionId);
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(stopped);
       sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
     }
