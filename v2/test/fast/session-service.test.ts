@@ -1886,6 +1886,12 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.spawn.retrying"),
     ).toBe(false);
+    // The failure lands after createTmuxSession/sendMessageToTmux already
+    // launched a real agent, so cleanupBackgroundSpawnAttempt must tear it
+    // down through killAgentPaneAndConfirmExit (capture-then-confirm), not a
+    // raw killTmuxSession.
+    expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
+    expect(terminateAgentProcessesMock).toHaveBeenCalled();
   });
 
   it("adds sidecar-only testing instructions to the initial message when sidecars are configured", async () => {
@@ -21483,6 +21489,26 @@ describe("SessionService", () => {
           ([, entry]) => entry.event === "session.agent_process.survivors",
         ),
       ).toBe(true);
+    });
+
+    it("tears down a spawn failure's already-launched pane through killAgentPaneAndConfirmExit, not a raw kill, and does not bury the original error", async () => {
+      // spawn()'s catch wraps every stage from tmux.create through
+      // record.write, so createTmuxSession can have already launched a real
+      // agent by the time a later stage (here: waitForTmuxReady) throws.
+      mockClaudeJsonlState("waiting");
+      waitForTmuxReadyMock.mockRejectedValueOnce(new Error("agent never became ready"));
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [42] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        /agent never became ready/,
+      );
+
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
+      expect(terminateAgentProcessesMock).toHaveBeenCalled();
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     });
   });
 });

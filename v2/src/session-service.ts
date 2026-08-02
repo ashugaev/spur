@@ -5389,8 +5389,17 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
-      if (sessionId && project && placeholderWritten) {
-        await killTmuxSession(sessionId);
+      if (sessionId && project && placeholderWritten && agent) {
+        // This catch wraps every stage from tmux.create through record.write,
+        // so the pane can already hold a real launched agent by the time we
+        // get here (e.g. a waitForTmuxReady timeout or a sendAgentMessage
+        // failure after createTmuxSession succeeded). failOnSurvivors:false —
+        // spawn is already failing; a survivor throw here would bury the
+        // original error instead of surfacing it.
+        await this.killAgentPaneAndConfirmExit(
+          { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+          { failOnSurvivors: false },
+        );
         // Non-mcp project sidecars are desk-shared: a sibling can already be
         // attached to this still-spawning anchor (or, for a failing sibling,
         // the anchor/another sibling can still be live), so this session's
@@ -5437,9 +5446,7 @@ export class SessionService {
           id: sessionId,
           project: request.project,
           workspaceId: failedSpawnSession.workspaceId,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent,
           prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -5509,7 +5516,21 @@ export class SessionService {
     workspacePath: string,
     finalFailure: boolean,
   ): Promise<void> {
-    await killTmuxSession(prepared.sessionId);
+    // Called from the background-spawn retry catch, which wraps every stage
+    // from tmux.create through record.write — same rationale as the
+    // catch block in spawn() above: the pane can already hold a real
+    // launched agent, so this must go through the capture-then-confirm path,
+    // not a raw kill. failOnSurvivors:false: a retry (or the final failure
+    // path) must not throw a second error over the one already in flight.
+    await this.killAgentPaneAndConfirmExit(
+      {
+        id: prepared.sessionId,
+        tmuxSession: prepared.sessionId,
+        agent: prepared.agent,
+        launchCommand: prepared.placeholder.launchCommand,
+      },
+      { failOnSurvivors: false },
+    );
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
     const deskAlive = this.hasRunningWorkspaceMembers(prepared.placeholder);
