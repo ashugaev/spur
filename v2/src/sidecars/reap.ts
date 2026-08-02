@@ -713,6 +713,12 @@ export async function findLeakedSidecarTrees(
     const matchingNames = claim
       ? [...claim.sidecarNames].filter((name) => info.args.includes(name))
       : [];
+    // Worktree-level trust boundary, not per-tree: identityRecorded says this
+    // worktree has ever tracked sidecar identity, not that this specific
+    // orphan tree was ever tracked. A worktree with one identity-recorded
+    // sidecar and a second, unrelated untracked leak marks both reapable.
+    // Correct by construction for a true orphan (nothing left to correlate
+    // against) but worth remembering when reading `reapable` in isolation.
     const reapable = claim === undefined || claim.identityRecorded === true;
     leaked.push({
       rootPid: info.pid,
