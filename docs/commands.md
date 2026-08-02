@@ -12,6 +12,8 @@ Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
 
+An `agent-process-ownership` check scans for live agent processes not owned by their session record: a still-running process left behind by a prior relaunch, keyed on the session id it carries, never on cwd/worktree (shared-desk siblings and `worktree: false` projects legitimately run multiple sessions from one path). Each finding reports pid, agent, session id, reason, rss, age, and worktree. It is `warn` severity — a leaked process to clean up, not a broken install — so it never flips the exit code. Reports "cannot determine agent process ownership on this platform" off Linux (no readable `/proc/<pid>/environ`).
+
 ## spawn
 
 ```bash
@@ -59,6 +61,8 @@ TTY opens a live selector: `Enter` attach in place, `l` log view, `p` pause, `c`
 Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex signals. The log view combines key session events with a live tail of the main agent pane.
 
 `pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed` and `completed` sessions are never restorable.
+
+`restore` (and `reopen`) refuse when a live agent process for that session id survives — either the prior pane's own process didn't die under signal escalation, or a foreign process elsewhere on the host still carries the session id. `r` on an already-selected session retries with `force: true`, bypassing the foreign-process check only (a survivor of the prior pane's own escalation always still refuses — force cannot launch a genuine duplicate over it).
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
