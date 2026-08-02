@@ -120,11 +120,7 @@ export async function listProcesses(): Promise<ProcessSnapshotEntry[]> {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    // The trailing args group is optional: a zombie's argv is reclaimed, so
-    // `ps` emits an empty args column, `.trim()` strips the now-trailing
-    // separator whitespace, and a required `\s+` before the group would
-    // reject the whole row — making a zombie invisible to every scan.
-    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/.exec(trimmed);
+    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
