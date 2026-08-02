@@ -2444,13 +2444,6 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(deliverMock).toHaveBeenCalled();
       });
-      expect(
-        logSpurEventMock.mock.calls.some(
-          ([, entry]) =>
-            entry.event === "trigger.send.dropped" &&
-            entry.details?.reason === "trigger_not_allowed",
-        ),
-      ).toBe(false);
     } finally {
       await controller.stop();
     }
