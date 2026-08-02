@@ -42,6 +42,7 @@ import {
   buildSidecarClaims,
   confirmReaps,
   reapRecordedIdentity,
+  reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
   sweepSidecars,
@@ -183,7 +184,6 @@ import {
   getTmuxSessionActivity,
   getTmuxPanePid,
   isProcessRunningInTmux,
-  killSidecarTmux,
   killTmuxSession,
   listTmuxSessionNames,
   sendSubmitKeyToTmux,
@@ -2004,7 +2004,7 @@ export class SessionService {
           continue;
         }
         const sessionId = name.slice(0, -`--${builtinName}`.length);
-        await killSidecarTmux(sessionId, builtinName).catch(() => {});
+        await this.reapSidecarByName(sessionId, builtinName);
         this.clearSidecarProcEntry(sessionId, builtinName);
       }
       await this.sweepLeakedBuiltinSidecars("reaper");
@@ -3018,7 +3018,7 @@ export class SessionService {
             continue;
           }
           if (await sidecarTmuxAlive(session.id, sidecarName)) {
-            await killSidecarTmux(session.id, sidecarName);
+            await this.reapSidecarByName(session.id, sidecarName);
             this.clearSidecarProcEntry(session.id, sidecarName);
             reaped += 1;
           }
@@ -3589,8 +3589,9 @@ export class SessionService {
       if (plan.kind === "clear") {
         if (plan.crossSession) {
           this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
-          await killTmuxSession(
-            sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
+          await this.reapSidecarByName(
+            plan.crossSession.sessionId,
+            plan.crossSession.sidecarName,
           );
           this.clearSidecarProcEntry(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.releaseSidecarPortFromSession(
@@ -3655,7 +3656,7 @@ export class SessionService {
         return args.session;
       }
       if (paneDead) {
-        await killSidecarTmux(args.session.id, args.sidecarName);
+        await this.reapSidecarByName(args.session.id, args.sidecarName);
         this.clearSidecarProcEntry(args.session.id, args.sidecarName);
       }
 
@@ -3746,7 +3747,7 @@ export class SessionService {
         );
         return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
-        await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
         this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
         const baseRecord =
           reservedSession !== args.session
@@ -5442,7 +5443,7 @@ export class SessionService {
             continue;
           }
           const failedSpawnOwnerId = sidecarOwnerId(failedSpawnSession, sidecar);
-          await killSidecarTmux(failedSpawnOwnerId, scName).catch(() => {});
+          await this.reapSidecarByName(failedSpawnOwnerId, scName);
           this.clearSidecarProcEntry(failedSpawnOwnerId, scName);
         }
         // Startup attachments are preserved for a respawn, so the ids come
@@ -5550,7 +5551,7 @@ export class SessionService {
         continue;
       }
       const cleanupOwnerId = sidecarOwnerId(prepared.placeholder, sidecar);
-      await killSidecarTmux(cleanupOwnerId, sidecarName).catch(() => {});
+      await this.reapSidecarByName(cleanupOwnerId, sidecarName);
       this.clearSidecarProcEntry(cleanupOwnerId, sidecarName);
     }
     if (finalFailure) {
@@ -7368,6 +7369,19 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  // Reaps a sidecar's whole tmux pane process tree (group-first where
+  // proven, per-pid leaves-first otherwise) and waits for confirmation.
+  // Never throws — a survivor becomes a `warn` log entry, not a rejected
+  // promise (invariant: reap never blocks teardown). This is THE reap path
+  // for every single-shot sidecar-kill site; only teardownSessionSidecars
+  // bypasses it (signals all its sidecars first, confirms once, batching
+  // the grace window instead of paying it once per sidecar here).
+  private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+    return outcome;
+  }
+
   private logSidecarReapSurvivors(
     ownerId: string,
     sidecarName: string,
@@ -7415,7 +7429,7 @@ export class SessionService {
   private async killSidecarAndUnlinkSlot(ownerId: string, sidecarName: string): Promise<void> {
     this.abortSidecarUrlProbe(ownerId, sidecarName);
     if (await sidecarTmuxAlive(ownerId, sidecarName)) {
-      await killSidecarTmux(ownerId, sidecarName);
+      await this.reapSidecarByName(ownerId, sidecarName);
     } else {
       const owner = readSession(this.config.dataDir, ownerId);
       const identity = owner?.sidecarProcs?.[sidecarName];

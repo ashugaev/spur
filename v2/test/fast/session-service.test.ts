@@ -88,7 +88,6 @@ const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
-const killSidecarTmuxMock = vi.fn();
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
@@ -428,7 +427,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSidecarSession: createTmuxSidecarSessionMock,
   sidecarTmuxAlive: sidecarTmuxAliveMock,
   sidecarTmuxSession: sidecarTmuxSessionMock,
-  killSidecarTmux: killSidecarTmuxMock,
   listTmuxSessionNames: listTmuxSessionNamesMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: getTmuxPanePidMock,
@@ -990,7 +988,6 @@ describe("SessionService", () => {
     sidecarTmuxSessionMock
       .mockReset()
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
-    killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
     listTmuxSessionNamesMock.mockReset().mockResolvedValue(new Set());
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
@@ -9796,7 +9793,7 @@ describe("SessionService", () => {
 
       const result = await service.stopSidecar("api-2", "daemon");
 
-      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
       expect(sessions.get("api-1")?.slots).toBeUndefined();
       expect(result.id).toBe("api-2");
     });
@@ -12208,7 +12205,7 @@ describe("SessionService", () => {
         sidecarName: "dev",
       }),
     );
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
       status: "errored",
@@ -12405,9 +12402,9 @@ describe("SessionService", () => {
 
     await service.reapDeadSessionSidecars();
 
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("term-1", "playwright");
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("missing-1", "playwright");
-    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("live-1", "playwright");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("term-1--playwright");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("missing-1--playwright");
+    expect(killTmuxSessionMock).not.toHaveBeenCalledWith("live-1--playwright");
     service.dispose();
   });
 
@@ -12438,7 +12435,7 @@ describe("SessionService", () => {
 
     await service.reapDeadSessionSidecars();
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     service.dispose();
   });
 
@@ -12484,8 +12481,8 @@ describe("SessionService", () => {
 
     await service.reapDeadSessionSidecars();
 
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("stopped-1", "playwright");
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("err-1", "playwright");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("stopped-1--playwright");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("err-1--playwright");
     service.dispose();
   });
 
@@ -12521,7 +12518,7 @@ describe("SessionService", () => {
 
     await service.reapDeadSessionSidecars();
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("restoring-1", "playwright");
+    expect(killTmuxSessionMock).not.toHaveBeenCalledWith("restoring-1--playwright");
     service.dispose();
   });
 
@@ -15320,7 +15317,7 @@ describe("SessionService", () => {
 
     await service.startSidecar("api-1", "dev");
 
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
     );
@@ -16175,7 +16172,7 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.sidecarPorts).toEqual({
       dev: {
         SPUR_RESERVED_PORT_DEV: 3000,
@@ -16242,7 +16239,7 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.sidecarPorts).toEqual({
       dev: {
         SPUR_RESERVED_PORT_DEV: 3000,
@@ -16314,7 +16311,7 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(181_000);
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalled();
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
       { label: "dev", url: "https://preview.example.com/3000" },
@@ -16466,7 +16463,7 @@ describe("SessionService", () => {
     await expect(service.stopSidecar("api-1", "dev")).rejects.toThrow(
       'Session api-1 has no sidecar "dev"',
     );
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("stopSidecar is idempotent when the sidecar tmux session is already offline", async () => {
@@ -16500,7 +16497,7 @@ describe("SessionService", () => {
 
     const result = await service.stopSidecar("api-1", "dev");
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
   });
 
@@ -16539,7 +16536,7 @@ describe("SessionService", () => {
 
     const result = await service.stopSidecar("api-1", "dev");
 
-    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarProcs");
   });
@@ -16575,7 +16572,7 @@ describe("SessionService", () => {
 
     const result = await service.stopSidecar("api-1", "dev");
 
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
     expect(writeSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -19359,7 +19356,7 @@ describe("SessionService", () => {
 
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
-      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
       service.dispose();
     });
 
@@ -19397,7 +19394,7 @@ describe("SessionService", () => {
 
       // The pane is named after the anchor, so reaping it here would kill the
       // sidecar the live sibling is using.
-      expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("api-1", "daemon");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
 
       sessions.set("api-2", {
         ...(sessions.get("api-2") as SessionRecord),
@@ -19405,7 +19402,7 @@ describe("SessionService", () => {
       });
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
-      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "daemon");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
       service.dispose();
     });
 
@@ -19419,9 +19416,10 @@ describe("SessionService", () => {
 
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
+      // Sidecars serve that live agent — reaping them breaks it too. A single
+      // assertion covers both the agent's own pane and every sidecar, since
+      // both now route through killTmuxSession.
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      // Sidecars serve that live agent — reaping them breaks it too.
-      expect(killSidecarTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -19437,7 +19435,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
-      expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
       service.dispose();
     });
   });

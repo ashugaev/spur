@@ -109,7 +109,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSidecarSession: vi.fn(),
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
-  killSidecarTmux: vi.fn(),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),

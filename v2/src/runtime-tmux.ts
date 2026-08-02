@@ -857,7 +857,3 @@ export async function createTmuxSidecarSession(input: {
 export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
   return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
 }
-
-export async function killSidecarTmux(sessionId: string, sidecarName: string): Promise<void> {
-  await killTmuxSession(sidecarTmuxSession(sessionId, sidecarName));
-}
