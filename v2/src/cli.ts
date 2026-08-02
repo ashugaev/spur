@@ -34,9 +34,11 @@ import {
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
+  loadInstanceConfigReadOnly,
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
+import { checkAgentProcessOwnership } from "./agent-processes.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
@@ -59,7 +61,11 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
-import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import {
+  isForeignAgentProcessMessage,
+  isKillConfirmationRequiredMessage,
+  isRestorableSession,
+} from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
@@ -1082,9 +1088,11 @@ async function runInteractiveSessionList(
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
   let pendingRespawnConfirmationSessionId: string | null = null;
+  let pendingRestoreConfirmationSessionId: string | null = null;
   const clearPendingConfirmations = (): void => {
     pendingKillConfirmationSessionId = null;
     pendingRespawnConfirmationSessionId = null;
+    pendingRestoreConfirmationSessionId = null;
   };
   let attachedPane: {
     tmuxSession: string;
@@ -1225,15 +1233,19 @@ async function runInteractiveSessionList(
       return;
     }
 
+    const forceRestore = pendingRestoreConfirmationSessionId === session.id;
+
     busy = true;
-    statusMessage = brandLine(`Restoring ${session.id}...`);
+    statusMessage = brandLine(
+      forceRestore ? `Restoring ${session.id} anyway...` : `Restoring ${session.id}...`,
+    );
     render();
 
     try {
       const restored = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/restore`,
-        {},
+        forceRestore ? { force: true } : {},
         configPath,
       );
       sessions = replaceListedSession(sessions, restored);
@@ -1242,7 +1254,15 @@ async function runInteractiveSessionList(
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
+      if (!forceRestore && isForeignAgentProcessMessage(message)) {
+        pendingKillConfirmationSessionId = null;
+        pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = session.id;
+        statusMessage = brandLine(`${message}. Press r again to restore anyway.`);
+      } else {
+        clearPendingConfirmations();
+        statusMessage = brandLine(message);
+      }
     } finally {
       busy = false;
       render();
@@ -1420,6 +1440,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!force && isKillConfirmationRequiredMessage(message)) {
         pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingKillConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
       } else {
@@ -1470,6 +1491,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!forceRespawn && isKillConfirmationRequiredMessage(message)) {
         pendingKillConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingRespawnConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press s again to respawn anyway.`);
       } else {
@@ -1558,7 +1580,6 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
-        clearPendingConfirmations();
         void restoreSelectedSession().catch(fail);
         return;
       }
@@ -1710,6 +1731,13 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
           const hostChecks = await collectHostInstallChecks();
+          // Read-only: never bootstrap-writes the instance config. "absent"
+          // (never initialized) and "invalid" (unparsable) both skip the
+          // check entirely — there is no dataDir to scan sessions under.
+          const instanceConfig = loadInstanceConfigReadOnly();
+          if (instanceConfig.status === "ok") {
+            hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+          }
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {

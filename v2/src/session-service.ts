@@ -361,6 +361,7 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 import { getVersion } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+const FOREIGN_AGENT_PROCESS_PREFIX = "already has a live agent process";
 const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
@@ -1118,6 +1119,14 @@ export function buildKillConfirmationRequiredMessage(sessionId: string, reasons:
 
 export function isKillConfirmationRequiredMessage(message: string): boolean {
   return message.startsWith(KILL_CONFIRMATION_REQUIRED_PREFIX);
+}
+
+export function buildForeignAgentProcessMessage(sessionId: string, pid: number): string {
+  return `Session ${sessionId} ${FOREIGN_AGENT_PROCESS_PREFIX} (pid ${pid}) outside its pane; restore with force to override`;
+}
+
+export function isForeignAgentProcessMessage(message: string): boolean {
+  return message.includes(FOREIGN_AGENT_PROCESS_PREFIX);
 }
 
 function buildSessionEnv(args: {
@@ -7566,19 +7575,20 @@ export class SessionService {
       processMatchers: sessionProcessMatchers(session),
       excludePanePid: panePid,
     });
-    if (scan.status !== "ok" || scan.processes.length === 0) {
+    if (scan.status !== "ok") {
       return;
     }
-    const pid = scan.processes[0]?.pid;
+    const [firstForeign] = scan.processes;
+    if (!firstForeign) {
+      return;
+    }
     this.logEvent("session.agent_process.foreign", {
       level: "warn",
       sessionId: session.id,
       message: `Session ${session.id} already has a live agent process outside its pane`,
       details: { pids: scan.processes.map((proc) => proc.pid) },
     });
-    throw new Error(
-      `Session ${session.id} already has a live agent process (pid ${pid}) outside its pane; restore with force to override`,
-    );
+    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign.pid));
   }
 
   private async applyManualStatus(
