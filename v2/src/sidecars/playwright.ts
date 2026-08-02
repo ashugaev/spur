@@ -1,15 +1,20 @@
+import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
 import {
   collectTree,
   killTree,
+  PS_MAX_BUFFER_BYTES,
   snapshotProcesses,
   type ProcessInfo,
   type ProcSnapshot,
 } from "./reap.js";
+
+const execFileAsync = promisify(execFile);
 
 // Re-exported for callers/tests that import the shared process-info shape
 // through this module; the one process-tree path lives in ./reap.js.
@@ -190,6 +195,44 @@ async function killProcessTree(pid: number, snapshot: ProcSnapshot): Promise<voi
   killTree(tree, "SIGKILL");
 }
 
+const PLAYWRIGHT_PS_ARGS = ["-eo", "pid=,ppid=,args="];
+const PLAYWRIGHT_PS_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(.*)$/;
+
+/**
+ * Portable fallback snapshot for this sweep only. reap.ts's own
+ * `snapshotProcesses` requires GNU `ps`'s `etimes` keyword, which BSD `ps`
+ * (macOS) doesn't have and exits nonzero on — that's fine for reap.ts's own
+ * orphan-tree reap (already Linux-only via /proc), but this sweep never
+ * touches /proc or process groups (`killTree` signals pids one at a time),
+ * so it only ever needs pid/ppid/args and can fall back to a minimal,
+ * portable `ps` call instead of reporting nothing every tick.
+ */
+async function snapshotPortable(): Promise<ProcSnapshot> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("ps", PLAYWRIGHT_PS_ARGS, {
+      timeout: 5_000,
+      maxBuffer: PS_MAX_BUFFER_BYTES,
+    }));
+  } catch {
+    return { ok: false, byPid: new Map(), byPgid: new Map() };
+  }
+  const byPid = new Map<number, ProcessInfo>();
+  for (const line of stdout.split("\n")) {
+    const match = PLAYWRIGHT_PS_ROW_RE.exec(line);
+    if (!match) {
+      continue;
+    }
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    byPid.set(pid, { pid, ppid, pgid: pid, rssKb: 0, etimes: 0, args: match[3] ?? "" });
+  }
+  if (byPid.size === 0) {
+    return { ok: false, byPid: new Map(), byPgid: new Map() };
+  }
+  return { ok: true, byPid, byPgid: new Map() };
+}
+
 /**
  * Find leaked managed playwright servers (orphaned, our bin, port not owned by
  * a live session) and kill their process trees. Returns the count of leaked
@@ -206,7 +249,10 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
-  const snapshot = await snapshotProcesses();
+  let snapshot = await snapshotProcesses();
+  if (!snapshot.ok) {
+    snapshot = await snapshotPortable();
+  }
   if (!snapshot.ok) {
     return 0;
   }
