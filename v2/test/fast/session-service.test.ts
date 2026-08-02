@@ -5,6 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type {
+  AgentProcessRef,
+  AgentTerminationOutcome,
+  SessionAgentScan,
+} from "../../src/agent-processes.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
@@ -93,6 +98,18 @@ const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
+const capturePaneAgentProcessesMock = vi.fn(() => Promise.resolve<AgentProcessRef[]>([]));
+const terminateAgentProcessesMock = vi.fn(() =>
+  Promise.resolve<AgentTerminationOutcome>({ status: "clear" }),
+);
+// "unavailable" is the safe default: it is what a real host without a
+// readable process environment (e.g. macOS, or a CI sandbox without procfs)
+// returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
+// contract, so no unrelated restore/relaunch/switchAuth test below has to
+// know this guard exists.
+const findForeignAgentProcessesForSessionMock = vi.fn(() =>
+  Promise.resolve<SessionAgentScan>({ status: "unavailable" }),
+);
 const sendMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
 const sendMenuSelectionKeysMock = vi.fn();
@@ -440,6 +457,12 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
+}));
+
+vi.mock("../../src/agent-processes.js", () => ({
+  capturePaneAgentProcesses: capturePaneAgentProcessesMock,
+  terminateAgentProcesses: terminateAgentProcessesMock,
+  findForeignAgentProcessesForSession: findForeignAgentProcessesForSessionMock,
 }));
 
 vi.mock("../../src/session-slots.js", () => ({
@@ -17552,7 +17575,12 @@ describe("SessionService", () => {
       expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     });
 
-    it("does not tmux-kill a completed respawn source", async () => {
+    it("tears down a completed respawn source's still-live pane before spawning its replacement", async () => {
+      // respawn()'s own this.kill() call is gated on status !== "completed",
+      // so a completed source used to keep any live agent process it still
+      // had — the fleet then carried two live agents on the same original
+      // session id. respawn() now closes that source out via
+      // killAgentPaneAndConfirmExit before spawning the replacement.
       mockClaudeJsonlState("waiting");
       readSessionMock.mockReturnValue({
         id: "api-1",
@@ -17572,9 +17600,18 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
+      const spawnOrder: string[] = [];
+      killTmuxSessionMock.mockImplementationOnce(async () => {
+        spawnOrder.push("kill");
+      });
+      createTmuxSessionMock.mockImplementationOnce(async () => {
+        spawnOrder.push("spawn");
+      });
+
       await service.respawn("api-1");
 
-      expect(killTmuxSessionMock.mock.calls.some((call) => call[0] === "api-1")).toBe(false);
+      expect(killTmuxSessionMock.mock.calls.some((call) => call[0] === "api-1")).toBe(true);
+      expect(spawnOrder).toEqual(["kill", "spawn"]);
     });
 
     it("rejects respawn for dirty errored worktrees unless forced", async () => {
