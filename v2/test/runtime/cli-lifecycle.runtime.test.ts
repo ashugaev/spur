@@ -5675,108 +5675,105 @@ projects:
 
 // Linux-only: the post-condition below reads /proc/<pid>/environ directly
 // (process-tree.ts's readProcessEnvValue), which has no portable equivalent.
-describe.skipIf(!tmuxOk || platform() !== "linux")(
-  "duplicate-agent guard (runtime)",
-  () => {
-    afterEach(async () => {
-      while (activeContexts.length > 0) {
-        const current = popActiveContext();
-        await stopDaemonByPid(current.daemonPid);
-        if (current.controllerSessionName) {
-          await killTmuxSession(current.controllerSessionName);
-        }
-        await killTmuxSessionsByPrefix(current.sessionPrefix);
-        await current.context.cleanup();
+describe.skipIf(!tmuxOk || platform() !== "linux")("duplicate-agent guard (runtime)", () => {
+  afterEach(async () => {
+    while (activeContexts.length > 0) {
+      const current = popActiveContext();
+      await stopDaemonByPid(current.daemonPid);
+      if (current.controllerSessionName) {
+        await killTmuxSession(current.controllerSessionName);
       }
+      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await current.context.cleanup();
+    }
+  });
+
+  it("restore leaves exactly one agent process for the session", async () => {
+    const port = await findFreePort();
+    // hupResistantAgents: the fake claude script ignores SIGHUP the same
+    // way pause()/restore() now must tolerate a real agent doing —
+    // proving killAgentPaneAndConfirmExit's escalation (HUP -> TERM ->
+    // KILL) actually lands on a real process tree, not just a mock.
+    const context = await createRuntimeTestContext(port, { hupResistantAgents: true });
+    const sessionPrefix = `rt-dup-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
+    const configPath = await context.writeConfig(
+      "dup-guard.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
 
-    it("restore leaves exactly one agent process for the session", async () => {
-      const port = await findFreePort();
-      // hupResistantAgents: the fake claude script ignores SIGHUP the same
-      // way pause()/restore() now must tolerate a real agent doing —
-      // proving killAgentPaneAndConfirmExit's escalation (HUP -> TERM ->
-      // KILL) actually lands on a real process tree, not just a mock.
-      const context = await createRuntimeTestContext(port, { hupResistantAgents: true });
-      const sessionPrefix = `rt-dup-${port}`;
-      activeContexts.push({ context, sessionPrefix });
-      await syncTmuxEnvironment({
-        HOME: context.env.HOME,
-        PATH: context.env.PATH,
-        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-      });
-      const configPath = await context.writeConfig(
-        "dup-guard.yaml",
-        baseConfig(context, sessionPrefix),
-      );
-      const daemon = await context.startDaemon(configPath);
-      currentActiveContext().daemonPid = daemon.info.pid;
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "duplicate guard runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
 
-      const spawned = JSON.parse(
-        (
-          await context.execCli([
-            "--config",
-            configPath,
-            "spawn",
-            "api",
-            "duplicate guard runtime prompt",
-            "--json",
-          ])
-        ).stdout,
-      ) as SessionView;
+    // Scoped to the AGENT process specifically (args matching the "claude"
+    // binary), not every process in the pane: the pane's own login shell
+    // also inherits SPUR_SESSION but is never the agent, so a blind
+    // SPUR_SESSION-only scan would always see 2 (the pane shell plus the
+    // real agent) and could never assert "exactly one agent".
+    function isClaudeAgentProcess(args: string): boolean {
+      return /(?:^|\/|\s)claude(?:\s|$)/.test(args);
+    }
 
-      // Scoped to the AGENT process specifically (args matching the "claude"
-      // binary), not every process in the pane: the pane's own login shell
-      // also inherits SPUR_SESSION but is never the agent, so a blind
-      // SPUR_SESSION-only scan would always see 2 (the pane shell plus the
-      // real agent) and could never assert "exactly one agent".
-      function isClaudeAgentProcess(args: string): boolean {
-        return /(?:^|\/|\s)claude(?:\s|$)/.test(args);
-      }
-
-      async function findSessionAgentPids(sessionId: string): Promise<number[]> {
-        const processes = await listProcesses();
-        const matches: number[] = [];
-        for (const proc of processes) {
-          if (!isClaudeAgentProcess(proc.args)) continue;
-          const envRead = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
-          if (envRead.status === "ok" && envRead.value === sessionId) {
-            matches.push(proc.pid);
-          }
+    async function findSessionAgentPids(sessionId: string): Promise<number[]> {
+      const processes = await listProcesses();
+      const matches: number[] = [];
+      for (const proc of processes) {
+        if (!isClaudeAgentProcess(proc.args)) continue;
+        const envRead = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
+        if (envRead.status === "ok" && envRead.value === sessionId) {
+          matches.push(proc.pid);
         }
-        return matches;
       }
+      return matches;
+    }
 
-      const preTeardownPids = await pollUntil(() => findSessionAgentPids(spawned.id), {
-        timeoutMs: 15_000,
-        accept: (pids) => pids.length > 0,
-      });
-      expect(preTeardownPids.length).toBeGreaterThan(0);
-      const [preTeardownPid] = preTeardownPids;
-      if (preTeardownPid === undefined) {
-        throw new Error("expected at least one agent pid before teardown");
-      }
-
-      // Pause is the real end-to-end exercise of the HUP-resistant escalation:
-      // it now routes through the same killAgentPaneAndConfirmExit restore()
-      // uses, so this proves the real signal sequence (HUP ignored, TERM
-      // lands) actually terminates a resistant process, not just a mock.
-      await context.execCli(["--config", configPath, "pause", spawned.id, "--json"]);
-      await pollUntil(() => processExists(preTeardownPid), {
-        timeoutMs: 15_000,
-        accept: (alive) => alive === false,
-      });
-      expect(await processExists(preTeardownPid)).toBe(false);
-
-      await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
-
-      const postRestorePids = await pollUntil(() => findSessionAgentPids(spawned.id), {
-        timeoutMs: 15_000,
-        accept: (pids) => pids.length === 1,
-      });
-      expect(postRestorePids).toHaveLength(1);
-      expect(postRestorePids).not.toContain(preTeardownPid);
-      expect(await processExists(preTeardownPid)).toBe(false);
+    const preTeardownPids = await pollUntil(() => findSessionAgentPids(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (pids) => pids.length > 0,
     });
-  },
-);
+    expect(preTeardownPids.length).toBeGreaterThan(0);
+    const [preTeardownPid] = preTeardownPids;
+    if (preTeardownPid === undefined) {
+      throw new Error("expected at least one agent pid before teardown");
+    }
+
+    // Pause is the real end-to-end exercise of the HUP-resistant escalation:
+    // it now routes through the same killAgentPaneAndConfirmExit restore()
+    // uses, so this proves the real signal sequence (HUP ignored, TERM
+    // lands) actually terminates a resistant process, not just a mock.
+    await context.execCli(["--config", configPath, "pause", spawned.id, "--json"]);
+    await pollUntil(() => processExists(preTeardownPid), {
+      timeoutMs: 15_000,
+      accept: (alive) => alive === false,
+    });
+    expect(await processExists(preTeardownPid)).toBe(false);
+
+    await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
+
+    const postRestorePids = await pollUntil(() => findSessionAgentPids(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (pids) => pids.length === 1,
+    });
+    expect(postRestorePids).toHaveLength(1);
+    expect(postRestorePids).not.toContain(preTeardownPid);
+    expect(await processExists(preTeardownPid)).toBe(false);
+  });
+});

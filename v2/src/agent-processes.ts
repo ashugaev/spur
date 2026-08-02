@@ -42,8 +42,7 @@ function compileMatchers(matchers: readonly string[]): RegExp[] {
   return matchers
     .filter((matcher) => matcher.trim().length > 0)
     .map(
-      (matcher) =>
-        new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
+      (matcher) => new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
     );
 }
 
@@ -52,7 +51,10 @@ function compileMatchers(matchers: readonly string[]): RegExp[] {
 // Ancestry is resolved over the FULL process table (not just the
 // candidates), so an intermediate non-matching process (a shell wrapper, for
 // example) does not break the chain.
-function collapseToShallowest(pids: number[], allProcesses: readonly ProcessSnapshotEntry[]): number[] {
+function collapseToShallowest(
+  pids: number[],
+  allProcesses: readonly ProcessSnapshotEntry[],
+): number[] {
   if (pids.length <= 1) {
     return pids;
   }
@@ -155,7 +157,9 @@ export async function terminateAgentProcesses(
   return { status: "survivors", pids: survivors };
 }
 
-export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; processes: AgentProcessRef[] };
+export type SessionAgentScan =
+  | { status: "unavailable" }
+  | { status: "ok"; processes: AgentProcessRef[] };
 
 // P2, env-rooted and heuristic launch guard: processes carrying
 // SPUR_SESSION === sessionId that are not this pane's own children
@@ -214,7 +218,9 @@ export interface UnownedAgentProcess {
   reason: UnownedAgentReason;
 }
 
-export type UnownedAgentScan = { status: "unavailable" } | { status: "ok"; processes: UnownedAgentProcess[] };
+export type UnownedAgentScan =
+  | { status: "unavailable" }
+  | { status: "ok"; processes: UnownedAgentProcess[] };
 
 function toFinding(
   proc: ProcessSnapshotEntry,
@@ -263,7 +269,9 @@ export async function scanUnownedAgentProcesses(dataDir: string): Promise<Unowne
   }
   const matchers = compileMatchers([...matcherSet]);
   const processes = await listProcesses();
-  const candidates = processes.filter((proc) => matchers.some((matcher) => matcher.test(proc.args)));
+  const candidates = processes.filter((proc) =>
+    matchers.some((matcher) => matcher.test(proc.args)),
+  );
 
   const bySessionId = new Map<string, ProcessSnapshotEntry[]>();
   for (const proc of candidates) {
@@ -294,7 +302,9 @@ export async function scanUnownedAgentProcesses(dataDir: string): Promise<Unowne
     const terminal = session.status === "completed" || session.status === "killed";
     if (terminal) {
       for (const proc of roots) {
-        findings.push(toFinding(proc, sessionId, session.agent, session.worktreePath, "terminal_record"));
+        findings.push(
+          toFinding(proc, sessionId, session.agent, session.worktreePath, "terminal_record"),
+        );
       }
       continue;
     }

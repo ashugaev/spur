@@ -1021,7 +1021,9 @@ describe("SessionService", () => {
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue([]);
     terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
-    findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
+    findForeignAgentProcessesForSessionMock
+      .mockReset()
+      .mockResolvedValue({ status: "unavailable" });
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);

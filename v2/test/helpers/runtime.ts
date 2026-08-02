@@ -930,7 +930,10 @@ export async function createRuntimeTestContext(
   await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
   if (useFakeTools) {
     const agentScriptOptions = { hupResistant };
-    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude", agentScriptOptions));
+    await writeExecutable(
+      join(fakeBinDir, "claude"),
+      fakeAgentScript("claude", agentScriptOptions),
+    );
     await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex", agentScriptOptions));
     await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor", agentScriptOptions));
     await writeExecutable(

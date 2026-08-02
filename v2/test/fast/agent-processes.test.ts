@@ -69,7 +69,9 @@ const {
   terminateAgentProcesses,
 } = await import("../../src/agent-processes.js");
 
-function session(overrides: Partial<SessionRecord> & Pick<SessionRecord, "id" | "status">): SessionRecord {
+function session(
+  overrides: Partial<SessionRecord> & Pick<SessionRecord, "id" | "status">,
+): SessionRecord {
   return {
     project: "api",
     agent: "claude",
@@ -103,13 +105,21 @@ afterEach(() => {
 
 describe("capturePaneAgentProcesses", () => {
   it("returns [] when panePid is null", async () => {
-    expect(await capturePaneAgentProcesses({ panePid: null, processMatchers: ["claude"] })).toEqual([]);
+    expect(await capturePaneAgentProcesses({ panePid: null, processMatchers: ["claude"] })).toEqual(
+      [],
+    );
   });
 
   it("captures only pane descendants whose args match", async () => {
     fakeTable = [
       { pid: 1, ppid: 0, rssKb: 100, elapsedSeconds: 1, args: "-zsh" },
-      { pid: 2, ppid: 1, rssKb: 200, elapsedSeconds: 1, args: "/usr/bin/claude --dangerously-skip-permissions" },
+      {
+        pid: 2,
+        ppid: 1,
+        rssKb: 200,
+        elapsedSeconds: 1,
+        args: "/usr/bin/claude --dangerously-skip-permissions",
+      },
       { pid: 3, ppid: 0, rssKb: 300, elapsedSeconds: 1, args: "/usr/bin/claude --other" },
     ];
     const refs = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
@@ -120,7 +130,9 @@ describe("capturePaneAgentProcesses", () => {
 describe("terminateAgentProcesses", () => {
   it("returns clear when nothing is alive", async () => {
     deadPids.add(5);
-    const outcome = await terminateAgentProcesses([{ pid: 5, rssKb: 1, elapsedSeconds: 1, args: "x" }]);
+    const outcome = await terminateAgentProcesses([
+      { pid: 5, rssKb: 1, elapsedSeconds: 1, args: "x" },
+    ]);
     expect(outcome).toEqual({ status: "clear" });
   });
 
@@ -160,7 +172,14 @@ describe("findForeignAgentProcessesForSession", () => {
 
   it("excludes the calling pane's own descendants", async () => {
     fakeTable = [
-      { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } },
+      {
+        pid: 1,
+        ppid: 0,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
       {
         pid: 2,
         ppid: 999,
@@ -175,7 +194,10 @@ describe("findForeignAgentProcessesForSession", () => {
       processMatchers: ["claude"],
       excludePanePid: 1,
     });
-    expect(scan).toEqual({ status: "ok", processes: [{ pid: 2, rssKb: 1, elapsedSeconds: 1, args: "claude" }] });
+    expect(scan).toEqual({
+      status: "ok",
+      processes: [{ pid: 2, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+    });
   });
 });
 
@@ -183,16 +205,32 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
   it("collapses a nested agent onto its outer ancestor — not a duplicate", async () => {
     listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
     fakeTable = [
-      { pid: 10, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } },
+      {
+        pid: 10,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
       // Nested claude launched by the outer one (e.g. via the Bash tool).
-      { pid: 11, ppid: 10, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } },
+      {
+        pid: 11,
+        ppid: 10,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
     ];
     const scan = await scanUnownedAgentProcesses("/data");
     expect(scan).toEqual({ status: "ok", processes: [] });
   });
 
   it("collapses cursor's bare 'agent' process descending from the session's agent — not a duplicate", async () => {
-    listSessionsMock.mockReturnValue([session({ id: "cursor-1", status: "running", agent: "cursor" })]);
+    listSessionsMock.mockReturnValue([
+      session({ id: "cursor-1", status: "running", agent: "cursor" }),
+    ]);
     fakeTable = [
       {
         pid: 20,
@@ -202,7 +240,14 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
         args: "cursor-agent",
         env: { SPUR_SESSION: "cursor-1" },
       },
-      { pid: 21, ppid: 20, rssKb: 1, elapsedSeconds: 1, args: "/opt/foo/agent", env: { SPUR_SESSION: "cursor-1" } },
+      {
+        pid: 21,
+        ppid: 20,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "/opt/foo/agent",
+        env: { SPUR_SESSION: "cursor-1" },
+      },
     ];
     const scan = await scanUnownedAgentProcesses("/data");
     expect(scan).toEqual({ status: "ok", processes: [] });
@@ -211,13 +256,30 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
   it("flags two unrelated processes carrying the same session id as duplicate_for_session", async () => {
     listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
     fakeTable = [
-      { pid: 30, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } },
-      { pid: 31, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } },
+      {
+        pid: 30,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
+      {
+        pid: 31,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
     ];
     const scan = await scanUnownedAgentProcesses("/data");
     expect(scan.status).toBe("ok");
     if (scan.status !== "ok") throw new Error("unreachable");
-    expect(scan.processes.map((proc) => proc.reason)).toEqual(["duplicate_for_session", "duplicate_for_session"]);
+    expect(scan.processes.map((proc) => proc.reason)).toEqual([
+      "duplicate_for_session",
+      "duplicate_for_session",
+    ]);
     expect(scan.processes.map((proc) => proc.pid).sort()).toEqual([30, 31]);
   });
 
@@ -232,8 +294,22 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
       }),
     ]);
     fakeTable = [
-      { pid: 40, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "desk-a" } },
-      { pid: 41, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "desk-b" } },
+      {
+        pid: 40,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "desk-a" },
+      },
+      {
+        pid: 41,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "desk-b" },
+      },
     ];
     const scan = await scanUnownedAgentProcesses("/data");
     expect(scan).toEqual({ status: "ok", processes: [] });
@@ -241,12 +317,29 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
 
   it("flags a live process under a completed record as terminal_record", async () => {
     listSessionsMock.mockReturnValue([session({ id: "api-1", status: "completed" })]);
-    fakeTable = [{ pid: 50, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } }];
+    fakeTable = [
+      {
+        pid: 50,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
+    ];
     const scan = await scanUnownedAgentProcesses("/data");
     expect(scan.status).toBe("ok");
     if (scan.status !== "ok") throw new Error("unreachable");
     expect(scan.processes).toEqual([
-      { pid: 50, rssKb: 1, elapsedSeconds: 1, sessionId: "api-1", agent: "claude", worktreePath: "/tmp/spur-worktrees/api/api-1", reason: "terminal_record" },
+      {
+        pid: 50,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        sessionId: "api-1",
+        agent: "claude",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        reason: "terminal_record",
+      },
     ]);
   });
 
@@ -254,7 +347,16 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
     "does not flag a live process under a %s record",
     async (status) => {
       listSessionsMock.mockReturnValue([session({ id: "api-1", status })]);
-      fakeTable = [{ pid: 60, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude", env: { SPUR_SESSION: "api-1" } }];
+      fakeTable = [
+        {
+          pid: 60,
+          ppid: 1,
+          rssKb: 1,
+          elapsedSeconds: 1,
+          args: "claude",
+          env: { SPUR_SESSION: "api-1" },
+        },
+      ];
       const scan = await scanUnownedAgentProcesses("/data");
       expect(scan).toEqual({ status: "ok", processes: [] });
     },
@@ -276,7 +378,14 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
   it("includes pid, agent, rss and age in a seeded finding's detail string", async () => {
     listSessionsMock.mockReturnValue([session({ id: "api-1", status: "completed" })]);
     fakeTable = [
-      { pid: 70, ppid: 1, rssKb: 204_800, elapsedSeconds: 125, args: "claude", env: { SPUR_SESSION: "api-1" } },
+      {
+        pid: 70,
+        ppid: 1,
+        rssKb: 204_800,
+        elapsedSeconds: 125,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
     ];
     const check = await checkAgentProcessOwnership("/data");
     expect(check.ok).toBe(false);

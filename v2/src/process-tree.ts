@@ -190,9 +190,7 @@ export function signalPid(pid: number, signal: NodeJS.Signals): void {
 // "ok" = the read succeeded, `value` is the var's value (or undefined if the
 // var is absent from that process' environment) — distinct from "unreadable"
 // (dead pid, a proc race, permission, or no procfs at all).
-export type ProcessEnvRead =
-  | { status: "ok"; value: string | undefined }
-  | { status: "unreadable" };
+export type ProcessEnvRead = { status: "ok"; value: string | undefined } | { status: "unreadable" };
 
 // Linux /proc/<pid>/environ only: a NUL-separated KEY=VALUE blob. There is no
 // portable equivalent (macOS does not expose another process' environment to
