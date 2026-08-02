@@ -198,6 +198,13 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   return request;
 }
 
+function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
+  if (!isRecord(raw)) {
+    return { reap: false };
+  }
+  return { reap: raw["reap"] === true };
+}
+
 function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
   if (!isRecord(raw)) {
     return {};
@@ -1300,6 +1307,12 @@ export async function startServer(
           200,
           await service.stopSidecar(stopSidecarMatch[1], stopSidecarMatch[2]),
         );
+        return;
+      }
+
+      if (method === "POST" && path === "/sidecars/sweep") {
+        const { reap } = parseSweepSidecarsRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.sweepSidecarProcesses(reap));
         return;
       }
 

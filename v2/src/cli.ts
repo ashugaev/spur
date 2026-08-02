@@ -61,6 +61,7 @@ import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
+import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
@@ -846,6 +847,28 @@ function renderDoctorResult(result: DoctorResult): string {
   if (failed.length > 0) {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
+  return lines.join("\n");
+}
+
+function renderSidecarSweepResult(result: SidecarSweepResult): string {
+  if (!result.supported) {
+    return dimText("Process table or procfs unreadable on this host — sweep skipped.");
+  }
+  if (result.leaked.length === 0) {
+    return dimText("No leaked sidecar process trees found.");
+  }
+  const reapedPids = new Set(result.reaped.map((outcome) => outcome.panePid));
+  const lines = result.leaked.map((tree) => {
+    const ageMinutes = Math.floor(tree.ageSeconds / 60);
+    const status = reapedPids.has(tree.rootPid)
+      ? "reaped"
+      : tree.reapable
+        ? "reapable"
+        : "report-only";
+    return dimText(
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.rssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`,
+    );
+  });
   return lines.join("\n");
 }
 
@@ -2836,6 +2859,33 @@ export function createProgram(cliEntrypoint: string): Command {
           ),
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
+      });
+    });
+
+  sidecar
+    .command("sweep")
+    .description("Report sidecar process trees no live session claims; --reap to kill them.")
+    .option("--reap", "Signal reapable leaked trees instead of only reporting them")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sweeping sidecar process trees",
+        action: () =>
+          postJson<SidecarSweepResult>(
+            cliEntrypoint,
+            "/sidecars/sweep",
+            { reap: Boolean(options.reap) },
+            configPath,
+          ),
+        success: (result) =>
+          result.leaked.length === 0
+            ? "No leaked sidecar process trees found."
+            : `Found ${result.leaked.length} leaked sidecar process tree(s).`,
+        render: renderSidecarSweepResult,
       });
     });
 

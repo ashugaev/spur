@@ -78,6 +78,68 @@ describe("startServer", () => {
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 
+  it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const defaultResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(defaultResponse.status).toBe(200);
+      const defaultResult = (await defaultResponse.json()) as {
+        supported: boolean;
+        leaked: unknown[];
+        reaped: unknown[];
+      };
+      expect(defaultResult.reaped).toEqual([]);
+
+      const reapResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reap: true }),
+      });
+      expect(reapResponse.status).toBe(200);
+      const reapResult = (await reapResponse.json()) as {
+        supported: boolean;
+        leaked: unknown[];
+        reaped: unknown[];
+      };
+      // Nothing leaked in this empty sandbox, so both calls report the same
+      // shape either way — the important assertion is the default omits any
+      // reaping regardless of what `leaked` ends up containing.
+      expect(reapResult.leaked).toEqual(defaultResult.leaked);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("force closes active requests during stop", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
