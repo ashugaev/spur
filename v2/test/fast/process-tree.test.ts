@@ -3,6 +3,8 @@ import {
   canReadProcessTree,
   classifyProcessOwnership,
   collectDescendants,
+  isPidAlive,
+  isZombieProcessState,
   parseElapsedSeconds,
   type ProcessSnapshotEntry,
   type PpidReader,
@@ -96,5 +98,39 @@ describe("collectDescendants", () => {
       { pid: 600, ppid: 500, rssKb: 1000, elapsedSeconds: 10, args: "b" },
     ];
     expect(collectDescendants(500, cyclic).sort()).toEqual([500, 600]);
+  });
+});
+
+describe("isZombieProcessState", () => {
+  it("treats every ps -o stat= zombie code as a zombie", () => {
+    expect(isZombieProcessState("Z")).toBe(true);
+    expect(isZombieProcessState("Zs")).toBe(true);
+    expect(isZombieProcessState("Z+")).toBe(true);
+    // Leading/trailing whitespace as ps -o stat=<pid> can emit it.
+    expect(isZombieProcessState("  Z  ")).toBe(true);
+  });
+
+  it("does not treat a live state as a zombie", () => {
+    expect(isZombieProcessState("R")).toBe(false);
+    expect(isZombieProcessState("S")).toBe(false);
+    expect(isZombieProcessState("S+")).toBe(false);
+    expect(isZombieProcessState("Ss")).toBe(false);
+    expect(isZombieProcessState("")).toBe(false);
+  });
+});
+
+describe("isPidAlive", () => {
+  // A real OS zombie cannot be manufactured from inside this Node process
+  // (see the isZombieProcessState comment), so this exercises the real `ps`
+  // plumbing against the two cases that ARE constructible: a genuinely live
+  // pid (this test process itself) and a pid that does not exist.
+  it("is true for a live, non-zombie pid", async () => {
+    expect(await isPidAlive(process.pid)).toBe(true);
+  });
+
+  it("is false for a pid with no ps row", async () => {
+    // Reserved/unlikely-to-exist on any real host; pid_max never reaches
+    // this on Linux (32-bit ceiling, default max is far lower) or macOS.
+    expect(await isPidAlive(2_147_483_647)).toBe(false);
   });
 });

@@ -120,7 +120,11 @@ export async function listProcesses(): Promise<ProcessSnapshotEntry[]> {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
+    // The trailing args group is optional: a zombie's argv is reclaimed, so
+    // `ps` emits an empty args column, `.trim()` strips the now-trailing
+    // separator whitespace, and a required `\s+` before the group would
+    // reject the whole row — making a zombie invisible to every scan.
+    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/.exec(trimmed);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
@@ -161,19 +165,42 @@ export function collectDescendants(
   return ordered;
 }
 
-// Alive unless the signal-0 probe fails with ESRCH. EPERM (or any other
-// errno) counts as alive: the process exists, this caller just cannot signal
-// it. This is the canonical copy — playwright.ts's leak sweep uses it.
-// workspace.ts:100, ids.ts:20 and update.ts:139 each keep a deliberately
-// different errno policy for their own call site (rethrow-unknown,
-// EPERM-only, etc.) and are intentionally NOT consolidated onto this one.
-export function isPidAlive(pid: number): boolean {
+// `ps -o stat=` zombie state codes ("Z", "Zs", "Z+", ...) on both Linux and
+// macOS: any state beginning with "Z". Exported so the zombie rule itself is
+// directly unit-testable — a real OS zombie cannot be manufactured from
+// inside this Node process (libuv reaps every child it spawns as soon as it
+// exits), so the parsing rule is what a fast test can actually pin down.
+export function isZombieProcessState(state: string): boolean {
+  return state.trim().startsWith("Z");
+}
+
+// Alive unless `ps` has no row for the pid, or reports it as a zombie. A
+// signal-0 probe (kill(pid, 0)) is NOT enough here: a zombie still answers
+// it (the kernel keeps the pid entry until the parent reaps it), so a
+// captured agent that exited but was left unreaped would report "alive"
+// forever — wedging every failOnSurvivors:true caller (restore/relaunch/
+// switchAuth) with no bypass, since `force` only gates the separate P2 scan,
+// never a P1 survivor. `ps -o stat=` is the portable way to see through
+// that on both Linux and macOS, so this stays a leaf `ps` call rather than a
+// /proc read. This is the canonical copy — playwright.ts's leak sweep uses
+// it. workspace.ts:100, ids.ts:20 and update.ts:139 each keep a deliberately
+// different kill(pid,0)-based errno policy for their own call site
+// (rethrow-unknown, EPERM-only, etc.) and are intentionally NOT consolidated
+// onto this one — they answer a different question (can THIS process signal
+// that pid) than the one this copy now answers (is the pid a live,
+// non-zombie process at all).
+export async function isPidAlive(pid: number): Promise<boolean> {
+  let stdout: string;
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    ({ stdout } = await execFileAsync("ps", ["-o", "stat=", "-p", String(pid)]));
+  } catch {
+    return false;
   }
+  const state = stdout.trim();
+  if (!state) {
+    return false;
+  }
+  return !isZombieProcessState(state);
 }
 
 // Best-effort signal send. Swallows ESRCH (already dead) and any other

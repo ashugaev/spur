@@ -189,7 +189,7 @@ async function killProcessTree(pid: number): Promise<void> {
   }
   await sleep(KILL_TREE_GRACE_MS);
   for (const target of [...tree].reverse()) {
-    if (isPidAlive(target)) {
+    if (await isPidAlive(target)) {
       signalPid(target, "SIGKILL");
     }
   }

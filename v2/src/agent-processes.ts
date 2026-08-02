@@ -74,12 +74,17 @@ function collapseToShallowest(
   return pids.filter((pid) => !covered.has(pid));
 }
 
+async function filterAlivePids(pids: readonly number[]): Promise<number[]> {
+  const flags = await Promise.all(pids.map((pid) => isPidAlive(pid)));
+  return pids.filter((_pid, index) => flags[index]);
+}
+
 async function pollUntilDead(pids: number[], graceMs: number, pollMs: number): Promise<number[]> {
   const deadline = Date.now() + graceMs;
-  let alive = pids.filter(isPidAlive);
+  let alive = await filterAlivePids(pids);
   while (alive.length > 0 && Date.now() < deadline) {
     await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-    alive = alive.filter(isPidAlive);
+    alive = await filterAlivePids(alive);
   }
   return alive;
 }
@@ -119,7 +124,7 @@ const POLL_MS = 100;
 // Poll -> SIGHUP -> poll -> SIGTERM -> poll -> SIGKILL -> poll. `processes`
 // is expected root-first (capturePaneAgentProcesses' order); signalling
 // walks it leaves-first so a parent is never signalled before its children.
-// Portable: signals and kill(pid,0) only, no /proc.
+// Portable: signals and a `ps`-based liveness probe only, no /proc.
 export async function terminateAgentProcesses(
   processes: readonly AgentProcessRef[],
   options?: { hupGraceMs?: number; termGraceMs?: number; killGraceMs?: number },
@@ -128,10 +133,9 @@ export async function terminateAgentProcesses(
   const termGraceMs = options?.termGraceMs ?? DEFAULT_GRACE_MS;
   const killGraceMs = options?.killGraceMs ?? DEFAULT_GRACE_MS;
 
-  let survivors = [...processes]
-    .reverse()
-    .map((proc) => proc.pid)
-    .filter(isPidAlive);
+  let survivors = await filterAlivePids(
+    [...processes].reverse().map((proc) => proc.pid),
+  );
   if (survivors.length === 0) {
     return { status: "clear" };
   }
