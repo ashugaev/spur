@@ -10012,7 +10012,7 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("completed");
     });
 
-    it("teardown of a 3-sidecar session sleeps one shared grace window, not three", async () => {
+    it("teardown of a 3-sidecar session sleeps one grace window, not three", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
         projects: {
