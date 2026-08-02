@@ -19,10 +19,14 @@ describe("readResponsePayload", () => {
     expect(await readResponsePayload(response)).toEqual({ error: "Session not found" });
   });
 
-  it("collapses a 413 body to a short, actionable message regardless of content", async () => {
+  it("collapses a 413 body to a short, neutral message regardless of content", async () => {
+    // Neutral, not attachment-specific: a 413 can come from an oversize text
+    // message with no attachments at all. The attachment-specific advice
+    // comes only from the client pre-flight (ATTACHMENTS_TOO_LARGE_MESSAGE),
+    // which fires exactly when attachments are the cause.
     const response = htmlResponse(413, "<html><body>413 Request Entity Too Large</body></html>");
     expect(await readResponsePayload(response)).toEqual({
-      error: "Request rejected: payload too large. Try smaller or fewer attachments.",
+      error: "Request rejected: payload too large.",
     });
   });
 
@@ -89,13 +93,21 @@ describe("responseErrorMessage", () => {
   it("falls back when the payload has no error field", () => {
     expect(responseErrorMessage({}, "fallback")).toBe("fallback");
   });
+
+  it("falls back when the error field is an empty string", () => {
+    expect(responseErrorMessage({ error: "" }, "fallback")).toBe("fallback");
+  });
+
+  it("falls back when the error field is whitespace-only", () => {
+    expect(responseErrorMessage({ error: "   " }, "fallback")).toBe("fallback");
+  });
 });
 
 describe("readApiErrorMessage", () => {
-  it("sanitizes an HTML 413 body into the shared oversize message", async () => {
+  it("sanitizes an HTML 413 body into the shared neutral oversize message", async () => {
     const response = htmlResponse(413, "<html>413 Request Entity Too Large</html>");
     expect(await readApiErrorMessage(response, "fallback")).toBe(
-      "Request rejected: payload too large. Try smaller or fewer attachments.",
+      "Request rejected: payload too large.",
     );
   });
 
@@ -111,6 +123,14 @@ describe("readApiErrorMessage", () => {
     const response = new Response("   ", {
       status: 500,
       headers: { "content-type": "text/plain" },
+    });
+    expect(await readApiErrorMessage(response, "fallback")).toBe("fallback");
+  });
+
+  it("uses the fallback for a JSON body with an empty error field instead of a blank message", async () => {
+    const response = new Response(JSON.stringify({ error: "" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
     });
     expect(await readApiErrorMessage(response, "fallback")).toBe("fallback");
   });

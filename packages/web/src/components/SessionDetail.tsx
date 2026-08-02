@@ -57,6 +57,7 @@ import {
   assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import {
@@ -2172,19 +2173,46 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const addFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addRespawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setRespawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addDeskSpawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setDeskSpawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 

@@ -23,10 +23,16 @@ function isLikelyHtml(text: string, contentType: string): boolean {
  * never lands in a toast. Any other plain-text body (e.g. a long daemon
  * error) is passed through as-is — the toast UI is built to scroll long
  * daemon errors, so truncating here would regress that.
+ *
+ * The 413 message stays neutral (no attachment-specific advice): a 413 can
+ * come from an oversize text message with no attachments at all, and the
+ * client-side pre-flight (ATTACHMENTS_TOO_LARGE_MESSAGE in
+ * file-attachments.ts) already covers the attachment-specific case by
+ * construction — it only fires when attachments are actually the cause.
  */
 function sanitizeNonJsonBody(text: string, response: Response): string {
   if (response.status === 413) {
-    return "Request rejected: payload too large. Try smaller or fewer attachments.";
+    return "Request rejected: payload too large.";
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (isLikelyHtml(text, contentType)) {
@@ -49,7 +55,7 @@ export async function readResponsePayload(response: Response): Promise<unknown> 
 export function responseErrorMessage(payload: unknown, fallback: string): string {
   if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
     const message = (payload as Record<string, unknown>)["error"];
-    if (typeof message === "string") {
+    if (typeof message === "string" && message.trim()) {
       return message;
     }
   }

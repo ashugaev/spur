@@ -21,9 +21,14 @@ const EXTENSION_BY_BLOB_MIME: Record<string, string> = {
   "image/png": "png",
 };
 
-// Kept under the daemon's 15 MB JSON body cap (v2/src/server.ts readJsonBody
-// maxBytes override) to leave headroom for JSON overhead and other fields.
-export const MAX_ATTACHMENTS_PAYLOAD_BYTES = 14 * 1024 * 1024;
+// The daemon's exact JSON body cap is 15,000,000 bytes (v2/src/server.ts
+// readJsonBody maxBytes override on the spawn/send/respawn routes). This
+// check only sums attachment bytes, not the rest of the body (prompt, steps,
+// branch, message text, JSON structure), so the budget is set well below the
+// server cap — 1,000,000 bytes (~1 MB) of headroom, comfortably more than
+// any realistic prompt/steps/branch text — rather than shaving it to a few
+// hundred KB that a long prompt could still blow through.
+export const MAX_ATTACHMENTS_PAYLOAD_BYTES = 14_000_000;
 
 export const ATTACHMENTS_TOO_LARGE_MESSAGE =
   "Attachments too large to send — try a smaller image or fewer files.";
@@ -283,5 +288,28 @@ export function assertAttachmentsWithinLimit(encoded: Array<{ name: string; data
   const totalBytes = encoded.reduce((sum, attachment) => sum + attachment.data.length, 0);
   if (totalBytes > MAX_ATTACHMENTS_PAYLOAD_BYTES) {
     throw new Error(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  }
+}
+
+/**
+ * Merges newly resolved attachments into the current selection unless the
+ * merge would exceed a server-enforced limit — reuses
+ * assertAttachmentsWithinLimit (the same guard the submit-time fetch calls)
+ * so the user gets the signal at attach time instead of only at submit,
+ * after every file has already been read and base64-encoded for nothing.
+ * The submit-time assert stays the authoritative guard; this only decides
+ * whether to commit the merge.
+ */
+export function mergeAttachmentsWithinLimit(
+  current: FileAttachment[],
+  incoming: FileAttachment[],
+): { attachments: FileAttachment[]; rejectedMessage: string | null } {
+  const merged = [...current, ...incoming];
+  try {
+    assertAttachmentsWithinLimit(encodeFileAttachments(merged));
+    return { attachments: merged, rejectedMessage: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ATTACHMENTS_TOO_LARGE_MESSAGE;
+    return { attachments: current, rejectedMessage: message };
   }
 }

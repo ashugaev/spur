@@ -10,8 +10,17 @@ import {
   imageFilesFromDataTransfer,
   MAX_ATTACHMENT_COUNT,
   MAX_ATTACHMENT_DECODED_BYTES,
+  mergeAttachmentsWithinLimit,
   shouldDownscaleImage,
+  type FileAttachment,
 } from "@/lib/file-attachments";
+
+function attachment(name: string, dataLength: number): FileAttachment {
+  return {
+    file: new File([name], name, { type: "image/png" }),
+    preview: `data:image/png;base64,${"a".repeat(dataLength)}`,
+  };
+}
 
 type TestDataTransferItem = {
   getAsFile: () => File | null;
@@ -233,6 +242,52 @@ describe("assertAttachmentsWithinLimit", () => {
       data: "a".repeat(10),
     }));
     expect(() => assertAttachmentsWithinLimit(encoded)).not.toThrow();
+  });
+});
+
+describe("mergeAttachmentsWithinLimit", () => {
+  it("commits the merge and reports no rejection when within the limit", () => {
+    const current = [attachment("a.png", 100)];
+    const incoming = [attachment("b.png", 100)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toEqual([...current, ...incoming]);
+    expect(result.rejectedMessage).toBeNull();
+  });
+
+  it("rejects the merge and keeps the current selection when the count cap would be exceeded", () => {
+    const current = Array.from({ length: MAX_ATTACHMENT_COUNT }, (_, i) =>
+      attachment(`a${i}.png`, 10),
+    );
+    const incoming = [attachment("one-too-many.png", 10)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toMatch(/too many attachments/i);
+  });
+
+  it("rejects the merge and keeps the current selection when a single incoming file exceeds the per-file cap", () => {
+    const current: FileAttachment[] = [];
+    const oversizedBase64Length = Math.ceil((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3) + 100;
+    const incoming = [attachment("huge.gif", oversizedBase64Length)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toMatch(/huge\.gif/);
+  });
+
+  it("rejects the merge and keeps the current selection when the aggregate cap would be exceeded", () => {
+    const each = 4_000_000; // safely under the per-file cap on its own
+    const current = [attachment("a.png", each), attachment("b.png", each)];
+    const incoming = [attachment("c.png", each), attachment("d.png", each)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toBe(ATTACHMENTS_TOO_LARGE_MESSAGE);
   });
 });
 

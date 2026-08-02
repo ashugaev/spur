@@ -39,6 +39,7 @@ import {
   assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
@@ -2107,14 +2108,23 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addSpawnFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setSpawnAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
