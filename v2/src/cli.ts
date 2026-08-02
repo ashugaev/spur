@@ -857,22 +857,36 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
   if (result.leaked.length === 0) {
     return dimText("No leaked sidecar process trees found.");
   }
-  const reapedPids = new Set(result.reaped.map((outcome) => outcome.panePid));
+  // Keyed by rootPid, not just presence: an outcome with survivors left
+  // alive after the SIGKILL confirmation window is a partial kill, not a
+  // clean reap — surfacing it as "[reaped]" would tell the operator nothing
+  // is left running when something still is.
+  const outcomeByRootPid = new Map(result.reaped.map((outcome) => [outcome.panePid, outcome]));
   const lines = result.leaked.map((tree) => {
     const ageMinutes = Math.floor(tree.ageSeconds / 60);
-    const status = reapedPids.has(tree.rootPid)
-      ? "reaped"
-      : tree.reapable
-        ? "reapable"
-        : "report-only";
+    const outcome = outcomeByRootPid.get(tree.rootPid);
+    const status =
+      outcome === undefined
+        ? tree.reapable
+          ? "reapable"
+          : "report-only"
+        : outcome.survivors.length === 0
+          ? "reaped"
+          : "partial";
+    const survivorsSuffix =
+      outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
     );
   });
   return lines.join("\n");
 }
+
+// Test-only: exercises the sweep summary's status/survivors formatting
+// without spinning up a live CLI command or the daemon route it calls.
+export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
   return [...previous, value];
