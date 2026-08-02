@@ -557,4 +557,25 @@ describe("runtime-tmux", () => {
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(false);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
   });
+
+  it("getTmuxPanePid fresh forks a second list-panes instead of reusing the cached fleet snapshot", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return { stdout: "api-1 1 1 0 4242 /dev/pts/1", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { getTmuxPanePid } = await import("../../src/runtime-tmux.js");
+
+    const first = await getTmuxPanePid("api-1");
+    const second = await getTmuxPanePid("api-1", { fresh: true });
+
+    expect(first).toBe(4242);
+    expect(second).toBe(4242);
+    const listPanesCalls = execFileAsyncMock.mock.calls.filter(
+      ([, args]) => args[0] === "list-panes",
+    );
+    expect(listPanesCalls).toHaveLength(2);
+  });
 });
