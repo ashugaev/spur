@@ -40,7 +40,8 @@ export async function readResponsePayload(response: Response): Promise<unknown> 
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    return { error: sanitizeNonJsonBody(text, response) };
+    const sanitized = sanitizeNonJsonBody(text, response);
+    return sanitized ? { error: sanitized } : {};
   }
 }
 

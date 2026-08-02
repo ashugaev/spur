@@ -2216,6 +2216,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (options?.queue !== undefined) body.queue = options.queue;
       if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
       await handleAction("send", body);
+    } catch (sendError) {
+      showErrorToast(errorMessage(sendError, "Failed to send session message"));
     } finally {
       sendingRef.current = false;
     }

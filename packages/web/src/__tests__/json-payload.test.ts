@@ -65,6 +65,14 @@ describe("readResponsePayload", () => {
     const response = new Response("", { status: 200 });
     expect(await readResponsePayload(response)).toEqual({});
   });
+
+  it("returns an empty object for a whitespace-only non-JSON body, not a blank error", async () => {
+    const response = new Response("   ", {
+      status: 500,
+      headers: { "content-type": "text/plain" },
+    });
+    expect(await readResponsePayload(response)).toEqual({});
+  });
 });
 
 describe("responseErrorMessage", () => {
@@ -91,6 +99,14 @@ describe("readApiErrorMessage", () => {
       headers: { "content-type": "application/json" },
     });
     expect(await readApiErrorMessage(response, "fallback")).toBe("Kill confirmation required");
+  });
+
+  it("uses the fallback for a whitespace-only body instead of an empty message", async () => {
+    const response = new Response("   ", {
+      status: 500,
+      headers: { "content-type": "text/plain" },
+    });
+    expect(await readApiErrorMessage(response, "fallback")).toBe("fallback");
   });
 });
 

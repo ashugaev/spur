@@ -11,6 +11,16 @@ const REENCODE_QUALITY = 0.85;
 const WEBP_MIME = "image/webp";
 const JPEG_MIME = "image/jpeg";
 
+// Single source for mapping a canvas-produced blob's actual MIME type to a
+// filename extension. An unsupported `toBlob` type silently yields image/png
+// per the canvas spec, so the extension must always be derived from the blob
+// that came back, never assumed from the type that was requested.
+const EXTENSION_BY_BLOB_MIME: Record<string, string> = {
+  [WEBP_MIME]: "webp",
+  [JPEG_MIME]: "jpg",
+  "image/png": "png",
+};
+
 // Kept under the daemon's 15 MB JSON body cap (v2/src/server.ts readJsonBody
 // maxBytes override) to leave headroom for JSON overhead and other fields.
 export const MAX_ATTACHMENTS_PAYLOAD_BYTES = 14 * 1024 * 1024;
@@ -122,14 +132,15 @@ async function reencodeImage(
   ctx.drawImage(image, 0, 0, width, height);
 
   const webpBlob = await canvasToBlob(canvas, WEBP_MIME, REENCODE_QUALITY);
-  if (webpBlob && webpBlob.type === WEBP_MIME) {
-    return { blob: webpBlob, extension: "webp" };
-  }
-  const jpegBlob = await canvasToBlob(canvas, JPEG_MIME, REENCODE_QUALITY);
-  if (jpegBlob) {
-    return { blob: jpegBlob, extension: "jpg" };
-  }
-  return null;
+  const blob =
+    webpBlob && webpBlob.type === WEBP_MIME
+      ? webpBlob
+      : await canvasToBlob(canvas, JPEG_MIME, REENCODE_QUALITY);
+  if (!blob) return null;
+
+  const extension = EXTENSION_BY_BLOB_MIME[blob.type];
+  if (!extension) return null;
+  return { blob, extension };
 }
 
 async function downscaleImageFile(file: File): Promise<File> {
