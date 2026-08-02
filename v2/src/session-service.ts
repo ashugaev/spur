@@ -4233,11 +4233,15 @@ export class SessionService {
     return { records: subscriber.stateSubscriptions ?? [] };
   }
 
-  subscribeToSessionStates(
+  // Shared by subscribeToSessionStates (one entry, writes immediately) and
+  // applyRequestedStateSubscriptions (N entries, accumulated in memory and
+  // written once) so both stay on the same validation/merge rules.
+  private buildNextStateSubscriptions(
     subscriberId: string,
+    existing: SessionStateSubscription[],
     request: SubscribeSessionStatesRequest,
-  ): SessionStateSubscriptionRecordResponse {
-    const subscriber = this.requireSession(subscriberId);
+    now: string,
+  ): { record: SessionStateSubscription; nextSubscriptions: SessionStateSubscription[] } {
     const targetSessionId = request.targetSessionId.trim();
     if (!targetSessionId) {
       throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
@@ -4248,9 +4252,7 @@ export class SessionService {
     }
     const states = canonicalSubscriptionStates(request.states);
     const message = request.message?.trim();
-    const now = nowIso();
     const id = stateSubscriptionId(targetSessionId);
-    const existing = subscriber.stateSubscriptions ?? [];
     const previous = existing.find(
       (subscription) => subscription.targetSessionId === targetSessionId,
     );
@@ -4269,6 +4271,21 @@ export class SessionService {
     const nextSubscriptions = previous
       ? existing.map((subscription) => (subscription.id === id ? record : subscription))
       : [...existing, record];
+    return { record, nextSubscriptions };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const now = nowIso();
+    const { record, nextSubscriptions } = this.buildNextStateSubscriptions(
+      subscriberId,
+      subscriber.stateSubscriptions ?? [],
+      request,
+      now,
+    );
     this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
     return { record };
   }
@@ -4285,6 +4302,59 @@ export class SessionService {
     }
     this.writeStateSubscriptions(subscriber, nextSubscriptions);
     return { records: nextSubscriptions };
+  }
+
+  private applyRequestedStateSubscriptions(
+    session: SessionRecord,
+    requested: SubscribeSessionStatesRequest[] | undefined,
+  ): SessionRecord {
+    if (!requested || requested.length === 0) {
+      return session;
+    }
+    const now = nowIso();
+    let nextSubscriptions = session.stateSubscriptions ?? [];
+    let armedAny = false;
+    // Accumulate every requested entry in memory and persist once — avoids
+    // one readSession/writeSession/syncStateSubscriptionIndex round trip per
+    // entry on the spawn hot path.
+    for (const entry of requested) {
+      try {
+        nextSubscriptions = this.buildNextStateSubscriptions(
+          session.id,
+          nextSubscriptions,
+          entry,
+          now,
+        ).nextSubscriptions;
+        armedAny = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: {
+            targetSessionId: entry.targetSessionId,
+            error: message,
+          },
+        });
+      }
+    }
+    if (armedAny) {
+      try {
+        this.writeStateSubscriptions(session, nextSubscriptions, now);
+      } catch (error) {
+        // A write/index failure here must not fail the spawn — same
+        // non-fatal contract as the per-entry validation above.
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: { error: message },
+        });
+      }
+    }
+    return readSession(this.config.dataDir, session.id) ?? session;
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -5355,6 +5425,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -6294,6 +6365,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",

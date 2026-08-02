@@ -346,7 +346,9 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await page.setViewportSize({ width: 700, height: 844 });
     await page.goto("/");
 
-    const glyph = page.getByRole("img", { name: "Spur" });
+    // Scoped to the header: with zero sessions the EmptyState renders a second
+    // "Spur" glyph inside main once it loads, and the bare locator goes ambiguous.
+    const glyph = page.getByRole("banner").getByRole("img", { name: "Spur" });
     const filtersTrigger = page.getByRole("button", { name: "Filters" });
     const searchInput = page.getByPlaceholder("Filter...");
     const shepherd = page.getByRole("button", { name: "Spawn Shepherd" });
@@ -393,7 +395,8 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await page.goto("/");
 
     const controls = [
-      page.getByRole("img", { name: "Spur" }),
+      // Header-scoped for the same reason as the 700px/390px test above.
+      page.getByRole("banner").getByRole("img", { name: "Spur" }),
       page.getByRole("button", { name: "Filters" }),
       page.getByPlaceholder("Filter..."),
       page.getByRole("button", { name: "Spawn Shepherd" }),

@@ -354,6 +354,41 @@ function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionState
   };
 }
 
+// A CLI spawn only ever sends one entry; this bounds direct API/MCP callers,
+// which can pass an arbitrary array. Each entry still does a requireSession
+// read on the spawn hot path (the writes are batched into one at the end).
+const MAX_SPAWN_STATE_SUBSCRIPTIONS = 20;
+
+function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesRequest[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new InvalidSessionSubscriptionInputError("subscriptions must be an array");
+  }
+  if (raw.length > MAX_SPAWN_STATE_SUBSCRIPTIONS) {
+    throw new InvalidSessionSubscriptionInputError(
+      `subscriptions must not exceed ${MAX_SPAWN_STATE_SUBSCRIPTIONS} entries`,
+    );
+  }
+  const entries = raw.map((entry) => parseSubscribeSessionStatesRequest(entry));
+  const targetSessionIds = new Set<string>();
+  for (const entry of entries) {
+    if (targetSessionIds.has(entry.targetSessionId)) {
+      throw new InvalidSessionSubscriptionInputError(
+        `subscriptions must not repeat targetSessionId: ${entry.targetSessionId}`,
+      );
+    }
+    targetSessionIds.add(entry.targetSessionId);
+  }
+  return entries;
+}
+
+function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
+  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -1112,13 +1147,17 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(body));
+        sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
         return;
       }
 
       if (method === "POST" && path === "/sessions/background") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnInBackground(body));
+        sendJson(
+          response,
+          201,
+          await service.spawnInBackground(mergeSpawnStateSubscriptions(body)),
+        );
         return;
       }
 

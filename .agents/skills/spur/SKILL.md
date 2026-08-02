@@ -17,10 +17,10 @@ Sections through `## Safety` describe Spur anywhere, no repo path needed. Sectio
 ## Interfaces
 
 - CLI: discover the surface with `spur --help`, then `spur <command> --help`. Never hard-code a command list.
-- Daemon HTTP API, the same surface the web UI uses: `GET /info`, `GET /sessions`, `POST /sessions`, `POST /sessions/:id/{send,pause,complete,kill,respawn,restore,handoff,wake,self-destruct}`. `POST /sessions` body: `{project, prompt?, steps?, agent?, model?, planMode?, restrictWrites?, branch?, overrides?, selfDestruct?}`.
+- Daemon HTTP API, the same surface the web UI uses: `GET /info`, `GET /sessions`, `POST /sessions`, `POST /sessions/:id/{send,pause,complete,kill,respawn,restore,handoff,wake,self-destruct}`. `POST /sessions` body: `{project, prompt?, steps?, agent?, model?, planMode?, restrictWrites?, branch?, overrides?, selfDestruct?, subscriptions?}`.
 - `POST /sessions/:id/answer {optionIndex}` picks a claude AskUserQuestion menu option by keystroke. Claude only, no CLI equivalent.
 - Telegram: an allowed user binds a chat or forum topic with `/watch [sessionId]`; the agent answers that target with `spur source reply "..."`.
-- Hidden CLI commands, absent from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
+- Hidden CLI commands, absent from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 - Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH` and holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`. When the project sets `branchNaming.regex` it also holds `spur-branch` and a `git` wrapper that blocks a push off-pattern — a blocked push means that shim, not a real git failure. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND` (points at `spur-slots`, takes `--title-if-absent`, `--link <label>=<url>`, `--tag`), `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 
 ## Session lifecycle
@@ -45,6 +45,7 @@ spur send <sessionId> "message"
 - `pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`.
 - `restore` needs status `running`/`stopped`/`paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed`/`completed` are never restorable. `respawn` starts a fresh session from a terminal session's config. `reopen <sessionId>` restarts a `completed` session in place instead: same id, same worktree, native conversation resumed, prompt not resent; refuses when the branch or worktree is gone (use `respawn`) or a reopen is already running.
 - `send` queues while the agent is busy and flushes at the next prompt, ahead of the next auto-step.
+- Cross-agent wakeup: `spur subscribe <targetSessionId> --state <state> ...` (plus `--list`/`--remove`) messages the subscriber once per matching state transition of the target; `spur spawn --subscribe-to <sessionId>` (repeatable `--subscribe-state`, optional `--subscribe-message`) arms the same subscription at spawn time. See `docs/commands.md`.
 - Model precedence: request `--model`, then project `defaultModels[agent]`, then Spur's own default (claude `opus`, cursor `auto`; codex has none). Claude ids: `opus|sonnet|haiku|fable`.
 
 ## Automation

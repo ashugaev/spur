@@ -1351,6 +1351,176 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("spawn-time subscriptions persist a state-<target> record on the new session and the returned view", async () => {
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [{ targetSessionId: "watched-1", states: ["needs_input"], message: "ping" }],
+    });
+
+    expect(result.stateSubscriptions).toEqual([
+      expect.objectContaining({
+        id: "state-watched-1",
+        targetSessionId: "watched-1",
+        states: ["needs_input"],
+        message: "ping",
+      }),
+    ]);
+    expect(sessions.get("api-1")?.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1" }),
+    ]);
+    service.dispose();
+  });
+
+  it("batches multiple spawn-time subscriptions into a single write instead of one per entry", async () => {
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    sessions.set("watched-2", runningSession({ id: "watched-2" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    writeSessionMock.mockClear();
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [
+        { targetSessionId: "watched-1", states: ["needs_input"] },
+        { targetSessionId: "watched-2", states: ["stopped"] },
+      ],
+    });
+
+    expect(result.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1", targetSessionId: "watched-1" }),
+      expect.objectContaining({ id: "state-watched-2", targetSessionId: "watched-2" }),
+    ]);
+    const subscriptionWrites = writeSessionMock.mock.calls.filter(
+      ([, session]) => session.id === "api-1" && session.stateSubscriptions !== undefined,
+    );
+    expect(subscriptionWrites).toHaveLength(1);
+    expect(subscriptionWrites[0]?.[1].stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1" }),
+      expect.objectContaining({ id: "state-watched-2" }),
+    ]);
+    service.dispose();
+  });
+
+  it("arms and persists the valid entry from a mixed valid/missing-target batch, logs spawn_failed only for the missing one", async () => {
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [
+        { targetSessionId: "watched-1", states: ["needs_input"] },
+        { targetSessionId: "missing-1", states: ["needs_input"] },
+      ],
+    });
+
+    expect(result.status).toBe("running");
+    expect(result.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1", targetSessionId: "watched-1" }),
+    ]);
+    expect(sessions.get("api-1")?.stateSubscriptions).toEqual([
+      expect.objectContaining({ id: "state-watched-1" }),
+    ]);
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.subscription.spawn_failed",
+      ),
+    ).toHaveLength(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.subscription.spawn_failed",
+        level: "warn",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({ targetSessionId: "missing-1" }),
+      }),
+    );
+    service.dispose();
+  });
+
+  it("delivers exactly one message to a spawn-time subscriber on a matching target transition", async () => {
+    // Subscriber spawns as codex so classifying it during delivery doesn't share
+    // the claude jsonl mock being driven below to transition the claude target.
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+      agent: "codex",
+      subscriptions: [{ targetSessionId: "watched-1", states: ["needs_input"], message: "ping" }],
+    });
+    sendMessageToTmuxMock.mockClear();
+
+    // Baseline read establishes "waiting" for watched-1 without dispatching.
+    await service.get("watched-1");
+    mockClaudeJsonlState("needs_input");
+    // Two settling reads: the first clears the state-hold debounce, the second
+    // commits the waiting -> needs_input transition that fires the dispatch.
+    await service.get("watched-1");
+    await service.get("watched-1");
+
+    await vi.waitFor(() => {
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("ping"),
+      expect.any(Object),
+    );
+    service.dispose();
+  });
+
+  it("logs a spawn_failed warning and keeps the session running when a spawn-time subscription target does not exist", async () => {
+    const sessions = createSessionStore();
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [{ targetSessionId: "missing-1", states: ["needs_input"] }],
+    });
+
+    expect(result.status).toBe("running");
+    expect(result.stateSubscriptions).toBeUndefined();
+    expect(sessions.get("api-1")?.stateSubscriptions).toBeUndefined();
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.subscription.spawn_failed",
+      ),
+    ).toHaveLength(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.subscription.spawn_failed",
+        level: "warn",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({ targetSessionId: "missing-1" }),
+      }),
+    );
+    service.dispose();
+  });
+
   it("lists configured available backlog items", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
@@ -1537,6 +1707,27 @@ describe("SessionService", () => {
           session.worktreePath === "/tmp/spur-worktrees/api/api-1",
       ),
     ).toBe(true);
+  });
+
+  it("arms spawn-time subscriptions on a background spawn once it settles", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("watched-1", runningSession({ id: "watched-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      subscriptions: [{ targetSessionId: "watched-1", states: ["needs_input"] }],
+    });
+
+    await vi.waitFor(() => {
+      expect(sessions.get("api-1")?.stateSubscriptions).toEqual([
+        expect.objectContaining({ id: "state-watched-1", targetSessionId: "watched-1" }),
+      ]);
+    });
   });
 
   it("rejects a background spawn whose slot link label fails validation", async () => {
