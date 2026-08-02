@@ -425,6 +425,63 @@ describe("session workspaceId normalization", () => {
   });
 });
 
+describe("sidecarProcs", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("keeps a valid entry across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: { dev: { pid: 1234, pgid: 1234, starttime: 5678 } },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("drops a malformed entry instead of persisting it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: {
+        dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+        broken: { pid: -1, pgid: 0, starttime: NaN } as unknown as {
+          pid: number;
+          pgid: number;
+          starttime: number;
+        },
+      },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("stays absent on a record written without the field", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toBeUndefined();
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();

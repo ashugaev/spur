@@ -21,6 +21,7 @@ import {
   type SessionPipelineState,
   type SessionRecord,
   type SessionStateSubscription,
+  type SidecarProcessIdentity,
   type TelegramBinding,
   type TelegramReplyTarget,
   type WorkItemLifecycleRecord,
@@ -478,6 +479,35 @@ function normalizeQueuedMessagesState(
   };
 }
 
+// Keeps only entries whose pid/pgid/starttime are finite positive integers —
+// a malformed entry (bad restore, hand-edited JSON) must never survive a
+// write, since it would be trusted as a real signal target later.
+function normalizeSidecarProcs(
+  sidecarProcs: Record<string, SidecarProcessIdentity> | undefined,
+): Record<string, SidecarProcessIdentity> | undefined {
+  if (!sidecarProcs) {
+    return undefined;
+  }
+  const isPositiveInt = (value: unknown): value is number =>
+    typeof value === "number" && Number.isInteger(value) && value > 0;
+  const normalized: Record<string, SidecarProcessIdentity> = {};
+  for (const [name, identity] of Object.entries(sidecarProcs)) {
+    if (
+      identity &&
+      isPositiveInt(identity.pid) &&
+      isPositiveInt(identity.pgid) &&
+      isPositiveInt(identity.starttime)
+    ) {
+      normalized[name] = {
+        pid: identity.pid,
+        pgid: identity.pgid,
+        starttime: identity.starttime,
+      };
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function normalizeStateSubscriptions(
   subscriptions: SessionStateSubscription[] | undefined,
 ): SessionStateSubscription[] | undefined {
@@ -512,6 +542,7 @@ function normalizeStateSubscriptions(
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -560,6 +591,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
+    ...(sidecarProcs ? { sidecarProcs } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
       : {}),

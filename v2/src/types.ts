@@ -651,6 +651,18 @@ export interface SessionStateSubscriptionRecordResponse {
   record: SessionStateSubscription;
 }
 
+export interface SidecarProcessIdentity {
+  /** tmux pane pid at start. On Linux this is also the pane's pgid and sid. */
+  pid: number;
+  /** Process group id of the pane at start. Signal target for a leaked tree. */
+  pgid: number;
+  /**
+   * /proc/<pid>/stat field 22 (starttime, clock ticks since boot). The only
+   * pid-reuse guard: a wall-clock timestamp cannot distinguish a reused pid.
+   */
+  starttime: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -696,6 +708,12 @@ export interface SessionRecord {
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
+  /**
+   * Pane identity of each sidecar's CURRENT instance, keyed by sidecar name.
+   * Written on the sidecar OWNER's record (the workspace anchor for a
+   * desk-shared sidecar, the session itself for an mcp sidecar).
+   */
+  sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
