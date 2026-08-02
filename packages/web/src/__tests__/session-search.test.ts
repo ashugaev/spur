@@ -126,9 +126,9 @@ Your terminal output is invisible to them. Reply when you need input and when th
       port: 3000,
     });
 
-    expect(matchesSessionSearch(makeSession({ prompt, originalTaskPrompt: prompt }), "spur.yaml")).toBe(
-      false,
-    );
+    expect(
+      matchesSessionSearch(makeSession({ prompt, originalTaskPrompt: prompt }), "spur.yaml"),
+    ).toBe(false);
   });
 
   it("matches every session for a blank query", () => {
