@@ -199,6 +199,40 @@ describe("findForeignAgentProcessesForSession", () => {
       processes: [{ pid: 2, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
     });
   });
+
+  it("resolves a ppid cycle between two candidates to exactly one survivor, never zero", async () => {
+    // A genuine OS ppid chain cannot cycle, but the collapse step must stay
+    // bounded against a synthetic/adversarial table anyway: two candidates
+    // whose ppid fields point at each other would otherwise each "cover"
+    // the other and both get filtered out, silently reporting no live
+    // process at all instead of refusing the launch over a real one.
+    fakeTable = [
+      {
+        pid: 30,
+        ppid: 31,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
+      {
+        pid: 31,
+        ppid: 30,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
+    ];
+    const scan = await findForeignAgentProcessesForSession({
+      sessionId: "api-1",
+      processMatchers: ["claude"],
+      excludePanePid: null,
+    });
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes).toHaveLength(1);
+  });
 });
 
 describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {

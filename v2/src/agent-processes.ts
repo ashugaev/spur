@@ -51,6 +51,13 @@ function compileMatchers(matchers: readonly string[]): RegExp[] {
 // Ancestry is resolved over the FULL process table (not just the
 // candidates), so an intermediate non-matching process (a shell wrapper, for
 // example) does not break the chain.
+//
+// A genuine OS ppid chain cannot cycle, but a synthetic/adversarial process
+// table (or a pid-reuse race caught mid-transition) could — collectDescendants
+// bounds that with its own `seen` set, so two candidates on a ppid cycle
+// mutually "cover" each other here. Filtering both would return [] and
+// suppress a real verdict entirely, so a mutual pair is resolved by keeping
+// the lower pid instead of dropping both.
 function collapseToShallowest(
   pids: number[],
   allProcesses: readonly ProcessSnapshotEntry[],
@@ -66,9 +73,18 @@ function collapseToShallowest(
   for (const pid of pids) {
     for (const other of pids) {
       if (other === pid) continue;
-      if (descendantsOf.get(other)?.has(pid)) {
-        covered.add(pid);
+      const otherCoversPid = descendantsOf.get(other)?.has(pid) ?? false;
+      if (!otherCoversPid) continue;
+      const pidCoversOther = descendantsOf.get(pid)?.has(other) ?? false;
+      if (pidCoversOther) {
+        // Mutual coverage: a ppid cycle joins pid and other. Keep the lower
+        // pid deterministically instead of dropping both.
+        if (pid > other) {
+          covered.add(pid);
+        }
+        continue;
       }
+      covered.add(pid);
     }
   }
   return pids.filter((pid) => !covered.has(pid));
@@ -133,9 +149,7 @@ export async function terminateAgentProcesses(
   const termGraceMs = options?.termGraceMs ?? DEFAULT_GRACE_MS;
   const killGraceMs = options?.killGraceMs ?? DEFAULT_GRACE_MS;
 
-  let survivors = await filterAlivePids(
-    [...processes].reverse().map((proc) => proc.pid),
-  );
+  let survivors = await filterAlivePids([...processes].reverse().map((proc) => proc.pid));
   if (survivors.length === 0) {
     return { status: "clear" };
   }
