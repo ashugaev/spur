@@ -21364,7 +21364,7 @@ describe("SessionService", () => {
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       getTmuxPanePidMock.mockResolvedValue(4242);
-      const capturedRefs = [{ pid: 4242, rssKb: 1_000, elapsedSeconds: 5, args: "claude" }];
+      const capturedRefs = [{ pid: 4242 }];
       capturePaneAgentProcessesMock.mockResolvedValue(capturedRefs);
 
       const service = await createDisposedSessionService();
@@ -21430,7 +21430,7 @@ describe("SessionService", () => {
       mockExitedThenRestoredProcess();
       findForeignAgentProcessesForSessionMock.mockResolvedValue({
         status: "ok",
-        processes: [{ pid: 777, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+        processes: [{ pid: 777 }],
       });
 
       const service = await createDisposedSessionService();

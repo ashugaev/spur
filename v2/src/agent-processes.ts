@@ -23,15 +23,17 @@ import type { AgentName } from "./types.js";
 // registry's shared check shape.
 import type { HostInstallCheck } from "./host-install.js";
 
+// pid only: every consumer of a capture/scan result (terminateAgentProcesses,
+// killAgentPaneAndConfirmExit's logging, assertNoForeignAgentForSession) acts
+// on the pid alone. rss/age/args belong to the doctor-facing
+// UnownedAgentProcess below, which is built straight from ProcessSnapshotEntry
+// via toFinding, not from this type.
 export interface AgentProcessRef {
   pid: number;
-  rssKb: number;
-  elapsedSeconds: number;
-  args: string;
 }
 
 function toRef(proc: ProcessSnapshotEntry): AgentProcessRef {
-  return { pid: proc.pid, rssKb: proc.rssKb, elapsedSeconds: proc.elapsedSeconds, args: proc.args };
+  return { pid: proc.pid };
 }
 
 // Same word-boundary matching isProcessRunningInTmux (runtime-tmux.ts) uses,

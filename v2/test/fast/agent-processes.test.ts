@@ -130,17 +130,16 @@ describe("capturePaneAgentProcesses", () => {
 describe("terminateAgentProcesses", () => {
   it("returns clear when nothing is alive", async () => {
     deadPids.add(5);
-    const outcome = await terminateAgentProcesses([
-      { pid: 5, rssKb: 1, elapsedSeconds: 1, args: "x" },
-    ]);
+    const outcome = await terminateAgentProcesses([{ pid: 5 }]);
     expect(outcome).toEqual({ status: "clear" });
   });
 
   it("stops escalating as soon as SIGHUP clears the pid", async () => {
-    const outcome = await terminateAgentProcesses(
-      [{ pid: 7, rssKb: 1, elapsedSeconds: 1, args: "x" }],
-      { hupGraceMs: 5, termGraceMs: 5, killGraceMs: 5 },
-    );
+    const outcome = await terminateAgentProcesses([{ pid: 7 }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
     expect(signalPidMock).toHaveBeenCalledWith(7, "SIGHUP");
     expect(signalPidMock).not.toHaveBeenCalledWith(7, "SIGTERM");
     expect(outcome.status).toBe("clear");
@@ -148,10 +147,11 @@ describe("terminateAgentProcesses", () => {
 
   it("reports survivors when the pid never dies", async () => {
     isPidAliveMock.mockImplementation(() => true);
-    const outcome = await terminateAgentProcesses(
-      [{ pid: 9, rssKb: 1, elapsedSeconds: 1, args: "x" }],
-      { hupGraceMs: 5, termGraceMs: 5, killGraceMs: 5 },
-    );
+    const outcome = await terminateAgentProcesses([{ pid: 9 }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
     expect(outcome).toEqual({ status: "survivors", pids: [9] });
     expect(signalPidMock).toHaveBeenCalledWith(9, "SIGHUP");
     expect(signalPidMock).toHaveBeenCalledWith(9, "SIGTERM");
@@ -196,7 +196,7 @@ describe("findForeignAgentProcessesForSession", () => {
     });
     expect(scan).toEqual({
       status: "ok",
-      processes: [{ pid: 2, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+      processes: [{ pid: 2 }],
     });
   });
 
