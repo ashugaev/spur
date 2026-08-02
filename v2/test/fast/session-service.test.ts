@@ -1019,6 +1019,9 @@ describe("SessionService", () => {
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
+    capturePaneAgentProcessesMock.mockReset().mockResolvedValue([]);
+    terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
+    findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -21343,6 +21346,141 @@ describe("SessionService", () => {
 
       await expect(service.respawn("ghost-1")).rejects.toThrow("Unknown project: ghost");
       service.dispose();
+    });
+  });
+
+  describe("duplicate-agent guard", () => {
+    it("captures the pane's agent processes, kills the pane, then hands the captured refs to terminateAgentProcesses — in that order", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      getTmuxPanePidMock.mockResolvedValue(4242);
+      const capturedRefs = [{ pid: 4242, rssKb: 1_000, elapsedSeconds: 5, args: "claude" }];
+      capturePaneAgentProcessesMock.mockResolvedValue(capturedRefs);
+
+      const service = await createDisposedSessionService();
+
+      await service.restore("api-1");
+
+      const [captureOrder] = capturePaneAgentProcessesMock.mock.invocationCallOrder;
+      const [killOrder] = killTmuxSessionMock.mock.invocationCallOrder;
+      const [createOrder] = createTmuxSessionMock.mock.invocationCallOrder;
+      if (captureOrder === undefined || killOrder === undefined || createOrder === undefined) {
+        throw new Error("expected all three mocks to have been called");
+      }
+      expect(captureOrder).toBeLessThan(killOrder);
+      expect(killOrder).toBeLessThan(createOrder);
+      expect(terminateAgentProcessesMock).toHaveBeenCalledWith(capturedRefs);
+    });
+
+    it("refuses to launch a replacement when the prior agent survives SIGKILL — restore()", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [555] });
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/555/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses to launch a replacement when the prior agent survives SIGKILL — relaunch via send recovery", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        agentSessionId: "session-uuid",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      // ensureSessionReadyForSend sees the pane dead and falls into
+      // relaunchSessionInPlace (the "recover" path).
+      tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses restore() when a foreign agent process for the session id is already live, and force bypasses it", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      findForeignAgentProcessesForSessionMock.mockResolvedValue({
+        status: "ok",
+        processes: [{ pid: 777, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+      });
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/777/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+
+      const restored = await service.restore("api-1", { force: true });
+
+      expect(restored.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not block restore() when the foreign-agent scan is 'unavailable'", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "unavailable" });
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("api-1");
+
+      expect(restored.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not reject kill() when the prior agent survives SIGKILL, and the record still reaches 'killed'", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      workspaceExistsMock.mockReturnValue(false);
+      isGitWorktreeMock.mockResolvedValue(false);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [321] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.kill("api-1");
+
+      expect(result.status).toBe("killed");
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.agent_process.survivors",
+        ),
+      ).toBe(true);
     });
   });
 });
