@@ -41,7 +41,6 @@ import {
 import {
   assembleSidecarSweepClaims,
   confirmReaps,
-  isTerminalSessionStatus,
   reapRecordedIdentity,
   reapSidecarPane,
   readProcessStarttime,
@@ -264,6 +263,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isTerminalSessionStatus,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,

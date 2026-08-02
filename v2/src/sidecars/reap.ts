@@ -4,7 +4,11 @@ import { realpathSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
-import type { SessionRecord, SidecarProcessIdentity } from "../types.js";
+import {
+  isTerminalSessionStatus,
+  type SessionRecord,
+  type SidecarProcessIdentity,
+} from "../types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,19 +99,6 @@ export interface SidecarSweepResult {
   leaked: LeakedSidecarTree[];
   /** Non-empty only when the caller asked to reap. */
   reaped: ReapOutcome[];
-}
-
-/**
- * Terminal-for-sidecar-claims predicate: a session in this state can no
- * longer claim a sidecar process. The one definition, imported by
- * session-service.ts (which also gates ~15 unrelated session-lifecycle call
- * sites with it) and host-install.ts's doctor check, so a "session is
- * terminal" decision never drifts between the two copies.
- */
-export function isTerminalSessionStatus(
-  status: SessionRecord["status"],
-): status is "completed" | "killed" {
-  return status === "completed" || status === "killed";
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {

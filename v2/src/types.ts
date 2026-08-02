@@ -725,6 +725,14 @@ export interface SessionRecord {
   error?: string;
 }
 
+// Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
+// and reap.ts's sidecar-claims sweep — one definition, never two copies.
+export function isTerminalSessionStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
+}
+
 export interface ServiceInstanceRecord {
   sessionId: string;
   project: string;
