@@ -414,14 +414,16 @@ export async function reapSidecarPane(sessionName: string): Promise<ReapOutcome>
   const pending = await signalSidecarPane(sessionName);
   const [outcome] = await confirmReaps([pending]);
   return (
-    outcome ?? { sessionName, panePid: pending.panePid, treeSize: pending.tree.length, survivors: [] }
+    outcome ?? {
+      sessionName,
+      panePid: pending.panePid,
+      treeSize: pending.tree.length,
+      survivors: [],
+    }
   );
 }
 
-type StarttimeProbe =
-  | { kind: "ok"; starttime: number }
-  | { kind: "gone" }
-  | { kind: "unknown" };
+type StarttimeProbe = { kind: "ok"; starttime: number } | { kind: "gone" } | { kind: "unknown" };
 
 // /proc/<pid>/stat field 22 (starttime). The comm field is parenthesized and
 // may itself contain spaces, so parsing anchors on the last ')'.
@@ -631,8 +633,13 @@ export interface FindLeakedSidecarTreesInput {
 export async function findLeakedSidecarTrees(
   input: FindLeakedSidecarTreesInput,
 ): Promise<{ supported: boolean; leaked: LeakedSidecarTree[] }> {
-  const { snapshot, claims, worktreePaths, worktreeDirRealpath, readCwd = readProcCwdRealpath } =
-    input;
+  const {
+    snapshot,
+    claims,
+    worktreePaths,
+    worktreeDirRealpath,
+    readCwd = readProcCwdRealpath,
+  } = input;
   if (!snapshot.ok) {
     return { supported: false, leaked: [] };
   }

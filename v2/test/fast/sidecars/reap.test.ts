@@ -137,7 +137,10 @@ describe("findLeakedSidecarTrees", () => {
   const worktreeDir = "/tmp/spur-worktrees";
   const worktreePath = "/tmp/spur-worktrees/api/api-1";
 
-  function claimsWithLivePgid(pgid: number | undefined, identityRecorded = true): Map<string, SidecarClaim> {
+  function claimsWithLivePgid(
+    pgid: number | undefined,
+    identityRecorded = true,
+  ): Map<string, SidecarClaim> {
     return new Map([
       [
         worktreePath,

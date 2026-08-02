@@ -3589,10 +3589,7 @@ export class SessionService {
       if (plan.kind === "clear") {
         if (plan.crossSession) {
           this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
-          await this.reapSidecarByName(
-            plan.crossSession.sessionId,
-            plan.crossSession.sidecarName,
-          );
+          await this.reapSidecarByName(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.clearSidecarProcEntry(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.releaseSidecarPortFromSession(
             plan.crossSession.sessionId,
@@ -3718,8 +3715,7 @@ export class SessionService {
           sidecarTmuxSession(reservedSession.id, args.sidecarName),
           { fresh: true },
         );
-        const starttime =
-          freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+        const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
         const identity: SidecarProcessIdentity | undefined =
           freshPanePid !== null && starttime !== null
             ? { pid: freshPanePid, pgid: freshPanePid, starttime }
@@ -3734,7 +3730,10 @@ export class SessionService {
             : { sidecarNames: [...sidecarNames, args.sidecarName] }),
           ...(identity
             ? {
-                sidecarProcs: { ...(reservedSession.sidecarProcs ?? {}), [args.sidecarName]: identity },
+                sidecarProcs: {
+                  ...(reservedSession.sidecarProcs ?? {}),
+                  [args.sidecarName]: identity,
+                },
               }
             : {}),
         };

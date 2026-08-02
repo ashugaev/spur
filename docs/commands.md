@@ -4,13 +4,13 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `subscribe`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## doctor
 
-Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
+Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) lists sidecar process trees no live session claims — pid, rss, age, worktree — without killing anything; run `spur sidecar sweep --reap` to actually reap them.
 
 ## spawn
 
@@ -118,6 +118,8 @@ A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk
 Commands run through `sh -lc` with no `exec`, so login-shell init still applies and a sidecar command may start with `VAR=value ...`. `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
+
+Stop and restart reap the sidecar's whole tmux pane process tree, not just the pane's direct child — a supervisor (nodemon, tsx watch) that `setsid`s a worker into its own process group no longer leaves that worker behind. `spur sidecar sweep` reports sidecar process trees no live session claims (pid, rss, age, worktree); nothing is killed unless you pass `--reap`.
 
 ### Built-in MCP sidecars
 
