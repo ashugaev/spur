@@ -5,8 +5,9 @@ set -euo pipefail
 
 ROOT="${1:-$(pwd)}"
 [ -d "$ROOT" ] || { echo "census: no such directory: $ROOT" >&2; exit 1; }
-always_total=0
-ondemand_total=0
+declare -A always_totals ondemand_totals VENDOR_SEEN
+declare -a VENDOR_ORDER
+skipped_count=0
 
 printf 'scope\tvendor\tkind\tpath\tlines\tbytes\test_tokens\t# ESTIMATE bytes/4, no tokenizer on this box\n'
 
@@ -14,7 +15,12 @@ emit() {
   local scope=$1 vendor=$2 kind=$3 path=$4 lines=$5 bytes=$6 bucket=$7
   local tok=$(( bytes / 4 ))
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$scope" "$vendor" "$kind" "$path" "$lines" "$bytes" "$tok"
-  if [ "$bucket" = always ]; then always_total=$((always_total + tok)); else ondemand_total=$((ondemand_total + tok)); fi
+  if [ -z "${VENDOR_SEEN[$vendor]:-}" ]; then VENDOR_SEEN[$vendor]=1; VENDOR_ORDER+=("$vendor"); fi
+  if [ "$bucket" = always ]; then
+    always_totals[$vendor]=$(( ${always_totals[$vendor]:-0} + tok ))
+  else
+    ondemand_totals[$vendor]=$(( ${ondemand_totals[$vendor]:-0} + tok ))
+  fi
 }
 
 whole() {
@@ -30,16 +36,18 @@ split() {
   local ml mb bl bb fstate stats
   # fstate: 0 no frontmatter, 1 opened but never closed, 2 closed normally.
   stats=$(awk '
-    NR==1 && /^---$/ {f=1; next}
-    f==1 && /^---$/ {f=2; next}
+    NR==1 && /^---[ \t]*\r?$/ {f=1; next}
+    f==1 && /^---[ \t]*\r?$/ {f=2; next}
     f==1 {ml++; mb+=length($0)+1}
     f==2 {bl++; bb+=length($0)+1}
     END{printf "%d %d %d %d %d", ml+0, mb+0, bl+0, bb+0, f+0}
   ' "$file")
   read -r ml mb bl bb fstate <<<"$stats"
   if [ "$fstate" = 1 ]; then
-    echo "census: unterminated frontmatter (opening --- never closed): $file" >&2
-    exit 1
+    echo "census: unterminated frontmatter (opening --- never closed), skipping: $file" >&2
+    printf 'SKIPPED\t%s\t%s\t%s\t-\t-\t-\n' "$scope" "$vendor" "$file"
+    skipped_count=$((skipped_count + 1))
+    return 0
   fi
   if [ "$ml" -gt 0 ]; then
     emit "$scope" "$vendor" "${base}-meta" "$file" "$ml" "$mb" always
@@ -61,8 +69,15 @@ for f in "$ROOT"/.agents/agents/*.md; do split "$f" repo codex agent; done
 for f in "$ROOT"/.codex/agents/*.toml; do whole "$f" repo codex agent-def ondemand; done
 
 whole "$HOME/.claude/CLAUDE.md" user claude root-doc always
-whole "$HOME/.claude/settings.json" user claude config always
-whole "$HOME/.codex/config.toml" user codex config always
 
-printf 'SUBTOTAL\talways\t-\t-\t-\t-\t%s\n' "$always_total"
-printf 'SUBTOTAL\tondemand\t-\t-\t-\t-\t%s\n' "$ondemand_total"
+for v in "${VENDOR_ORDER[@]}"; do
+  printf 'SUBTOTAL\talways\t%s\t-\t-\t-\t%s\n' "$v" "${always_totals[$v]:-0}"
+done
+for v in "${VENDOR_ORDER[@]}"; do
+  printf 'SUBTOTAL\tondemand\t%s\t-\t-\t-\t%s\n' "$v" "${ondemand_totals[$v]:-0}"
+done
+
+if [ "$skipped_count" -gt 0 ]; then
+  echo "census: $skipped_count file(s) skipped, subtotals are incomplete" >&2
+  exit 1
+fi

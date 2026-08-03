@@ -8,6 +8,7 @@
 #
 # Store  ~/.agent-backups, a git repo. One commit per snapshot.
 # Naming YYYY-MM-DDTHH-MM-SSZ--<label>, UTC, so name order is date order.
+# Canonical copy lives here; install with: cp <this file> ~/.local/bin/agent-backup
 set -euo pipefail
 
 STORE=${AGENT_BACKUP_STORE:-$HOME/.agent-backups}
@@ -38,9 +39,13 @@ cmd_snapshot() {
   mkdir -p "$dest/payload"
   cp -a "$src" "$dest/payload/"
   # The store is a git repo. Credentials never enter it.
-  local dropped
-  dropped=$(find "$dest/payload" -type f \( -name '.credentials.json' -o -name 'auth.json' \
-    -o -name '*.env' -o -name '*.pem' -o -name '*.key' -o -name 'id_*' \) -printf '%P\n' -delete)
+  local dropped="" f
+  while IFS= read -r -d '' f; do
+    dropped+="${f#"$dest"/payload/}"$'\n'
+    rm -f "$f"
+  done < <(find "$dest/payload" -type f \( -name '.credentials.json' -o -name 'auth.json' \
+    -o -name '*.env' -o -name '*.pem' -o -name '*.key' -o -name 'id_*' \) -print0)
+  dropped=${dropped%$'\n'}
   {
     printf 'SOURCE   %s\n' "$src"
     printf 'LABEL    %s\n' "$label"
@@ -58,8 +63,9 @@ cmd_snapshot() {
 
 cmd_list() {
   init_store
-  local n=${1:-20}
-  find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.git' -printf '%f\n' | sort -r | head -n "$n" |
+  local n=${1:-20} d
+  find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.git' -print0 |
+    while IFS= read -r -d '' d; do printf '%s\n' "${d##*/}"; done | sort -r | head -n "$n" |
     while read -r name; do
       printf '%s\t%s\n' "$name" "$(sed -n 's/^SOURCE   //p' "$STORE/$name/MANIFEST" 2>/dev/null)"
     done

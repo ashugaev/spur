@@ -12,7 +12,7 @@ description: Audits everything that enters an agent's context — skills, agent 
 | Mode | Scope | Run |
 | --- | --- | --- |
 | SCOPED | one diff | Check only surfaces the diff touches |
-| SWEEP | everything | `<skill dir>/scripts/census.sh [repo_root]`, `<skill dir>/scripts/mcp-scope.sh` |
+| SWEEP | everything | `<skill dir>/scripts/census.sh [repo_root]`, `<skill dir>/scripts/mcp-scope.sh [repo_root]` |
 | NEGOTIATE | one named surface | See Negotiate below |
 
 Default to SCOPED on a diff, SWEEP on first run or "audit my context config", NEGOTIATE when a cut is contested.
@@ -45,7 +45,7 @@ Traps:
 | 3 | Tool search off | `/context` vs `ENABLE_TOOL_SEARCH=false /context` |
 | 4 | Two surfaces answer one question differently | grep the directive's noun across every surface |
 | 5 | Same rule stated twice | same grep, identical intent |
-| 6 | Always-loaded total over budget | `SUBTOTAL always`; CLAUDE.md target under 200 lines |
+| 6 | Always-loaded total over budget | `SUBTOTAL always <vendor>` row for the session's own vendor; CLAUDE.md target under 200 lines |
 | 7 | Over 50 imperative lines in one always-loaded surface | count verb-initial lines |
 | 8 | Content derivable from the codebase | directory trees, dependency lists, architecture prose |
 | 9 | Instructions the model already follows | persona preambles, "verify your work", "if in doubt use X" |

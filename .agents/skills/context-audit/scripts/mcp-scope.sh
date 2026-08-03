@@ -1,7 +1,10 @@
 #!/bin/bash
-# mcp-scope.sh - effective MCP registration, scope, owner, CLI-replacement
-# status. Verified against Claude Code 2.1.220, codex-cli 0.145.0. No args.
+# mcp-scope.sh [repo_root] - effective MCP registration, scope, owner,
+# CLI-replacement status. Verified against Claude Code 2.1.220, codex-cli 0.145.0.
 set -euo pipefail
+
+ROOT="${1:-$(pwd)}"
+[ -d "$ROOT" ] || { echo "mcp-scope: no such directory: $ROOT" >&2; exit 1; }
 
 # Candidates in preference order; the first one on PATH wins.
 cli_for() { case "$(tr 'A-Z' 'a-z' <<<"$1")" in
@@ -17,13 +20,16 @@ cli_pick() {
 }
 
 verdict_for() {
-  local name=$1 cli=$2 scope=$3
+  local name=$1 cli=$2 scope=$3 status=$4
   [ "$scope" = settings.json ] && { echo INERT; return; }
   case "$(tr 'A-Z' 'a-z' <<<"$name")" in
     *playwright*) echo keep:live-driving; return ;;
     *figma*|*linear*|*notion*|*slack*) echo keep:no-cli; return ;;
   esac
-  [ "$cli" != - ] && { echo "migrate:$cli"; return; }
+  if [ "$cli" != - ]; then
+    if [ "$status" = found ]; then echo "migrate:$cli"; else echo "migrate:$cli:install-first"; fi
+    return
+  fi
   echo keep
 }
 
@@ -31,15 +37,16 @@ emit() {
   local cli status
   cli=$(cli_for "$2"); status=-
   [ "$cli" != - ] && read -r cli status < <(cli_pick "$cli")
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$cli" "$status" "$(verdict_for "$2" "$cli" "$3")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$cli" "$status" "$(verdict_for "$2" "$cli" "$3" "$status")"
 }
 
 printf 'vendor\tserver\tscope\towner\tcli\tcli_status\tverdict\n'
 
-# ~/.claude.json owner map, ~/.claude/settings.json inert names, repo .mcp.json.
+# ~/.claude.json owner map, ~/.claude/settings.json inert names, repo .mcp.json
+# resolved against MCP_SCAN_ROOT (the [repo_root] arg, not the process cwd).
 # Emits an "OK" sentinel line last, proof the parse ran to completion. Zero
 # servers is a valid, common result; only a missing sentinel is a parse failure.
-data=$(python3 - <<'PY'
+data=$(MCP_SCAN_ROOT="$ROOT" python3 - <<'PY'
 import json, os, sys
 
 def load(p):
@@ -53,6 +60,7 @@ def load(p):
         sys.exit(1)
 
 home = os.path.expanduser('~')
+root = os.environ['MCP_SCAN_ROOT']
 cj = load(os.path.join(home, '.claude.json'))
 for name in cj.get('mcpServers', {}):
     print(f"MAP\t{name}\tuser\t-")
@@ -61,8 +69,8 @@ for proj, v in cj.get('projects', {}).items():
         print(f"MAP\t{name}\tproject\t{proj}")
 for name in load(os.path.join(home, '.claude', 'settings.json')).get('mcpServers', {}):
     print(f"SETTINGS\t{name}\t-\t-")
-for name in load('.mcp.json').get('mcpServers', {}):
-    print(f"PROJECT\t{name}\tproject\t{os.getcwd()}")
+for name in load(os.path.join(root, '.mcp.json')).get('mcpServers', {}):
+    print(f"PROJECT\t{name}\tproject\t{root}")
 print("OK\t-\t-\t-")
 PY
 )
@@ -116,7 +124,7 @@ while IFS= read -r line; do
     *"Project config"*) emit claude "$name" project - ;;
     *"Local config"*) emit claude "$name" local - ;;
     *"Dynamic config"*) emit claude "$name" plugin - ;;
-    *) echo "mcp-scope: unparseable scope for claude server $name" >&2; exit 1 ;;
+    *) echo "mcp-scope: unparseable scope for claude server $name, marking unknown" >&2; emit claude "$name" unknown - ;;
   esac
 done <<<"$raw"
 
