@@ -6,11 +6,13 @@ import {
   readReviewSourceSnapshots,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
-import type {
-  ReviewEventData,
-  ReviewProviderId,
-  ReviewSignal,
-  ReviewSourceConfig,
+import {
+  reviewSnapshotBaseline,
+  type ReviewEventData,
+  type ReviewProviderId,
+  type ReviewSignal,
+  type ReviewSnapshot,
+  type ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -89,21 +91,27 @@ export function createReviewSourceModule(
                 continue;
               }
 
-              const previous = snapshots.get(session.id);
+              const previous = reviewSnapshotBaseline(
+                snapshots.get(session.id),
+                collected.data.prNumber,
+              );
               const next = collected.snapshot;
               const changed = [...next.values()].filter((signal) => {
                 const prior = previous?.get(signal.key);
                 return !prior || prior.text !== signal.text;
               });
 
-              snapshots.set(session.id, next);
+              // Built once, handed to both the in-memory map and the on-disk write
+              // so the two copies cannot desync.
+              const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+              snapshots.set(session.id, nextSnapshot);
               writeReviewSourceSnapshot(
                 deps.dataDir,
                 providerId,
                 deps.projectId,
                 deps.sourceId,
                 session.id,
-                next,
+                nextSnapshot,
               );
               if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
                 emitSignalsByKind(

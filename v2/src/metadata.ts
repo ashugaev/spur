@@ -14,6 +14,7 @@ import {
   type PersistedPendingBatch,
   type ReviewProviderId,
   type ReviewSignal,
+  type ReviewSnapshot,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
   type ServiceInstanceRecord,
@@ -449,9 +450,29 @@ function writeJsonFile(path: string, value: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function parseReviewSignals(path: string): Map<string, ReviewSignal> {
-  const signals = JSON.parse(readFileSync(path, "utf-8")) as ReviewSignal[];
-  return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]));
+// Discriminates the current envelope (`{prNumber, signals}`) from the legacy
+// on-disk shape (a bare `ReviewSignal[]`) purely on `Array.isArray` — no
+// `version` field, since nothing would ever read one. A legacy file carries
+// no PR identity, so it normalizes to `prNumber: null`, which by construction
+// matches no scoped terminal key and no fresh PR number: never a skip, always
+// a re-baseline on the next poll.
+function parseReviewSnapshot(path: string): ReviewSnapshot {
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  const envelope = isRecord(parsed) ? parsed : null;
+  const signalsRaw = (Array.isArray(parsed) ? parsed : envelope?.signals) as
+    | ReviewSignal[]
+    | undefined;
+  const prNumber = Array.isArray(parsed)
+    ? null
+    : typeof envelope?.prNumber === "number"
+      ? envelope.prNumber
+      : null;
+  return {
+    prNumber,
+    signals: new Map(
+      (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
+    ),
+  };
 }
 
 function normalizePipelineState(pipeline: SessionPipelineState): SessionPipelineState {
@@ -741,15 +762,15 @@ export function readReviewSourceSnapshots(
   providerId: ReviewProviderId,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   const dir = reviewSnapshotDir(dataDir, providerId, projectId, sourceId);
   if (!existsSync(dir)) return new Map();
 
-  const snapshots = new Map<string, Map<string, ReviewSignal>>();
+  const snapshots = new Map<string, ReviewSnapshot>();
   for (const fileName of readdirSync(dir)) {
     if (!fileName.endsWith(".json")) continue;
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSignals(join(dir, fileName)));
+    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
   }
   return snapshots;
 }
@@ -760,9 +781,9 @@ export function readReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   const path = reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId);
-  return existsSync(path) ? parseReviewSignals(path) : null;
+  return existsSync(path) ? parseReviewSnapshot(path) : null;
 }
 
 export function writeReviewSourceSnapshot(
@@ -771,11 +792,12 @@ export function writeReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
-  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), [
-    ...snapshot.values(),
-  ]);
+  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
+    prNumber: snapshot.prNumber,
+    signals: [...snapshot.signals.values()],
+  });
 }
 
 export function deleteReviewSourceSnapshot(
@@ -794,7 +816,7 @@ export function readGitHubSourceSnapshots(
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   return readReviewSourceSnapshots(dataDir, "github", projectId, sourceId);
 }
 
@@ -803,7 +825,7 @@ export function readGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   return readReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
@@ -812,7 +834,7 @@ export function writeGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
   writeReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId, snapshot);
 }
