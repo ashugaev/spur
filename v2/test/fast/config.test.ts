@@ -2373,7 +2373,7 @@ projects:
       docsBlock?.selfDestruct?.enabled,
     ]).toEqual(["claude", "sonnet", true, true]);
     expect(docsBlock?.selfDestruct?.conditions).toBe(
-      "the docs review has been posted, or the PR changes no docs and no user-facing surface.",
+      "docs review posted, or PR changes no docs and no user-facing surface.",
     );
     expect([
       trigger.spawn.restrictWrites,
@@ -2384,11 +2384,11 @@ projects:
       [
         "Run /code-review {{url}} --comment.",
         "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."',
       ].join("\n"),
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
-      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+      "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
     );
   });
 
