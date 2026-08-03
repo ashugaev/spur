@@ -412,8 +412,23 @@ const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
 // activity, so they don't need every-tick re-enrichment — a small bounded
 // round-robin corrects that drift without making the tick cost scale with
-// total record count.
-const DASHBOARD_IDLE_REFRESH_PER_TICK = 4;
+// total record count. Some of that drift (workspaceExists, runtimeAlive)
+// gates real controls (Restore/Recover, the terminal button), so the quota
+// scales with the idle set instead of staying fixed: a fixed 4/tick sweeps
+// ~2 s worth of idle sessions in a couple of ticks at small fleet sizes but
+// takes ~13.5 min to sweep 1612 idle sessions, which is long enough for a
+// removed worktree to keep offering Restore. quota = ceil(idle / 60),
+// clamped to [MIN, MAX]: at 10 idle that's still the MIN floor of 4 (full
+// sweep in 3 ticks, ~6 s); at 1612 idle that's 27/tick (full sweep in 60
+// ticks, ~2 min); above ~1920 idle the MAX cap of 32 keeps per-tick cost
+// bounded at the price of a sweep slower than 2 min.
+const DASHBOARD_IDLE_REFRESH_MIN_PER_TICK = 4;
+const DASHBOARD_IDLE_REFRESH_MAX_PER_TICK = 32;
+// Divisor for the quota formula above: ceil(idle / this) ticks the quota to
+// target a full idle-set sweep in roughly this many ticks (60 ticks * the
+// 2 s DASHBOARD_CACHE_INTERVAL_MS tick == a ~2 min sweep) before the MIN/MAX
+// clamp takes over at the small and large ends of the fleet-size range.
+const DASHBOARD_IDLE_REFRESH_SWEEP_TICKS = 60;
 // Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
 // with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
 // showing the corrected needs_input state between live pane scans instead of
@@ -1832,7 +1847,7 @@ export class SessionService {
   // check — no re-serialisation, no extra reads.
   private readonly dashboardEnrichedRecords = new Map<string, SessionRecord>();
   // Rotating cursor into the idle (non-live) id array for the bounded
-  // round-robin refresh; see DASHBOARD_IDLE_REFRESH_PER_TICK.
+  // round-robin refresh; see DASHBOARD_IDLE_REFRESH_MIN_PER_TICK.
   private dashboardIdleCursor = 0;
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
@@ -3033,7 +3048,12 @@ export class SessionService {
       // filesystem-only drift still eventually surfaces without making the
       // tick's cost scale with the idle set's size.
       if (idle.length > 0) {
-        const quota = Math.min(DASHBOARD_IDLE_REFRESH_PER_TICK, idle.length);
+        const targetQuota = Math.ceil(idle.length / DASHBOARD_IDLE_REFRESH_SWEEP_TICKS);
+        const clampedQuota = Math.min(
+          DASHBOARD_IDLE_REFRESH_MAX_PER_TICK,
+          Math.max(DASHBOARD_IDLE_REFRESH_MIN_PER_TICK, targetQuota),
+        );
+        const quota = Math.min(clampedQuota, idle.length);
         for (let offset = 0; offset < quota; offset += 1) {
           const roundRobinSession = idle[(this.dashboardIdleCursor + offset) % idle.length];
           if (roundRobinSession) {
