@@ -3,10 +3,18 @@
 # status. Verified against Claude Code 2.1.220, codex-cli 0.145.0. No args.
 set -euo pipefail
 
+# Candidates in preference order; the first one on PATH wins.
 cli_for() { case "$(tr 'A-Z' 'a-z' <<<"$1")" in
-  *github*) echo gh ;; *sentry*) echo sentry-cli ;; *jira*|*atlassian*) echo acli ;;
+  *github*) echo gh ;; *sentry*) echo sentry-cli ;; *jira*|*atlassian*) echo "jira acli" ;;
   *playwright*) echo playwright ;; *filesystem*) echo shell ;; *aws*) echo aws ;;
   *gcp*|*gcloud*) echo gcloud ;; *postgres*) echo psql ;; *) echo - ;; esac; }
+
+# First installed candidate, else the preferred one. Echoes "<cli> <found|missing>".
+cli_pick() {
+  local c
+  for c in $1; do command -v "$c" >/dev/null 2>&1 && { echo "$c found"; return; }; done
+  echo "${1%% *} missing"
+}
 
 verdict_for() {
   local name=$1 cli=$2 status=$3 scope=$4
@@ -23,7 +31,7 @@ ROWS=0
 emit() {
   local cli status
   cli=$(cli_for "$2"); status=-
-  [ "$cli" != - ] && { command -v "$cli" >/dev/null 2>&1 && status=found || status=missing; }
+  [ "$cli" != - ] && read -r cli status < <(cli_pick "$cli")
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$cli" "$status" "$(verdict_for "$2" "$cli" "$status" "$3")"
   ROWS=$((ROWS + 1))
 }
@@ -86,6 +94,13 @@ for name in "${SETTINGS_NAMES[@]:-}"; do
   [ -z "$name" ] && continue
   [ -n "${EFFECTIVE[$name]:-}" ] && continue
   emit claude "$name" settings.json -
+done
+
+# claude mcp list only sees the current project. Other projects' servers are
+# real registrations that a sweep must count, so emit them from the owner map.
+for name in "${!SCOPE[@]}"; do
+  [ -n "${EFFECTIVE[$name]:-}" ] && continue
+  emit claude "$name" "${SCOPE[$name]}" "${OWNERS[$name]:--}"
 done
 
 names=$(grep -oE '^\[mcp_servers\.[A-Za-z0-9_.-]+\]' "$HOME/.codex/config.toml" 2>/dev/null | sed -E 's/^\[mcp_servers\.(.*)\]$/\1/' || true)

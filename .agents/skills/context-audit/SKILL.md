@@ -5,8 +5,6 @@ description: Audits everything that enters an agent's context — skills, agent 
 
 # Context Audit
 
-Every token competes. Rank findings by tokens saved x adherence recovered.
-
 ## Modes
 
 | Mode | Scope | Run |
@@ -19,36 +17,24 @@ Default to SCOPED on a diff, SWEEP on first run or "audit my context config", NE
 
 ## MCP protocol
 
-Decision rule: keep MCP only when a CLI cannot do the job. Default is migrate. A CLI adds no per-tool listing; tool-choice accuracy degrades past 30-50 tools; each MCP tool costs 150-350 tokens, loaded every session whether or not it is called.
+Decision rule: keep MCP only when a CLI cannot do the job. Default is migrate.
 
 Order: migrate anything with a CLI -> demote every user-scope server owned by one project -> disable never-called tools on what remains, then re-measure.
 
 Scope rule: one repo and shareable -> project (`.mcp.json`, committed). One repo with private creds -> local. Every session and no CLI exists -> user.
 
-CLI mapping:
+Server-to-CLI mapping and the keep-list live in `scripts/mcp-scope.sh`, functions `cli_for` and `verdict_for`. Read them there; they are what runs.
 
-| Server | CLI |
-| --- | --- |
-| github | `gh` |
-| sentry | `sentry-cli` |
-| atlassian / jira | `acli` |
-| playwright | `playwright` (scripted runs only; MCP for live driving) |
-| filesystem | shell, Read/Grep/Glob |
-| aws | `aws` |
-| gcp | `gcloud` |
-| postgres | `psql` |
+Keep MCP when the mapping has no entry: a live stateful loop such as driving a browser across turns; a harness with no shell; per-user OAuth with tenant isolation and an audit trail; a push or streaming channel that originates events, which a CLI cannot.
 
-No CLI exists: figma (Code Connect CLI only publishes), linear, notion, slack.
+Traps:
 
-Keep MCP when: a live stateful loop such as driving a browser across turns; a harness with no shell; per-user OAuth with tenant isolation and an audit trail; a push or streaming channel that originates events, which a CLI cannot; a SaaS with no CLI at all.
-
-Traps: confirm a deletion with `claude mcp list` no longer showing the server. Per-tool disable is unproven — re-measure `/context` after, remove the whole server if the schema persists. Never delete on the INERT verdict alone; absence from `claude mcp list` first, delete second.
-
-Run `scripts/mcp-scope.sh` for the live table (`vendor server scope owner cli cli_status verdict`).
+- Prove the replacement CLI before removing the server. Run one real read through it and show the output. `cli_status=found` means on PATH, not authenticated. Untested CLI, server stays.
+- Back up any surface outside the repo before editing it: `agent-backup <path> <label>`.
+- Per-tool disable is unproven — re-measure `/context` after, remove the whole server if the schema persists.
+- Never delete on the INERT verdict alone. Absence from `claude mcp list` first, delete second.
 
 ## Checklist
-
-Ranked by yield. 1-3 token mass, 4-5 adherence, 6-12 hygiene.
 
 | # | Check | How |
 | --- | --- | --- |
@@ -69,7 +55,7 @@ Excluded on purpose: mirror drift (repo-shaped, not portable); instruction posit
 
 ## Negotiate
 
-Cuts settled by two opposed subagents, spawned in parallel through the runtime's own native mechanism — Claude's built-in parallel subagents, Codex's `multi_agent`. Never a Spur session. Neither role is a separate agent definition file; both ship as prompt blocks below.
+Cuts settled by two opposed subagents, spawned in parallel through the runtime's own native mechanism — Claude's built-in parallel subagents, Codex's `multi_agent`. Never a Spur session. Neither role is a separate agent definition file.
 
 1. Input: the surface text plus the candidate cut list from Checklist.
 2. Spawn CUT and KEEP in parallel. Neither sees the other's output.
@@ -80,8 +66,6 @@ Cuts settled by two opposed subagents, spawned in parallel through the runtime's
    - Proposed, defended, named failure already prevented elsewhere (hook, narrower surface) -> delete, cite the preventer.
    - Proposed, defended with a live failure -> one rebuttal round for CUT only: concede or refute.
 4. Still unresolved -> report CONTESTED with both one-line arguments. Never auto-delete a contested line.
-
-Default is deletion. Text survives by earning a concession, not by inertia.
 
 ## Measure
 
@@ -101,11 +85,8 @@ Write to `$SPUR_SESSION_ARTIFACTS_DIR/context-audit/findings.md`.
 
 ## Boundaries
 
-- Prose quality inside one file: `skill-writer`.
-- Code simplification: `code-simplifier`.
-- Published docs under `docs/` or root doc files: `docs`.
-- Command and config field semantics: `docs/commands.md` / `docs/configuration.md` plus the `spur` skill.
+Command and config field semantics: `docs/commands.md` / `docs/configuration.md` plus the `spur` skill.
 
 ## Evidence
 
-Every number above traces to `references/evidence.md` — one line per claim, no narrative, no URLs here.
+Every number traces to `references/evidence.md`. No URLs here.
