@@ -59,6 +59,18 @@ EOF
   cat >"$fake_bin/npm" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "config" ] && [ "\$2" = "get" ] && [ "\$3" = "prefix" ]; then
+  # Fails loudly on a dropped or misspelled --globalconfig flag instead of
+  # silently answering any "config get prefix" argv (H5) — the persisted pin
+  # lives in Spur's own \$HOME/.spur/npmrc, not \$HOME/.npmrc, so the gate
+  # must pass both flags to agree with the heal.
+  case " \$* " in
+    *" --userconfig $fake_home/.npmrc "*) ;;
+    *) echo "fake npm: missing --userconfig $fake_home/.npmrc (got: \$*)" >&2; exit 1 ;;
+  esac
+  case " \$* " in
+    *" --globalconfig $fake_home/.spur/npmrc "*) ;;
+    *) echo "fake npm: missing --globalconfig $fake_home/.spur/npmrc (got: \$*)" >&2; exit 1 ;;
+  esac
   echo "$fake_home/.local"
   exit 0
 fi

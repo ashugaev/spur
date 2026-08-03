@@ -706,10 +706,12 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).not.toContain("[projects.");
   });
 
-  it("writes a single playwright http server table for the reserved port", async () => {
+  it("writes a single mcp server table per binding for the reserved port", async () => {
     setUserConfig('[model]\nname = "test"\n');
 
-    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], { playwrightPort: 8742 });
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+    });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
@@ -723,12 +725,32 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).not.toContain('url = "http://127.0.0.1:8742/mcp"');
   });
 
-  it("strips a pre-existing inherited playwright table and preserves unrelated servers", async () => {
+  it("writes one table per binding for multiple mcp bindings", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [
+        { server: "playwright", url: "http://localhost:8742/mcp" },
+        { server: "widget", url: "http://localhost:9001/widget" },
+      ],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).toContain('[mcp_servers.widget]\nurl = "http://localhost:9001/widget"');
+  });
+
+  it("strips a pre-existing inherited table for the bound server and preserves unrelated servers", async () => {
     setUserConfig(
       '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
     );
 
-    await ensureCodexHooksConfig("/session/tool", [], { playwrightPort: 8742 });
+    await ensureCodexHooksConfig("/session/tool", [], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+    });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
@@ -742,7 +764,7 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 
-  it("omits the playwright table when no port is provided", async () => {
+  it("omits any mcp server table when no bindings are provided", async () => {
     setUserConfig('[model]\nname = "test"\n');
 
     await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
@@ -754,7 +776,7 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).not.toContain("[mcp_servers.playwright]");
   });
 
-  it("strips a pre-existing inherited playwright table even when no port is provided (sidecar start failure)", async () => {
+  it("leaves an inherited table for an unbound server untouched when no bindings are provided", async () => {
     setUserConfig(
       '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
     );
@@ -765,8 +787,7 @@ describe("ensureCodexHooksConfig trusted projects", () => {
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
     const content = writeCall?.[1] as string;
-    expect(content).not.toContain("[mcp_servers.playwright]");
-    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.playwright]\ncommand = "npx"');
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 });

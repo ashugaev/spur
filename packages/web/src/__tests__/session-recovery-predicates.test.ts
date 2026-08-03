@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canReopen,
   canRecover,
   isRestorable,
   isSessionNotRestorablePayload,
@@ -74,6 +75,48 @@ describe("canRecover", () => {
     );
 
     expect(canRecover(session)).toBe(false);
+  });
+});
+
+describe("canReopen", () => {
+  it("is true for a completed session with no live runtime", () => {
+    const session = toDashboardSession(
+      baseView({ status: "completed", state: "stopped", runtimeAlive: false }),
+    );
+
+    expect(canReopen(session)).toBe(true);
+  });
+
+  it("is false for a completed session with a live runtime", () => {
+    const session = toDashboardSession(
+      baseView({ status: "completed", state: "stopped", runtimeAlive: true }),
+    );
+
+    expect(canReopen(session)).toBe(false);
+  });
+
+  it("is false for a killed session", () => {
+    const session = toDashboardSession(
+      baseView({ status: "killed", state: "killed", runtimeAlive: false }),
+    );
+
+    expect(canReopen(session)).toBe(false);
+  });
+
+  it("is false for an errored session", () => {
+    const session = toDashboardSession(
+      baseView({ status: "errored", state: "error", runtimeAlive: false }),
+    );
+
+    expect(canReopen(session)).toBe(false);
+  });
+
+  it("is false for a stopped session", () => {
+    const session = toDashboardSession(
+      baseView({ status: "stopped", state: "stopped", runtimeAlive: false }),
+    );
+
+    expect(canReopen(session)).toBe(false);
   });
 });
 

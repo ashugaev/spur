@@ -468,6 +468,12 @@ function githubEvent(signalKey = "comment:1") {
   };
 }
 
+function commentSnapshot(signalKey = "comment:1") {
+  return new Map([
+    [signalKey, { key: signalKey, kind: "comment", text: "A new comment arrived." }],
+  ]);
+}
+
 function gitlabEvent(signalKey = "comment:1") {
   return {
     name: "gitlab:comment",
@@ -1293,6 +1299,111 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.dropped",
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("backs off and drops a delivery that keeps failing instead of retrying forever", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockRejectedValue(new Error("submit-ack timeout"));
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      // Flush ticks inside the first backoff window (10s) must not re-attempt.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // Exponential backoff from a 10s base, doubling between the 8 attempts.
+      const backoffsMs = [10, 20, 40, 80, 160, 320, 640].map((seconds) => seconds * 1_000);
+      let expectedCalls = 1;
+      for (const backoff of backoffsMs) {
+        await vi.advanceTimersByTimeAsync(backoff);
+        expectedCalls += 1;
+        expect(deliverMock).toHaveBeenCalledTimes(expectedCalls);
+      }
+      expect(deliverMock).toHaveBeenCalledTimes(8);
+
+      // Eighth failure exhausts the cap: drop the batch, log it, and stop.
+      const dropped = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .find((entry) => entry.event === "trigger.send.dropped");
+      expect(dropped).toBeDefined();
+      expect(dropped.details).toMatchObject({ reason: "retry_exhausted", attempts: 8 });
+
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(8);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("clears delivery-failure backoff once a later attempt succeeds", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("submit-ack timeout"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.dropped",
+      );
+
+      // Successful delivery clears the batch; the flush loop stops.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
     } finally {
       await controller.stop();
     }
@@ -2205,7 +2316,12 @@ describe("startConfiguredTriggers", () => {
         { interrupt: true },
       );
 
+      // Flush ticks within the backoff window do not re-attempt the throw.
       await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // After the first backoff (10s) the flush loop retries and succeeds.
+      await vi.advanceTimersByTimeAsync(10_000);
       await vi.waitFor(() => {
         expect(deliverMock).toHaveBeenCalledTimes(2);
       });
@@ -3115,6 +3231,59 @@ describe("startConfiguredTriggers", () => {
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
         "trigger.send.delivered",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.failed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("never drops the pending batch when every delivery attempt is rate limited across the full backoff schedule", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    // Import after loadTriggersModule()'s vi.resetModules() so this resolves to the same
+    // session-service.js module instance triggers.ts uses internally for the instanceof check.
+    const { SessionRateLimitedError } = await import("../../src/session-service.js");
+    const deliverMock = vi.fn().mockRejectedValue(new SessionRateLimitedError("rate limited"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      // Advance through the same total window as the 8-attempt exponential
+      // backoff cap used for ordinary delivery failures (10s..640s). Rate-limit
+      // suppression must never consume that budget, so the batch stays queued
+      // and every attempt keeps retrying instead of tripping the drop path.
+      const backoffsMs = [10, 20, 40, 80, 160, 320, 640].map((seconds) => seconds * 1_000);
+      for (const backoff of backoffsMs) {
+        await vi.advanceTimersByTimeAsync(backoff);
+      }
+
+      expect(deliverMock.mock.calls.length).toBeGreaterThan(8);
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.dropped",
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
         "trigger.send.failed",

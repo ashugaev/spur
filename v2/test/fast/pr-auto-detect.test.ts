@@ -6,6 +6,7 @@ const glabMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const writeWorkspaceStateMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -50,7 +51,7 @@ vi.mock("../../src/agents/index.js", () => ({
 vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
-  findProjectConfigPath: vi.fn(),
+  findProjectConfigPathInDirectory: vi.fn(),
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
@@ -76,6 +77,27 @@ vi.mock("../../src/metadata.js", () => ({
   readSession: readSessionMock,
   writeServiceInstance: vi.fn(),
   writeSession: writeSessionMock,
+}));
+// node:fs is stubbed below (existsSync always true, mkdirSync/writeFileSync
+// no-ops) for the rest of this suite's needs, which breaks
+// workspace-store.js's real tmp-file-and-rename write (renameSync is real
+// and would throw ENOENT on the never-actually-written tmp file). This
+// suite only cares that a found PR binding lands on the session record via
+// writeSession, so resolve workspace state straight off the passed-in
+// record — the same "no workspace file yet" value the real resolver would
+// give here, since every test in this file uses a single non-desk session
+// id (`workspaceId === id`) and never actually writes a workspace file.
+vi.mock("../../src/workspace-store.js", () => ({
+  resolveWorkspaceState: (
+    _dataDir: string,
+    record: { slots?: SessionSlots; pr?: SessionRecord["pr"] },
+  ) => ({
+    ...(record.slots ? { slots: record.slots } : {}),
+    ...(record.pr ? { pr: record.pr } : {}),
+  }),
+  writeWorkspaceState: writeWorkspaceStateMock,
+  deleteWorkspaceState: vi.fn(),
+  readWorkspaceState: vi.fn().mockReturnValue(null),
 }));
 vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
@@ -208,6 +230,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     id: "api-a1b2",
     project: "api",
+    workspaceId: overrides.workspaceId ?? "api-a1b2",
     agent: "claude",
     prompt: "fix the bug",
     branch: "spur/auto-detect-pr-slot",
@@ -291,6 +314,20 @@ describe("PR auto-detect", () => {
       "number,title,url",
       "--limit",
       "1",
+    );
+    // The binding is workspace-owned state: it lands in the workspace file
+    // keyed by the workspace id, and is mirrored onto the session record for
+    // the transitional legacy readers.
+    expect(writeWorkspaceStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      session.id,
+      expect.objectContaining({
+        pr: {
+          number: 42,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      }),
     );
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",

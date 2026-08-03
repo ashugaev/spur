@@ -2520,7 +2520,7 @@ projects:
     ]).toEqual([true, undefined, []]);
     expect(claudeBlock?.prompt).toBe(
       [
-        "Run /code-review {{url}}.",
+        "Run /code-review {{url}} --comment.",
         "Apply the `review` tag to this session.",
         'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
       ].join("\n"),
@@ -2530,10 +2530,15 @@ projects:
     );
   });
 
-  it("does not enable codex fast mode for the sp project", async () => {
+  it("pins codex non-fast service_tier and high reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'model_reasoning_effort="high"']);
+    expect(config.projects["sp"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'service_tier="default"',
+    ]);
   });
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
@@ -3259,6 +3264,169 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.api.restoreAfterReboot must be a boolean",
+    );
+  });
+
+  it("built-in sidecar is absent when unconfigured", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.sidecars).toEqual({});
+  });
+
+  it("parses a built-in sidecar entry without a command, filling code-only fields", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+`);
+
+    const config = loadConfig(configPath);
+    const playwright = config.projects["api"]?.sidecars["playwright"];
+
+    expect(playwright?.autoStart).toBe(true);
+    expect(playwright?.agents).toEqual(["claude", "codex"]);
+    expect(playwright?.mcp).toEqual({
+      server: "playwright",
+      portId: "http",
+      path: "/mcp",
+      clientHost: "localhost",
+    });
+    expect(playwright?.command).toContain("--headless");
+  });
+
+  it("defaults a built-in sidecar's autoStart to false when omitted", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.sidecars["playwright"]?.autoStart).toBe(false);
+  });
+
+  it("rejects a non-built-in sidecar without a command", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      widget:
+        autoStart: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.sidecars.widget.command must be a non-empty string",
+    );
+  });
+
+  it("rejects dependsOn on a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: pnpm dev
+      playwright:
+        autoStart: true
+        dependsOn: [dev]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: dependsOn)',
+    );
+  });
+
+  // startSidecarWithDependencies recurses over the raw project sidecars, so a
+  // user sidecar depending on the built-in would start it for a cursor session
+  // (and despite autoStart: false), bypassing the agent scope.
+  it("rejects a user sidecar whose dependsOn points at a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: false
+      dev:
+        command: pnpm dev
+        autoStart: true
+        dependsOn: [playwright]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.dev.dependsOn must not reference the built-in sidecar "playwright"',
+    );
+  });
+
+  // dependsOn is parsed only on the non-built-in path, so a malformed value on a
+  // built-in still reports the informative built-in rejection rather than a
+  // generic "must be an array of strings" type error.
+  it("reports the built-in rejection for a malformed dependsOn on a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+        dependsOn: nope
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: dependsOn)',
+    );
+  });
+
+  it("rejects a built-in sidecar entry that also carries command/env/ports/agents", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        autoStart: true
+        command: pnpm exec playwright test
+        env:
+          MY_VAR: value
+        ports:
+          http:
+            env: MY_PORT
+            start: 9000
+            end: 9010
+        agents: [cursor]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: command, env, ports, agents)',
+    );
+  });
+
+  it("does not resolve prototype-chain keys like 'constructor' as a built-in sidecar", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      constructor:
+        autoStart: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.sidecars.constructor.command must be a non-empty string",
     );
   });
 

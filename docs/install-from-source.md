@@ -9,6 +9,7 @@ Deploy from a GitHub checkout (dev / maintainers). `v2/` is the runtime source o
 - Daemon on loopback `127.0.0.1:4310`.
 - Web UI on loopback `127.0.0.1:3012` — serves the terminal WebSocket on the same port at `/ws`.
 - `nginx` is the only externally-bound surface: loopback by default, optionally a private interface (VM/Tailscale/VPN IP) on `5555`. Never bind `0.0.0.0` unless the VM is intentionally public.
+- `ui.port` tracks the web unit's `PORT` (`3012` here), not the nginx front port — a mismatch is what `spur doctor`'s `web-ui-port-drift` reports.
 
 Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env to coordinate.
 
@@ -18,8 +19,8 @@ Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env 
 - Node 20+.
 - pnpm pinned to `9.15.4` via corepack. This exact version matters: pnpm 11+ uses vm dynamic-import semantics incompatible with Node 24 and crashes on startup with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
 - GitHub SSH access on the VM (for the clone).
-- Agent CLIs installed user-scoped, not `sudo npm -g`: set `npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH. The daemon unit's `PATH` includes that dir; a system-wide install won't be found. Then `codex login` / `claude login` / `gh auth login` on the host.
-- Spur pins every agent session's `NPM_CONFIG_PREFIX` to `~/.local` (see [install-from-npm.md](install-from-npm.md#setup)), so `claude`/`codex` self-update lands under `~/.local/bin` regardless of this `~/.npm-global` layout — the daemon unit's `PATH` lists `~/.local/bin` first, so the self-updated copy wins for Spur sessions.
+- Agent CLIs installed user-scoped, not `sudo npm -g`: `npm install -g --prefix ~/.npm-global @anthropic-ai/claude-code @openai/codex` — a one-shot `--prefix`, never `npm config set prefix ~/.npm-global` (persists into `~/.npmrc`, see below for why that breaks self-update). Put `~/.npm-global/bin` on PATH; the daemon unit's `PATH` includes that dir already. Then `codex login` / `claude login` / `gh auth login` on the host.
+- Spur pins every agent session's self-update to `~/.local` via a Spur-owned globalconfig file — mechanism and precedence caveat in [install-from-npm.md](install-from-npm.md#setup). That pin loses to a `prefix=` persisted in `~/.npmrc` — exactly what `npm config set prefix ~/.npm-global` would leave behind, which is why the bullet above uses a one-shot `--prefix` instead. `daemon start` writes the pin file on every boot unconditionally — even behind an explicit `npm_config_prefix` in its own env, since the file only ever backs the globalconfig pointer, never overrides that env var (npm's env layer always outranks a globalconfig file); it never touches `~/.npmrc` — `spur doctor`'s `npmrc-nvm-conflict` check (nvm-only hosts) flags a stray line there and gives the exact fix.
 
 ### claude permission prompt
 
@@ -53,7 +54,7 @@ defaultAgent: claude
 tmux:
   socketName: spur-4310
 ui:
-  port: 5555
+  port: 3012
 ```
 
 Spur uses a dedicated tmux socket (`spur-4310`), so plain `tmux ls` shows nothing — use `tmux -L spur-4310 ls`.
@@ -90,6 +91,10 @@ server {
     listen 127.0.0.1:5555;
     listen <private-ip>:5555;
     server_name _;
+
+    # Image attachments (spawn, session send, respawn) go inline as base64 in
+    # the request body. nginx's 1m default rejects them with a raw HTML 413.
+    client_max_body_size 20m;
 
     # One upstream serves the UI and the terminal WebSocket (/ws); the
     # Upgrade/Connection headers let the WS handshake pass through `/`.

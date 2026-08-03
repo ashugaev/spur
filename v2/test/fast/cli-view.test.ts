@@ -11,6 +11,7 @@ function session(overrides: Partial<SessionView>): SessionView {
   return {
     id: "api-1",
     project: "api",
+    workspaceId: "api-1",
     agent: "claude",
     prompt: "test",
     branch: "main",

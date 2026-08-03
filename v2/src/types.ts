@@ -89,6 +89,32 @@ export interface SessionMemoryRecordResponse {
   record: SessionMemoryRecord;
 }
 
+export type SharedMemoryScope = "task" | "project" | "global";
+
+export interface SharedMemoryEntry {
+  key: string;
+  body: string;
+}
+
+export interface SetSharedMemoryRequest {
+  body: string;
+}
+
+export interface SharedMemoryListResponse {
+  scope: SharedMemoryScope;
+  keys: string[];
+}
+
+export interface SharedMemoryEntryResponse {
+  scope: SharedMemoryScope;
+  entry: SharedMemoryEntry;
+}
+
+export interface SharedMemoryRemoveResponse {
+  scope: SharedMemoryScope;
+  key: string;
+}
+
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
@@ -321,6 +347,10 @@ export interface SidecarConfig {
   dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
+  /** Agents allowed to use this sidecar. Undefined = all agents. */
+  agents?: AgentName[];
+  /** Present when this sidecar exposes an MCP server to the launching agent. */
+  mcp?: SidecarMcpConfig;
 }
 
 export interface SidecarPortConfig {
@@ -328,6 +358,19 @@ export interface SidecarPortConfig {
   start: number;
   end: number;
   url?: string;
+}
+
+export interface SidecarMcpConfig {
+  server: string;
+  /** Selects which `ports` entry carries the reserved port for this MCP server. */
+  portId: string;
+  path: string;
+  clientHost?: string;
+}
+
+export interface SidecarMcpBinding {
+  server: string;
+  url: string;
 }
 
 export type WorkspaceAccessItemKind = "copy" | "link";
@@ -618,6 +661,20 @@ export interface SessionStateSubscriptionRecordResponse {
 export interface SessionRecord {
   id: string;
   project: string;
+  // The id of the workspace (shared git worktree) this session lives in.
+  // Equals the session's own id for a session that does not share a
+  // workspace; otherwise the id of the session whose workspace it joined
+  // (desk sibling, handoff). Written once at session creation, and filled in
+  // for every record by normalizeSessionRecord on write.
+  //
+  // Optional because this is the on-disk shape and a record written before
+  // this field existed genuinely lacks it. Never read it directly — go
+  // through `workspaceIdOf` in session-desk.ts, the one accessor that
+  // resolves the legacy shapes.
+  workspaceId?: string;
+  // Legacy input field: the pre-workspaceId name for the same fact. Read
+  // for back-compat by normalizeSessionRecord/workspaceIdOf; no longer
+  // written by any code path.
   deskId?: string;
   agent: AgentName;
   model?: string;
@@ -690,6 +747,17 @@ export interface SidecarPortView {
   port: number;
 }
 
+// A desk-shared (non-mcp) project sidecar's `tmuxSession` is
+// `${anchorId}--${name}`; a per-session (mcp) sidecar's is
+// `${sessionId}--${name}` — this is the sole source of the pane name outside
+// the daemon (web terminal attach, CLI `spur sidecar` commands).
+export interface SessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports: SidecarPortView[];
+  tmuxSession: string;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -699,7 +767,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
+  sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
@@ -779,6 +847,7 @@ export interface SpawnSessionRequest {
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
+  subscriptions?: SubscribeSessionStatesRequest[];
 }
 
 export interface SendMessageAttachment {
@@ -1015,8 +1084,29 @@ export interface ConversationMessage {
   timestampMs: number;
 }
 
+export type TranscriptEntry =
+  | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      inputSummary?: string;
+      output?: string;
+      timestampMs?: number;
+    }
+  | { kind: "reasoning"; text: string; timestampMs?: number }
+  | {
+      kind: "question";
+      header: string;
+      prompt: string;
+      options?: { label: string; index: number }[];
+      multiSelect?: boolean;
+      timestampMs?: number;
+    };
+
 export interface ConversationResponse {
   messages: ConversationMessage[];
+  entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
 }

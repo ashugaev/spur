@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRolloutState } from "../../src/agents/codex.js";
+import { readCodexRolloutState, readCodexTranscriptEntries } from "../../src/agents/codex.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -202,6 +202,61 @@ describe("readCodexRolloutState", () => {
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
       timestamp: "2026-04-26T16:14:44.371Z",
     });
+  });
+
+  it("derives the live model from the newest turn_context record in the tail", async () => {
+    const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-model.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.model).toBe("gpt-5.5");
+  });
+
+  it("reports the model of a fresh rollout file whose only signal is turn_context", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:00.000Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.5-codex" },
+      }),
+      "rollout-turn-context-only.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toEqual({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
+  });
+
+  it("keeps a sibling's rate limit when the newest file carries only a turn_context model", async () => {
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "fresh-model-only.jsonl",
+        content: JSON.stringify({
+          timestamp: "2026-05-10T10:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.5-codex" },
+        }),
+        mtimeMs: 2_000_000_000_000,
+      },
+      {
+        filename: "rate-limited.jsonl",
+        content: JSON.stringify({
+          timestamp: "2026-05-10T09:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: { rate_limit_reached_type: "primary" },
+          },
+        }),
+        mtimeMs: 1_000_000_000_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.model).toBe("gpt-5.5-codex");
   });
 
   it("ignores turn_aborted events when the reason is not interrupted", async () => {
@@ -469,5 +524,143 @@ describe("readCodexRolloutState", () => {
       timestamp: sharedTimestamp,
       timestampMs: Date.parse(sharedTimestamp),
     });
+  });
+});
+
+describe("readCodexTranscriptEntries", () => {
+  it("parses an assistant message and a tool entry whose output is paired via call_id", async () => {
+    const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-transcript-working.jsonl");
+
+    const entries = await readCodexTranscriptEntries(sessionsDir);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    const assistantMessage = entries.find(
+      (entry) => entry.kind === "message" && entry.role === "assistant",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    const pairedTool = entries.find(
+      (entry) => entry.kind === "tool" && entry.callId === "call_5Uzki2Hl1LTKvrICbkwUXLrD",
+    );
+    expect(pairedTool).toMatchObject({
+      kind: "tool",
+      name: "exec_command",
+      callId: "call_5Uzki2Hl1LTKvrICbkwUXLrD",
+    });
+    if (pairedTool?.kind === "tool") {
+      expect(pairedTool.output).toContain("Total output lines: 50");
+    }
+  });
+
+  it("emits entries in file-line order", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-05-10T09:00:00.000Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T09:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call_ordered",
+            arguments: "{}",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T09:00:02.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call_ordered", output: "done" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T09:00:03.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "all set" }],
+          },
+        }),
+      ].join("\n"),
+      "rollout-transcript-order.jsonl",
+    );
+
+    const entries = await readCodexTranscriptEntries(sessionsDir);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    expect(entries).toEqual([
+      {
+        kind: "message",
+        role: "user",
+        text: "hi",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
+      {
+        kind: "tool",
+        name: "exec_command",
+        callId: "call_ordered",
+        inputSummary: "{}",
+        output: "done",
+        timestampMs: Date.parse("2026-05-10T09:00:01.000Z"),
+      },
+      {
+        kind: "message",
+        role: "assistant",
+        text: "all set",
+        timestampMs: Date.parse("2026-05-10T09:00:03.000Z"),
+      },
+    ]);
+  });
+
+  it("parses a reasoning entry from a non-empty summary", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Checking the failing test." }],
+        },
+      }),
+      "rollout-transcript-reasoning.jsonl",
+    );
+
+    const entries = await readCodexTranscriptEntries(sessionsDir);
+
+    expect(entries).toEqual([
+      {
+        kind: "reasoning",
+        text: "Checking the failing test.",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
+    ]);
+  });
+
+  it("emits a question entry with options omitted for request_user_input", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "response_item",
+        payload: { type: "function_call", name: "request_user_input", arguments: "{}" },
+      }),
+      "rollout-transcript-question.jsonl",
+    );
+
+    const entries = await readCodexTranscriptEntries(sessionsDir);
+
+    expect(entries).toEqual([
+      {
+        kind: "question",
+        header: "",
+        prompt: "",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
+    ]);
   });
 });

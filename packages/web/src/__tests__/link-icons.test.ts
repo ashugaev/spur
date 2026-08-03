@@ -1,6 +1,14 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchPrInfo, extractLinkId, prStateColor, usePrInfo } from "@/lib/link-icons.js";
+import {
+  fetchPrInfo,
+  fetchPrInfoBatch,
+  extractLinkId,
+  primePrInfo,
+  prStateColor,
+  usePrInfo,
+  usePrReadyUrls,
+} from "@/lib/link-icons.js";
 import type { SpurSessionLink } from "@/lib/types.js";
 
 const mockFetch = vi.fn<typeof fetch>();
@@ -317,6 +325,14 @@ describe("extractLinkId", () => {
     expect(extractLinkId(link)).toBe("#123");
   });
 
+  it("extracts PR number from legacy github_pr pull URL", () => {
+    const link: SpurSessionLink = {
+      label: "github_pr",
+      url: "https://github.com/org/repo/pull/123",
+    };
+    expect(extractLinkId(link)).toBe("#123");
+  });
+
   it("returns 'PR' when URL has no pull number", () => {
     const link: SpurSessionLink = { label: "github-pr", url: "https://github.com/org/repo" };
     expect(extractLinkId(link)).toBe("PR");
@@ -333,6 +349,14 @@ describe("extractLinkId", () => {
   it("extracts tracker ID from /browse/ URL", () => {
     const link: SpurSessionLink = {
       label: "tracker",
+      url: "https://jira.example.com/browse/PROJ-42",
+    };
+    expect(extractLinkId(link)).toBe("PROJ-42");
+  });
+
+  it("extracts tracker ID from jira label URLs", () => {
+    const link: SpurSessionLink = {
+      label: "jira",
       url: "https://jira.example.com/browse/PROJ-42",
     };
     expect(extractLinkId(link)).toBe("PROJ-42");
@@ -462,5 +486,343 @@ describe("usePrInfo hook", () => {
 
     expect(mockFetch.mock.calls.length).toBeGreaterThan(callCountAfterMount);
     unmount();
+  });
+});
+
+describe("primePrInfo", () => {
+  it("re-renders an already-mounted usePrInfo consumer", async () => {
+    const url = "https://github.com/org/repo/pull/prime-rerender";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    );
+    const { result } = renderHook(() => usePrInfo(url));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.state).toBe("open");
+
+    act(() => {
+      primePrInfo(url, {
+        state: "merged",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: false,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+    });
+
+    expect(result.current.state).toBe("merged");
+  });
+});
+
+describe("fetchPrInfoBatch", () => {
+  it("primes the cache for each URL in the batch response", async () => {
+    const urlA = "https://github.com/org/repo/pull/batch-a";
+    const urlB = "https://github.com/org/repo/pull/batch-b";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [urlA]: {
+            state: "open",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+          [urlB]: {
+            state: "merged",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: false,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    await fetchPrInfoBatch([urlA, urlB]);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [requestUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(requestUrl).toBe("/api/pr-status/batch");
+    expect(init.method).toBe("POST");
+
+    const { result } = renderHook(() => usePrInfo(urlA));
+    expect(result.current.state).toBe("open");
+    expect(result.current.canMerge).toBe(true);
+  });
+
+  it("chunks requests above the route's 100-URL cap into multiple calls", async () => {
+    const urls = Array.from(
+      { length: 250 },
+      (_, i) => `https://github.com/org/repo/pull/chunk-${i}`,
+    );
+    mockFetch.mockResolvedValue(jsonResponse({ results: {} }));
+
+    const success = await fetchPrInfoBatch(urls);
+
+    expect(success).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const sizes = mockFetch.mock.calls.map(
+      ([, init]) =>
+        (JSON.parse((init as RequestInit).body as string) as { urls: string[] }).urls.length,
+    );
+    expect(sizes).toEqual([100, 100, 50]);
+  });
+
+  it("returns false when the request fails, without throwing", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "bad request" }, false, 400));
+
+    const success = await fetchPrInfoBatch(["https://github.com/org/repo/pull/batch-fail"]);
+
+    expect(success).toBe(false);
+  });
+
+  it("returns false when a chunk network request throws", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network down"));
+
+    const success = await fetchPrInfoBatch(["https://github.com/org/repo/pull/batch-throw"]);
+
+    expect(success).toBe(false);
+  });
+
+  it("does not clobber a cached entry with a soft error payload (state: null + error)", async () => {
+    const url = "https://github.com/org/repo/pull/batch-soft-error";
+
+    // Seed a known-good cache entry via the hook, which writes through to
+    // the shared cache (a bare `fetchPrInfo` call does not).
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: null,
+        ciStatus: "success",
+        canMerge: true,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      }),
+    );
+    await act(async () => {
+      renderHook(() => usePrInfo(url));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Batch response for the same URL carries a soft error (state: null, error set).
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [url]: {
+            state: null,
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: false,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+            error: "GitHub API 503",
+          },
+        },
+      }),
+    );
+    await fetchPrInfoBatch([url]);
+
+    const { result } = renderHook(() => usePrInfo(url));
+    expect(result.current.state).toBe("open");
+    expect(result.current.ciStatus).toBe("success");
+  });
+});
+
+describe("usePrReadyUrls", () => {
+  it("does not fetch while disabled", () => {
+    const urls = ["https://github.com/org/repo/pull/ready-disabled"];
+    const { result } = renderHook(() => usePrReadyUrls(urls, false));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.current.loaded).toBe(false);
+    expect(result.current.ready.size).toBe(0);
+  });
+
+  it("returns only GitHub URLs satisfying isPrReady once the batch resolves", async () => {
+    const readyUrl = "https://github.com/org/repo/pull/901";
+    const notReadyUrl = "https://github.com/org/repo/pull/902";
+    const gitlabUrl = "https://gitlab.com/org/repo/-/merge_requests/1";
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [readyUrl]: {
+            state: "open",
+            reviewDecision: null,
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+          [notReadyUrl]: {
+            state: "open",
+            reviewDecision: "changes_requested",
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    const urls = [readyUrl, notReadyUrl, gitlabUrl];
+    const { result } = renderHook(() => usePrReadyUrls(urls, true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { urls: string[] };
+    expect(body.urls).toEqual([readyUrl, notReadyUrl]);
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(readyUrl)).toBe(true);
+    expect(result.current.ready.has(notReadyUrl)).toBe(false);
+  });
+
+  it("keeps loaded false when the batch fetch fails, instead of committing an empty ready set", async () => {
+    const url = "https://github.com/org/repo/pull/903";
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "at most 100 urls" }, false, 400));
+
+    const { result } = renderHook(() => usePrReadyUrls([url], true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(false);
+    expect(result.current.ready.size).toBe(0);
+  });
+
+  it("resets loaded to false while a new URL set's batch is in flight, instead of keeping stale readiness", async () => {
+    const urlA = "https://github.com/org/repo/pull/920";
+    const urlB = "https://github.com/org/repo/pull/921";
+    const prInfo = {
+      state: "open",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    };
+
+    mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [urlA]: prInfo } }));
+
+    const { result, rerender } = renderHook(({ urls }) => usePrReadyUrls(urls, true), {
+      initialProps: { urls: [urlA] },
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(urlA)).toBe(true);
+
+    // Leave the second batch unresolved so the reset can be observed before
+    // it settles.
+    let resolveSecondBatch: (value: Response) => void = () => {};
+    mockFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSecondBatch = resolve;
+        }),
+    );
+
+    act(() => {
+      rerender({ urls: [urlB] });
+    });
+
+    expect(result.current.loaded).toBe(false);
+
+    resolveSecondBatch(jsonResponse({ results: { [urlB]: prInfo } }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(urlB)).toBe(true);
+  });
+
+  it("updates the ready set from a primePrInfo write without waiting for the next poll", async () => {
+    const url = "https://github.com/org/repo/pull/930";
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        results: {
+          [url]: {
+            state: "open",
+            reviewDecision: "changes_requested",
+            ciStatus: null,
+            canMerge: true,
+            mergeConflict: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          },
+        },
+      }),
+    );
+
+    const { result } = renderHook(() => usePrReadyUrls([url], true));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(url)).toBe(false);
+
+    // A write from elsewhere (e.g. SessionRow's post-merge prime) flips the
+    // PR to ready — the set must update immediately, not after POLL_MS.
+    act(() => {
+      primePrInfo(url, {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+    });
+
+    expect(result.current.ready.has(url)).toBe(true);
   });
 });

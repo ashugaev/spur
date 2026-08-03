@@ -22,16 +22,18 @@ describe("spur help", () => {
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
+    expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("service");
     expect(help).toContain("source");
+    expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
-    expect(help).not.toContain("subscribe");
-    expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
+    expect(help).not.toContain("playwright");
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {
@@ -101,6 +103,9 @@ describe("spur help", () => {
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
+    expect(help).toContain("--subscribe-to <sessionId>");
+    expect(help).toContain("--subscribe-state <state>");
+    expect(help).toContain("--subscribe-message <message>");
     expect(help).toContain("Agent to start: claude, codex, or cursor");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
@@ -201,10 +206,8 @@ describe("spur help", () => {
   it("documents exact session-memory commands without aliases", () => {
     const program = buildProgram();
     const sessionMemory = program.commands.find((command) => command.name() === "session-memory");
-    const genericMemory = program.commands.find((command) => command.name() === "memory");
 
     expect(sessionMemory).toBeDefined();
-    expect(genericMemory).toBeUndefined();
     if (!sessionMemory) {
       throw new Error("Expected session-memory command to be registered");
     }
@@ -220,5 +223,23 @@ describe("spur help", () => {
     expect(help).toContain(
       "Session memory is daemon-managed and scoped to one existing session id.",
     );
+  });
+
+  it("documents the memory command with the required --scope option", () => {
+    const program = buildProgram();
+    const memory = program.commands.find((command) => command.name() === "memory");
+
+    expect(memory).toBeDefined();
+    if (!memory) {
+      throw new Error("Expected memory command to be registered");
+    }
+
+    expect(memory.aliases()).toEqual([]);
+
+    const help = memory.helpInformation();
+    expect(help).toContain("memory <set|get|list|rm> [key] [body] --scope <task|project|global>");
+    expect(help).toContain("--scope <scope>");
+    expect(help).toContain("--file <path>");
+    expect(help).toContain("--session <id>");
   });
 });

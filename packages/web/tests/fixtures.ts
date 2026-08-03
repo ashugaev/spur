@@ -1,5 +1,10 @@
 import type { Page } from "@playwright/test";
-import type { AvailableBacklogItem, ProjectInfo, SpurSessionView } from "../src/lib/types";
+import type {
+  AvailableBacklogItem,
+  ProjectInfo,
+  SpurSessionSidecarView,
+  SpurSessionView,
+} from "../src/lib/types";
 
 const NOW = new Date().toISOString();
 const DEFAULT_GITHUB_STATUS = {
@@ -42,15 +47,39 @@ function baseSession(id: string): SpurSessionView {
   };
 }
 
-export function makeWorkingSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+// The daemon always publishes each sidecar's pane name, and for a session that
+// is not a desk member that name is `<sessionId>--<name>`. Fixtures may leave it
+// out and get the same value the daemon would send, so a spec only spells it out
+// when it is testing a desk-shared sidecar (whose pane belongs to the anchor).
+type SidecarFixture = Omit<SpurSessionSidecarView, "tmuxSession"> & {
+  tmuxSession?: string;
+};
+
+function withSidecarPaneNames(
+  session: Omit<SpurSessionView, "sidecars"> & { sidecars?: SidecarFixture[] },
+): SpurSessionView {
   return {
+    ...session,
+    sidecars: (session.sidecars ?? []).map((sidecar) => ({
+      ...sidecar,
+      tmuxSession: sidecar.tmuxSession ?? `${session.id}--${sidecar.name}`,
+    })),
+  };
+}
+
+type SessionOverrides = Partial<Omit<SpurSessionView, "sidecars">> & {
+  sidecars?: SidecarFixture[];
+};
+
+export function makeWorkingSession(overrides?: SessionOverrides): SpurSessionView {
+  return withSidecarPaneNames({
     ...baseSession("session-working-1"),
     runtimeAlive: true,
     tmuxSession: "spur-session-working-1",
     status: "running",
     state: "working",
     ...overrides,
-  };
+  });
 }
 
 export function makeSpawningSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
@@ -169,9 +198,9 @@ export function makeSessionWithTracker(overrides?: Partial<SpurSessionView>): Sp
 export function makeSessionWithSidecar(
   name: string,
   alive: boolean,
-  overrides?: Partial<SpurSessionView>,
+  overrides?: SessionOverrides,
 ): SpurSessionView {
-  return {
+  return withSidecarPaneNames({
     ...baseSession("session-sidecar-1"),
     runtimeAlive: true,
     tmuxSession: "spur-session-sidecar-1",
@@ -179,7 +208,7 @@ export function makeSessionWithSidecar(
     state: "working",
     sidecars: [{ name, alive }],
     ...overrides,
-  };
+  });
 }
 
 function normalizeProject(project: ProjectInfo): ProjectInfo {
@@ -268,6 +297,35 @@ export async function mockGitLabStatus(
       body: JSON.stringify(body),
     });
   });
+}
+
+/**
+ * Stub `POST /api/pr-status/batch` with a fixed `url -> PrStatusResponse`
+ * map and a request counter, so E2E specs can both drive the PR-ready
+ * filter and assert the batch endpoint is never called while it's off.
+ */
+export async function mockPrStatusBatch(
+  page: Page,
+  byUrl: Record<string, Record<string, unknown>>,
+): Promise<{ count: () => number }> {
+  let requestCount = 0;
+  await page.route(/\/api\/pr-status\/batch$/, (route) => {
+    requestCount += 1;
+    const payload = route.request().postDataJSON() as { urls?: unknown } | null;
+    const urls = Array.isArray(payload?.urls) ? payload.urls : [];
+    const results: Record<string, unknown> = {};
+    for (const url of urls) {
+      if (typeof url === "string" && byUrl[url]) {
+        results[url] = byUrl[url];
+      }
+    }
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ results }),
+    });
+  });
+  return { count: () => requestCount };
 }
 
 export async function mockTagCatalog(page: Page): Promise<void> {

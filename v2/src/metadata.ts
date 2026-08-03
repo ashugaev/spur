@@ -27,6 +27,7 @@ import {
   type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
+import { workspaceIdOf } from "./session-desk.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -514,7 +515,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    // Legacy on-disk records only have `deskId` (or neither field); this is
+    // where a pre-workspaceId record gets migrated in memory on every read.
+    // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
+    // stays written in exactly one place (session-desk.ts).
+    workspaceId: workspaceIdOf(normalizedSession),
     agent: normalizedSession.agent,
+    ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
     ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
@@ -528,6 +535,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.originalTaskPrompt
+      ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
+      : {}),
     ...(normalizedSession.startupAttachmentIds
       ? { startupAttachmentIds: normalizedSession.startupAttachmentIds }
       : {}),
@@ -544,6 +554,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
+    // deskId is legacy-read-only from here on (see the field's doc comment
+    // in types.ts): keep passing through an existing value so old records
+    // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),

@@ -19,9 +19,11 @@ import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   imageFilesFromDataTransfer,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { TerminalStatusDot } from "@/components/TerminalStatusDot";
@@ -36,6 +38,7 @@ interface DirectTerminalProps {
   apiSessionId?: string;
   agentInputEnabled?: boolean;
   agent?: AgentName;
+  model?: string;
   activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
@@ -196,6 +199,7 @@ export function DirectTerminal({
   apiSessionId,
   agentInputEnabled = true,
   agent = "claude",
+  model,
   activity,
   title,
   onClose,
@@ -308,14 +312,23 @@ export function DirectTerminal({
   const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
-  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setVoiceAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addVoiceImageFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const sendSessionMessage = useCallback(
     async (
@@ -324,6 +337,7 @@ export function DirectTerminal({
       options: { queue: boolean; interrupt?: boolean },
     ) => {
       const encodedAttachments = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
       const body: Record<string, unknown> = {
@@ -360,12 +374,21 @@ export function DirectTerminal({
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
-          setVoiceAttachments((current) => [...current, ...attachments]);
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) {
+            showErrorToast(rejectedMessage);
+            return;
+          }
           voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
         })
         .catch(() => {});
     },
-    [agentInputEnabled, voice],
+    [agentInputEnabled, showErrorToast, voice],
   );
 
   const handleTerminalPaste = useCallback(
@@ -805,13 +828,18 @@ export function DirectTerminal({
             {title}
           </div>
         ) : null}
+        {/* Never truncates: the title yields space, this label just butts against it. */}
+        <div
+          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+          data-testid="direct-terminal-header-agent"
+        >
+          {getAgentDisplayName(agent)}
+          {model ? ` • ${model}` : null}
+        </div>
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className={cn(
-              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
-              !title && "ml-auto",
-            )}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >

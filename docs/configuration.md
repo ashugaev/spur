@@ -9,6 +9,8 @@ Two layers:
 
 `spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present.
 
+A running session reads only the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one the session uses the project as the daemon has it.
+
 ## Local project config
 
 `spur doctor --scaffold` writes the minimal shape:
@@ -135,7 +137,7 @@ projects:
 
 ## selfDestruct, steps
 
-When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Optional `conditions` replace the default completion condition. Disabled or omitted capability returns access denied and leaves the session running.
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Omitting `conditions` (or leaving it blank) uses the default completion condition, `every objective in the task prompt is done`; an explicit `conditions` string is trimmed and replaces it.
 
 With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message — unless a mode resolved (see Modes below), in which case the mode instruction becomes the session's initial message on its own.
 
@@ -161,6 +163,12 @@ triggers:
 ```
 
 `spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`; mixed workspace overrides are rejected.
+
+A desk group is any set of sessions sharing one workspace: the children of a `spawnDeskGroup` trigger, and the two sides of a handoff.
+
+Members share slots (title/links/tags/PR), session artifacts, and non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one shared instance per desk, addressable by any member. Each member still keeps its own transcript, agent process, status, MCP sidecar (`playwright`), and session tool dir.
+
+The worktree and the shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. A shared sidecar and its reserved ports are released as soon as no member has a running agent; restoring a member starts it again.
 
 ## Modes
 
@@ -189,11 +197,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
+- `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`. `false` runs in the project path instead of an owned worktree. Override per session with `--worktree`/`--shared` or `trigger.spawn.overrides.worktree`.
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
+- `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.
@@ -203,7 +213,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
 - `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
 - `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
@@ -231,6 +241,17 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk, and rejects mixed resolved `overrides.worktree`/`overrides.defaultBranch`.
 - `send.interrupt`: optional boolean, default `false`. `false` queues while `working`/`needs_input`, dedupes, flushes when `waiting`. `true` interrupts immediately while `working`; `needs_input` still queues.
 - `send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
+- `projects.<id>.backlog.<backlogId>.source`: required source id; must be a `jira` source.
+- `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
+- `projects.<id>.backlog.<backlogId>.intervalMs`: optional, default `60000`.
+- `projects.<id>.backlog.<backlogId>.runOnStart`: optional, default `false`.
+- `tags.<name>.description`: required. Sole agent-facing instruction for the tag; conditions (e.g. request-only) live here, not in source. Instance config only — a project-config `tags` block parses without error and is discarded.
+- `tags.<name>.color`: optional CSS color; auto-derived from the tag name (hashed hue) when omitted.
+- `authRotation.autoRotateOnRateLimit`: optional boolean, default `false`. Instance config only.
+- `authRotation.cooldownMinutes`: optional, default `60`.
+- `authRotation.maxRotationsPerEpisode`: optional, default `2`.
+- `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
+- `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 
 ## Events
 
@@ -238,7 +259,9 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
+- `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, `gitlab:merge_conflict`.
+- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`.
@@ -261,4 +284,4 @@ Unit templates live in `deploy/`. After editing, copy to `/etc/systemd/system/` 
 
 ## spur init (npm host flags)
 
-`spur init` installs the `spur-daemon`/`spur-web` systemd user units. Flags: `--no-start`; `--expose-web` (public `0.0.0.0` bind, default `127.0.0.1`); `--web-port <port>` (default `4311`); `--tailscale`/`--no-tailscale` (default on — widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once the tailnet is up; loopback stays bound; never `0.0.0.0`). `--expose-web` is the explicit public override and supersedes Tailscale. `WEB_HOST` takes a comma-separated host list (`packages/web/server/web-hosts.ts`); `spur-web`'s production server binds one listener per host. Full walkthrough: [install-from-npm.md](install-from-npm.md).
+`spur init` installs the `spur-daemon`/`spur-web` systemd user units. Flags: `--no-start`; `--expose-web` (public `0.0.0.0` bind, default `127.0.0.1`); `--web-port <port>` (default `5555`); `--tailscale`/`--no-tailscale` (default on — widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once the tailnet is up; loopback stays bound; never `0.0.0.0`). `--expose-web` is the explicit public override and supersedes Tailscale. `WEB_HOST` takes a comma-separated host list (`packages/web/server/web-hosts.ts`); `spur-web`'s production server binds one listener per host. Full walkthrough: [install-from-npm.md](install-from-npm.md).

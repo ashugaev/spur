@@ -367,12 +367,71 @@ describe("pending send batches", () => {
   });
 });
 
+describe("session workspaceId normalization", () => {
+  const legacyBase = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("survives a write/read round-trip", async () => {
+    // Guards the whitelist trap: normalizeSessionRecord drops any field it
+    // does not list, and its own default would then silently re-derive
+    // workspaceId, hiding the loss behind a plausible value.
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      workspaceId: "api-1",
+      tmuxSession: "api-2",
+    });
+
+    expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("derives it from the legacy deskId of a record written before the field existed", async () => {
+    const dataDir = await newDataDir();
+    const legacy = { ...legacyBase, id: "api-2", deskId: "api-1", tmuxSession: "api-2" };
+    writeSession(dataDir, legacy as SessionRecord);
+
+    expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("falls back to the session's own id for a legacy record with neither field", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...legacyBase, id: "api-1", tmuxSession: "api-1" } as SessionRecord);
+
+    expect(readSession(dataDir, "api-1")?.workspaceId).toBe("api-1");
+  });
+
+  it("prefers workspaceId over a stale legacy deskId", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      workspaceId: "api-9",
+      deskId: "api-1",
+      tmuxSession: "api-2",
+    });
+
+    expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-9");
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
       id: "api-1",
       project: "api",
+      workspaceId: "api-1",
       agent: "claude",
       prompt: "ship it",
       branch: "api-1",
@@ -753,6 +812,39 @@ describe("session metadata PR migration", () => {
     );
     expect(listSessions(dataDir)).toEqual([
       expect.objectContaining({ serverErrorAt: "2026-03-18T10:05:00.000Z" }),
+    ]);
+  });
+
+  it("preserves model and originalTaskPrompt when writing and reading a session record", async () => {
+    // normalizeSessionRecord rebuilds the record field by field, so an
+    // optional SessionRecord field missing from its whitelist is silently
+    // dropped on the very next write — spawn persists both of these and every
+    // later write (a state transition, markOpened) would erase them.
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      model: "opus",
+      prompt: "ship it (with orchestrator preamble)",
+      originalTaskPrompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+    );
+    expect(listSessions(dataDir)).toEqual([
+      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
     ]);
   });
 });

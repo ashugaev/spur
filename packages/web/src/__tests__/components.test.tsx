@@ -16,6 +16,7 @@ import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -729,10 +730,14 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      const header = screen.getByRole("banner");
-      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
       expect(screen.queryByRole("link", { name: "Collapsed mobile stop" })).not.toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Stopped:/ })).toHaveTextContent("1");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close filters" }));
 
     fireEvent.click(getAttentionZoneToggle("Stopped"));
 
@@ -817,7 +822,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No matching sessions in API.", { exact: false }),
+        screen.getByText("No sessions match this filter in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 
@@ -1409,6 +1414,64 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(screen.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
     expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
+  });
+
+  it("shows the default self-destruct condition as a placeholder and omits conditions when left blank", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Ship it" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+
+    const conditionsField = screen.getByLabelText("Self-destruct conditions");
+    expect(conditionsField).toHaveAttribute(
+      "placeholder",
+      `Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`,
+    );
+    expect(conditionsField).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "Ship it",
+            agent: "claude",
+            selfDestruct: { enabled: true },
+          }),
+        }),
+      );
+    });
   });
 
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {

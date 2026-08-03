@@ -14,6 +14,9 @@ const jetbrainsMono = JetBrains_Mono({
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  // Pinned so iOS Safari never auto-zooms when a form field with a
+  // sub-16px font size takes focus.
+  maximumScale: 1,
   viewportFit: "cover",
   themeColor: BG_BASE_HEX,
 };
