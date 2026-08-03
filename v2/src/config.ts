@@ -38,6 +38,7 @@ import {
   type TriggerConfig,
 } from "./types.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
@@ -1665,6 +1666,9 @@ function parseConfigFile(
             retainArchives:
               asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+            collapseWindowMs:
+              asNonNegativeNumber(eventLog["collapseWindowMs"], "eventLog.collapseWindowMs") ??
+              DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
     userActionLog:

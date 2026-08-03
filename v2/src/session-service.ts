@@ -110,12 +110,16 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  flushEventLogCollapse,
   logSpurEvent,
   logUserInputEvent,
+  sessionEventLogPath,
   type SpurLogEntry,
   type UserInputKind,
 } from "./event-log.js";
-import { deleteSessionUserActions } from "./user-action-log.js";
+import { deleteSessionUserActions, sessionUserActionLogPath } from "./user-action-log.js";
+import { tryRotate } from "./jsonl-log-io.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -413,6 +417,14 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // session). The reaper needs the full set of statuses that mean "this
 // session's runtime is not supposed to exist anymore".
 const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
+// A terminal session's shard stops growing but can already sit well above
+// this floor; the compaction sweep gzips it down once the session goes
+// terminal. Well above the worst measured post-terminal write rate.
+const TERMINAL_COMPACT_FLOOR_BYTES = 64 * 1024;
+// Bounds each sweep tick to ~0.6s of gzip work (measured 282 MB/s, 8.3 MB
+// average shard) so a large terminal-session backlog never blocks the event
+// loop; the remainder drains over subsequent ticks.
+const COMPACT_MAX_PER_TICK = 20;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1804,6 +1816,12 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
+  private compactRunning = false;
+  // Round-robin offset into the terminal-session list, advanced by each
+  // tick's COMPACT_MAX_PER_TICK batch so a backlog larger than one tick's
+  // budget still drains across ticks instead of reprocessing the same head
+  // every time.
+  private compactCursor = 0;
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -2931,8 +2949,53 @@ export class SessionService {
     }
     this.reaperTimer = setInterval(() => {
       void this.reapOrphanedTmux();
+      this.compactTerminalSessionLogs();
+      flushEventLogCollapse(this.config.dataDir);
     }, REAP_INTERVAL_MS);
     this.reaperTimer.unref();
+  }
+
+  // Gzips each terminal (killed/completed/stopped) session's live event-log
+  // and user-action shard once it exceeds TERMINAL_COMPACT_FLOOR_BYTES.
+  // Deliberately does NOT inherit reapOrphanedTmux's `manual_pause` filter —
+  // that filter protects a paused agent's tmux, and compaction never touches
+  // tmux, sidecars, worktrees, or session records. Bounded to
+  // COMPACT_MAX_PER_TICK sessions per tick via compactCursor's round-robin
+  // offset, so a large backlog drains across several ticks — each tick
+  // picking up where the last left off — instead of blocking the event loop
+  // in one gzip burst or reprocessing the same head every tick.
+  private compactTerminalSessionLogs(): void {
+    if (this.compactRunning) {
+      return;
+    }
+    this.compactRunning = true;
+    try {
+      const sessions = listSessions(this.config.dataDir).filter((session) =>
+        REAPABLE_SESSION_STATUSES.has(session.status),
+      );
+      if (sessions.length === 0) {
+        this.compactCursor = 0;
+        return;
+      }
+      const retain = this.config.eventLog?.retainArchives ?? DEFAULT_EVENT_LOG_RETAIN_ARCHIVES;
+      const start = this.compactCursor % sessions.length;
+      const batch = sessions.slice(start, start + COMPACT_MAX_PER_TICK);
+      for (const session of batch) {
+        tryRotate(
+          sessionEventLogPath(this.config.dataDir, session.id),
+          TERMINAL_COMPACT_FLOOR_BYTES,
+          retain,
+        );
+        tryRotate(
+          sessionUserActionLogPath(this.config.dataDir, session.id),
+          TERMINAL_COMPACT_FLOOR_BYTES,
+          retain,
+        );
+      }
+      this.compactCursor = start + batch.length >= sessions.length ? 0 : start + batch.length;
+    } finally {
+      this.compactRunning = false;
+    }
   }
 
   // Safety net: a terminal (killed/completed/stopped) session's tmux is

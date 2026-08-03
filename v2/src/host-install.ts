@@ -1,6 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
@@ -29,6 +37,14 @@ import { getVersion } from "./version.js";
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
 const DISK_SPACE_MIN_FREE_KB = 5_120;
 const DISK_SPACE_PROBE_TIMEOUT_MS = 2_000;
+// Above this total (session shards plus the root-level global logs),
+// `data-dir-log-bytes` warns. Post-sweep steady state projects to ~1-1.5GB,
+// so 5GB is ~3x headroom on a healthy host.
+const LOG_BYTES_WARN_KB = 5 * 1024 * 1024;
+// `du -sk <dataDir>/sessions` on a healthy host completes in ~0.02s; `du -sk
+// <dataDir>` (which also walks worktrees) can take 6+s, so the probe is
+// scoped to `sessions` and given a generous but bounded timeout.
+const LOG_BYTES_PROBE_TIMEOUT_MS = 5_000;
 // A2: `node -e "require('node-pty')"` must never hang doctor on a wedged
 // child process.
 const NODE_PTY_PROBE_TIMEOUT_MS = 5_000;
@@ -528,6 +544,74 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
 }
 
+// `du -sk <dir>` first line, first whitespace-delimited field (KB total).
+function parseDuKb(output: string | undefined): number | undefined {
+  if (!output) return undefined;
+  const firstLine = output.trim().split("\n")[0];
+  if (!firstLine) return undefined;
+  const raw = firstLine.trim().split(/\s+/)[0];
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+// The global events.jsonl/user-actions.jsonl logs (and their .gz archives)
+// live at the data-dir root, disjoint from <dataDir>/sessions — eventLog.*
+// governs exactly these files, so the doctor total must include them. A
+// plain readdir+stat over the root (never recursive) stays cheap regardless
+// of how large `sessions` is.
+function rootLogFileBytes(dataDir: string): number {
+  let names: string[];
+  try {
+    names = readdirSync(dataDir);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const name of names) {
+    if (!name.startsWith("events.jsonl") && !name.startsWith("user-actions.jsonl")) {
+      continue;
+    }
+    try {
+      total += statSync(join(dataDir, name)).size;
+    } catch {
+      // Removed between readdir and stat — not itself a reportable condition.
+    }
+  }
+  return total;
+}
+
+function checkLogBytes(id: string, dataDir: string): HostInstallCheck {
+  const duOutput = tryExec("du", ["-sk", join(dataDir, "sessions")], {
+    timeoutMs: LOG_BYTES_PROBE_TIMEOUT_MS,
+  });
+  const sessionsKb = parseDuKb(duOutput);
+  if (sessionsKb === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — du unavailable or non-numeric on this filesystem",
+    };
+  }
+  const totalKb = sessionsKb + Math.ceil(rootLogFileBytes(dataDir) / 1024);
+  if (totalKb > LOG_BYTES_WARN_KB) {
+    return {
+      id,
+      ok: false,
+      severity: "warn",
+      detail: `Spur logs under ${dataDir} total ${totalKb}KB (above the ${LOG_BYTES_WARN_KB}KB warn threshold)`,
+      fix: `lower eventLog.shardHotBytes / eventLog.retainArchives in ~/.spur/config.yaml`,
+    };
+  }
+  return {
+    id,
+    ok: true,
+    severity: "warn",
+    detail: `Spur logs under ${dataDir} total ${totalKb}KB (within the ${LOG_BYTES_WARN_KB}KB warn threshold)`,
+  };
+}
+
 async function portConflictCheck(
   id: ServiceId,
   unit: string,
@@ -928,6 +1012,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
     checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
     checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+    checks.push(checkLogBytes("data-dir-log-bytes", instanceConfig.config.dataDir));
 
     const actualWebPort = readWebPort(scope);
     const configuredWebPort = instanceConfig.config.ui.port;

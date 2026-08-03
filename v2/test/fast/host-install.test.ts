@@ -107,6 +107,9 @@ interface ExecState {
   dfKbLine: string;
   dfILine: string;
   nodePtyOk: boolean;
+  // data-dir-log-bytes seam: `du -sk <dataDir>/sessions` first line.
+  duAvailable: boolean;
+  duKbLine: string;
 }
 
 let execState: ExecState;
@@ -142,6 +145,8 @@ beforeEach(() => {
     dfKbLine: "/dev/sda1 100000000 5000000 90000000 10% /",
     dfILine: "/dev/sda1 1000000 200000 800000 20% /",
     nodePtyOk: true,
+    duAvailable: true,
+    duKbLine: "1000\t/data/sessions",
   };
   execFileSyncMock.mockReset();
   execFileSyncMock.mockImplementation((file: string, args: string[]) => {
@@ -171,6 +176,10 @@ beforeEach(() => {
     if (file === "node") {
       if (!execState.nodePtyOk) throw new Error('Failed to load native module "node-pty"');
       return "";
+    }
+    if (file === "du") {
+      if (!execState.duAvailable) throw new Error("du not found");
+      return execState.duKbLine;
     }
     if (file === "systemctl") {
       if (!execState.systemctlAvailable) throw new Error("systemctl not available");
@@ -996,11 +1005,62 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     });
   });
 
+  it("reports data-dir-log-bytes warn when du reports usage above the 5GB threshold", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duKbLine = `6000000\t${join(dataDir, "sessions")}`;
+    const checks = await collectHostInstallChecks(fakeHome);
+    const check = checks.find((check) => check.id === "data-dir-log-bytes");
+    expect(check).toMatchObject({ ok: false, severity: "warn" });
+    expect(check?.fix).toContain("eventLog");
+    // Log growth must never fail `spur doctor` on its own: cli.ts exits 1 only
+    // on error severity, and this check tops out at warn.
+    expect(hasErrorSeverity([check!])).toBe(false);
+  });
+
+  it("skips (info) data-dir-log-bytes when du is unavailable", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duAvailable = false;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+
   it("never pushes worktree/data-dir checks on a never-initialized host (no instance config)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-never-init-c");
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(hasErrorSeverity(checks)).toBe(false);
   });
 });
@@ -1047,6 +1107,7 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
     expect(probeInfoMock).toHaveBeenCalledWith(
       expect.objectContaining({ url: expect.stringContaining(":4310/info") }),

@@ -33,8 +33,8 @@ export interface BuildUserActionInput {
 const USER_ACTION_LOG_FILE = "user-actions.jsonl";
 const SESSIONS_DIR = "sessions";
 
-export const DEFAULT_USER_ACTION_LOG_HOT_BYTES = 500 * 1024 * 1024;
-export const DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_USER_ACTION_LOG_HOT_BYTES = 128 * 1024 * 1024;
+export const DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES = 5;
 
 export interface UserActionLogConfig {

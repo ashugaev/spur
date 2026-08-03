@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -141,6 +142,8 @@ class MockPreflightBranchValidationError extends Error {
   }
 }
 const logSpurEventMock = vi.fn();
+const flushEventLogCollapseMock = vi.fn();
+const tryRotateMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
 const readClaudeSessionStatusMock = vi.fn();
@@ -328,6 +331,15 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
       const entry = actual.buildUserInputLogEntry(input);
       if (entry) logSpurEventMock(dataDir, entry);
     },
+    flushEventLogCollapse: flushEventLogCollapseMock,
+  };
+});
+
+vi.mock("../../src/jsonl-log-io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof jsonlLogIoModule>();
+  return {
+    ...actual,
+    tryRotate: tryRotateMock,
   };
 });
 
@@ -1007,6 +1019,8 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(() => ({ exists: workspaceExistsMock(), missing: false }));
     logSpurEventMock.mockReset();
+    flushEventLogCollapseMock.mockReset();
+    tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
@@ -19143,6 +19157,128 @@ describe("SessionService", () => {
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "proxy");
+      service.dispose();
+    });
+  });
+
+  describe("terminal log compaction", () => {
+    // Built inline instead of importing sessionEventLogPath/sessionUserActionLogPath:
+    // a real (non-type) top-level import of a vi.mock'd module family loads before
+    // this file's own `const ...Mock = vi.fn()` declarations run, which throws a
+    // "before initialization" TDZ error from inside the mock factory.
+    function shardPath(id: string, file: "events.jsonl" | "user-actions.jsonl"): string {
+      return join(TEST_DATA_DIR, "sessions", id, file);
+    }
+
+    function seedCompactSession(
+      id: string,
+      overrides: Partial<SessionRecord> = {},
+    ): Map<string, SessionRecord> {
+      const sessions = createSessionStore();
+      sessions.set(id, {
+        id,
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: id,
+        worktree: true,
+        worktreePath: `/tmp/spur-worktrees/api/${id}`,
+        tmuxSession: id,
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        ...overrides,
+      });
+      return sessions;
+    }
+
+    it("rotates both shards of a completed session with the 64KB floor and configured retain", async () => {
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 5);
+      expect(tryRotateMock).toHaveBeenCalledWith(
+        shardPath("api-1", "user-actions.jsonl"),
+        65536,
+        5,
+      );
+      service.dispose();
+    });
+
+    it("rotates a manual_pause stopped session's shards, unlike the tmux reaper", async () => {
+      seedCompactSession("api-1", { status: "stopped", stopReason: "manual_pause" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 5);
+      service.dispose();
+    });
+
+    it("skips running and errored sessions", async () => {
+      const sessions = seedCompactSession("api-1", { status: "running" });
+      sessions.set("api-2", {
+        ...(sessions.get("api-1") as SessionRecord),
+        id: "api-2",
+        tmuxSession: "api-2",
+        status: "errored",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("bounds one tick to COMPACT_MAX_PER_TICK sessions and drains the rest on the next tick", async () => {
+      const sessions = createSessionStore();
+      for (let i = 0; i < 25; i += 1) {
+        const id = `api-${i}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: "ship the task",
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "completed",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      // 20 sessions x 2 shards (event log + user action) per tick.
+      expect(tryRotateMock.mock.calls.length).toBe(40);
+
+      tryRotateMock.mockClear();
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      // The remaining 5 sessions drain on the second tick.
+      expect(tryRotateMock.mock.calls.length).toBe(10);
+      service.dispose();
+    });
+
+    it("flushes the event-log collapse map once per reaper tick", async () => {
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(flushEventLogCollapseMock).toHaveBeenCalledWith(TEST_DATA_DIR);
+      expect(flushEventLogCollapseMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
   });

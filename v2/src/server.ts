@@ -7,6 +7,7 @@ import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
@@ -1508,6 +1509,7 @@ export async function startServer(
         });
       }
       await closePromise;
+      flushEventLogCollapse(service.config.dataDir);
       logEvent("daemon.stopped", {
         level: "info",
         message: "Stopped Spur daemon",
