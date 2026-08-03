@@ -189,6 +189,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.worktree`: optional, default `true`. `false` runs in the project path instead of an owned worktree. Override per session with `--worktree`/`--shared` or `trigger.spawn.overrides.worktree`.
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
+- `projects.<id>.mcp.exclude`: optional array of MCP server names, default `[]`. Host/global servers Spur drops from this project's claude and codex sessions. See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.

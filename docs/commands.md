@@ -140,11 +140,34 @@ per-session toggle, no `spur playwright` command.
 
 Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
 with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
-config survive — the merge reads `~/.claude.json` user-scope servers, `~/.claude.json`
-`projects["<worktree path>"]`, and `<worktree>/.mcp.json`. A fresh worktree has no
-`projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
-are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
-is silently replaced by Spur's own.
+config survive — the merge reads `~/.claude/settings.json`, `~/.claude.json` user-scope servers,
+`<worktree>/.mcp.json`, and `~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh
+worktree has no `projects["<worktree path>"]` entry yet, so local-scope servers approved against the
+main repo path are dropped for that session. A host `mcpServers.playwright` entry (from any of those
+sources) is silently replaced by Spur's own.
+
+### Suppressing a host MCP server
+
+A globally-configured MCP server is spawned per session by the agent, whether or not the session
+uses it. `projects.<id>.mcp.exclude` drops named servers from what Spur hands the agent, so a
+project pays no RAM for tooling it does not need:
+
+```yaml
+projects:
+  api:
+    mcp:
+      exclude: [playwright, digitalocean]
+```
+
+Applies to claude (dropped from the generated `mcp-config.json`, which is then launched with
+`--strict-mcp-config`) and codex (the inherited `[mcp_servers.<name>]` table is stripped from the
+session `config.toml`). Cursor has no suppression path. Excluding a name that a sidecar also binds
+is safe: the sidecar wins, so `exclude: [playwright]` plus `sidecars.playwright.autoStart: true`
+gives the session Spur's managed server and not the host's.
+
+For claude, any non-empty `exclude` makes the generated config authoritative for the session, the
+same as enabling an MCP sidecar — the caveats above apply. With no `exclude` and no MCP sidecar,
+Spur passes no MCP flags and claude resolves servers itself.
 
 ## build, daemon
 

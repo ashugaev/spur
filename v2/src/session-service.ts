@@ -801,6 +801,7 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
   // .claude.json instead of the host ~/.claude.json when merging MCP
@@ -816,6 +817,7 @@ async function setupSessionAgentHooks(args: {
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
+    ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -5211,6 +5213,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -6157,6 +6160,7 @@ export class SessionService {
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
@@ -7881,6 +7885,7 @@ export class SessionService {
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+      ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
@@ -8101,6 +8106,9 @@ export class SessionService {
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(restoreProjectConfig.mcp?.exclude.length
+          ? { mcpExclude: restoreProjectConfig.mcp.exclude }
+          : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);

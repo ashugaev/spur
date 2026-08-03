@@ -1,5 +1,8 @@
+import { spawn } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
+  killProcessTree,
   isLeakedManagedPlaywright,
   playwrightMcpUrl,
   PLAYWRIGHT_SIDECAR_CONFIG,
@@ -27,6 +30,7 @@ describe("PLAYWRIGHT_SIDECAR_CONFIG", () => {
   // 1). It still carries every non-bin flag so config/tests can assert on it.
   it("carries the launch flags as a static placeholder, without resolving the real bin", () => {
     expect(PLAYWRIGHT_SIDECAR_CONFIG.command).not.toContain("npx");
+    expect(PLAYWRIGHT_SIDECAR_CONFIG.command.startsWith("exec node ")).toBe(true);
     expect(PLAYWRIGHT_SIDECAR_CONFIG.command).toContain("--headless");
     expect(PLAYWRIGHT_SIDECAR_CONFIG.command).toContain("--isolated");
     expect(PLAYWRIGHT_SIDECAR_CONFIG.command).toContain("--host 127.0.0.1");
@@ -69,11 +73,40 @@ describe("resolvePlaywrightSidecarCommand", () => {
   it("resolves the real bin at call time", () => {
     const bin = resolvePlaywrightMcpBin();
     const command = resolvePlaywrightSidecarCommand();
-    expect(command.startsWith(`node ${shellEscape(bin)} `)).toBe(true);
+    expect(command.startsWith(`exec node ${shellEscape(bin)} `)).toBe(true);
     expect(command).toContain("--headless");
     expect(command).toContain("--isolated");
     expect(command).toContain("--host 127.0.0.1");
     expect(command).toContain(`--port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`);
+  });
+
+  // The pane runs `sh -lc '<command>'` with no exec of its own, so without a
+  // leading `exec` the pane pid is a shell that survives above node. That
+  // shell carries the UNEXPANDED "--port $SPUR_RESERVED_PORT_PLAYWRIGHT" (no
+  // digits, so extractPlaywrightPort returns undefined) and node's ppid is
+  // that shell rather than 1 — isLeakedManagedPlaywright matches neither and
+  // the tree leaks forever. `exec` collapses the pane to node itself.
+  it("execs so the sweep can match the pane process itself", () => {
+    // Load-bearing: the pane pid must be node, not a shell above it.
+    expect(resolvePlaywrightSidecarCommand().startsWith("exec node ")).toBe(true);
+    const bin = resolvePlaywrightMcpBin();
+    // The shape the sweep would face without exec: the shell holds the
+    // unexpanded port (no digits) and node's ppid is that shell, so neither
+    // process is matchable and the whole tree leaks.
+    const shell: ProcessInfo = {
+      pid: 2000,
+      ppid: 1,
+      args: `sh -lc node ${bin} --headless --isolated --host 127.0.0.1 --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
+    };
+    const nodeUnderShell: ProcessInfo = {
+      pid: 2001,
+      ppid: 2000,
+      args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8751`,
+    };
+    expect(isLeakedManagedPlaywright(shell, new Set())).toBe(false);
+    expect(isLeakedManagedPlaywright(nodeUnderShell, new Set())).toBe(false);
+    // With exec the orphan is node itself, reparented to init: matchable.
+    expect(isLeakedManagedPlaywright({ ...nodeUnderShell, ppid: 1 }, new Set())).toBe(true);
   });
 });
 
@@ -186,5 +219,132 @@ describe("isLeakedManagedPlaywright", () => {
       args: `node ${bin} --headless --isolated --host 127.0.0.1`,
     };
     expect(isLeakedManagedPlaywright(noPort, new Set())).toBe(false);
+  });
+});
+
+function spawnIdle(): number {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("Failed to spawn test process");
+  child.unref();
+  return pid;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+describe("killProcessTree", () => {
+  it("kills the root and every descendant, not just the root", async () => {
+    // Real processes, tree shape declared through a stubbed `ps` (below the
+    // process the sweep would find, a chromium child hangs off the server).
+    const root = spawnIdle();
+    const child = spawnIdle();
+    const grandchild = spawnIdle();
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+        cb(null, {
+          stdout: [
+            `${root} 1 node cli.js --headless`,
+            `${child} ${root} chromium --type=zygote`,
+            `${grandchild} ${child} chromium --type=renderer`,
+            "",
+          ].join("\n"),
+        });
+      },
+    }));
+    try {
+      const mod = await import("../../../src/sidecars/playwright.js");
+      await mod.killProcessTree(root);
+      // SIGKILL is asynchronous from the signaller's point of view.
+      await sleep(200);
+      expect(alive(root)).toBe(false);
+      expect(alive(child)).toBe(false);
+      expect(alive(grandchild)).toBe(false);
+    } finally {
+      for (const pid of [root, child, grandchild]) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already dead — the assertion above is what matters.
+        }
+      }
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("is exported for the leak sweep and tolerates an already-dead pid", async () => {
+    const pid = spawnIdle();
+    process.kill(pid, "SIGKILL");
+    await sleep(100);
+    await expect(killProcessTree(pid)).resolves.toBeUndefined();
+  });
+});
+
+// Requirement: a session whose agent died leaves an orphaned server; the sweep
+// must reap its whole tree, not only the root it matched.
+describe("sweepLeakedPlaywright", () => {
+  it("reaps the full process tree of a leaked server", async () => {
+    const bin = resolvePlaywrightMcpBin();
+    const server = spawnIdle();
+    const browser = spawnIdle();
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+        cb(null, {
+          stdout: [
+            `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
+            `${browser} ${server} /opt/chromium --headless --remote-debugging-pipe`,
+            "",
+          ].join("\n"),
+        });
+      },
+    }));
+    try {
+      const mod = await import("../../../src/sidecars/playwright.js");
+      await expect(mod.sweepLeakedPlaywright(new Set<number>())).resolves.toBe(1);
+      await sleep(200);
+      expect(alive(server)).toBe(false);
+      expect(alive(browser)).toBe(false);
+    } finally {
+      for (const pid of [server, browser]) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already dead.
+        }
+      }
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("leaves a server alone when a live session still owns its port", async () => {
+    const bin = resolvePlaywrightMcpBin();
+    const server = spawnIdle();
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+        cb(null, {
+          stdout: `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
+        });
+      },
+    }));
+    try {
+      const mod = await import("../../../src/sidecars/playwright.js");
+      await expect(mod.sweepLeakedPlaywright(new Set<number>([8799]))).resolves.toBe(0);
+      expect(alive(server)).toBe(true);
+    } finally {
+      process.kill(server, "SIGKILL");
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
   });
 });

@@ -575,11 +575,18 @@ function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): str
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
   mcpBindings: readonly SidecarMcpBinding[] = [],
+  mcpExclude: readonly string[] = [],
 ): Promise<string> {
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
-  return mcpBindings.reduce((text, binding) => withCodexMcpServer(text, binding), withTrust);
+  // Exclude first so a project can suppress the host server and still receive
+  // Spur's managed sidecar binding under the same name.
+  const withExclusions = mcpExclude.reduce(
+    (text, server) => stripCodexMcpTable(text, server),
+    withTrust,
+  );
+  return mcpBindings.reduce((text, binding) => withCodexMcpServer(text, binding), withExclusions);
 }
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
@@ -617,7 +624,7 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[] },
+  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[]; mcpExclude?: string[] },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -628,7 +635,11 @@ export async function ensureCodexHooksConfig(
     next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
   }
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.mcpBindings ?? []);
+  const baseConfig = await buildEphemeralCodexConfig(
+    trustedProjects,
+    options?.mcpBindings ?? [],
+    options?.mcpExclude ?? [],
+  );
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);

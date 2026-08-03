@@ -118,6 +118,7 @@ interface AgentAdapter {
     worktreePath: string;
     sessionToolDir: string;
     mcpBindings?: SidecarMcpBinding[];
+    mcpExclude?: string[];
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
@@ -234,14 +235,21 @@ function mergeMcpServers(
   return target;
 }
 
-// Merges the same MCP server sources Claude itself loads (user < project <
-// local, later wins), so --strict-mcp-config only drops servers Claude
-// wouldn't have loaded anyway rather than every host/project MCP server.
+// Merges the same MCP server sources Claude itself loads (settings < user <
+// project < local, later wins), so --strict-mcp-config only drops servers
+// Claude wouldn't have loaded anyway rather than every host/project MCP server.
 async function readHostClaudeMcpServers(args: {
   worktreePath: string;
   claudeConfigDir?: string;
 }): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
+  const settingsPath = args.claudeConfigDir
+    ? join(args.claudeConfigDir, "settings.json")
+    : join(homedir(), ".claude", "settings.json");
+  const settings = await readJsonFile(settingsPath);
+  if (isPlainObject(settings)) {
+    mergeMcpServers(merged, settings.mcpServers);
+  }
   const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
   const userConfig = await readJsonFile(userConfigPath);
   let localProject: unknown;
@@ -277,6 +285,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       worktreePath,
       sessionToolDir,
       mcpBindings,
+      mcpExclude,
       restrictWrites,
       claudeConfigDir,
     }) => {
@@ -284,13 +293,22 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       if (restrictWrites) {
         result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
-      if (mcpBindings?.length) {
+      // Either an MCP sidecar to inject or a host server to suppress makes the
+      // generated file authoritative (--strict-mcp-config). With neither, stay
+      // out of the way and let Claude resolve MCP servers itself.
+      if (mcpBindings?.length || mcpExclude?.length) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
-        const mcpServers = await readHostClaudeMcpServers({
+        const hostServers = await readHostClaudeMcpServers({
           worktreePath,
           ...(claudeConfigDir ? { claudeConfigDir } : {}),
         });
-        for (const binding of mcpBindings) {
+        // Exclude first: a project that suppresses the host "playwright" still
+        // gets Spur's managed playwright sidecar binding under the same name.
+        const excluded = new Set(mcpExclude ?? []);
+        const mcpServers = Object.fromEntries(
+          Object.entries(hostServers).filter(([name]) => !excluded.has(name)),
+        );
+        for (const binding of mcpBindings ?? []) {
           mcpServers[binding.server] = { type: "http", url: binding.url };
         }
         const mcpConfig = { mcpServers };
@@ -340,10 +358,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       ctx.codexSessionsDir
         ? readCodexTranscriptEntries(ctx.codexSessionsDir)
         : Promise.resolve(null),
-    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites }) => ({
+    setup: async ({ sessionToolDir, worktreePath, mcpBindings, mcpExclude, restrictWrites }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(mcpExclude?.length ? { mcpExclude } : {}),
       }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
@@ -503,6 +522,7 @@ export async function setupAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;
