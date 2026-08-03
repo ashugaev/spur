@@ -1005,6 +1005,43 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
   });
 });
 
+describe("collectHostInstallChecks: home-disk-headroom", () => {
+  it("is ok:false, severity:warn below the default 10GB threshold, and never trips hasErrorSeverity", async () => {
+    execState.dfKbLine = "/dev/sda1 100000000 99999000 100 99% /";
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-low");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: false,
+      severity: "warn",
+      fix: "spur cache --prune --yes",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is ok:true above the threshold", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-high");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is present even when unitsInstalled is false (ungated, unlike data-dir-disk-space)", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-ungated");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toBeDefined();
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+  });
+
+  it("degrades to ok:true, severity:info when df is unavailable", async () => {
+    execState.dfAvailable = false;
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-nodf");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+});
+
 describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
   it("warns when configured ui.port differs from the web unit's actual PORT", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");

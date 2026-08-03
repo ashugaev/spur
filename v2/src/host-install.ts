@@ -4,7 +4,8 @@ import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } fro
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import { DEFAULT_DISK_RETENTION, loadInstanceConfigReadOnly } from "./config.js";
+import { parseDfField } from "./disk-space.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
@@ -479,21 +480,6 @@ function checkDirWritable(id: string, dir: string): HostInstallCheck {
   }
 }
 
-// `df -Pk`/`df -Pi` second line, 4th field (Available / IFree respectively,
-// POSIX `-P` format). Any parse failure (missing `df`, a filesystem that
-// reports `-` for inodes, etc.) is not itself an error — it just means this
-// particular signal is unavailable on this host, not that the directory is
-// unhealthy.
-function parseDfField(output: string | undefined, fieldIndex: number): number | undefined {
-  if (!output) return undefined;
-  const dataLine = output.trim().split("\n")[1];
-  if (!dataLine) return undefined;
-  const raw = dataLine.trim().split(/\s+/)[fieldIndex];
-  if (raw === undefined) return undefined;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   const kbOutput = tryExec("df", ["-Pk", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
   const iOutput = tryExec("df", ["-Pi", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
@@ -526,6 +512,37 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
     };
   }
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
+}
+
+// Ungated (unlike checkDiskSpace, which needs a live unitsInstalled host):
+// `home` is always readable, so this can report on a bare, un-initialized
+// host too. `warn`, not `error` — a low-headroom host is a nudge toward
+// `spur cache`, not a broken install, so this can never move doctor's exit
+// code (hasErrorSeverity only counts severity:"error").
+function checkHomeDiskHeadroom(home: string, warnFreeGb: number): HostInstallCheck {
+  const id = "home-disk-headroom";
+  const kbOutput = tryExec("df", ["-Pk", home], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const availKb = parseDfField(kbOutput, 3);
+  if (availKb === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — df unavailable or non-numeric on this filesystem",
+    };
+  }
+  const warnFreeKb = warnFreeGb * 1024 * 1024;
+  const availGb = (availKb / (1024 * 1024)).toFixed(1);
+  const ok = availKb >= warnFreeKb;
+  return {
+    id,
+    ok,
+    severity: "warn",
+    detail: ok
+      ? `${home} has ${availGb}GB free (>= ${warnFreeGb}GB floor)`
+      : `${home} has only ${availGb}GB free (below the ${warnFreeGb}GB floor)`,
+    ...(ok ? {} : { fix: "spur cache --prune --yes" }),
+  };
 }
 
 async function portConflictCheck(
@@ -917,6 +934,12 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkTmuxInstalled());
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
+
+  const warnFreeGb =
+    instanceConfig.status === "ok"
+      ? instanceConfig.config.diskRetention.warnFreeGb
+      : DEFAULT_DISK_RETENTION.warnFreeGb;
+  checks.push(checkHomeDiskHeadroom(home, warnFreeGb));
 
   // C1/C2/E2 additionally require `unitsInstalled` (not just a readable
   // instance config) — an instance config can legitimately exist (e.g. a

@@ -1462,6 +1462,24 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
   };
 }
 
+export const DEFAULT_DISK_RETENTION: AppConfig["diskRetention"] = { warnFreeGb: 10 };
+
+// Instance-only, same footgun as authRotation/rateLimitReactivation/tags: a
+// project-mode diskRetention block parses without error and is discarded.
+// Drives both doctor's home-disk-headroom check and SessionService's
+// pre-spawn low-disk warning.
+function parseDiskRetention(value: unknown): AppConfig["diskRetention"] {
+  if (value === undefined) {
+    return DEFAULT_DISK_RETENTION;
+  }
+  const root = asObject(value, "diskRetention");
+  return {
+    warnFreeGb:
+      asNonNegativeNumber(root["warnFreeGb"], "diskRetention.warnFreeGb") ??
+      DEFAULT_DISK_RETENTION.warnFreeGb,
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1695,6 +1713,8 @@ function parseConfigFile(
         : { afterHours: 0 },
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
+    diskRetention:
+      mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     projects: normalizedProjects,
     tags,
   };
