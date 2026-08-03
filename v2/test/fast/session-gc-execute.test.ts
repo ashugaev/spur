@@ -50,7 +50,9 @@ function makeDeps(overrides: Partial<SessionGcExecutorDeps> = {}): SessionGcExec
     ),
     measureSize: vi.fn(async () => 1024),
     removeWorktree: vi.fn(async () => {}),
-    archiveGroup: vi.fn((members) => ({ archivedIds: members.map((m) => m.id) })),
+    archiveGroup: vi.fn<SessionGcExecutorDeps["archiveGroup"]>((members) => ({
+      archivedIds: members.map((member) => member.id),
+    })),
     pruneRepo: vi.fn(async () => {}),
     ...overrides,
   };
@@ -132,7 +134,9 @@ describe("executeSessionGc", () => {
     const plan = planOne(record);
     const deps = makeDeps({
       readGroupMembers: (ids) => ids.map(() => record),
-      openPrIndex: vi.fn(async () => ({ numbers: new Set([42]), branches: new Set() })),
+      openPrIndex: vi.fn(
+        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([42]), branches: new Set() }),
+      ),
     });
 
     const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
@@ -147,7 +151,12 @@ describe("executeSessionGc", () => {
     const plan = planOne(record);
     const deps = makeDeps({
       readGroupMembers: (ids) => ids.map(() => record),
-      openPrIndex: vi.fn(async () => ({ numbers: new Set(), branches: new Set(["feature/x"]) })),
+      openPrIndex: vi.fn(
+        async (): Promise<GcOpenPrIndex> => ({
+          numbers: new Set(),
+          branches: new Set(["feature/x"]),
+        }),
+      ),
     });
 
     const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });

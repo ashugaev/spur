@@ -201,6 +201,13 @@ function baseConfig(): AppConfig {
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    },
     projects: {
       api: {
         path: "/repo/api",
