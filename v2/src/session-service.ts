@@ -119,7 +119,7 @@ import {
   type UserInputKind,
 } from "./event-log.js";
 import { deleteSessionUserActions, sessionUserActionLogPath } from "./user-action-log.js";
-import { tryRotate } from "./jsonl-log-io.js";
+import { archivePath, tryRotate } from "./jsonl-log-io.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -417,14 +417,32 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // session). The reaper needs the full set of statuses that mean "this
 // session's runtime is not supposed to exist anymore".
 const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
-// A terminal session's shard stops growing but can already sit well above
-// this floor; the compaction sweep gzips it down once the session goes
-// terminal. Well above the worst measured post-terminal write rate.
+// Threshold for a terminal session's FIRST compaction: a shard below this is
+// not worth spending a gzip + archive slot on yet. Only gates the one-time
+// initial compaction — compactShardOnce's existsSync(archivePath) guard is
+// what makes compaction a one-way ratchet, not this floor.
 const TERMINAL_COMPACT_FLOOR_BYTES = 64 * 1024;
 // Bounds each sweep tick to ~0.6s of gzip work (measured 282 MB/s, 8.3 MB
 // average shard) so a large terminal-session backlog never blocks the event
 // loop; the remainder drains over subsequent ticks.
 const COMPACT_MAX_PER_TICK = 20;
+
+// Gzips `path` into its .1.gz archive slot at most once. A terminal session
+// can keep receiving low-volume trickle writes indefinitely (e.g.
+// session.pr_auto_detect.failed); rotating it again at the same small floor
+// every sweep would shift the just-created archive down a slot each time and
+// eventually unlink it once it falls outside retainArchives. Once a .1.gz
+// exists — from this compaction or from an ordinary shardHotBytes rotation —
+// normal size-based rotation owns the shard and this sweep leaves it alone.
+// Stateless by construction (no in-memory "already compacted" bookkeeping),
+// so the ratchet holds across daemon restarts too.
+function compactShardOnce(path: string, retainArchives: number): void {
+  if (existsSync(archivePath(path, 1))) {
+    return;
+  }
+  tryRotate(path, TERMINAL_COMPACT_FLOOR_BYTES, retainArchives);
+}
+
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -1816,7 +1834,6 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
-  private compactRunning = false;
   // Round-robin offset into the terminal-session list, advanced by each
   // tick's COMPACT_MAX_PER_TICK batch so a backlog larger than one tick's
   // budget still drains across ticks instead of reprocessing the same head
@@ -2964,11 +2981,16 @@ export class SessionService {
   // offset, so a large backlog drains across several ticks — each tick
   // picking up where the last left off — instead of blocking the event loop
   // in one gzip burst or reprocessing the same head every tick.
+  //
+  // One-way ratchet, by construction rather than bookkeeping: compactShardOnce
+  // skips a shard that already has a .1.gz archive. A terminal session that
+  // keeps receiving trickle writes (e.g. session.pr_auto_detect.failed) after
+  // its first compaction is left to normal shardHotBytes rotation instead of
+  // being repeatedly re-rotated at the 64 KB floor — that ratchet would walk
+  // the compacted archive out of the retain window across a handful of
+  // 5-minute ticks. Stateless so it also survives a daemon restart, unlike an
+  // in-memory "already compacted" set.
   private compactTerminalSessionLogs(): void {
-    if (this.compactRunning) {
-      return;
-    }
-    this.compactRunning = true;
     try {
       const sessions = listSessions(this.config.dataDir).filter((session) =>
         REAPABLE_SESSION_STATUSES.has(session.status),
@@ -2981,20 +3003,16 @@ export class SessionService {
       const start = this.compactCursor % sessions.length;
       const batch = sessions.slice(start, start + COMPACT_MAX_PER_TICK);
       for (const session of batch) {
-        tryRotate(
-          sessionEventLogPath(this.config.dataDir, session.id),
-          TERMINAL_COMPACT_FLOOR_BYTES,
-          retain,
-        );
-        tryRotate(
-          sessionUserActionLogPath(this.config.dataDir, session.id),
-          TERMINAL_COMPACT_FLOOR_BYTES,
-          retain,
-        );
+        compactShardOnce(sessionEventLogPath(this.config.dataDir, session.id), retain);
+        compactShardOnce(sessionUserActionLogPath(this.config.dataDir, session.id), retain);
       }
       this.compactCursor = start + batch.length >= sessions.length ? 0 : start + batch.length;
-    } finally {
-      this.compactRunning = false;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.compact.failed", {
+        level: "warn",
+        message: `Terminal-session log compaction sweep failed: ${message}`,
+      });
     }
   }
 

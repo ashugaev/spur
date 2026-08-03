@@ -119,8 +119,12 @@ export function appendEventLog(dataDir: string, entry: SpurLogEntryInput): void 
 // the first occurrence of a key writes immediately, repeats within
 // collapseWindowMs are counted but not written, and the first occurrence past
 // the window flushes a summary line (details.suppressedCount/suppressedSince)
-// before writing itself. info is never routed through this map.
-const EVENT_LOG_COLLAPSE_MAX_KEYS = 512;
+// before writing itself. info is never routed through this map. Sized for
+// ~300 terminal + running sessions x a handful of distinct warn/error events
+// each (measured hot set ~600-900 keys) — under FIFO eviction a key
+// surviving less than the collapse window degrades the mechanism toward a
+// no-op on a busy host.
+const EVENT_LOG_COLLAPSE_MAX_KEYS = 4096;
 
 interface CollapseEntry {
   dataDir: string;

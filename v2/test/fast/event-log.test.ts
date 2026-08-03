@@ -526,19 +526,19 @@ describe("warn collapse", () => {
     expect(readEventLog(dataDir)).toHaveLength(2);
   });
 
-  it("evicts and flushes the oldest key once a 513th distinct key is inserted", () => {
+  it("evicts and flushes the oldest key once a 4097th distinct key is inserted", () => {
     const dataDir = makeTempDir();
     logSpurEvent(dataDir, { event: "e0", level: "warn" });
     logSpurEvent(dataDir, { event: "e0", level: "warn" }); // suppressed once, suppressedCount 1
-    for (let i = 1; i < 512; i += 1) {
+    for (let i = 1; i < 4096; i += 1) {
       logSpurEvent(dataDir, { event: `e${i}`, level: "warn" });
     }
-    // 512 distinct keys resident; nothing has flushed yet.
+    // 4096 distinct keys resident; nothing has flushed yet.
     expect(
       readEventLog(dataDir).some((entry) => entry.details?.["suppressedCount"] !== undefined),
     ).toBe(false);
 
-    logSpurEvent(dataDir, { event: "e512", level: "warn" }); // 513th distinct key
+    logSpurEvent(dataDir, { event: "e4096", level: "warn" }); // 4097th distinct key
 
     const summary = readEventLog(dataDir).find(
       (entry) => entry.event === "e0" && entry.details?.["suppressedCount"] === 1,

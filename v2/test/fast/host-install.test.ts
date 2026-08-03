@@ -1009,6 +1009,7 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
     const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
     const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
     await pinInstanceConfig(
       [
         "server:",
@@ -1028,13 +1029,14 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     expect(check?.fix).toContain("eventLog");
     // Log growth must never fail `spur doctor` on its own: cli.ts exits 1 only
     // on error severity, and this check tops out at warn.
-    expect(hasErrorSeverity([check!])).toBe(false);
+    expect(hasErrorSeverity(checks.filter((c) => c.id === "data-dir-log-bytes"))).toBe(false);
   });
 
   it("skips (info) data-dir-log-bytes when du is unavailable", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
     const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
     const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
     await pinInstanceConfig(
       [
         "server:",
@@ -1053,6 +1055,33 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
       ok: true,
       severity: "info",
     });
+  });
+
+  it("reports data-dir-log-bytes as 0KB (not skipped) when <dataDir>/sessions does not exist yet", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    // du is never invoked here: a fresh instance's <dataDir>/sessions does not
+    // exist yet, so it should short-circuit to 0KB instead of reading as "du
+    // unavailable or non-numeric".
+    execState.duAvailable = false;
+    const check = (await collectHostInstallChecks(fakeHome)).find(
+      (c) => c.id === "data-dir-log-bytes",
+    );
+    expect(check).toMatchObject({ ok: true, severity: "warn" });
+    expect(check?.detail).not.toContain("skipped");
   });
 
   it("never pushes worktree/data-dir checks on a never-initialized host (no instance config)", async () => {

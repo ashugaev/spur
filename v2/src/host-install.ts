@@ -582,10 +582,17 @@ function rootLogFileBytes(dataDir: string): number {
 }
 
 function checkLogBytes(id: string, dataDir: string): HostInstallCheck {
-  const duOutput = tryExec("du", ["-sk", join(dataDir, "sessions")], {
-    timeoutMs: LOG_BYTES_PROBE_TIMEOUT_MS,
-  });
-  const sessionsKb = parseDuKb(duOutput);
+  const sessionsDir = join(dataDir, "sessions");
+  // A fresh instance (or one that has never spawned a session) has no
+  // sessions dir at all; du exits non-zero on a missing path, which would
+  // otherwise read as "du unavailable" instead of the true 0KB.
+  let sessionsKb: number | undefined = existsSync(sessionsDir) ? undefined : 0;
+  if (sessionsKb === undefined) {
+    const duOutput = tryExec("du", ["-sk", sessionsDir], {
+      timeoutMs: LOG_BYTES_PROBE_TIMEOUT_MS,
+    });
+    sessionsKb = parseDuKb(duOutput);
+  }
   if (sessionsKb === undefined) {
     return {
       id,

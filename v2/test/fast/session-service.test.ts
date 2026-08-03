@@ -19281,6 +19281,35 @@ describe("SessionService", () => {
       expect(flushEventLogCollapseMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
+
+    it("never re-rotates a shard that already has a .1.gz archive, across two ticks", async () => {
+      // Regression for the ratchet bug: compacting a terminal session's shard
+      // every tick at the 64KB floor would shift its .1.gz down a slot each
+      // time a small trickle write reopened it above the floor, and after
+      // enough ticks unlink it once it fell outside retainArchives. A shard
+      // that already has a .1.gz archive — from this compaction or from an
+      // ordinary shardHotBytes rotation — must be left alone by the sweep.
+      seedCompactSession("api-1", { status: "completed" });
+      const eventsPath = shardPath("api-1", "events.jsonl");
+      const actionsPath = shardPath("api-1", "user-actions.jsonl");
+      mkdirSync(join(TEST_DATA_DIR, "sessions", "api-1"), { recursive: true });
+      writeFileSync(eventsPath, "trickle\n");
+      writeFileSync(`${eventsPath}.1.gz`, "already-archived");
+      writeFileSync(actionsPath, "trickle\n");
+      writeFileSync(`${actionsPath}.1.gz`, "already-archived");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).not.toHaveBeenCalled();
+      // The pre-existing archive must survive untouched (not shifted to .2.gz).
+      expect(existsSync(`${eventsPath}.1.gz`)).toBe(true);
+      expect(existsSync(`${eventsPath}.2.gz`)).toBe(false);
+      service.dispose();
+    });
   });
 
   describe("live model override", () => {
