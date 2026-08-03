@@ -103,7 +103,10 @@ export function createReviewSourceModule(
 
               // Built once, handed to both the in-memory map and the on-disk write
               // so the two copies cannot desync.
-              const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+              const nextSnapshot: ReviewSnapshot = {
+                prNumber: collected.data.prNumber,
+                signals: next,
+              };
               snapshots.set(session.id, nextSnapshot);
               writeReviewSourceSnapshot(
                 deps.dataDir,

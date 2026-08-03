@@ -1363,7 +1363,10 @@ describe("github source", () => {
           // Legacy on-disk shape (bare array) parses to `prNumber: null`, which
           // carries no PR identity and matches no scoped terminal key — the stale
           // bare `merged` key must never authorize a skip.
-          storedSnapshot([{ key: "merged", kind: "merged" as const, text: "PR #42 was merged." }], null),
+          storedSnapshot(
+            [{ key: "merged", kind: "merged" as const, text: "PR #42 was merged." }],
+            null,
+          ),
         ],
       ]),
     );

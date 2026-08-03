@@ -565,11 +565,7 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
   const signalsRaw = (Array.isArray(parsed) ? parsed : envelope?.signals) as
     | ReviewSignal[]
     | undefined;
-  const prNumber = Array.isArray(parsed)
-    ? null
-    : typeof envelope?.prNumber === "number"
-      ? envelope.prNumber
-      : null;
+  const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
   return {
     prNumber,
     signals: new Map(
