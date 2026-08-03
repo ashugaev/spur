@@ -81,6 +81,9 @@ worktreeDir: ~/.spur/worktrees
 defaultAgent: claude             # claude|codex|cursor
 ui:
   port: 5555
+eventLog:                        # instance-only
+  hotBytes: 134217728            # 128MB default
+  collapseWindowMs: 60000        # default; 0 disables collapse
 tags:                            # instance-only agent-facing catalog
   bug:
     description: Fixing a defect or regression   # sole agent instruction
@@ -123,6 +126,7 @@ projects:
 - `${VAR}` resolves from the process env, else the project `.env`; config load fails fast when unresolved.
 - `authRotation` rotates claude logins across a rate limit. Accounts are never declared in config: they live in a runtime store under `dataDir` and are added by OAuth login through the web UI.
 - `backlog.<id>` requires a `jira` source. Items are served at `GET /backlog/available` only, in fetch order — the server never re-sorts, so put `ORDER BY Rank ASC` in the JQL. A session spawned from an item carries a `tracker` link.
+- `eventLog`/`userActionLog` rotate to `.gz` archives by size and `retainArchives`; a 5-minute sweep also compacts terminal sessions' shards. `spur doctor`'s `data-dir-log-bytes` check warns above 5GB. Full field list: `docs/configuration.md`.
 
 ## Safety
 

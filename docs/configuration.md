@@ -37,6 +37,15 @@ tmux:
   socketName: spur-4310
 ui:
   port: 5555
+eventLog:
+  hotBytes: 134217728 # 128MB
+  shardHotBytes: 16777216 # 16MB
+  retainArchives: 5
+  collapseWindowMs: 60000
+userActionLog:
+  hotBytes: 134217728 # 128MB
+  shardHotBytes: 16777216 # 16MB
+  retainArchives: 5
 
 projects:
   backend-api:
@@ -174,6 +183,16 @@ Chats and forum topics bind to sessions with `/watch`. Without an id, Spur repli
 
 Bound chats get proactive pushes from the attention monitor: `needs_input`, `error`, and `rate_limited` each push once on entry (with a pane tail for the first two), and the forum topic name tracks state. A `working`→`waiting` transition with no reply since the last inbound message nudges the chat once. `complete`/`kill` send a farewell and close the topic. Every send is best-effort — a Telegram failure never blocks the monitor tick or cleanup.
 
+## Event log retention
+
+Two append-only logs live under `dataDir`: `events.jsonl` (daemon/session events) and `user-actions.jsonl` (mutating API calls). Each also shards per session under `<dataDir>/sessions/<id>/`. `eventLog.hotBytes` / `userActionLog.hotBytes` cap the root file before it rotates into a `.N.gz` archive; `shardHotBytes` caps each per-session shard the same way. `retainArchives` bounds how many `.N.gz` archives are kept per file before the oldest is deleted — rotation is lossless, archives stay readable through the same read path as the live file.
+
+A 5-minute sweep also gzips a terminal (`killed`/`completed`/`stopped`) session's shards once they cross a small floor, so a finished session's logs settle into a `.gz` archive without waiting for `shardHotBytes` to be reached.
+
+Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `eventLog.collapseWindowMs` are counted, not appended; the next occurrence past the window flushes one summary line carrying `details.suppressedCount`/`details.suppressedSince` before writing itself. `info`-level events and the user-action log are never collapsed. `collapseWindowMs: 0` disables collapsing.
+
+Both `eventLog` and `userActionLog` are instance config only — a project-config block parses without error and is discarded. `spur doctor`'s `data-dir-log-bytes` check warns when logs under `dataDir` (session shards plus the root-level files and their archives) exceed 5GB; severity `warn`, so it never changes doctor's exit code.
+
 ## Field reference
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -234,6 +253,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `authRotation.maxRotationsPerEpisode`: optional, default `2`.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
+- `eventLog.hotBytes`: optional, default `134217728` (128MB). Instance config only. See [Event log retention](#event-log-retention).
+- `eventLog.shardHotBytes`: optional, default `16777216` (16MB).
+- `eventLog.retainArchives`: optional, default `5`.
+- `eventLog.collapseWindowMs`: optional, default `60000` (60s); `0` disables collapsing, negative rejected.
+- `userActionLog.hotBytes`: optional, default `134217728` (128MB). Instance config only.
+- `userActionLog.shardHotBytes`: optional, default `16777216` (16MB).
+- `userActionLog.retainArchives`: optional, default `5`.
 
 ## Events
 
