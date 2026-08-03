@@ -20599,7 +20599,12 @@ describe("SessionService", () => {
             entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
         ).length,
       ).toBe(1);
-      expect(sessions.get("shp-bad-daily")?.dailyWake).toBeUndefined();
+      expect(sessions.get("shp-bad-daily")?.dailyWake).toEqual({
+        dailyAt: ["99:99"],
+        nextDueAt: "2026-03-19T10:05:01.000Z",
+        message: "Malformed daily wake",
+        stopCondition: "Stop condition",
+      });
       expect(sessions.get("shp-2")?.scheduledWake).toBeUndefined();
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-2",
@@ -20607,6 +20612,63 @@ describe("SessionService", () => {
         { agent: "claude", interrupt: false },
       );
       service.dispose();
+    });
+
+    it("bounds a malformed daily wake to one failure event per day, not a per-poll storm", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const serviceDay1 = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Day 1: claims the due occurrence and bumps nextDueAt 24h out.
+      await advanceSeconds(5);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      const nextDueAtAfterDay1 = sessions.get("shp-bad-daily")?.dailyWake?.nextDueAt;
+      expect(nextDueAtAfterDay1).toBe("2026-03-19T10:05:01.000Z");
+      serviceDay1.dispose();
+
+      // Cross the day boundary: jump the clock to when the bumped nextDueAt
+      // comes due, without replaying every intervening 1s poll (the disposed
+      // timer above has nothing pending to catch up). A fresh monitor on the
+      // new day must still emit exactly one more failure, not a storm.
+      logSpurEventMock.mockClear();
+      vi.setSystemTime(new Date(nextDueAtAfterDay1 ?? ""));
+      const serviceDay2 = new SessionService("/tmp/spur.yaml", nextDueAtAfterDay1);
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      serviceDay2.dispose();
     });
 
     it("requires a stop condition for daily wakes", async () => {

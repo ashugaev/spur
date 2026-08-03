@@ -2401,17 +2401,26 @@ export class SessionService {
           // mirroring the auto-rotate catch above: one bad record must not
           // escape the loop and starve every later session's wake
           // processing this tick. Unlike a delivery failure, a malformed
-          // dailyAt has no next occurrence to advance to and cannot repair
-          // itself -- only scheduleWake (which validates on arm) can fix
-          // it -- so clear the schedule instead of leaving it due: log ONE
-          // failure and never look at it again until it is re-armed.
+          // dailyAt has no next occurrence to advance to, so skip 24h ahead
+          // instead of clearing the schedule -- an absent dailyWake is
+          // invisible in the web UI and in `spur list`, and disabling a
+          // schedule is meant to be an explicit user action (cancelWake).
+          // This bounds the storm to one failure event per day and keeps
+          // message/stopCondition intact for repair via re-arm.
           let nextDueAt: Date;
           try {
             nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            const { dailyWake: _dailyWake, ...base } = currentDailyWakeSession;
-            writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+            const skipped: SessionRecord = {
+              ...currentDailyWakeSession,
+              dailyWake: {
+                ...dailyWake,
+                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+              },
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, skipped);
             this.logEvent("session.wake.daily_failed", {
               level: "error",
               sessionId: session.id,
