@@ -51,7 +51,7 @@ vi.mock("../../src/agents/index.js", () => ({
 vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
-  findProjectConfigPath: vi.fn(),
+  findProjectConfigPathInDirectory: vi.fn(),
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),

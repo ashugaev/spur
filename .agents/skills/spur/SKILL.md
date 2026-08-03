@@ -62,6 +62,8 @@ CONFIG
 
 Two YAML layers. Instance config `~/.spur/config.yaml` holds all keys and can also declare `projects:`. Project config, the nearest `spur.yaml`/`spur.yml`, contributes more entries to `projects:` only; a project id or `sessionPrefix` duplicated across sources fails to load. Footgun: the merge keeps only `projects:` from a project config; each other key there parses without error, then is discarded — `tags`, `authRotation`, `rateLimitReactivation`, `server`, `dataDir` in a project file do nothing.
 
+A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
+
   server:
     port: 4310                     # default
   dataDir: ~/.spur
