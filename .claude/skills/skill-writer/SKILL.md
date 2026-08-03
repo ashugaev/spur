@@ -91,7 +91,7 @@ Body: one-line role -> Constraints -> Process (numbered) -> Output (template) ->
 
 ## Caveman gate
 
-When invoked as the `caveman` gate by `manager` (touches skills, agents, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules`):
+When invoked as the `caveman` gate by `manager` (touches skills, agents, `AGENTS.md`/`CLAUDE.md`, or `.cursor/BUGBOT.md`):
 
 1. Read the diff for changed prose surfaces only — code/templates/identifiers untouched.
 2. Apply the compression checklist above.

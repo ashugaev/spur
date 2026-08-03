@@ -35,7 +35,7 @@ Property modifiers (orthogonal, add to any tier):
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
 | Introduces or changes visible `packages/web` UI | manager runs the `design-author` process itself in the main Claude session before `architect` (only place `DesignSync` works; not a Task subagent); hard-stop for user approval of the exported design-spec before any implementation; on a non-Claude runtime or missing `DesignSync`, consume-only (existing approved design-spec, else route the design step to a Claude session; never stall) |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
-| Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
+| Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/BUGBOT.md` | `skill-writer` (caveman pass) before `reviewer` |
 | Adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), or touches published docs (`docs/`, `README.md`, root doc files) | `docs` before `reviewer`; `developer` documents new surface and updates the owning doc in the same change |
 | Any code change | `reviewer` -> `tester`; `github` close-out (mandatory PR) |
 | Default close-out | `self-verify` |
