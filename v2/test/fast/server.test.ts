@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
-import { startServer } from "../../src/server.js";
+import { startServer, type StartedServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
   SessionNotReopenableError,
@@ -2719,5 +2719,35 @@ describe("startServer", () => {
       dirWatcher.close();
       await server.stop();
     }
+  });
+
+  it("refuses to bind the production port from a non-default config path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-prod-slot-test-"));
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      ["server:", "  port: 4310", `dataDir: ${dataDir}`, `worktreeDir: ${worktreeDir}`].join("\n"),
+      "utf8",
+    );
+
+    let started: StartedServer | undefined;
+    try {
+      await expect(
+        startServer(configPath, {
+          info: () => undefined,
+          warn: () => undefined,
+        }).then((server) => {
+          started = server;
+          return server;
+        }),
+      ).rejects.toThrow(/4310/);
+    } finally {
+      await started?.stop();
+    }
+
+    expect(fs.existsSync(dataDir)).toBe(false);
+    expect(fs.existsSync(worktreeDir)).toBe(false);
   });
 });

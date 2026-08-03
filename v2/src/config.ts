@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -1745,6 +1745,49 @@ export function resolveInstanceConfigPath(input?: string): string {
 
 export function instanceConfigExists(input?: string): boolean {
   return existsSync(resolveInstanceConfigPath(input));
+}
+
+// Tolerant of a symlinked/bind-mounted $HOME: resolves both paths to their
+// real on-disk location before comparing, falling back to a plain resolved
+// string compare when either side does not exist (e.g. a config path that is
+// about to be bootstrap-created).
+function samePathOnDisk(a: string, b: string): boolean {
+  try {
+    return realpathSync.native(a) === realpathSync.native(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
+}
+
+function isDefaultInstanceConfigPath(configPath: string): boolean {
+  return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
+}
+
+// Pure guard, no writes: a daemon started from an instance config whose
+// resolved path is NOT the default instance config path must not claim the
+// prod slot (server.port 4310 or dataDir ~/.spur) — that slot belongs to
+// whatever daemon boots from the default config path (see
+// deploy/spur-daemon.service, which has no --config and Restart=always).
+// A default-path config on the prod slot always passes: refusing it would
+// crash-loop production.
+export function assertConfigMayBindProdSlot(
+  config: Pick<AppConfig, "configPath" | "dataDir"> & { server: { port: number } },
+): void {
+  if (isDefaultInstanceConfigPath(config.configPath)) {
+    return;
+  }
+  const prodDataDir = resolveFrom(dirname(DEFAULT_INSTANCE_CONFIG_PATH), DEFAULT_DATA_DIR);
+  const claimsProdPort = config.server.port === DEFAULT_SERVER_PORT;
+  const claimsProdDataDir = samePathOnDisk(config.dataDir, prodDataDir);
+  if (!claimsProdPort && !claimsProdDataDir) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${config.configPath} may not bind the production slot ` +
+      `(server.port ${config.server.port}, dataDir ${config.dataDir}). ` +
+      `A non-default config path must not claim port ${DEFAULT_SERVER_PORT} or dataDir ${prodDataDir}. ` +
+      `Set server.port and dataDir explicitly in this config, or use scripts/spur-isolated-daemon.sh.`,
+  );
 }
 
 export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
