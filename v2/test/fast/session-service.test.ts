@@ -19534,7 +19534,17 @@ describe("SessionService", () => {
     });
 
     it("tick enrich count tracks live sessions, not total records", async () => {
-      async function countTickEnrichCalls(liveCount: number, idleCount: number): Promise<number> {
+      // Mirrors the tick's own clamp(ceil(idle / 60), MIN, MAX) quota rule
+      // rather than hardcoding a constant, so this stays correct if the
+      // constants change.
+      function expectedIdleQuota(idleCount: number): number {
+        return Math.min(32, Math.max(4, Math.ceil(idleCount / 60)));
+      }
+
+      async function countTickEnrichCalls(
+        liveCount: number,
+        idleCount: number,
+      ): Promise<{ firstTick: number; secondTick: number; totalAfterSecondTick: number }> {
         seedDashboardSessions(liveCount, idleCount);
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -19545,19 +19555,44 @@ describe("SessionService", () => {
 
         const spy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
         await vi.advanceTimersByTimeAsync(2_000);
-        const calls = spy.mock.calls.length;
+        const firstTick = spy.mock.calls.length;
+
+        // A second tick must show the SAME bounded delta as the first.
+        // This is what catches a prune-off-the-enriched-subset bug: if the
+        // tick prunes dashboardCache down to only the ids it enriched this
+        // tick (instead of the enumerated+filtered set), every idle entry
+        // the tick skipped is silently evicted, so the very next tick sees
+        // a cache miss for all of them and re-enriches close to the whole
+        // idle set -- an O(total) regression a single-tick assertion can
+        // never observe.
+        spy.mockClear();
+        await vi.advanceTimersByTimeAsync(2_000);
+        const secondTick = spy.mock.calls.length;
+
+        const totalAfterSecondTick = (
+          await service.list({ view: "dashboard", includeCompleted: true })
+        ).length;
+
         service.dispose();
-        return calls;
+        return { firstTick, secondTick, totalAfterSecondTick };
       }
 
       const small = await countTickEnrichCalls(2, 10);
       const large = await countTickEnrichCalls(2, 100);
 
-      // liveCount (2) + the bounded idle round-robin quota. Hardcoded as 4
-      // here rather than importing DASHBOARD_IDLE_REFRESH_PER_TICK, which is
-      // not exported.
-      expect(small).toBe(2 + 4);
-      expect(large).toBe(small);
+      // liveCount (2) + the bounded idle round-robin quota. Both idle
+      // counts here fall on the MIN floor of the quota rule, so cost stays
+      // flat as the idle set grows tenfold.
+      expect(small.firstTick).toBe(2 + expectedIdleQuota(10));
+      expect(large.firstTick).toBe(small.firstTick);
+
+      expect(small.secondTick).toBe(small.firstTick);
+      expect(large.secondTick).toBe(large.firstTick);
+
+      // The prune must never drop an idle entry a tick skipped: list()
+      // still reports every seeded session after a second tick.
+      expect(small.totalAfterSecondTick).toBe(2 + 10);
+      expect(large.totalAfterSecondTick).toBe(2 + 100);
     });
 
     it("re-enriches a terminal session whose record changed without an eager refresh", async () => {
