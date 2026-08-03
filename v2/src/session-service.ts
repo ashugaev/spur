@@ -3109,13 +3109,15 @@ export class SessionService {
         limit: gcConfig.maxGroupsPerSweep,
         pathExists: (path) => workspaceExists(path),
       });
+      // sizes: true so the sweep can report freed bytes; the du cost is bounded
+      // by maxGroupsPerSweep, and only reclaim groups are measured.
       const report = await executeSessionGc(plan, createGcDeps(this.config), {
         dryRun: false,
-        sizes: false,
+        sizes: true,
       });
       this.logEvent("session.gc.completed", {
         level: "info",
-        message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived.`,
+        message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
         details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
       });
     } catch (error) {

@@ -698,11 +698,12 @@ export function archiveSessions(
   }
 
   if (archivedIds.length > 0) {
+    const archivedIdSet = new Set(archivedIds);
     const index = readSessionIndex(dataDir);
-    for (const id of archivedIds) {
-      delete index[id];
-    }
-    writeJsonFile(sessionIndexFilePath(dataDir), index);
+    const nextIndex = Object.fromEntries(
+      Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
+    );
+    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
   }
 
   return { archivedIds, archiveDir };

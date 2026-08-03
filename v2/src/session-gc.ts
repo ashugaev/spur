@@ -73,7 +73,10 @@ export async function resolveSessionCleanupContext(
   }
   return {
     repoPath,
-    symlinks: cleanupIgnoredPaths(session, findProjectByRepoPath(projects, repoPath)?.symlinks ?? []),
+    symlinks: cleanupIgnoredPaths(
+      session,
+      findProjectByRepoPath(projects, repoPath)?.symlinks ?? [],
+    ),
   };
 }
 
@@ -222,13 +225,20 @@ function classifyGroup(
   statuses: readonly SessionGcStatus[],
   now: Date,
   pathExists: (path: string) => boolean,
-): { action: GcAction; blockReasons: string[]; worktreePath: string; ageDays: number; newestUpdatedAt: string } {
+): {
+  action: GcAction;
+  blockReasons: string[];
+  worktreePath: string;
+  ageDays: number;
+  newestUpdatedAt: string;
+} {
   const newestUpdatedAt = members.reduce(
     (latest, member) => (member.updatedAt > latest ? member.updatedAt : latest),
     firstMember(members, "classifyGroup").updatedAt,
   );
   const ageDays = ageInDays(newestUpdatedAt, now);
-  const worktreePath = members.find((member) => member.worktreePath.trim())?.worktreePath.trim() ?? "";
+  const worktreePath =
+    members.find((member) => member.worktreePath.trim())?.worktreePath.trim() ?? "";
 
   const blockReasons: string[] = [];
   const statusSet = new Set<string>(statuses);
@@ -405,7 +415,6 @@ export async function executeSessionGc(
   let worktreesRemoved = 0;
   let recordsArchived = 0;
   let freedBytes = 0;
-  let freedKnown = false;
   let errors = 0;
 
   for (const group of plan.groups) {
@@ -418,6 +427,12 @@ export async function executeSessionGc(
     let sizeBytes: number | null = null;
 
     try {
+      // Sized before anything is removed: du on an already-deleted worktree
+      // reports nothing, which would zero out every freed-byte total.
+      if (options.sizes && plannedAction === "reclaim") {
+        sizeBytes = await deps.measureSize(group.worktreePath);
+      }
+
       if (action !== "blocked") {
         const freshRaw = deps.readGroupMembers(group.sessionIds);
         const freshMembers: SessionRecord[] = [];
@@ -485,20 +500,16 @@ export async function executeSessionGc(
           }
         }
       }
-
-      if (options.sizes && plannedAction === "reclaim") {
-        sizeBytes = await deps.measureSize(group.worktreePath);
-      }
     } catch (executionError) {
       error = executionError instanceof Error ? executionError.message : String(executionError);
       errors += 1;
     }
 
-    if (sizeBytes !== null) {
-      freedKnown = true;
-      if (removed) {
-        freedBytes += sizeBytes;
-      }
+    // A dry run reports the bytes a reclaim would free; an execute run counts
+    // only worktrees actually removed. A group whose measurement failed keeps
+    // sizeBytes: null in its own report, so the gap in the total is visible.
+    if (sizeBytes !== null && (removed || (options.dryRun && action === "reclaim"))) {
+      freedBytes += sizeBytes;
     }
 
     groupReports.push({
@@ -531,7 +542,7 @@ export async function executeSessionGc(
       records: groupReports.reduce((acc, entry) => acc + entry.sessionIds.length, 0),
       worktreesRemoved,
       recordsArchived,
-      freedBytes: freedKnown ? freedBytes : null,
+      freedBytes: options.sizes ? freedBytes : null,
       errors,
     },
   };
@@ -543,9 +554,14 @@ export async function executeSessionGc(
 
 const DU_TIMEOUT_MS = 120_000;
 
+// `du -s --block-size=1`, not `du -sb`: apparent size (`-b`) undercounts a
+// worktree by orders of magnitude (it ignores directory and block overhead),
+// and freed disk is what the caller cares about. A file hardlinked into
+// several worktrees (pnpm store) still counts once per worktree, so a total
+// across many groups can overstate the disk actually returned.
 async function measureWorktreeSize(worktreePath: string): Promise<number | null> {
   try {
-    const { stdout } = await execFileAsync("du", ["-sb", "--", worktreePath], {
+    const { stdout } = await execFileAsync("du", ["-s", "--block-size=1", "--", worktreePath], {
       timeout: DU_TIMEOUT_MS,
     });
     const match = /^(\d+)/.exec(stdout);
@@ -570,8 +586,7 @@ export function createGcDeps(config: AppConfig): SessionGcExecutorDeps {
 
   return {
     cwd: process.cwd(),
-    readGroupMembers: (sessionIds) =>
-      sessionIds.map((id) => readSession(config.dataDir, id)),
+    readGroupMembers: (sessionIds) => sessionIds.map((id) => readSession(config.dataDir, id)),
     probeGuards: async (group, freshMembers) => {
       if (!group.worktreePath || !existsSync(group.worktreePath)) {
         return [];
@@ -616,9 +631,9 @@ export function createGcDeps(config: AppConfig): SessionGcExecutorDeps {
       return cached;
     },
     measureSize: measureWorktreeSize,
-    removeWorktree: async (_group, freshMembers) => {
+    removeWorktree: async (group, freshMembers) => {
       const repoPath = await repoPathForGroup(freshMembers);
-      await removeWorktree(repoPath, _group.worktreePath);
+      await removeWorktree(repoPath, group.worktreePath);
     },
     archiveGroup: (members) => archiveSessions(config.dataDir, members),
     pruneRepo: async (_group, freshMembers) => {

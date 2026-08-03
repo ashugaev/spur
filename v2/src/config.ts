@@ -1473,9 +1473,7 @@ export const DEFAULT_SESSION_GC: AppConfig["sessionGc"] = {
 };
 
 function isSessionGcStatus(value: unknown): value is (typeof SESSION_GC_STATUSES)[number] {
-  return (
-    typeof value === "string" && (SESSION_GC_STATUSES as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (SESSION_GC_STATUSES as readonly string[]).includes(value);
 }
 
 function parseSessionGcStatuses(value: unknown): AppConfig["sessionGc"]["statuses"] {

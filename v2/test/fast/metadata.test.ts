@@ -860,9 +860,7 @@ describe("archiveSessions", () => {
     expect(readSession(dataDir, "api-1")).toBeNull();
     expect(listSessions(dataDir)).toEqual([]);
     expect(existsSync(shardDir)).toBe(false);
-    expect(
-      existsSync(join(result.archiveDir, "api", "api-1", "events.jsonl")),
-    ).toBe(true);
+    expect(existsSync(join(result.archiveDir, "api", "api-1", "events.jsonl"))).toBe(true);
     const index = JSON.parse(
       readFileSync(join(dataDir, "sessions", ".index.json"), "utf-8"),
     ) as Record<string, string>;
@@ -897,7 +895,11 @@ describe("archiveSessions", () => {
       { id: "api-2", project: "api" },
     ]);
 
-    expect(listSessions(dataDir).map((s) => s.id).sort()).toEqual(["api-3"]);
+    expect(
+      listSessions(dataDir)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(["api-3"]);
     expect(readSession(dataDir, "api-3")?.id).toBe("api-3");
   });
 });
