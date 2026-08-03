@@ -255,6 +255,131 @@ describe("setupAgentHooks", () => {
     });
   });
 
+  // settings.json is a real MCP source for claude. Missing it meant
+  // --strict-mcp-config silently dropped every server declared only there.
+  it("merges settings.json mcpServers, with .claude.json winning a name collision", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/settings.json") {
+        return JSON.stringify({
+          mcpServers: {
+            sentry: { command: "npx", args: ["-y", "sentry-mcp"] },
+            shared: { command: "npx", args: ["-y", "settings-scope-mcp"] },
+          },
+        });
+      }
+      if (path === "/home/user/.claude.json") {
+        return JSON.stringify({
+          mcpServers: { shared: { command: "npx", args: ["-y", "user-scope-mcp"] } },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      claudeConfigDir: "/home/user",
+    });
+
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        sentry: { command: "npx", args: ["-y", "sentry-mcp"] },
+        shared: { command: "npx", args: ["-y", "user-scope-mcp"] },
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
+  // Suppression path: a project pays no RAM for a globally-configured server it
+  // does not use. Needs no sidecar binding to take effect.
+  it("writes an authoritative mcp-config.json for mcpExclude alone, dropping the excluded server", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/settings.json") {
+        return JSON.stringify({
+          mcpServers: {
+            playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] },
+            sentry: { command: "npx", args: ["-y", "sentry-mcp"] },
+          },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpExclude: ["playwright"],
+      claudeConfigDir: "/home/user",
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: { sentry: { command: "npx", args: ["-y", "sentry-mcp"] } },
+    });
+  });
+
+  it("keeps Spur's sidecar binding when the same server name is also excluded", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/settings.json") {
+        return JSON.stringify({
+          mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] } },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      mcpExclude: ["playwright"],
+      claudeConfigDir: "/home/user",
+    });
+
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: { playwright: { type: "http", url: "http://localhost:8742/mcp" } },
+    });
+  });
+
+  it("stays out of the way when there is nothing to inject and nothing to exclude", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpExclude: [],
+      claudeConfigDir: "/home/user",
+    });
+
+    expect(result).toEqual({});
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards mcpExclude to codex hook config", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpExclude: ["playwright"],
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { mcpExclude: ["playwright"] },
+    );
+  });
+
   it("forwards mcpBindings to codex hook config", async () => {
     ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
     const mcpBindings = [{ server: "playwright", url: "http://localhost:8742/mcp" }];

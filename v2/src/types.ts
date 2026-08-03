@@ -562,6 +562,16 @@ export interface SessionModeConfig {
   default?: boolean;
 }
 
+/**
+ * Host/global MCP servers suppressed for this project's sessions. Spur's launch
+ * plan is authoritative: an excluded server is dropped from the generated agent
+ * MCP config, so a project pays no RAM for a globally-configured server it does
+ * not use.
+ */
+export interface ProjectMcpConfig {
+  exclude: string[];
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -580,6 +590,7 @@ export interface ProjectConfig {
   workspaceAccess?: WorkspaceAccessConfig;
   modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
+  mcp?: ProjectMcpConfig;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
