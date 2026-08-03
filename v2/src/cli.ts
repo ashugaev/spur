@@ -29,6 +29,7 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  assertDaemonStartConfigExists,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
@@ -3011,6 +3012,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertDaemonStartConfigExists(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;

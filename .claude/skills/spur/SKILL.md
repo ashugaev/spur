@@ -144,7 +144,7 @@ projects:
 - Validation, cheapest tier that crosses the change: `pnpm --dir v2 test` (fast, every Spur code change), `pnpm --dir v2 test:runtime` (CLI, daemon start, transport, lifecycle, worktree, tmux), `pnpm --dir v2 test:smoke` (real agent launch or prompt delivery).
 - Run `pnpm --dir v2 build` after changing Spur code.
 - Keep Spur lean: one task, one interface, one code path. Delete stale paths instead of keeping alternates or speculative fields.
-- Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
+- Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. `scripts/spur-isolated-daemon.sh` is the sanctioned launcher — it assigns a non-default port/dataDir so it never trips the bind guard. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
 - `.claude/skills/spur/SKILL.md` and `.agents/skills/spur/SKILL.md` stay byte-identical.
 
 ## Updating this skill

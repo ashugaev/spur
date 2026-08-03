@@ -1,9 +1,13 @@
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertConfigMayBindProdSlot, defaultInstanceConfigPath } from "../../src/config.js";
+import {
+  assertConfigMayBindProdSlot,
+  assertDaemonStartConfigExists,
+  defaultInstanceConfigPath,
+} from "../../src/config.js";
 import { findFreePort } from "../helpers/common.js";
 
 // This file must never create, write, or delete anything under the real
@@ -98,5 +102,27 @@ describe("assertConfigMayBindProdSlot", () => {
     ).toThrow();
 
     expect(existsSync(dataDir)).toBe(false);
+  });
+});
+
+describe("assertDaemonStartConfigExists", () => {
+  it("throws for a non-default config path that does not exist and never creates it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-bind-guard-test-"));
+    const missingPath = join(root, "missing.yaml");
+
+    expect(() => assertDaemonStartConfigExists(missingPath)).toThrow();
+    expect(existsSync(missingPath)).toBe(false);
+  });
+
+  it("passes for a non-default config path that exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-bind-guard-test-"));
+    const configPath = join(root, "spur.yaml");
+    await writeFile(configPath, "server:\n  port: 4400\n", "utf8");
+
+    expect(() => assertDaemonStartConfigExists(configPath)).not.toThrow();
+  });
+
+  it("passes for the default instance config path regardless of existence", () => {
+    expect(() => assertDaemonStartConfigExists(defaultInstanceConfigPath())).not.toThrow();
   });
 });

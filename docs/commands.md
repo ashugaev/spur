@@ -12,6 +12,12 @@ Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
 
+## daemon
+
+Hidden: `daemon start|stop|restart`. Normal usage never calls these directly — `spawn`, `list`, etc. auto-start the daemon through the config path already bound to `spur`.
+
+`daemon start --config <path>` refuses instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. Independent of that, any daemon boot — via `daemon start` or the auto-start inside `startServer` — refuses to bind the production slot (`server.port` `4310` or `dataDir` `~/.spur`) from a config whose resolved path is not `~/.spur/config.yaml`. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+
 ## spawn
 
 ```bash

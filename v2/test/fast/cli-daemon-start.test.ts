@@ -22,6 +22,13 @@ const startServerMock = vi.fn(async () => {
 
 const writeStderrMock = vi.fn();
 
+const ensureInstanceConfigMock = vi.fn(() => ({
+  configPath: "/tmp/spur.yaml",
+  initialized: false,
+}));
+
+const assertDaemonStartConfigExistsMock = vi.fn();
+
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
 }));
@@ -43,11 +50,9 @@ vi.mock("../../src/client.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   defaultVoiceModelPath: vi.fn(),
+  assertDaemonStartConfigExists: assertDaemonStartConfigExistsMock,
   createProjectConfigScaffold: vi.fn(),
-  ensureInstanceConfig: vi.fn(() => ({
-    configPath: "/tmp/spur.yaml",
-    initialized: false,
-  })),
+  ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
   loadConfig: vi.fn(() => ({
@@ -83,6 +88,9 @@ describe("spur daemon start CLI", () => {
     });
     startServerMock.mockClear();
     writeStderrMock.mockClear();
+    ensureInstanceConfigMock.mockClear();
+    assertDaemonStartConfigExistsMock.mockClear();
+    assertDaemonStartConfigExistsMock.mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -110,5 +118,18 @@ describe("spur daemon start CLI", () => {
         "failed to write npm global-prefix pin file: EACCES: permission denied",
       ),
     );
+  });
+
+  it("refuses to start when the --config path does not exist and is not the default", async () => {
+    assertDaemonStartConfigExistsMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "start", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(startServerMock).not.toHaveBeenCalled();
   });
 });

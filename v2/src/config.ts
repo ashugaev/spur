@@ -1790,6 +1790,22 @@ export function assertConfigMayBindProdSlot(
   );
 }
 
+// `daemon start` must not bootstrap a prod-default config template at an
+// arbitrary path (that is what stole port 4310 from production in the
+// incident this guards against). The default instance config path is exempt
+// so a first boot at the default location still bootstraps as before.
+export function assertDaemonStartConfigExists(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (existsSync(configPath) || isDefaultInstanceConfigPath(configPath)) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${configPath} does not exist. ` +
+      `'daemon start' only bootstraps the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+      `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+  );
+}
+
 export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
   const configPath = resolveInstanceConfigPath(input);
   if (existsSync(configPath)) {
