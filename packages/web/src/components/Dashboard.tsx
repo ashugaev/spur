@@ -18,6 +18,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FiltersModal } from "@/components/FiltersModal";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -54,6 +55,7 @@ import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
@@ -64,6 +66,7 @@ import {
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
@@ -1036,6 +1039,12 @@ export function Dashboard() {
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    session: DashboardSession;
+    prAction?: OpenPrAction;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
+  const [prCheckBusy, setPrCheckBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -1982,7 +1991,11 @@ export function Dashboard() {
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
+  const handleCompleteSession = async (
+    session: DashboardSession,
+    options: { prAction?: OpenPrAction; skipPrCheck?: boolean } = {},
+  ): Promise<boolean> => {
+    const { prAction, skipPrCheck } = options;
     const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
@@ -1993,7 +2006,7 @@ export function Dashboard() {
           activeSubagentCount === 1 ? "" : "s"
         } on this checkout will be ended.`,
       );
-      if (!ok) return;
+      if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
@@ -2018,7 +2031,11 @@ export function Dashboard() {
     });
 
     try {
-      const body = { scope: "desk", ...(prAction ? { prAction } : {}) };
+      const body = {
+        scope: "desk",
+        ...(prAction ? { prAction } : {}),
+        ...(skipPrCheck ? { skipPrCheck: true } : {}),
+      };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2031,7 +2048,17 @@ export function Dashboard() {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
           setOpenPrAction({ session, payload });
-          return;
+          return false;
+        }
+        // GitHub can be rate limited or unreachable. Offer retry / skip instead of
+        // failing the row, otherwise completing a session is impossible until the
+        // rate limit resets.
+        if (isGithubPrCheckUnavailablePayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          setPrCheckUnavailable({ session, ...(prAction ? { prAction } : {}), payload });
+          return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
@@ -2056,6 +2083,7 @@ export function Dashboard() {
           };
         });
       }
+      return true;
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -2071,10 +2099,28 @@ export function Dashboard() {
     if (!openPrAction) return;
     setOpenPrActionBusy(true);
     try {
-      await handleCompleteSession(openPrAction.session, prAction);
+      await handleCompleteSession(openPrAction.session, { prAction });
       setOpenPrAction(null);
     } finally {
       setOpenPrActionBusy(false);
+    }
+  };
+
+  const runPrCheckRecovery = async (options: { skipPrCheck?: boolean }) => {
+    if (!prCheckUnavailable) return;
+    const { session, prAction } = prCheckUnavailable;
+    setPrCheckBusy(true);
+    try {
+      const done = await handleCompleteSession(session, {
+        ...(prAction ? { prAction } : {}),
+        ...options,
+      });
+      if (done) setPrCheckUnavailable(null);
+    } catch {
+      // handleCompleteSession already toasted and rolled the row back.
+      setPrCheckUnavailable(null);
+    } finally {
+      setPrCheckBusy(false);
     }
   };
 
@@ -2171,7 +2217,8 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
+        return;
 
       const target = event.target;
       if (
@@ -2192,7 +2239,7 @@ export function Dashboard() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
@@ -2600,6 +2647,15 @@ export function Dashboard() {
             onAction={(action) => void handleOpenPrAction(action)}
             onCancel={() => setOpenPrAction(null)}
             payload={openPrAction.payload}
+          />
+        ) : null}
+        {prCheckUnavailable ? (
+          <GithubRateLimitDialog
+            busy={prCheckBusy}
+            onCancel={() => setPrCheckUnavailable(null)}
+            onRetry={() => void runPrCheckRecovery({})}
+            onSkip={() => void runPrCheckRecovery({ skipPrCheck: true })}
+            payload={prCheckUnavailable.payload}
           />
         ) : null}
       </main>

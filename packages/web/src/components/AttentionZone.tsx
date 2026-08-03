@@ -16,7 +16,7 @@ interface AttentionZoneProps {
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
