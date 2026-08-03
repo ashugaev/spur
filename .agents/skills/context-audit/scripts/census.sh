@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT="${1:-$(pwd)}"
+[ -d "$ROOT" ] || { echo "census: no such directory: $ROOT" >&2; exit 1; }
 always_total=0
 ondemand_total=0
 
@@ -26,15 +27,20 @@ whole() {
 split() {
   local file=$1 scope=$2 vendor=$3 base=$4
   [ -f "$file" ] || return 0
-  local ml mb bl bb stats
+  local ml mb bl bb fstate stats
+  # fstate: 0 no frontmatter, 1 opened but never closed, 2 closed normally.
   stats=$(awk '
     NR==1 && /^---$/ {f=1; next}
     f==1 && /^---$/ {f=2; next}
     f==1 {ml++; mb+=length($0)+1}
     f==2 {bl++; bb+=length($0)+1}
-    END{printf "%d %d %d %d", ml+0, mb+0, bl+0, bb+0}
+    END{printf "%d %d %d %d %d", ml+0, mb+0, bl+0, bb+0, f+0}
   ' "$file")
-  read -r ml mb bl bb <<<"$stats"
+  read -r ml mb bl bb fstate <<<"$stats"
+  if [ "$fstate" = 1 ]; then
+    echo "census: unterminated frontmatter (opening --- never closed): $file" >&2
+    exit 1
+  fi
   if [ "$ml" -gt 0 ]; then
     emit "$scope" "$vendor" "${base}-meta" "$file" "$ml" "$mb" always
     emit "$scope" "$vendor" "${base}-body" "$file" "$bl" "$bb" ondemand

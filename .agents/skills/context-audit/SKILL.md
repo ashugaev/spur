@@ -5,12 +5,14 @@ description: Audits everything that enters an agent's context — skills, agent 
 
 # Context Audit
 
+`<skill dir>` below means the directory holding this file: `.claude/skills/context-audit/` for Claude, `.agents/skills/context-audit/` for Codex.
+
 ## Modes
 
 | Mode | Scope | Run |
 | --- | --- | --- |
 | SCOPED | one diff | Check only surfaces the diff touches |
-| SWEEP | everything | `scripts/census.sh [repo_root]`, `scripts/mcp-scope.sh` |
+| SWEEP | everything | `<skill dir>/scripts/census.sh [repo_root]`, `<skill dir>/scripts/mcp-scope.sh` |
 | NEGOTIATE | one named surface | See Negotiate below |
 
 Default to SCOPED on a diff, SWEEP on first run or "audit my context config", NEGOTIATE when a cut is contested.
@@ -23,22 +25,22 @@ Order: migrate anything with a CLI -> demote every user-scope server owned by on
 
 Scope rule: one repo and shareable -> project (`.mcp.json`, committed). One repo with private creds -> local. Every session and no CLI exists -> user.
 
-Server-to-CLI mapping and the keep-list live in `scripts/mcp-scope.sh`, functions `cli_for` and `verdict_for`. Read them there; they are what runs.
+Server-to-CLI mapping and the keep-list live in `<skill dir>/scripts/mcp-scope.sh`, functions `cli_for` and `verdict_for`. Read them there; they are what runs.
 
 Keep MCP when the mapping has no entry: a live stateful loop such as driving a browser across turns; a harness with no shell; per-user OAuth with tenant isolation and an audit trail; a push or streaming channel that originates events, which a CLI cannot.
 
 Traps:
 
 - Prove the replacement CLI before removing the server. Run one real read through it and show the output. `cli_status=found` means on PATH, not authenticated. Untested CLI, server stays.
-- Back up any surface outside the repo before editing it: `agent-backup <path> <label>`.
+- Back up any surface outside the repo before editing it: `<skill dir>/scripts/agent-backup <path> <label>`.
 - Per-tool disable is unproven — re-measure `/context` after, remove the whole server if the schema persists.
-- Never delete on the INERT verdict alone. Absence from `claude mcp list` first, delete second.
+- Never cut on the INERT verdict alone. Absence from `claude mcp list` first, cut second.
 
 ## Checklist
 
 | # | Check | How |
 | --- | --- | --- |
-| 1 | MCP server with a CLI equivalent | `mcp-scope.sh`, rows with `cli_status=found` |
+| 1 | MCP server with a CLI equivalent | `<skill dir>/scripts/mcp-scope.sh`, rows with `cli_status=found` |
 | 2 | User-scope server owned by one project | `scope=user` and name matches one repo's domain |
 | 3 | Tool search off | `/context` vs `ENABLE_TOOL_SEARCH=false /context` |
 | 4 | Two surfaces answer one question differently | grep the directive's noun across every surface |
@@ -59,13 +61,13 @@ Cuts settled by two opposed subagents, spawned in parallel through the runtime's
 
 1. Input: the surface text plus the candidate cut list from Checklist.
 2. Spawn CUT and KEEP in parallel. Neither sees the other's output.
-   - CUT: propose maximal deletion. One line per cut naming why it is derivable, duplicated, stale, or already model-default.
-   - KEEP: for each candidate, name the concrete failure that follows deletion — a specific wrong action the agent would then take. A defense that names no failure is not a defense.
+   - CUT: propose the maximal cut. One line per cut naming why it is derivable, duplicated, stale, or already model-default.
+   - KEEP: for each candidate, name the concrete failure that follows the cut — a specific wrong action the agent would then take. A defense that names no failure is not a defense.
 3. Merge deterministically in the caller, not a third agent:
-   - Proposed, undefended -> delete.
-   - Proposed, defended, named failure already prevented elsewhere (hook, narrower surface) -> delete, cite the preventer.
+   - Proposed, undefended -> cut.
+   - Proposed, defended, named failure already prevented elsewhere (hook, narrower surface) -> cut, cite the preventer.
    - Proposed, defended with a live failure -> one rebuttal round for CUT only: concede or refute.
-4. Still unresolved -> report CONTESTED with both one-line arguments. Never auto-delete a contested line.
+4. Still unresolved -> report CONTESTED with both one-line arguments. Never auto-cut a contested line.
 
 ## Measure
 
@@ -81,7 +83,7 @@ Traps:
 
 Table: `finding | surface | est_tokens | verdict | evidence`. One row per finding, ranked by tokens saved x adherence recovered, highest first. `verdict` is one of migrate, cut, keep, CONTESTED.
 
-Write to `$SPUR_SESSION_ARTIFACTS_DIR/context-audit/findings.md`.
+Write to `$SPUR_SESSION_ARTIFACTS_DIR/context-audit/findings.txt`, plain text.
 
 ## Boundaries
 

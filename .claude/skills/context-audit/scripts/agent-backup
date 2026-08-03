@@ -1,0 +1,89 @@
+#!/bin/bash
+# agent-backup - snapshot an agent config surface before editing it.
+#
+#   agent-backup <path> [label]   snapshot path into the store, commit it
+#   agent-backup list [n]         newest n snapshots, default 20
+#   agent-backup show <snapshot>  manifest + tree of one snapshot
+#   agent-backup restore <snapshot> [dest]   copy a snapshot back
+#
+# Store  ~/.agent-backups, a git repo. One commit per snapshot.
+# Naming YYYY-MM-DDTHH-MM-SSZ--<label>, UTC, so name order is date order.
+set -euo pipefail
+
+STORE=${AGENT_BACKUP_STORE:-$HOME/.agent-backups}
+
+init_store() {
+  [ -d "$STORE/.git" ] && return
+  mkdir -p "$STORE"
+  git -C "$STORE" init -q
+  # Local identity only. Never touch the user's global git config.
+  git -C "$STORE" config user.name "agent-backup"
+  git -C "$STORE" config user.email "agent-backup@localhost"
+  git -C "$STORE" commit -q --allow-empty -m "chore: init agent backup store"
+}
+
+slug() { tr 'A-Z' 'a-z' <<<"$1" | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40; }
+
+cmd_snapshot() {
+  local src=$1 label=${2:-} stamp name dest
+  [ -e "$src" ] || { echo "agent-backup: no such path: $src" >&2; exit 1; }
+  src=$(cd "$(dirname "$src")" && printf '%s/%s' "$(pwd)" "$(basename "$src")")
+  [ -n "$label" ] || label=$(basename "$src")
+  init_store
+  stamp=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+  name="$stamp--$(slug "$label")"
+  local n=2
+  while [ -e "$STORE/$name" ]; do name="$stamp--$(slug "$label")-$n"; n=$((n + 1)); done
+  dest="$STORE/$name"
+  mkdir -p "$dest/payload"
+  cp -a "$src" "$dest/payload/"
+  # The store is a git repo. Credentials never enter it.
+  local dropped
+  dropped=$(find "$dest/payload" -type f \( -name '.credentials.json' -o -name 'auth.json' \
+    -o -name '*.env' -o -name '*.pem' -o -name '*.key' -o -name 'id_*' \) -printf '%P\n' -delete)
+  {
+    printf 'SOURCE   %s\n' "$src"
+    printf 'LABEL    %s\n' "$label"
+    printf 'TAKEN    %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'HOST     %s\n' "$(hostname)"
+    printf 'BY       %s\n' "${AGENT_BACKUP_BY:-${USER:-unknown}}"
+    printf 'FILES    %s\n' "$(find "$dest/payload" -type f | wc -l)"
+    printf 'BYTES    %s\n' "$(du -sb "$dest/payload" | cut -f1)"
+    [ -n "$dropped" ] && printf 'DROPPED  %s\n' "$(tr '\n' ' ' <<<"$dropped")"
+  } >"$dest/MANIFEST"
+  git -C "$STORE" add -A "$name"
+  git -C "$STORE" commit -q -m "backup: $label ($stamp)"
+  printf '%s\n' "$dest"
+}
+
+cmd_list() {
+  init_store
+  local n=${1:-20}
+  find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.git' -printf '%f\n' | sort -r | head -n "$n" |
+    while read -r name; do
+      printf '%s\t%s\n' "$name" "$(sed -n 's/^SOURCE   //p' "$STORE/$name/MANIFEST" 2>/dev/null)"
+    done
+}
+
+cmd_show() {
+  local name=${1:?agent-backup show <snapshot>}
+  [ -d "$STORE/$name" ] || { echo "agent-backup: no such snapshot: $name" >&2; exit 1; }
+  cat "$STORE/$name/MANIFEST"
+  find "$STORE/$name/payload" -type f | sed "s|^$STORE/$name/payload/||"
+}
+
+cmd_restore() {
+  local name=${1:?agent-backup restore <snapshot> [dest]} dest=${2:-}
+  [ -d "$STORE/$name" ] || { echo "agent-backup: no such snapshot: $name" >&2; exit 1; }
+  [ -n "$dest" ] || dest=$(dirname "$(sed -n 's/^SOURCE   //p' "$STORE/$name/MANIFEST")")
+  cp -a "$STORE/$name/payload/." "$dest/"
+  printf 'restored %s -> %s\n' "$name" "$dest"
+}
+
+case "${1:-}" in
+  list) shift; cmd_list "$@" ;;
+  show) shift; cmd_show "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  '' | -h | --help) sed -n '2,10p' "$0" | sed 's/^# \?//' ;;
+  *) cmd_snapshot "$@" ;;
+esac
