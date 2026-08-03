@@ -38,6 +38,24 @@ export function reviewCommentSeenKey(id: number | string): string {
   return `review-comment:${id}`;
 }
 
+type TerminalLifecycleKind = "merged" | "closed";
+
+function terminalSignalKey(kind: TerminalLifecycleKind, prNumber: number): string {
+  return `${kind}:${prNumber}`;
+}
+
+// Single place the terminal-key format is spelled: `<merged|closed>:<prNumber>`.
+// A session's snapshot authorizes a poll-skip only when it holds the terminal
+// key for the PR the session is *currently* bound to (`session.pr.number`) —
+// never for a stale, previously-closed PR the session has since rebound away
+// from.
+export function hasTerminalSignal(signals: Map<string, ReviewSignal>, prNumber: number): boolean {
+  return (
+    signals.has(terminalSignalKey("merged", prNumber)) ||
+    signals.has(terminalSignalKey("closed", prNumber))
+  );
+}
+
 type IssueComment = {
   id: number;
   body: string;
@@ -155,6 +173,21 @@ export async function resolveTrackedBranch(
   return sessionBranch;
 }
 
+// A branch with `--state all` can list several PRs (e.g. an old closed one
+// plus the current open one). Picking `prs[0]` trusted `gh`'s ordering, which
+// is not a documented contract. Deterministic rule instead: the
+// highest-numbered OPEN PR wins (the branch's live PR); if none is open, fall
+// back to the highest-numbered PR overall so a fully-closed/merged branch
+// still resolves to its most recent history.
+function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | null {
+  const open = prs.filter((pr) => pr.state === "OPEN");
+  const pool = open.length > 0 ? open : prs;
+  return pool.reduce<GitHubPrStatusSummary | null>(
+    (highest, pr) => (!highest || pr.number > highest.number ? pr : highest),
+    null,
+  );
+}
+
 export async function resolvePrSummary(
   worktreePath: string,
   branch: string,
@@ -174,7 +207,7 @@ export async function resolvePrSummary(
   const prs = Array.isArray(parsed)
     ? parsed.map(readPrStatusSummary).filter((pr) => pr !== null)
     : [];
-  const pr = prs[0];
+  const pr = selectPrSummary(prs);
   if (!pr) return null;
 
   let mergeable = pr.mergeable;
@@ -445,14 +478,16 @@ async function collectSignals(
     });
   }
   if (pr.state === "MERGED") {
-    snapshot.set("merged", {
-      key: "merged",
+    const key = terminalSignalKey("merged", pr.number);
+    snapshot.set(key, {
+      key,
       kind: "merged",
       text: `PR #${pr.number} was merged.`,
     });
   } else if (pr.state === "CLOSED") {
-    snapshot.set("closed", {
-      key: "closed",
+    const key = terminalSignalKey("closed", pr.number);
+    snapshot.set(key, {
+      key,
       kind: "closed",
       text: `PR #${pr.number} was closed without merging.`,
     });

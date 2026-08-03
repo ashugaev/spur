@@ -5,11 +5,13 @@ import { extractGithubErrorText, gh, isGitHubRateLimitError } from "../gh.js";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
+  reviewSnapshotBaseline,
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
+  type ReviewSnapshot,
   type WorkItemEventData,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -25,6 +27,7 @@ import {
   removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
+import { hasTerminalSignal } from "../review-providers/github.js";
 import { reviewProvider } from "../review-providers/index.js";
 import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
@@ -332,13 +335,19 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
-        // Skip sessions whose PR is already merged/closed: terminal state, no new
-        // signals possible, and re-polling them burns the shared gh rate limit. The
-        // snapshot key persists on disk and reloads at startup so the skip is sticky.
-        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
-        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
+        // Skip only when the session is bound to a PR and the snapshot's terminal
+        // signal is *for that PR*: terminal state, no new signals possible, and
+        // re-polling burns the shared gh rate limit. Scoped by PR number so a
+        // rebind to a new PR (`spur slots --link pr=...`) is always polled again —
+        // a stale terminal snapshot from the PR the session used to be bound to
+        // must never mute it. Unbound sessions are always polled (the only local
+        // authority for "the current PR" is `session.pr`; see decision 2).
+        // The snapshot persists to disk and reloads at startup, so the skip is
+        // sticky across restarts: a CLOSED PR later reopened won't be re-detected
+        // while the session stays bound to that PR number (no `reopened` lifecycle
+        // kind exists). MERGED is unconditionally terminal.
         const existing = snapshots.get(session.id);
-        if (existing && (existing.has("merged") || existing.has("closed"))) {
+        if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
         }
         // Proactively skip sessions whose worktree is missing or no longer a git repo:
@@ -396,21 +405,24 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          const previous = snapshots.get(session.id);
+          const previous = reviewSnapshotBaseline(snapshots.get(session.id), collected.data.prNumber);
           const next = collected.snapshot;
           const changed = [...next.values()].filter((signal) => {
             const prior = previous?.get(signal.key);
             return !prior || prior.text !== signal.text;
           });
 
-          snapshots.set(session.id, next);
+          // Built once, handed to both the in-memory map and the on-disk write so
+          // the two copies cannot desync.
+          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          snapshots.set(session.id, nextSnapshot);
           writeReviewSourceSnapshot(
             deps.dataDir,
             "github",
             deps.projectId,
             deps.sourceId,
             session.id,
-            next,
+            nextSnapshot,
           );
 
           if (restoreReplayRequested) {

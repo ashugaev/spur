@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearGitHubMergeConflictRestoreReplay,
   hasGitHubMergeConflictRestoreReplay,
+  readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
   writeGitHubSourceSnapshot,
   writeSession,
@@ -31,6 +32,7 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
+  resolvePrSummary,
   resolveTrackedBranch,
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
@@ -322,6 +324,82 @@ describe("resolveBoundPrSummary", () => {
   });
 });
 
+describe("resolvePrSummary", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+  afterEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("resolves the highest-numbered OPEN PR when the branch also has a closed one", async () => {
+    // `gh pr list --head <branch> --state all` can return several PRs for one
+    // branch (retried work); `prs[0]`'s ordering was never a documented gh
+    // contract. The live PR must win over stale history regardless of order.
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 10,
+          title: "old attempt",
+          url: "https://github.com/o/r/pull/10",
+          reviewDecision: null,
+          mergeable: "UNKNOWN",
+          mergeStateStatus: "UNKNOWN",
+          state: "CLOSED",
+          isDraft: false,
+        },
+        {
+          number: 21,
+          title: "current attempt",
+          url: "https://github.com/o/r/pull/21",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "OPEN",
+          isDraft: false,
+        },
+      ]),
+    );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr?.number).toBe(21);
+    expect(pr?.state).toBe("OPEN");
+  });
+
+  it("falls back to the highest-numbered PR overall when none is open", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 10,
+          title: "first attempt",
+          url: "https://github.com/o/r/pull/10",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "CLOSED",
+          isDraft: false,
+        },
+        {
+          number: 21,
+          title: "second attempt",
+          url: "https://github.com/o/r/pull/21",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "MERGED",
+          isDraft: false,
+        },
+      ]),
+    );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr?.number).toBe(21);
+    expect(pr?.state).toBe("MERGED");
+  });
+});
+
 describe("resolveTrackedBranch", () => {
   beforeEach(() => {
     readCurrentBranchMock.mockReset();
@@ -535,7 +613,7 @@ describe("github source rearm", () => {
   it("clears stale rearm markers when the session disappears", async () => {
     const { dataDir } = await createRuntimeState();
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", new Map());
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", { prNumber: 42, signals: new Map() });
 
     const controller = new AbortController();
     const handle = await githubSourceModule.start({
@@ -560,5 +638,56 @@ describe("github source rearm", () => {
       handle.stop();
       clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     }
+  });
+});
+
+describe("review snapshot envelope", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function createDataDir(): Promise<string> {
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-gh-snapshot-"));
+    tempDirs.push(dataDir);
+    return dataDir;
+  }
+
+  it("round-trips prNumber and signal keys through the real writer and reader", async () => {
+    const dataDir = await createDataDir();
+    const signal = { key: "ci_failed", kind: "ci_failed" as const, text: "CI is failing: build." };
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", {
+      prNumber: 42,
+      signals: new Map([[signal.key, signal]]),
+    });
+
+    const stored = readGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1");
+
+    expect(stored?.prNumber).toBe(42);
+    expect(stored?.signals.get("ci_failed")).toEqual(signal);
+  });
+
+  it("parses a hand-written legacy bare-array snapshot to prNumber: null", async () => {
+    // Legacy on-disk shape predates the envelope: a bare `ReviewSignal[]`, no
+    // `prNumber` field. `Array.isArray` is the sole discriminator (no `version`
+    // field — nothing would ever read one), and the legacy default is `null`.
+    const dataDir = await createDataDir();
+    const dir = join(dataDir, "source-state", "github", "api", "pr-watch");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "api-1.json"),
+      JSON.stringify([{ key: "closed", kind: "closed", text: "PR #42 was closed without merging." }]),
+      "utf-8",
+    );
+
+    const stored = readGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1");
+
+    expect(stored?.prNumber).toBeNull();
+    expect(stored?.signals.get("closed")).toEqual({
+      key: "closed",
+      kind: "closed",
+      text: "PR #42 was closed without merging.",
+    });
   });
 });

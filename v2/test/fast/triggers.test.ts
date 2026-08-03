@@ -1,7 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
-import type { PersistedPendingBatch, WorkItemLifecycleRecord } from "../../src/types.js";
+import type {
+  PersistedPendingBatch,
+  ReviewSignal,
+  ReviewSnapshot,
+  WorkItemLifecycleRecord,
+} from "../../src/types.js";
+
+// Builds the on-disk/in-memory envelope shape `readGitHubSourceSnapshotMock`
+// now returns. `prNumber` defaults to 42 to match the fixture events' `prNumber`
+// below so the mocked snapshot is treated as the current PR's state.
+function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): ReviewSnapshot {
+  return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
+}
 
 const readGitHubSourceSnapshotMock = vi.fn();
 const readReviewSourceSnapshotMock = vi.fn();
@@ -439,10 +451,8 @@ function githubEvent(signalKey = "comment:1") {
   };
 }
 
-function commentSnapshot(signalKey = "comment:1") {
-  return new Map([
-    [signalKey, { key: signalKey, kind: "comment", text: "A new comment arrived." }],
-  ]);
+function commentSnapshot(signalKey = "comment:1"): ReviewSnapshot {
+  return storedSnapshot([{ key: signalKey, kind: "comment", text: "A new comment arrived." }]);
 }
 
 function gitlabEvent(signalKey = "comment:1") {
@@ -508,16 +518,13 @@ function mergeConflictEvent() {
   };
 }
 
-function ciSnapshot() {
-  return new Map([
-    [
-      "ci_failed",
-      {
-        key: "ci_failed",
-        kind: "ci_failed",
-        text: "CI is failing: test suite.",
-      },
-    ],
+function ciSnapshot(): ReviewSnapshot {
+  return storedSnapshot([
+    {
+      key: "ci_failed",
+      kind: "ci_failed",
+      text: "CI is failing: test suite.",
+    },
   ]);
 }
 
@@ -873,7 +880,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(new Map());
+    readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([]));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -924,18 +931,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1264,7 +1260,7 @@ describe("startConfiguredTriggers", () => {
         expect(deliverMock).toHaveBeenCalledTimes(1);
       });
 
-      snapshot = new Map();
+      snapshot = storedSnapshot([]);
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
@@ -1774,18 +1770,7 @@ describe("startConfiguredTriggers", () => {
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
     const warnMock = vi.fn();
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1878,18 +1863,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2021,18 +1995,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2082,7 +2045,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(new Map());
+    readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([]));
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2221,15 +2184,12 @@ describe("startConfiguredTriggers", () => {
       .mockRejectedValueOnce(new Error("agent busy"))
       .mockResolvedValue(undefined);
     readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "merge_conflict",
-          {
-            key: "merge_conflict",
-            kind: "merge_conflict",
-            text: "Merge conflicts are blocking this PR.",
-          },
-        ],
+      storedSnapshot([
+        {
+          key: "merge_conflict",
+          kind: "merge_conflict",
+          text: "Merge conflicts are blocking this PR.",
+        },
       ]),
     );
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -2947,18 +2907,7 @@ describe("startConfiguredTriggers", () => {
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -3253,18 +3202,7 @@ describe("startConfiguredTriggers", () => {
       },
     };
     readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
