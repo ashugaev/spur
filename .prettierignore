@@ -1,6 +1,7 @@
 node_modules
 .agents/
 .claude/
+.cursor/
 dev/
 dist/
 node_modules/
