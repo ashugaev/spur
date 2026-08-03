@@ -15,16 +15,49 @@ Markdown file, minimal markdown. Frontmatter is yaml, machinery not style.
   Body is blank lines, two-space indent, UPPERCASE labels. Nothing else.
   Banned in a body: # heading, ** bold, | table, ``` fence, - bullet, emoji.
   Data needing shape: align columns with spaces.
-  Short line, drop articles. Command over description of command.
   One screen per file. Longer, split to references/.
+
+Command text is data, not prose. The format law stops at it.
+
+  One command per line. Never join two commands with a separator.
+  Copy-pasteable block keeps its own whitespace. A heredoc terminator
+  sits at column 0 and stays there, unindented, fence or no fence.
+  Reformatting a command is a defect even when the prose around it improves.
+
+
+CAVEMAN, HARD
+
+Verb first. Number over adjective. One rule per line.
+
+  Drop articles a, an, the wherever sense survives.
+  Drop copulas where a colon or a column carries the meaning.
+  Say the number, not the adjective. "under 200 lines", never "large".
+  Name the command, never describe the command.
+
+Banned outright:
+
+  hedges       might, may, could, generally, typically, usually, often,
+               tends to, in most cases, as needed, where appropriate
+  degree       very, quite, fairly, rather, really, simply, just
+  meta         note that, keep in mind, remember, be aware, it is worth,
+               this means, in other words
+  justifying   because, since, in order to, so that, this allows, which
+               enables, the reason
+  transitions  however, moreover, additionally, furthermore, overall
+  courtesy     please, kindly, make sure to, it is important to
+
+Deletion test, apply to every sentence: cut it, reread the file. No
+instruction changed, it stays cut.
+
+Grep before returning:
+
+  grep -niE 'because|in order to|note that|keep in mind|it is important|might|may |could |generally|typically|usually|simply|just |very |really' <file>
 
 
 PRINCIPLES
 
   Token cost    every sentence justifies itself. Delete what the agent
                 already knows or reads from context.
-  Imperative    "Extract the schema", not "You should extract".
-                No please, kindly, in order to, make sure to, it is important to.
   One term      never alternate synonyms.
   Specificity   show the exact command or format, not a description of it.
 
@@ -82,14 +115,14 @@ ANTI-PATTERNS
 
 CHECKLIST
 
-  Every paragraph justifies its tokens
-  Imperative form, no filler
+  Every sentence survives the deletion test
+  Verb first, no banned word from CAVEMAN, HARD
   Consistent terminology
   Output is a concrete template, not a description
   Nothing explained that the agent already knows
   Under 500 lines, subdirs one level deep
   Description carries positive and negative triggers
-  Format law above obeyed
+  FORMAT law obeyed, grep clean
 
 
 CAVEMAN GATE
@@ -98,13 +131,15 @@ Invoked by manager when a diff touches skills, agents, AGENTS.md,
 CLAUDE.md, or .cursor/BUGBOT.md.
 
   1  Read the diff for changed prose only. Code and identifiers untouched.
-  2  Apply the checklist.
-  3  Return APPROVED or CHANGES_REQUESTED with file:line findings.
+  2  Run the CAVEMAN, HARD grep on every changed file.
+  3  Apply the checklist.
+  4  Return APPROVED or CHANGES_REQUESTED with file:line findings.
 
 Never APPROVE:
 
-  pleasantries, hedging (might be, perhaps), filler (just, really, basically)
+  a banned word from CAVEMAN, HARD
+  a sentence that passes the deletion test
   duplication of a rule already in AGENTS.md always-on rules
-  a heading, bold, pipe table, or fence introduced into a body
+  a heading, bold, pipe table, fence, or bullet in a body
 
-Skip stylistic taste. Flag only what adds tokens without adding meaning.
+One grep hit is CHANGES_REQUESTED. No taste calls, no warnings-only pass.
