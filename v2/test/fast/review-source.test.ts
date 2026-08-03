@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReviewEventData, ReviewSignal, ReviewSnapshot, SessionRecord } from "../../src/types.js";
+import type {
+  ReviewEventData,
+  ReviewSignal,
+  ReviewSnapshot,
+  SessionRecord,
+} from "../../src/types.js";
 import type { ReviewProvider } from "../../src/review-providers/types.js";
 
 const listSessionsMock = vi.fn();
@@ -168,7 +173,11 @@ describe("createReviewSourceModule (generic review source)", () => {
     listSessionsMock.mockReturnValue([makeSession()]);
     collectSignalsMock.mockResolvedValueOnce(
       collected(42, [
-        { key: "changes_requested", kind: "changes_requested", text: "Still unresolved (updated)." },
+        {
+          key: "changes_requested",
+          kind: "changes_requested",
+          text: "Still unresolved (updated).",
+        },
       ]),
     );
     const emit = vi.fn();
@@ -195,7 +204,9 @@ describe("createReviewSourceModule (generic review source)", () => {
 
   it("deletes the snapshot when the session's MR no longer resolves", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(
-      new Map([["api-1", storedSnapshot([{ key: "ci_failed", kind: "ci_failed", text: "CI red." }])]]),
+      new Map([
+        ["api-1", storedSnapshot([{ key: "ci_failed", kind: "ci_failed", text: "CI red." }])],
+      ]),
     );
     listSessionsMock.mockReturnValue([makeSession()]);
     collectSignalsMock.mockResolvedValueOnce(null);

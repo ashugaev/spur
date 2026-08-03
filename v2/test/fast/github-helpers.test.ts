@@ -613,7 +613,10 @@ describe("github source rearm", () => {
   it("clears stale rearm markers when the session disappears", async () => {
     const { dataDir } = await createRuntimeState();
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", { prNumber: 42, signals: new Map() });
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", {
+      prNumber: 42,
+      signals: new Map(),
+    });
 
     const controller = new AbortController();
     const handle = await githubSourceModule.start({
@@ -677,7 +680,9 @@ describe("review snapshot envelope", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(
       join(dir, "api-1.json"),
-      JSON.stringify([{ key: "closed", kind: "closed", text: "PR #42 was closed without merging." }]),
+      JSON.stringify([
+        { key: "closed", kind: "closed", text: "PR #42 was closed without merging." },
+      ]),
       "utf-8",
     );
 

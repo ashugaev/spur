@@ -405,7 +405,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          const previous = reviewSnapshotBaseline(snapshots.get(session.id), collected.data.prNumber);
+          const previous = reviewSnapshotBaseline(
+            snapshots.get(session.id),
+            collected.data.prNumber,
+          );
           const next = collected.snapshot;
           const changed = [...next.values()].filter((signal) => {
             const prior = previous?.get(signal.key);

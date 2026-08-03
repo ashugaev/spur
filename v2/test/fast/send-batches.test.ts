@@ -259,9 +259,7 @@ describe("GitHub batch", () => {
       ],
     });
 
-    const snapshot = storedSnapshot([
-      { key: "comment:1", kind: "comment", text: "comment one" },
-    ]);
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     mock.mockReturnValue(snapshot);
 
     batch.prune("/data");
@@ -347,9 +345,7 @@ describe("GitLab batch", () => {
     const { readGitHubSourceSnapshot, readReviewSourceSnapshot } =
       await import("../../src/metadata.js");
     vi.mocked(readGitHubSourceSnapshot).mockReset().mockReturnValue(null);
-    const snapshot = storedSnapshot([
-      { key: "comment:1", kind: "comment", text: "comment one" },
-    ]);
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     vi.mocked(readReviewSourceSnapshot).mockReset().mockReturnValue(snapshot);
 
     const batch = makeBatch({
