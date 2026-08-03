@@ -1,12 +1,9 @@
-import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { promisify } from "node:util";
+import { collectDescendants, listProcesses, type ProcessInfo } from "../process-tree.js";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
-
-const execFileAsync = promisify(execFile);
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -141,37 +138,6 @@ export async function waitForPlaywrightReady(
   return false;
 }
 
-export interface ProcessInfo {
-  pid: number;
-  ppid: number;
-  args: string;
-}
-
-/**
- * Enumerate live processes via `ps` (no shell). Malformed lines are skipped.
- */
-async function listProcesses(): Promise<ProcessInfo[]> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="]));
-  } catch {
-    return [];
-  }
-  const processes: ProcessInfo[] = [];
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(trimmed);
-    if (!match) continue;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const args = match[3] ?? "";
-    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-    processes.push({ pid, ppid, args });
-  }
-  return processes;
-}
-
 function extractPlaywrightPort(args: string): number | undefined {
   const match = /--port\s+(\d+)/.exec(args);
   if (!match) return undefined;
@@ -197,29 +163,6 @@ export function isLeakedManagedPlaywright(
   const port = extractPlaywrightPort(proc.args);
   if (port === undefined) return false;
   return !ownedPorts.has(port);
-}
-
-function collectDescendants(rootPid: number, processes: readonly ProcessInfo[]): number[] {
-  const childrenByPpid = new Map<number, number[]>();
-  for (const proc of processes) {
-    const list = childrenByPpid.get(proc.ppid) ?? [];
-    list.push(proc.pid);
-    childrenByPpid.set(proc.ppid, list);
-  }
-  const ordered: number[] = [];
-  const seen = new Set<number>([rootPid]);
-  const queue: number[] = [rootPid];
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (pid === undefined) break;
-    ordered.push(pid);
-    for (const child of childrenByPpid.get(pid) ?? []) {
-      if (seen.has(child)) continue;
-      seen.add(child);
-      queue.push(child);
-    }
-  }
-  return ordered;
 }
 
 function killPid(pid: number, signal: NodeJS.Signals): void {

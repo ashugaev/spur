@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   canReadProcessTree,
   classifyProcessOwnership,
+  collectDescendants,
   type PpidReader,
+  type ProcessInfo,
 } from "../../src/process-tree.js";
 
 // tree: 100(root) -> 200 -> 300; 400 is unrelated (parent 1)
@@ -48,5 +50,23 @@ describe("canReadProcessTree", () => {
 
   it("is false when procfs cannot be read", async () => {
     expect(await canReadProcessTree(999, reader)).toBe(false);
+  });
+});
+
+describe("collectDescendants", () => {
+  function proc(pid: number, ppid: number): ProcessInfo {
+    return { pid, ppid, args: `proc-${pid}` };
+  }
+
+  it("returns root then children in BFS order", () => {
+    // 1(root) -> 2,3 ; 2 -> 4
+    const processes = [proc(2, 1), proc(3, 1), proc(4, 2), proc(99, 500)];
+    expect(collectDescendants(1, processes)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("terminates on a cyclic ppid table", () => {
+    // 10 <-> 11 form a cycle; must not infinite-loop.
+    const processes = [proc(10, 11), proc(11, 10)];
+    expect(collectDescendants(10, processes)).toEqual([10, 11]);
   });
 });

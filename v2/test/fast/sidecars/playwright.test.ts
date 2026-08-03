@@ -7,8 +7,8 @@ import {
   resolvePlaywrightMcpBin,
   resolvePlaywrightSidecarCommand,
   SPUR_RESERVED_PORT_PLAYWRIGHT,
-  type ProcessInfo,
 } from "../../../src/sidecars/playwright.js";
+import type { ProcessInfo } from "../../../src/process-tree.js";
 import { shellEscape } from "../../../src/agents/shell-escape.js";
 
 describe("playwrightMcpUrl", () => {

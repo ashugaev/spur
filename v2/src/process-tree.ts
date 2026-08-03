@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 // Resolves a process' parent pid. Returns null when the pid cannot be read
 // (dead process, proc race, or no procfs on this platform).
@@ -69,4 +73,61 @@ export async function canReadProcessTree(
   readPpid: PpidReader = readPpidFromProc,
 ): Promise<boolean> {
   return (await readPpid(pid)) !== null;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  ppid: number;
+  args: string;
+}
+
+/**
+ * Enumerate live processes via `ps` (no shell). Malformed lines are skipped.
+ * Moved here (from sidecars/playwright.ts) as the module that already owns
+ * process ancestry — cache-retention.ts and playwright.ts both import it
+ * rather than either copying it or importing a sidecar module.
+ */
+export async function listProcesses(): Promise<ProcessInfo[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="]));
+  } catch {
+    return [];
+  }
+  const processes: ProcessInfo[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(trimmed);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const args = match[3] ?? "";
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    processes.push({ pid, ppid, args });
+  }
+  return processes;
+}
+
+export function collectDescendants(rootPid: number, processes: readonly ProcessInfo[]): number[] {
+  const childrenByPpid = new Map<number, number[]>();
+  for (const proc of processes) {
+    const list = childrenByPpid.get(proc.ppid) ?? [];
+    list.push(proc.pid);
+    childrenByPpid.set(proc.ppid, list);
+  }
+  const ordered: number[] = [];
+  const seen = new Set<number>([rootPid]);
+  const queue: number[] = [rootPid];
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (pid === undefined) break;
+    ordered.push(pid);
+    for (const child of childrenByPpid.get(pid) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+    }
+  }
+  return ordered;
 }
