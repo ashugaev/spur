@@ -246,32 +246,40 @@ function readSessionFile(path: string): SessionRecord {
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
 // calls (see the "no in-place mutation of a listed record" contract).
-interface CachedSessionFile {
+interface FileFingerprint {
   ino: number;
   mtimeMs: number;
   size: number;
+}
+
+interface CachedSessionFile extends FileFingerprint {
   record: SessionRecord;
 }
 
 const sessionFileCache = new Map<string, CachedSessionFile>();
 
-function readSessionFileCached(path: string): SessionRecord {
-  let preStat: ReturnType<typeof statSync>;
+function statFingerprint(path: string): FileFingerprint | null {
   try {
-    preStat = statSync(path);
+    return statSync(path);
   } catch {
-    // File vanished (or was never there) between readdir and this stat.
-    // Fall through to the raw read so the caller sees today's exact error.
+    return null;
+  }
+}
+
+function sameFingerprint(a: FileFingerprint, b: FileFingerprint): boolean {
+  return a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function readSessionFileCached(path: string): SessionRecord {
+  // File vanished (or was never there) between readdir and this stat. Fall
+  // through to the raw read so the caller sees today's exact error.
+  const preStat = statFingerprint(path);
+  if (!preStat) {
     return readSessionFile(path);
   }
 
   const cached = sessionFileCache.get(path);
-  if (
-    cached &&
-    cached.ino === preStat.ino &&
-    cached.mtimeMs === preStat.mtimeMs &&
-    cached.size === preStat.size
-  ) {
+  if (cached && sameFingerprint(cached, preStat)) {
     return cached.record;
   }
 
@@ -281,18 +289,8 @@ function readSessionFileCached(path: string): SessionRecord {
   // change the inode mid-call. If the file moved under us, don't cache a
   // record that no longer matches what's on disk now — the NEXT call will
   // re-parse once and settle, rather than caching a stale pairing forever.
-  let postStat: ReturnType<typeof statSync>;
-  try {
-    postStat = statSync(path);
-  } catch {
-    sessionFileCache.delete(path);
-    return record;
-  }
-  if (
-    postStat.ino === preStat.ino &&
-    postStat.mtimeMs === preStat.mtimeMs &&
-    postStat.size === preStat.size
-  ) {
+  const postStat = statFingerprint(path);
+  if (postStat && sameFingerprint(postStat, preStat)) {
     sessionFileCache.set(path, {
       ino: postStat.ino,
       mtimeMs: postStat.mtimeMs,
