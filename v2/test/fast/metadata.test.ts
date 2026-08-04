@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -1035,6 +1035,32 @@ describe("listSessions record cache", () => {
     listSessions(dataDir1);
 
     const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("prunes only the missing sessions root before it is restored", async () => {
+    const dataDir1 = await newDataDir();
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir1First = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+    const sessionsRoot = join(dataDir1, "sessions");
+    const parkedRoot = join(dataDir1, "sessions-parked");
+
+    // Moving the root away and back preserves the file's fingerprint. A
+    // stale cache entry would therefore return the exact same object after
+    // restoration unless the missing-root listing prunes it.
+    renameSync(sessionsRoot, parkedRoot);
+    expect(listSessions(dataDir1)).toEqual([]);
+    renameSync(parkedRoot, sessionsRoot);
+
+    const dataDir1Second = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir1Second).not.toBe(dataDir1First);
     expect(dataDir2Second).toBe(dataDir2First);
   });
 
