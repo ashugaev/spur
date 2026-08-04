@@ -231,7 +231,8 @@ function isHeadroomBody(value: unknown): value is HeadroomReport {
     Array.isArray(body["sessions"]) &&
     typeof guard === "object" &&
     guard !== null &&
-    typeof (guard as Record<string, unknown>)["crossed"] === "boolean"
+    typeof (guard as Record<string, unknown>)["crossed"] === "boolean" &&
+    typeof body["projectedRoom"] === "number"
   );
 }
 

@@ -181,18 +181,19 @@ describe("startServer", () => {
 
     const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
     const originalSpawn = SessionService.prototype.spawn;
-    SessionService.prototype.spawn = async function mockSpawn() {
-      throw new SessionAdmissionDeniedError(
-        'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
-      );
-    };
-
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
-
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
     try {
+      SessionService.prototype.spawn = async function mockSpawn() {
+        throw new SessionAdmissionDeniedError(
+          'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
+        );
+      };
+
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
       const response = await fetch(`http://127.0.0.1:${port}/sessions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -204,7 +205,7 @@ describe("startServer", () => {
       expect(body.error).toContain("cap");
     } finally {
       SessionService.prototype.spawn = originalSpawn;
-      await server.stop();
+      await server?.stop();
     }
   });
 
