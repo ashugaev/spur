@@ -253,16 +253,15 @@ describe("setupAgentHooks", () => {
     });
   });
 
-  // settings.json is a real MCP source for claude. Missing it meant
-  // --strict-mcp-config silently dropped every server declared only there.
-  it("merges settings.json mcpServers, with .claude.json winning a name collision", async () => {
+  // Claude 2.1.221 ignores an "mcpServers" block in settings.json (verified
+  // with a scratch CLAUDE_CONFIG_DIR: `claude mcp list` shows a probe planted
+  // in .claude.json and not the same probe in settings.json). Merging it would
+  // make Spur start servers the session would otherwise never load.
+  it("ignores mcpServers in settings.json, which claude does not read", async () => {
     readFileMock.mockImplementation(async (path: string) => {
       if (path === "/home/user/settings.json") {
         return JSON.stringify({
-          mcpServers: {
-            sentry: { command: "npx", args: ["-y", "sentry-mcp"] },
-            shared: { command: "npx", args: ["-y", "settings-scope-mcp"] },
-          },
+          mcpServers: { sentry: { command: "npx", args: ["-y", "sentry-mcp"] } },
         });
       }
       if (path === "/home/user/.claude.json") {
@@ -284,7 +283,6 @@ describe("setupAgentHooks", () => {
     const [, contents] = writeFileMock.mock.calls[0] ?? [];
     expect(JSON.parse(contents as string)).toEqual({
       mcpServers: {
-        sentry: { command: "npx", args: ["-y", "sentry-mcp"] },
         shared: { command: "npx", args: ["-y", "user-scope-mcp"] },
         playwright: { type: "http", url: "http://localhost:8742/mcp" },
       },
@@ -295,7 +293,7 @@ describe("setupAgentHooks", () => {
   // does not use. Needs no sidecar binding to take effect.
   it("writes an authoritative mcp-config.json for mcpExclude alone, dropping the excluded server", async () => {
     readFileMock.mockImplementation(async (path: string) => {
-      if (path === "/home/user/settings.json") {
+      if (path === "/home/user/.claude.json") {
         return JSON.stringify({
           mcpServers: {
             playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] },
@@ -325,7 +323,7 @@ describe("setupAgentHooks", () => {
 
   it("keeps Spur's sidecar binding when the same server name is also excluded", async () => {
     readFileMock.mockImplementation(async (path: string) => {
-      if (path === "/home/user/settings.json") {
+      if (path === "/home/user/.claude.json") {
         return JSON.stringify({
           mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] } },
         });

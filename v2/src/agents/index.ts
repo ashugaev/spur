@@ -235,21 +235,20 @@ function mergeMcpServers(
   return target;
 }
 
-// Merges the same MCP server sources Claude itself loads (settings < user <
-// project < local, later wins), so --strict-mcp-config only drops servers
-// Claude wouldn't have loaded anyway rather than every host/project MCP server.
+// Merges the same MCP server sources Claude itself loads (user < project <
+// local, later wins), so --strict-mcp-config only drops servers Claude
+// wouldn't have loaded anyway rather than every host/project MCP server.
+//
+// settings.json is deliberately NOT a source: Claude 2.1.221 ignores an
+// "mcpServers" block there (verified against a scratch CLAUDE_CONFIG_DIR —
+// `claude mcp list` lists a probe planted in .claude.json and not the same
+// probe in settings.json). Reading it would make Spur START servers Claude
+// never loads, which is the opposite of what --strict-mcp-config is for here.
 async function readHostClaudeMcpServers(args: {
   worktreePath: string;
   claudeConfigDir?: string;
 }): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
-  const settingsPath = args.claudeConfigDir
-    ? join(args.claudeConfigDir, "settings.json")
-    : join(homedir(), ".claude", "settings.json");
-  const settings = await readJsonFile(settingsPath);
-  if (isPlainObject(settings)) {
-    mergeMcpServers(merged, settings.mcpServers);
-  }
   const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
   const userConfig = await readJsonFile(userConfigPath);
   let localProject: unknown;
