@@ -238,6 +238,11 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `authRotation.cooldownMinutes`: optional, default `60`.
 - `authRotation.maxRotationsPerEpisode`: optional, default `2`.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
+- `sessionGc.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur gc`](commands.md#gc) policy on a timer; `spur gc` itself works regardless.
+- `sessionGc.olderThanDays`: optional, default `30`. Minimum age of a group's newest record. Also the `spur gc --older-than` default.
+- `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
+- `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
+- `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 
 ## Events
@@ -255,7 +260,7 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals; state persists under `dataDir`. When `query` is set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids in an append-only registry. GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
-`github:ci_failed` uses one fixed policy: retry every 10 minutes, stop after 3 deliveries, reset only when the failing signal disappears from the latest snapshot. `github:merge_conflict` is snapshot-based and one-shot: emitted when the PR becomes conflicting, cleared when mergeable again, re-emittable if conflicts return. Terminal events (`merged`/`closed`) fire only while the owning session still runs.
+`github:ci_failed` uses one fixed policy: retry every 10 minutes, stop after 3 deliveries, reset only when the failing signal disappears from the latest snapshot. `github:merge_conflict` is snapshot-based and one-shot: emitted when the PR becomes conflicting, cleared when mergeable again, re-emittable if conflicts return. Terminal events (`merged`/`closed`) fire only while the owning session still runs. Once fired, polling pauses for that session as long as it stays bound to the same PR — sticky across daemon restarts, since the snapshot persists under `dataDir` — and resumes automatically once the session is rebound to a different PR; that first poll re-baselines against the new PR, so signals already true on it (e.g. an existing `changes_requested`) are absorbed silently instead of delivered, and only later changes emit. A session with no PR binding is always polled.
 
 With `adaptivePoll` configured, a `github` source tick is a no-op — zero `gh` calls — unless: the slow deadline (`slowIntervalMs` since the last real poll) has passed; the last cycle saw a non-terminal CI check; a tracked session hasn't been polled yet; or a session had a `send`/source-reply within `activeGraceMs`. The existing rate-limit cooldown backoff still overrides everything above, on `adaptivePoll` sources and plain ones alike. When `query` is also set, `github:work_item.new` discovery (`gh search prs`) runs on the same gated tick as session polling; every gate condition is scoped to already-tracked sessions, so a new, undiscovered PR alone cannot re-arm the tick early — discovery waits for the slow deadline or for an existing session to re-qualify.
 

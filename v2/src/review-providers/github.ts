@@ -52,6 +52,24 @@ export function reviewCommentSeenKey(id: number | string): string {
   return `review-comment:${id}`;
 }
 
+type TerminalLifecycleKind = "merged" | "closed";
+
+function terminalSignalKey(kind: TerminalLifecycleKind, prNumber: number): string {
+  return `${kind}:${prNumber}`;
+}
+
+// Single place the terminal-key format is spelled: `<merged|closed>:<prNumber>`.
+// A session's snapshot authorizes a poll-skip only when it holds the terminal
+// key for the PR the session is *currently* bound to (`session.pr.number`) —
+// never for a stale, previously-closed PR the session has since rebound away
+// from.
+export function hasTerminalSignal(signals: Map<string, ReviewSignal>, prNumber: number): boolean {
+  return (
+    signals.has(terminalSignalKey("merged", prNumber)) ||
+    signals.has(terminalSignalKey("closed", prNumber))
+  );
+}
+
 type IssueComment = {
   id: number;
   body: string;
@@ -559,14 +577,16 @@ function collectSignalsFromNode(
     });
   }
   if (pr.state === "MERGED") {
-    snapshot.set("merged", {
-      key: "merged",
+    const key = terminalSignalKey("merged", pr.number);
+    snapshot.set(key, {
+      key,
       kind: "merged",
       text: `PR #${pr.number} was merged.`,
     });
   } else if (pr.state === "CLOSED") {
-    snapshot.set("closed", {
-      key: "closed",
+    const key = terminalSignalKey("closed", pr.number);
+    snapshot.set(key, {
+      key,
       kind: "closed",
       text: `PR #${pr.number} was closed without merging.`,
     });

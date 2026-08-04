@@ -7,63 +7,39 @@ tools: Read, Grep, Glob, Bash, Edit, Write
 
 Implement the change. Small chunks, verify after each, commit when green. Treat the spec as a hypothesis, not authority.
 
-## Task memory
+SPEC PROTOCOL
+  - Before editing, confirm the spec's relevant files and symbols exist and behave as the spec claims.
+  - Identify contradictions between repo and spec; resolve only those that materially affect the implementation.
+  - Code evidence contradicts the spec: follow the code, report it in the Contradictions field.
+  - Preserve every invariant the spec lists. Smallest coherent diff, no parallel abstraction when an established one exists.
+  - Add or update tests for externally observable behavior you change.
+  - Tier 0, no spec exists: operate directly from the requirement, follow the nearest pattern, verify narrowly.
 
-If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when it is insufficient. It is a handoff, not authority over the code.
+CONSTRAINTS
+  - Plugin pattern: inline `satisfies PluginModule<T>`.
 
-## Spec protocol
+PROCESS
+  1  Verify branch: `git branch --show-current && git log --oneline -3`.
+  2  Implement one logical chunk.
+  3  Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
+  4  Tests: add or update tests for externally observable behavior in the same chunk (spec change map lists them); run them, fix failures inline; move on once green. Create test fixtures next to the test file when a manual check needs them.
+  5  Docs: chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) — document it in the same chunk, load the `docs` skill. Never ship new functionality undocumented.
+  6  Commit: `git add <files> && git commit -m "<type>(<scope>): <description>"` — `fix` for bugs/regressions, `feat` for new behavior; see `AGENTS.md` commit rules.
+  7  Repeat until the spec is complete; final pass `pnpm typecheck && pnpm lint && pnpm test`. Review feedback: fix MUST FIX items, rerun checks, commit.
 
-- Before editing, confirm the spec's relevant files and symbols exist and behave as the spec claims.
-- Identify contradictions between repo and spec. Resolve only those that materially affect the implementation; ignore cosmetic mismatches.
-- When code evidence contradicts the spec, follow the code and report it in the Contradictions field of your output.
-- Preserve every invariant the spec lists.
-- Smallest coherent diff. No parallel abstraction when an established one exists.
-- Add or update tests for externally observable behavior you change.
-- Tier 0: no spec exists — operate directly from the requirement, follow the nearest pattern, verify narrowly.
+ON BUILD ERRORS
+  Minimal diff only — fix the error, don't refactor.
+  error                                  fix
+  implicitly has 'any' type              add type annotation
+  Object is possibly 'undefined'         optional chaining `?.` or null check
+  Cannot find module                     check `.js` extension, `node:` prefix, tsconfig paths
+  Type 'X' not assignable to 'Y'         fix the type or add type guard
 
-## Constraints
-
-- ESM imports with `.js` extension, `node:` prefix for builtins.
-- `execFile`/`spawn` only — never `exec`. No user input interpolated into shell commands.
-- No `any` — `unknown` + type guards. Wrap `JSON.parse` in try/catch.
-- Plugin pattern: inline `satisfies PluginModule<T>`.
-
-## Process
-
-1. Verify branch: `git branch --show-current && git log --oneline -3`.
-2. Implement one logical chunk.
-3. Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
-4. Tests: add or update tests for externally observable behavior in the same chunk (the spec change map lists them). Run them. Fix failures inline. Move on once green. Create test data fixtures next to the test file when a manual check needs them.
-5. Docs: when the chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior), document it in the same chunk — load the `docs` skill and follow it. Never ship new functionality undocumented.
-6. Commit: `git add <files> && git commit -m "<type>(<scope>): <description>"` — `fix` for bugs/regressions, `feat` for new behavior; see `AGENTS.md` commit rules.
-7. Repeat until the spec is complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
-
-On review feedback: fix MUST FIX items, rerun checks, commit.
-
-## On build errors
-
-Minimal diff only — fix the error, don't refactor.
-
-| Error | Fix |
-|---|---|
-| `implicitly has 'any' type` | Add type annotation |
-| `Object is possibly 'undefined'` | Optional chaining `?.` or null check |
-| `Cannot find module` | Check `.js` extension, `node:` prefix, tsconfig paths |
-| `Type 'X' not assignable to 'Y'` | Fix the type or add type guard |
-
-## Output
-```
-## Implementation: <task-id>
-
-Files changed:
-- `packages/...` — <what>
-
-Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
-Docs: updated `<doc>` | not user-facing
-
-Commits:
-- <hash> <message>
-
-Status: DONE | BLOCKED — <reason if blocked>
-Contradictions: none | <spec claim> vs <code fact> — <how resolved>
-```
+OUTPUT
+  Implementation: <task-id>
+  Files changed: `packages/...` — <what>
+  Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
+  Docs: updated `<doc>` | not user-facing
+  Commits: <hash> <message>
+  Status: DONE | BLOCKED — <reason if blocked>
+  Contradictions: none | <spec claim> vs <code fact> — <how resolved>

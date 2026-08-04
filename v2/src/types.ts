@@ -444,6 +444,28 @@ export interface ReviewSignal {
   text: string;
 }
 
+// The PR/MR the snapshot's signals were collected from. `null` covers legacy
+// on-disk snapshots (bare array, no PR identity) so callers cannot mistake
+// "unknown" for a real number via `=== undefined`.
+export interface ReviewSnapshot {
+  prNumber: number | null;
+  signals: Map<string, ReviewSignal>;
+}
+
+// The baseline to diff the next poll's signals against: the stored snapshot's
+// signals when it was collected from the same PR/MR, otherwise `undefined` so
+// the caller takes the existing first-observation path. A rebind (or a legacy
+// snapshot with no recorded PR) must never diff against a different PR's
+// signals — `changes_requested`, `ready_for_review`, `approved:<login>`, etc.
+// are not PR-unique text, so a stale match would silently suppress the new
+// PR's identical-text signal.
+export function reviewSnapshotBaseline(
+  stored: ReviewSnapshot | undefined,
+  prNumber: number,
+): Map<string, ReviewSignal> | undefined {
+  return stored && stored.prNumber === prNumber ? stored.signals : undefined;
+}
+
 export interface ReviewEventData {
   sessionId: string;
   prNumber: number;
@@ -596,9 +618,21 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  sessionGc: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxGroupsPerSweep: number;
+    statuses: SessionGcStatus[];
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
+
+// The only statuses session GC ever reclaims: a session still `running`,
+// `spawning`, `paused`, or `errored` may resume work in its worktree, so GC
+// must never treat it as a candidate regardless of age.
+export type SessionGcStatus = "completed" | "killed" | "stopped";
 
 export interface SessionPipelineState {
   steps: string[];

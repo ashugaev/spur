@@ -68,6 +68,7 @@ const loadProjectConfigMock = vi.fn();
 const findProjectConfigPathInDirectoryMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
+const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -116,6 +117,7 @@ const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const readRemoteUrlsMock = vi.fn();
 const removeWorktreeMock = vi.fn();
+const pruneRepoWorktreesMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const branchRefsExistMock = vi.fn();
 const workspaceExistsMock = vi.fn();
@@ -369,6 +371,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -527,6 +530,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUncommittedChanges: hasUncommittedChangesMock,
   hasUnpushedCommits: hasUnpushedCommitsMock,
   isGitWorktree: isGitWorktreeMock,
+  pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
@@ -561,6 +565,13 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
     },
     projects: {
       api: {
@@ -626,6 +637,14 @@ function sessionRecord(
 
 function createSessionStore() {
   const sessions = new Map<string, SessionRecord>();
+  // listSessionsMock mirrors metadata.ts' real stat-gated parse cache: an
+  // unchanged record returns the SAME object on every call, a changed one
+  // gets a fresh clone. Without this, every session would look changed on
+  // every call (clone() always allocates a new object), which contradicts
+  // the real listSessions() and would make the tick's record-change
+  // detection untestable. readSessionMock/writeSessionMock stay a raw clone
+  // per call, mirroring production where only listSessions is stat-gated.
+  const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
     return session ? clone(session) : undefined;
@@ -634,7 +653,16 @@ function createSessionStore() {
     sessions.set(session.id, clone(session));
   });
   listSessionsMock.mockImplementation(() =>
-    [...sessions.values()].map((session) => clone(session)),
+    [...sessions.values()].map((session) => {
+      const json = JSON.stringify(session);
+      const existing = published.get(session.id);
+      if (existing && existing.json === json) {
+        return existing.record;
+      }
+      const record = clone(session);
+      published.set(session.id, { json, record });
+      return record;
+    }),
   );
   return sessions;
 }
@@ -12765,6 +12793,97 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("never runs the session GC sweep while sessionGc.enabled is false", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("sweeps and reports freed bytes once sessionGc.enabled is true", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.gc.completed",
+    );
+    expect(completed?.[1].message).toContain("0 worktree(s) removed");
+    expect(completed?.[1].message).toContain("byte(s) freed");
+    // Archived sessions lose their log shard dir, so the event must not carry a
+    // sessionId (that would recreate the dir appendEventLog writes into).
+    expect(completed?.[1].sessionId).toBeUndefined();
+    service.dispose();
+  });
+
+  it("waits out intervalMinutes before sweeping again, so a restart never sweeps immediately", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      dispose(): void;
+    };
+
+    // lastSessionGcSweepAt seeds from construction, so this tick is inside the
+    // 360-minute window and must do nothing.
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("skips an overlapping session GC sweep instead of running two at once", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      sessionGcRunning: boolean;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+    service.sessionGcRunning = true;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
   it("rejects a branch override that would mutate the shared workspace", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -17130,11 +17249,17 @@ describe("SessionService", () => {
 
     await service.startSidecar("api-1", "dev");
 
-    await vi.waitFor(() => {
-      expect(sessions.get("api-1")?.slots?.links).toEqual([
-        { label: "dev", url: "https://preview.example.com/3000" },
-      ]);
-    });
+    // The link is published off a fire-and-forget chain behind an HTTP probe
+    // that sleeps SIDECAR_PROBE_INTERVAL_MS (1s) per retry. waitFor's 1s
+    // default cannot absorb even one retry under load.
+    await vi.waitFor(
+      () => {
+        expect(sessions.get("api-1")?.slots?.links).toEqual([
+          { label: "dev", url: "https://preview.example.com/3000" },
+        ]);
+      },
+      { timeout: 5_000 },
+    );
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.link.published",
     );
@@ -19352,7 +19477,7 @@ describe("SessionService", () => {
   });
 
   describe("dashboard cache", () => {
-    function seedDashboardSessions(count: number): Map<string, SessionRecord> {
+    function seedDashboardSessions(count: number, idleCount = 0): Map<string, SessionRecord> {
       const sessions = createSessionStore();
       for (let index = 1; index <= count; index += 1) {
         const id = `api-${index}`;
@@ -19369,6 +19494,29 @@ describe("SessionService", () => {
           status: "running",
           createdAt: "2026-03-18T10:00:00.000Z",
           updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      // Idle (terminal, kept in list) sessions inserted after the running
+      // ones so insertion order — which the mock preserves — puts them last.
+      // killed+retainInList is kept by both the tick's inclusion filter and
+      // list()'s own filter, so these count toward the idle round-robin set
+      // without being pruned as terminal-and-dropped.
+      for (let index = 1; index <= idleCount; index += 1) {
+        const id = `done-${index}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: `finished task ${index}`,
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "killed",
+          retainInList: true,
+          createdAt: "2026-03-18T09:00:00.000Z",
+          updatedAt: "2026-03-18T09:01:00.000Z",
         });
       }
       return sessions;
@@ -19481,6 +19629,111 @@ describe("SessionService", () => {
 
       const afterRecovery = await service.list({ view: "dashboard" });
       expect(afterRecovery.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
+    });
+
+    it("tick enrich count tracks live sessions, not total records", async () => {
+      // Hand-mirrored copy of the tick's clamp(ceil(idle / 60), MIN, MAX)
+      // quota rule. The constants are not exported, so this copy is kept in
+      // sync manually -- change MIN/MAX/SWEEP_TICKS and this must change too.
+      function expectedIdleQuota(idleCount: number): number {
+        return Math.min(32, Math.max(4, Math.ceil(idleCount / 60)));
+      }
+
+      async function countTickEnrichCalls(
+        liveCount: number,
+        idleCount: number,
+      ): Promise<{ firstTick: number; secondTick: number; totalAfterSecondTick: number }> {
+        seedDashboardSessions(liveCount, idleCount);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        // Drain the boot tick: it enriches every included record once
+        // (O(total)) before any cache entry exists.
+        await service.list({ view: "dashboard" });
+
+        const spy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
+        await vi.advanceTimersByTimeAsync(2_000);
+        const firstTick = spy.mock.calls.length;
+
+        // A second tick must show the SAME bounded delta as the first.
+        // This is what catches a prune-off-the-enriched-subset bug: if the
+        // tick prunes dashboardCache down to only the ids it enriched this
+        // tick (instead of the enumerated+filtered set), every idle entry
+        // the tick skipped is silently evicted, so the very next tick sees
+        // a cache miss for all of them and re-enriches close to the whole
+        // idle set -- an O(total) regression a single-tick assertion can
+        // never observe.
+        spy.mockClear();
+        await vi.advanceTimersByTimeAsync(2_000);
+        const secondTick = spy.mock.calls.length;
+
+        const totalAfterSecondTick = (
+          await service.list({ view: "dashboard", includeCompleted: true })
+        ).length;
+
+        service.dispose();
+        return { firstTick, secondTick, totalAfterSecondTick };
+      }
+
+      const small = await countTickEnrichCalls(2, 10);
+      const large = await countTickEnrichCalls(2, 100);
+      const huge = await countTickEnrichCalls(2, 2_000);
+
+      // liveCount (2) + the bounded idle round-robin quota. Both idle
+      // counts here fall on the MIN floor of the quota rule, so cost stays
+      // flat as the idle set grows tenfold.
+      expect(small.firstTick).toBe(2 + expectedIdleQuota(10));
+      expect(large.firstTick).toBe(small.firstTick);
+
+      expect(small.secondTick).toBe(small.firstTick);
+      expect(large.secondTick).toBe(large.firstTick);
+
+      // Above the cap threshold the quota stops scaling: 2000 idle records
+      // cost the MAX of 32 per tick, not 2000/60. This is what pins the
+      // "tick cost is bounded by a constant, not by total record count"
+      // guarantee -- without it, raising MAX to an absurd value would leave
+      // the suite green while restoring the O(total) tick.
+      expect(expectedIdleQuota(2_000)).toBe(32);
+      expect(huge.firstTick).toBe(2 + 32);
+      expect(huge.secondTick).toBe(huge.firstTick);
+
+      // The prune must never drop an idle entry a tick skipped: list()
+      // still reports every seeded session after a second tick.
+      expect(small.totalAfterSecondTick).toBe(2 + 10);
+      expect(large.totalAfterSecondTick).toBe(2 + 100);
+      expect(huge.totalAfterSecondTick).toBe(2 + 2_000);
+    });
+
+    it("re-enriches a terminal session whose record changed without an eager refresh", async () => {
+      const sessions = seedDashboardSessions(1, 20);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard" });
+
+      // Mutate the record directly in the store, the same shape as the
+      // reconcileStaleStoppedSession/reconcileStaleErroredSession/
+      // writeServerErrorMarker bypasses: a status transition written without
+      // going through refreshDashboardCacheEntry.
+      const existing = sessions.get("done-20");
+      if (!existing) {
+        throw new Error("done-20 was not seeded");
+      }
+      sessions.set("done-20", {
+        ...existing,
+        status: "completed",
+        updatedAt: "2026-03-18T11:00:00.000Z",
+      });
+
+      // done-20 is last in insertion order and the idle cursor starts at 0,
+      // so the round-robin only covers done-1..done-4 this tick — any
+      // refresh of done-20 can only come from the record-change path.
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const listed = await service.list({ view: "dashboard", includeCompleted: true });
+      const view = listed.find((entry) => entry.id === "done-20");
+      expect(view).toMatchObject({ status: "completed", state: "stopped" });
       service.dispose();
     });
   });
@@ -20194,7 +20447,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a scheduled wake queued when delivery fails", async () => {
+    it("consumes a one-shot wake and keeps the message queued when delivery fails", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20222,16 +20475,16 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.scheduledWake).toEqual({
-        dueAt: "2026-03-18T10:05:05.000Z",
-        message: "Retry wake",
-      });
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.queuedMessages?.messages).toContain("Retry wake");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.failed")
+          .length,
+      ).toBe(1);
       service.dispose();
     });
 
@@ -20545,7 +20798,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a daily wake queued when delivery fails", async () => {
+    it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20574,14 +20827,194 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(1_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
+      expect(sessions.get("shp-1")?.queuedMessages?.messages.join("\n")).toContain(
+        "Retry daily wake",
+      );
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
       service.dispose();
+    });
+
+    it("logs one daily wake failure for a session that cannot receive", async () => {
+      const sessions = seedShepherdSession({
+        status: "completed",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("fires a far-past-due daily wake once and jumps to the next occurrence", async () => {
+      const sessions = seedShepherdSession({
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("does not let a session with a malformed dailyAt starve a later session's wake in the same tick", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      sessions.set("shp-2", {
+        id: "shp-2",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-2",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd-2",
+        tmuxSession: "shp-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        scheduledWake: {
+          dueAt: "2026-03-18T10:00:00.000Z",
+          message: "Due one-shot wake",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.monitor_failed",
+        ).length,
+      ).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-bad-daily")?.dailyWake).toEqual({
+        dailyAt: ["99:99"],
+        nextDueAt: "2026-03-19T10:05:01.000Z",
+        message: "Malformed daily wake",
+        stopCondition: "Stop condition",
+      });
+      expect(sessions.get("shp-2")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-2",
+        expect.stringContaining("Due one-shot wake"),
+        { agent: "claude", interrupt: false },
+      );
+      service.dispose();
+    });
+
+    it("bounds a malformed daily wake to one failure event per day, not a per-poll storm", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const serviceDay1 = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Day 1: claims the due occurrence and bumps nextDueAt 24h out.
+      await advanceSeconds(5);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      const nextDueAtAfterDay1 = sessions.get("shp-bad-daily")?.dailyWake?.nextDueAt;
+      expect(nextDueAtAfterDay1).toBe("2026-03-19T10:05:01.000Z");
+      serviceDay1.dispose();
+
+      // Cross the day boundary: jump the clock to when the bumped nextDueAt
+      // comes due, without replaying every intervening 1s poll (the disposed
+      // timer above has nothing pending to catch up). A fresh monitor on the
+      // new day must still emit exactly one more failure, not a storm.
+      logSpurEventMock.mockClear();
+      vi.setSystemTime(new Date(nextDueAtAfterDay1 ?? ""));
+      const serviceDay2 = new SessionService("/tmp/spur.yaml", nextDueAtAfterDay1);
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      serviceDay2.dispose();
     });
 
     it("requires a stop condition for daily wakes", async () => {

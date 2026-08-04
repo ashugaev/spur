@@ -2473,7 +2473,7 @@ projects:
       docsBlock?.selfDestruct?.enabled,
     ]).toEqual(["claude", "sonnet", true, true]);
     expect(docsBlock?.selfDestruct?.conditions).toBe(
-      "the docs review has been posted, or the PR changes no docs and no user-facing surface.",
+      "docs review posted, or PR changes no docs and no user-facing surface.",
     );
     expect([
       trigger.spawn.restrictWrites,
@@ -2484,11 +2484,11 @@ projects:
       [
         "Run /code-review {{url}} --comment.",
         "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."',
       ].join("\n"),
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
-      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+      "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
     );
   });
 
@@ -3702,6 +3702,82 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    });
+  });
+});
+
+describe("sessionGc", () => {
+  it("defaults to disabled with the documented values when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    });
+  });
+
+  it("parses sessionGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  enabled: true
+  olderThanDays: 14
+  intervalMinutes: 120
+  maxGroupsPerSweep: 5
+  statuses: [completed, stopped]
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: true,
+      olderThanDays: 14,
+      intervalMinutes: 120,
+      maxGroupsPerSweep: 5,
+      statuses: ["completed", "stopped"],
+    });
+  });
+
+  it("rejects a status outside the completed|killed|stopped allow-list", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  statuses: [running]
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/sessionGc\.statuses/);
+  });
+
+  it("ignores sessionGc in project mode", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  enabled: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
     });
   });
 });

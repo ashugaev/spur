@@ -27,6 +27,7 @@ const {
   discoverSessionPrBinding,
   normalizeSessionPrBinding,
   parseSessionPrBinding,
+  resolveRepoSlug,
   viewSessionPrState,
 } = await import("../../src/session-pr.js");
 const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
@@ -349,5 +350,91 @@ describe("session-pr", () => {
     });
 
     expect(ghMock).toHaveBeenCalledWith("/repo/api", "pr", "close", "42");
+  });
+});
+
+describe("listOpenPullRequests", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("lists open PRs by number and head branch", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        { number: 1, headRefName: "feature/a" },
+        { number: 2, headRefName: "feature/b" },
+      ]),
+    );
+
+    await expect(listOpenPullRequests("acme/api")).resolves.toEqual([
+      { number: 1, headRefName: "feature/a" },
+      { number: 2, headRefName: "feature/b" },
+    ]);
+    expect(ghMock).toHaveBeenCalledWith(
+      process.cwd(),
+      "pr",
+      "list",
+      "--repo",
+      "acme/api",
+      "--state",
+      "open",
+      "--json",
+      "number,headRefName",
+      "--limit",
+      "1000",
+    );
+  });
+
+  it("throws on invalid JSON", async () => {
+    ghMock.mockResolvedValueOnce("not json");
+    await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/invalid JSON/);
+  });
+
+  it("throws on a non-array payload", async () => {
+    ghMock.mockResolvedValueOnce(JSON.stringify({ number: 1 }));
+    await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/non-array/);
+  });
+
+  it("throws on an item with an unexpected shape", async () => {
+    ghMock.mockResolvedValueOnce(JSON.stringify([{ number: 1 }]));
+    await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/unexpected shape/);
+  });
+
+  it("throws when the result count saturates the limit", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        { number: 1, headRefName: "a" },
+        { number: 2, headRefName: "b" },
+      ]),
+    );
+    await expect(listOpenPullRequests("acme/api", 2)).rejects.toThrow(/unresolvable/);
+  });
+
+  it("propagates a gh call failure", async () => {
+    ghMock.mockRejectedValueOnce(new Error("gh not authenticated"));
+    await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/gh not authenticated/);
+  });
+});
+
+describe("resolveRepoSlug", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("resolves the nameWithOwner slug", async () => {
+    ghMock.mockResolvedValueOnce(JSON.stringify({ nameWithOwner: "acme/api" }));
+
+    await expect(resolveRepoSlug("/repo/api")).resolves.toBe("acme/api");
+    expect(ghMock).toHaveBeenCalledWith("/repo/api", "repo", "view", "--json", "nameWithOwner");
+  });
+
+  it("throws on invalid JSON", async () => {
+    ghMock.mockResolvedValueOnce("not json");
+    await expect(resolveRepoSlug("/repo/api")).rejects.toThrow(/invalid JSON/);
+  });
+
+  it("throws when nameWithOwner is missing", async () => {
+    ghMock.mockResolvedValueOnce(JSON.stringify({}));
+    await expect(resolveRepoSlug("/repo/api")).rejects.toThrow(/unexpected shape/);
   });
 });

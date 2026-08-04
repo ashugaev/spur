@@ -5,11 +5,13 @@ import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } fr
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
+  reviewSnapshotBaseline,
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
+  type ReviewSnapshot,
   type WorkItemEventData,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -392,7 +394,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         // a stale terminal snapshot from the PR the session used to be bound to
         // must never mute it. Unbound sessions are always polled (the only local
         // authority for "the current PR" is `session.pr`; see decision 2).
-        // The snapshot persists to disk and reloads at startup, so the skip is sticky.
+        // The snapshot persists to disk and reloads at startup, so the skip is
+        // sticky across restarts: a CLOSED PR later reopened won't be re-detected
+        // while the session stays bound to that PR number (no `reopened` lifecycle
+        // kind exists). MERGED is unconditionally terminal.
         const existing = snapshots.get(session.id);
         if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
@@ -475,21 +480,27 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          const previous = snapshots.get(session.id);
+          const previous = reviewSnapshotBaseline(
+            snapshots.get(session.id),
+            collected.data.prNumber,
+          );
           const next = collected.snapshot;
           const changed = [...next.values()].filter((signal) => {
             const prior = previous?.get(signal.key);
             return !prior || prior.text !== signal.text;
           });
 
-          snapshots.set(session.id, next);
+          // Built once, handed to both the in-memory map and the on-disk write so
+          // the two copies cannot desync.
+          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          snapshots.set(session.id, nextSnapshot);
           writeReviewSourceSnapshot(
             deps.dataDir,
             "github",
             deps.projectId,
             deps.sourceId,
             session.id,
-            next,
+            nextSnapshot,
           );
 
           if (restoreReplayRequested) {

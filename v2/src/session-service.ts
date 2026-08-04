@@ -207,6 +207,13 @@ import {
 } from "./session-artifacts.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
 import {
+  createGcDeps,
+  executeSessionGc,
+  planSessionGc,
+  resolveSessionCleanupContext,
+  type SessionCleanupContext,
+} from "./session-gc.js";
+import {
   deleteWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
@@ -363,7 +370,6 @@ import {
   isGitWorktree,
   readCurrentBranch,
   removeWorktree,
-  resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
@@ -419,6 +425,27 @@ const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Idle (non-live) dashboard entries can only drift from filesystem state
+// (workspaceExists, hasServiceIssues, workspace slots), never from agent
+// activity, so they don't need every-tick re-enrichment — a small bounded
+// round-robin corrects that drift without making the tick cost scale with
+// total record count. Some of that drift (workspaceExists, runtimeAlive)
+// gates real controls (Restore/Recover, the terminal button), so the quota
+// scales with the idle set instead of staying fixed: a fixed 4/tick sweeps
+// ~2 s worth of idle sessions in a couple of ticks at small fleet sizes but
+// takes ~13.5 min to sweep 1612 idle sessions, which is long enough for a
+// removed worktree to keep offering Restore. quota = ceil(idle / 60),
+// clamped to [MIN, MAX]: at 10 idle that's still the MIN floor of 4 (full
+// sweep in 3 ticks, ~6 s); at 1612 idle that's 27/tick (full sweep in 60
+// ticks, ~2 min); above ~1920 idle the MAX cap of 32 keeps per-tick cost
+// bounded at the price of a sweep slower than 2 min.
+const DASHBOARD_IDLE_REFRESH_MIN_PER_TICK = 4;
+const DASHBOARD_IDLE_REFRESH_MAX_PER_TICK = 32;
+// Divisor for the quota formula above: ceil(idle / this) ticks the quota to
+// target a full idle-set sweep in roughly this many ticks (60 ticks * the
+// 2 s DASHBOARD_CACHE_INTERVAL_MS tick == a ~2 min sweep) before the MIN/MAX
+// clamp takes over at the small and large ends of the fleet-size range.
+const DASHBOARD_IDLE_REFRESH_SWEEP_TICKS = 60;
 // Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
 // with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
 // showing the corrected needs_input state between live pane scans instead of
@@ -428,6 +455,11 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
+// Fixed tick cadence for the session GC sweep; the actual sweep frequency is
+// gated inside the tick by sessionGc.intervalMinutes (re-read from
+// this.config on every tick, so a config-only reload takes effect without a
+// daemon restart).
+const SESSION_GC_TICK_MS = 5 * 60_000;
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
@@ -604,10 +636,6 @@ type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
-interface SessionCleanupContext {
-  repoPath: string;
-  symlinks: string[];
-}
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -628,13 +656,6 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
-}
-
-function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
-  if (session.agent !== "cursor") {
-    return symlinks;
-  }
-  return [...symlinks, ".cursor/.workspace-trusted"];
 }
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
@@ -1855,11 +1876,26 @@ export class SessionService {
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  // Records the exact record object last handed to enrichDashboard for each
+  // id. Since listSessions() now returns the SAME object for an unchanged
+  // file (see metadata.ts), object-identity inequality against this map is an
+  // exact, free "did this session's record change since we last enriched it"
+  // check — no re-serialisation, no extra reads.
+  private readonly dashboardEnrichedRecords = new Map<string, SessionRecord>();
+  // Rotating cursor into the idle (non-live) id array for the bounded
+  // round-robin refresh; see DASHBOARD_IDLE_REFRESH_MIN_PER_TICK.
+  private dashboardIdleCursor = 0;
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
+  private sessionGcTimer: NodeJS.Timeout | null = null;
+  private sessionGcRunning = false;
+  // Construction time, not epoch 0: a daemon restart must not treat "never
+  // swept before" as "due immediately" — the first tick after a restart
+  // waits out a full intervalMinutes like every other tick.
+  private lastSessionGcSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -1933,6 +1969,7 @@ export class SessionService {
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
     this.startReaperLoop();
+    this.startSessionGcLoop();
   }
 
   /**
@@ -1968,6 +2005,10 @@ export class SessionService {
     if (this.reaperTimer) {
       clearInterval(this.reaperTimer);
       this.reaperTimer = null;
+    }
+    if (this.sessionGcTimer) {
+      clearInterval(this.sessionGcTimer);
+      this.sessionGcTimer = null;
     }
     this.stopDashboardCacheLoop();
   }
@@ -2011,11 +2052,8 @@ export class SessionService {
       // already have started its sidecar tmux pane (see restore() and
       // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
       // call for exactly this gap).
-      const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) =>
-          session.status === "running" ||
-          session.status === "spawning" ||
-          this.isInRestoreWarmup(session.id),
+      const liveSessions = listSessions(this.config.dataDir).filter((session) =>
+        this.isLiveSessionRecord(session),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -2173,37 +2211,42 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          try {
-            await this.send(session.id, { message: scheduledWake.message });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-              current.scheduledWake.message === scheduledWake.message
-            ) {
-              const { scheduledWake: _scheduledWake, ...base } = current;
-              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-              writeSession(this.config.dataDir, cleared);
+          // Claim the due occurrence BEFORE sending: clear scheduledWake and
+          // persist it first. A slow or failing send must not leave the wake
+          // due, or the `<= now` guard stays true and it re-fires every tick
+          // forever.
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message;
+          if (claimed) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            try {
+              await this.send(session.id, { message: scheduledWake.message });
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
             }
-            this.logEvent("session.wake.sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent scheduled wake to ${session.id}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
           }
         }
 
@@ -2419,54 +2462,96 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        try {
-          await this.send(session.id, {
-            message: this.formatDailyWakeMessage(
-              session.id,
-              dailyWake.message,
-              dailyWake.stopCondition,
-            ),
-          });
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          if (
-            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-            current.dailyWake.message === dailyWake.message &&
-            current.dailyWake.stopCondition === dailyWake.stopCondition
-          ) {
-            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-            const updated: SessionRecord = {
-              ...current,
+        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+        // next future scheduled time and persist it first. A slow or failing
+        // send must not leave the wake due, or the `<= now` guard stays true
+        // and it re-fires every tick forever.
+        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+        const dailyWakeClaimed =
+          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+        if (dailyWakeClaimed) {
+          // Resolving the next occurrence can throw on a malformed dailyAt
+          // (e.g. a stray "99:99" that slipped into an existing record
+          // before validation covered it). Scope this to the session,
+          // mirroring the auto-rotate catch above: one bad record must not
+          // escape the loop and starve every later session's wake
+          // processing this tick. Unlike a delivery failure, a malformed
+          // dailyAt has no next occurrence to advance to, so skip 24h ahead
+          // instead of clearing the schedule -- an absent dailyWake is
+          // invisible in the web UI and in `spur list`, and disabling a
+          // schedule is meant to be an explicit user action (cancelWake).
+          // This bounds the storm to one failure event per day and keeps
+          // message/stopCondition intact for repair via re-arm.
+          let nextDueAt: Date;
+          try {
+            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const skipped: SessionRecord = {
+              ...currentDailyWakeSession,
               dailyWake: {
                 ...dailyWake,
-                nextDueAt: nextDueAt.toISOString(),
+                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
               },
               updatedAt: nowIso(),
             };
-            writeSession(this.config.dataDir, updated);
+            writeSession(this.config.dataDir, skipped);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+            continue;
           }
-          this.logEvent("session.wake.daily_sent", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Sent daily wake to ${session.id}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
+          const updated: SessionRecord = {
+            ...currentDailyWakeSession,
+            dailyWake: {
+              ...dailyWake,
+              nextDueAt: nextDueAt.toISOString(),
             },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.daily_failed", {
-            level: "error",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Failed to send daily wake to ${session.id}: ${message}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, updated);
+          try {
+            await this.send(session.id, {
+              message: this.formatDailyWakeMessage(
+                session.id,
+                dailyWake.message,
+                dailyWake.stopCondition,
+              ),
+            });
+            this.logEvent("session.wake.daily_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent daily wake to ${session.id}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send daily wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          }
         }
       }
     } finally {
@@ -2979,19 +3064,84 @@ export class SessionService {
         }
         return session.status !== "killed" || session.retainInList === true;
       });
-      const liveIds = new Set(sessions.map((session) => session.id));
-      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
+      const includedIds = new Set(sessions.map((session) => session.id));
+
+      // A session is due for enrichment when it can still change on its own
+      // (isLiveSessionRecord), when its on-disk record object changed since
+      // we last enriched it (recordChanged is exact object-identity
+      // inequality, made free by listSessions' stat-gated parse cache — see
+      // metadata.ts), or when it has no cached view yet. Everything else is
+      // idle: its dashboard view can only drift from filesystem state, not
+      // agent activity, so it only needs the bounded round-robin below.
+      const due: SessionRecord[] = [];
+      const idle: SessionRecord[] = [];
+      for (const session of sessions) {
+        const recordChanged = this.dashboardEnrichedRecords.get(session.id) !== session;
+        if (
+          this.isLiveSessionRecord(session) ||
+          recordChanged ||
+          !this.dashboardCache.has(session.id)
+        ) {
+          due.push(session);
+        } else {
+          idle.push(session);
+        }
+      }
+
+      // Bounded round-robin over the idle set: clamp(ceil(idle / SWEEP_TICKS),
+      // MIN, MAX) least-recently-visited entries per tick via a rotating
+      // cursor (O(1), no sort), so filesystem-only drift still eventually
+      // surfaces. The quota scales with the idle set to hold the sweep period
+      // near SWEEP_TICKS, and the MAX cap is what keeps the tick's cost
+      // bounded by a constant rather than by the idle set's size.
+      if (idle.length > 0) {
+        const targetQuota = Math.ceil(idle.length / DASHBOARD_IDLE_REFRESH_SWEEP_TICKS);
+        const clampedQuota = Math.min(
+          DASHBOARD_IDLE_REFRESH_MAX_PER_TICK,
+          Math.max(DASHBOARD_IDLE_REFRESH_MIN_PER_TICK, targetQuota),
+        );
+        const quota = Math.min(clampedQuota, idle.length);
+        for (let offset = 0; offset < quota; offset += 1) {
+          const roundRobinSession = idle[(this.dashboardIdleCursor + offset) % idle.length];
+          if (roundRobinSession) {
+            due.push(roundRobinSession);
+          }
+        }
+        this.dashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
+      }
+
+      const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
       for (const view of enriched) {
         this.dashboardCache.set(view.id, view);
       }
+      // Store the pre-enrich listSessions reference, NOT the classified
+      // session enrichDashboard derived. This map is only ever compared by
+      // identity against the next tick's listSessions output, so it has to
+      // hold objects from that same parse cache; a classified session is a
+      // fresh object and would compare unequal every tick, making every
+      // record look changed. Reconcile-driven disk writes are picked up by
+      // the parse cache's inode check on the next listSessions, not from
+      // anything stored here.
+      for (const session of due) {
+        this.dashboardEnrichedRecords.set(session.id, session);
+      }
+
+      // Prune off the enumerated+filtered set, never off the enriched
+      // subset, so an idle entry that was seeded once and then never due
+      // again is not evicted just because this tick skipped it.
       for (const id of this.dashboardCache.keys()) {
-        if (!liveIds.has(id)) {
+        if (!includedIds.has(id)) {
           this.dashboardCache.delete(id);
         }
       }
       for (const id of this.sessionProjectCache.keys()) {
-        if (!liveIds.has(id)) {
+        if (!includedIds.has(id)) {
           this.sessionProjectCache.delete(id);
+        }
+      }
+      for (const id of this.dashboardEnrichedRecords.keys()) {
+        if (!includedIds.has(id)) {
+          this.dashboardEnrichedRecords.delete(id);
         }
       }
     } catch (error) {
@@ -3102,6 +3252,66 @@ export class SessionService {
       });
     } finally {
       this.reaperRunning = false;
+    }
+  }
+
+  private startSessionGcLoop(): void {
+    if (this.sessionGcTimer) {
+      return;
+    }
+    this.sessionGcTimer = setInterval(() => {
+      void this.runSessionGcSweep();
+    }, SESSION_GC_TICK_MS);
+    this.sessionGcTimer.unref();
+  }
+
+  // Config-gated daemon sweep: off unless sessionGc.enabled is true, and both
+  // that flag and intervalMinutes are re-read from this.config on every tick
+  // (not cached at construction), so a config reload takes effect on the next
+  // tick without a daemon restart. lastSessionGcSweepAt seeds from
+  // construction time, so a restart never fires an immediate sweep.
+  private async runSessionGcSweep(): Promise<void> {
+    if (this.sessionGcRunning) {
+      return;
+    }
+    const gcConfig = this.config.sessionGc;
+    if (!gcConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastSessionGcSweepAt < gcConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.sessionGcRunning = true;
+    this.lastSessionGcSweepAt = Date.now();
+    try {
+      const plan = planSessionGc({
+        sessions: listSessions(this.config.dataDir),
+        worktreeDir: this.config.worktreeDir,
+        now: new Date(),
+        olderThanDays: gcConfig.olderThanDays,
+        statuses: gcConfig.statuses,
+        limit: gcConfig.maxGroupsPerSweep,
+        pathExists: (path) => workspaceExists(path),
+      });
+      // sizes: true so the sweep can report freed bytes; the du cost is bounded
+      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      const report = await executeSessionGc(plan, createGcDeps(this.config), {
+        dryRun: false,
+        sizes: true,
+      });
+      this.logEvent("session.gc.completed", {
+        level: "info",
+        message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
+        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.gc.failed", {
+        level: "warn",
+        message: `Session GC sweep failed: ${message}`,
+      });
+    } finally {
+      this.sessionGcRunning = false;
     }
   }
 
@@ -3548,13 +3758,6 @@ export class SessionService {
     }
 
     return localProject ?? daemonProject;
-  }
-
-  private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
-    const resolvedRepoPath = tryRealpath(repoPath);
-    return Object.values(this.config.projects).find(
-      (project) => tryRealpath(project.path) === resolvedRepoPath,
-    );
   }
 
   private releaseSidecarPortFromSession(
@@ -4267,26 +4470,7 @@ export class SessionService {
   }
 
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
-    const currentProject = this.config.projects[session.project];
-    if (currentProject) {
-      return {
-        repoPath: currentProject.path,
-        symlinks: cleanupIgnoredPaths(session, currentProject.symlinks),
-      };
-    }
-    if (!session.worktree || !session.worktreePath) {
-      throw new Error(`Unknown project: ${session.project}`);
-    }
-    const repoPath = await resolveRepoPathFromWorktree(session.worktreePath);
-    if (!repoPath) {
-      throw new Error(
-        `Cannot resolve repository root for ${session.id} after project rename: ${session.worktreePath}`,
-      );
-    }
-    return {
-      repoPath,
-      symlinks: cleanupIgnoredPaths(session, this.findProjectByRepoPath(repoPath)?.symlinks ?? []),
-    };
+    return resolveSessionCleanupContext(this.config.projects, session);
   }
 
   private requireSessionMemorySession(sessionId: string, key?: string): void {
@@ -9795,6 +9979,19 @@ export class SessionService {
     if (until !== undefined && Date.now() < until) return true;
     this.restoreWarmupUntil.delete(sessionId);
     return false;
+  }
+
+  // Same "can this session's dashboard view still change from agent
+  // activity" predicate as reapDeadSessionSidecars' inline filter. The
+  // short-circuit order matters: isInRestoreWarmup mutates (it clears an
+  // expired warmup entry), so running/spawning sessions must never reach it,
+  // exactly as the sidecar reaper already relies on.
+  private isLiveSessionRecord(session: Pick<SessionRecord, "id" | "status">): boolean {
+    return (
+      session.status === "running" ||
+      session.status === "spawning" ||
+      this.isInRestoreWarmup(session.id)
+    );
   }
 
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
