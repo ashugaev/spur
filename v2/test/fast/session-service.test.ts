@@ -100,6 +100,11 @@ const killSidecarTmuxMock = vi.fn();
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
+const getFleetSessionRssBytesMock = vi
+  .fn<() => Promise<Map<string, number>>>()
+  .mockResolvedValue(new Map());
+const readHostMemoryMock =
+  vi.fn<() => { totalBytes: number; availableBytes: number; swapFreeBytes: number } | null>();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
@@ -442,6 +447,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   listTmuxSessionNames: listTmuxSessionNamesMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: getTmuxPanePidMock,
+  getFleetSessionRssBytes: getFleetSessionRssBytesMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
   setTmuxSocketName: setTmuxSocketNameMock,
@@ -451,6 +457,10 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
+}));
+
+vi.mock("../../src/host-memory.js", () => ({
+  readHostMemory: readHostMemoryMock,
 }));
 
 vi.mock("../../src/session-slots.js", () => ({
@@ -560,6 +570,13 @@ function baseConfig() {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    admission: {
+      enabled: true,
+      maxLiveSessions: 1000,
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: { enforce: false, minAvailableBytes: 1_073_741_824, minFreeSwapBytes: 0 },
     },
     projects: {
       api: {
@@ -1030,6 +1047,8 @@ describe("SessionService", () => {
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
+    getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
+    readHostMemoryMock.mockReset().mockReturnValue(null);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
@@ -6794,6 +6813,296 @@ describe("SessionService", () => {
         level: "warn",
       }),
     );
+  });
+
+  it("restoreRebootedSessions keeps iterating and logs reboot.restore.failed after a denied restore (no narrowed catch)", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          restoreAfterReboot: true,
+          symlinks: [],
+          sidecars: {},
+          sources: {},
+          triggers: {},
+        },
+      },
+    });
+    const service = await createDisposedSessionService();
+    const { SessionAdmissionDeniedError } = await loadSessionServiceModule();
+    const restoreSpy = vi
+      .spyOn(service, "restore")
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(
+        new SessionAdmissionDeniedError(
+          'Cannot restore session for project "api": at the global cap of 1 live sessions (1 live now). Stop one of: api-1 (api).',
+        ),
+      );
+
+    await service.restoreRebootedSessions([
+      { id: "api-1", project: "api" },
+      { id: "api-2", project: "api" },
+    ]);
+
+    expect(restoreSpy).toHaveBeenCalledTimes(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.reboot.restore.failed",
+        sessionId: "api-2",
+        level: "warn",
+      }),
+    );
+  });
+
+  describe("admission control", () => {
+    function withAdmission(overrides: Partial<AppConfig["admission"]> = {}) {
+      const config = baseConfig();
+      return {
+        ...config,
+        admission: { ...config.admission, ...overrides },
+      };
+    }
+
+    it("rejects spawn over the global cap, naming the cap, the live count, and a candidate", async () => {
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 2 }));
+      listSessionsMock.mockReturnValue([
+        sessionRecord({ id: "api-1", updatedAt: "2026-03-18T09:00:00.000Z" }),
+        sessionRecord({ id: "api-2", updatedAt: "2026-03-18T09:30:00.000Z" }),
+      ]);
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      let caught: unknown;
+      try {
+        await service.spawn({ project: "api", prompt: "hello" });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(SessionAdmissionDeniedError);
+      expect((caught as InstanceType<typeof SessionAdmissionDeniedError>).statusCode).toBe(429);
+      const message = (caught as Error).message;
+      expect(message).toContain("2");
+      expect(message).toMatch(/api-1 \(api\)/);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    });
+
+    it("spawns normally under the cap", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 2 }));
+      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-9" })]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(result.id).toBe("api-1");
+      expect(writeSessionMock).toHaveBeenCalled();
+    });
+
+    it("counts a status:running, state:waiting session toward the cap", async () => {
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
+      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", status: "running" })]);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+    });
+
+    it("counts a session inside its restore warmup window exactly once though its on-disk status is stopped", async () => {
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
+      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", status: "stopped" })]);
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        spawn: (typeof SessionService.prototype)["spawn"];
+        restoreWarmupUntil: Map<string, number>;
+        dispose(): void;
+      };
+      service.restoreWarmupUntil.set("api-1", Date.now() + 30_000);
+
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+    });
+
+    it("restore() over cap throws and does not set restoreWarmupUntil or start MCP sidecars", async () => {
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "manual_pause",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      // The one tmuxSessionExists probe enrich() makes before the admission
+      // gate: not-alive, so isRestorableSession passes and the denial below
+      // is provably the admission gate, not "not restorable".
+      tmuxSessionExistsMock.mockResolvedValueOnce(false);
+      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-existing" })]);
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        restore: (typeof SessionService.prototype)["restore"];
+        restoreWarmupUntil: Map<string, number>;
+        dispose(): void;
+      };
+
+      await expect(service.restore("api-1")).rejects.toThrow(SessionAdmissionDeniedError);
+
+      expect(service.restoreWarmupUntil.has("api-1")).toBe(false);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("projects.<id>.maxLiveSessions caps that project while a different project under the global cap still spawns", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        admission: { ...config.admission, maxLiveSessions: 10 },
+        projects: {
+          ...config.projects,
+          api: { ...config.projects.api, maxLiveSessions: 1 },
+          web: {
+            path: "/repo/web",
+            defaultBranch: "main",
+            sessionPrefix: "web",
+            worktree: true,
+            restoreAfterReboot: false,
+            symlinks: [],
+            sidecars: {},
+            sources: {},
+            backlog: {},
+            triggers: {},
+          },
+        },
+      });
+      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", project: "api" })]);
+      reserveNextSessionIdMock.mockResolvedValue("web-1");
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+      const webResult = await service.spawn({ project: "web", prompt: "hello" });
+      expect(webResult.id).toBe("web-1");
+    });
+
+    it("admission.enabled: false admits spawn and restore regardless of live count", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(withAdmission({ enabled: false, maxLiveSessions: 1 }));
+      listSessionsMock.mockReturnValue([
+        sessionRecord({ id: "api-9" }),
+        sessionRecord({ id: "api-10" }),
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+      expect(result.id).toBe("api-1");
+    });
+
+    it("memory guard enforce:false + crossed logs session.admission.memory_guard and admits", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        withAdmission({
+          memoryGuard: {
+            enforce: false,
+            minAvailableBytes: Number.MAX_SAFE_INTEGER,
+            minFreeSwapBytes: 0,
+          },
+        }),
+      );
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 100 * 1024,
+        swapFreeBytes: 0,
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(result.id).toBe("api-1");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.admission.memory_guard", level: "warn" }),
+      );
+    });
+
+    it("memory guard enforce:true + crossed rejects both spawn() and restore()", async () => {
+      loadConfigMock.mockReturnValue(
+        withAdmission({
+          memoryGuard: {
+            enforce: true,
+            minAvailableBytes: Number.MAX_SAFE_INTEGER,
+            minFreeSwapBytes: 0,
+          },
+        }),
+      );
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 100 * 1024,
+        swapFreeBytes: 0,
+      });
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "manual_pause",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValueOnce(false);
+
+      await expect(service.restore("api-1")).rejects.toThrow(SessionAdmissionDeniedError);
+    });
   });
 
   it("keeps a spawning session alive during boot reconcile before tmux exists", async () => {

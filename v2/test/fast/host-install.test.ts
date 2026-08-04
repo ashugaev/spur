@@ -14,6 +14,7 @@ const {
   platformMock,
   probeMock,
   probeInfoMock,
+  probeHeadroomMock,
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
@@ -22,6 +23,7 @@ const {
   platformMock: vi.fn(),
   probeMock: vi.fn(),
   probeInfoMock: vi.fn(),
+  probeHeadroomMock: vi.fn(),
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
@@ -49,7 +51,12 @@ vi.mock("node:fs", async () => {
 
 vi.mock("../../src/update-health.js", async () => {
   const actual = await vi.importActual<typeof UpdateHealth>("../../src/update-health.js");
-  return { ...actual, probe: probeMock, probeInfo: probeInfoMock };
+  return {
+    ...actual,
+    probe: probeMock,
+    probeInfo: probeInfoMock,
+    probeHeadroom: probeHeadroomMock,
+  };
 });
 
 vi.mock("../../src/port-probe.js", async () => {
@@ -229,6 +236,8 @@ beforeEach(() => {
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
   probeInfoMock.mockReset();
   probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+  probeHeadroomMock.mockReset();
+  probeHeadroomMock.mockResolvedValue({ ok: false });
   isHostPortFreeMock.mockReset();
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
@@ -779,6 +788,79 @@ describe("checkServiceHealth", () => {
     expect(result.checks.find((check) => check.id === "daemon-reachable")).toMatchObject({
       ok: true,
       severity: "info",
+    });
+  });
+
+  describe("session-headroom", () => {
+    it("reports ok:true severity:warn when reachable with room", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 3, byProject: { demo: 3 } },
+          projectedRoom: 7,
+          sessions: [{ id: "demo-1", project: "demo", status: "running", rssBytes: 0 }],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: true, severity: "warn" });
+      expect(check?.detail).toContain("3/10");
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("reports ok:false severity:warn with candidate ids in fix when reachable and full", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 2,
+            source: "config",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 2, byProject: { demo: 2 } },
+          projectedRoom: 0,
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 0 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 0 },
+          ],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain("demo-1");
+      expect(check?.fix).toContain("demo-2");
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("emits no session-headroom check when the daemon is unreachable", async () => {
+      probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+      probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      expect(result.checks.find((entry) => entry.id === "session-headroom")).toBeUndefined();
+      expect(probeHeadroomMock).not.toHaveBeenCalled();
+      expect(hasErrorSeverity(result.checks)).toBe(false);
     });
   });
 });

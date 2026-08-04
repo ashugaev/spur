@@ -57,7 +57,7 @@ function installFleetTmuxMock(): void {
       return { stdout: lines.join("\n"), stderr: "" };
     }
     if (file === "ps") {
-      const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} node agent`);
+      const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
       return { stdout: psLines.join("\n"), stderr: "" };
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -139,6 +139,40 @@ describe("runtime-tmux shared probe cache", () => {
     expect(warmPaneDead).toBe(coldPaneDead);
     expect(warmActivity).toEqual(coldActivity);
     expect(warmProcessAlive).toBe(coldProcessAlive);
+  });
+
+  it("attributes a sidecar pane's rss to its owning session id, summed with the agent pane, at one ps fork", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        const lines = sessionNames.map((name) => `${name} 1700000000`);
+        return { stdout: lines.join("\n"), stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        const lines = sessionNames.map((name, index) => fleetPaneLine(name, index));
+        // sidecarTmuxSession naming (`${sessionId}--${sidecarName}`): a
+        // playwright MCP pane owned by api-3, on its own pid/tty.
+        lines.push("api-3--playwright 1 1 0 9000 /dev/pts/900");
+        return { stdout: lines.join("\n"), stderr: "" };
+      }
+      if (file === "ps") {
+        const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
+        psLines.push("9000 pts/900 20480 node playwright-mcp");
+        return { stdout: psLines.join("\n"), stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetSessionRssBytes } = await import("../../src/runtime-tmux.js");
+
+    const results = await Promise.all(
+      Array.from({ length: SESSION_COUNT }, () => getFleetSessionRssBytes()),
+    );
+
+    expect(callsFor((file) => file === "ps")).toBe(1);
+    for (const rssBySessionId of results) {
+      expect(rssBySessionId.get("api-3")).toBe((51_200 + 20_480) * 1024);
+      expect(rssBySessionId.get("api-0")).toBe(51_200 * 1024);
+    }
   });
 
   it("caches capture-pane per (session, lines) so a repeat scan within the TTL forks nothing extra", async () => {
@@ -227,7 +261,7 @@ describe("runtime-tmux shared probe cache", () => {
         return { stdout: rows.join("\n"), stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "222 pts/51 agent-on-split-pane --flag", stderr: "" };
+        return { stdout: "222 pts/51 1024 agent-on-split-pane --flag", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });

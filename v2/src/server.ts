@@ -34,6 +34,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  SessionAdmissionDeniedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
@@ -601,6 +602,11 @@ export async function startServer(
 
       if (method === "GET" && path === "/info") {
         sendJson(response, 200, service.info());
+        return;
+      }
+
+      if (method === "GET" && path === "/headroom") {
+        sendJson(response, 200, await service.getHeadroom());
         return;
       }
 
@@ -1388,6 +1394,7 @@ export async function startServer(
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError
       ) {
@@ -1499,6 +1506,28 @@ export async function startServer(
     logEvent("daemon.startup.reconcile.failed", {
       level: "warn",
       message: `Reconcile at boot failed: ${message}`,
+    });
+  }
+
+  try {
+    const headroom = await service.getHeadroom();
+    const { enabled } = service.config.admission;
+    const atOrOverCap = headroom.live.count >= headroom.cap.global;
+    logEvent("daemon.admission.startup", {
+      level: atOrOverCap ? "warn" : "info",
+      message: `Admission at boot: enabled=${enabled}, cap=${headroom.cap.global} (${headroom.cap.source}), live=${headroom.live.count}`,
+      details: {
+        enabled,
+        cap: headroom.cap.global,
+        capSource: headroom.cap.source,
+        live: headroom.live.count,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.admission.startup", {
+      level: "warn",
+      message: `Admission headroom check at boot failed: ${message}`,
     });
   }
 

@@ -70,12 +70,142 @@ describe("startServer", () => {
 
     expect(readEventLog(dataDir).map((entry) => entry.event)).toEqual([
       "daemon.startup.reconciled",
+      "daemon.admission.startup",
       "daemon.started",
       "http.route.not_found",
       "daemon.stopping",
       "daemon.stopped",
     ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("GET /headroom returns cap, projectCaps, live, projectedRoom, per-session rss, memory, and guard", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const response = await fetch(`http://127.0.0.1:${port}/headroom`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        cap: { global: number; source: string; perSessionBytes: number; reserveFraction: number };
+        projectCaps: Record<string, number>;
+        live: { count: number; byProject: Record<string, number> };
+        projectedRoom: number;
+        sessions: Array<{ id: string; project: string; status: string; rssBytes: number }>;
+        memory: unknown;
+        guard: {
+          enforce: boolean;
+          minAvailableBytes: number;
+          minFreeSwapBytes: number;
+          crossed: boolean;
+        };
+      };
+      expect(body.cap.global).toBeGreaterThan(0);
+      expect(["config", "derived"]).toContain(body.cap.source);
+      expect(body.live).toEqual({ count: 1, byProject: { demo: 1 } });
+      expect(body.projectedRoom).toBe(body.cap.global - 1);
+      expect(body.sessions).toEqual([
+        { id: "demo-1", project: "demo", status: "running", rssBytes: expect.any(Number) },
+      ]);
+      expect(typeof body.guard.enforce).toBe("boolean");
+      expect(typeof body.guard.crossed).toBe("boolean");
+      expect(body.memory === null || typeof body.memory === "object").toBe(true);
+      expect(body.projectCaps).toEqual({});
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+    const originalSpawn = SessionService.prototype.spawn;
+    SessionService.prototype.spawn = async function mockSpawn() {
+      throw new SessionAdmissionDeniedError(
+        'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
+      );
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "hello" }),
+      });
+      expect(response.status).toBe(429);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("2");
+      expect(body.error).toContain("cap");
+    } finally {
+      SessionService.prototype.spawn = originalSpawn;
+      await server.stop();
+    }
   });
 
   it("force closes active requests during stop", async () => {
