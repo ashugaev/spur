@@ -6055,6 +6055,88 @@ describe("SessionService", () => {
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 
+  describe("session.state.classified dedupe", () => {
+    function classifiedCalls() {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+      );
+    }
+
+    it("emits exactly one classified event across 10 consecutive get() calls with unchanged mocked status", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      for (let i = 0; i < 10; i += 1) {
+        await service.get("api-1");
+      }
+
+      expect(classifiedCalls()).toHaveLength(1);
+    });
+
+    it("does not re-emit classified when only the detail suffix changes, not the state", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: new Array(50).fill(0),
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(classifiedCalls()).toHaveLength(1);
+      expect(classifiedCalls()[0]?.[1].message).toContain("records=50");
+
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: new Array(17).fill(0),
+        },
+      });
+      await service.get("api-1");
+
+      // Still just the one classified event from the first call: the detail
+      // changed (records=50 -> records=17) but the state stayed "waiting".
+      expect(classifiedCalls()).toHaveLength(1);
+    });
+
+    it("emits exactly one additional classified and one transition on a waiting -> working change", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(classifiedCalls()).toHaveLength(1);
+
+      // Past STATE_HOLD_MS so stabilizeState doesn't hold the prior "waiting"
+      // over the new classification. A plain clock jump (not
+      // advanceTimersByTimeAsync) so it doesn't also fire the service's own
+      // background ticks, which would add unrelated classify/transition calls.
+      vi.setSystemTime(new Date("2026-03-18T10:05:05.000Z"));
+      mockClaudeSessionStatus("working", "busy");
+      const result = await service.get("api-1");
+
+      expect(result.state).toBe("working");
+      expect(classifiedCalls()).toHaveLength(2);
+      expect(classifiedCalls()[1]?.[1].message).toContain("State: working");
+
+      const transitionCalls = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.state.transition" && entry.sessionId === "api-1",
+      );
+      expect(transitionCalls).toHaveLength(1);
+    });
+  });
+
   it("delivers a queued message to a codex_stale session, since typing is what un-wedges a hung turn", async () => {
     // Deliberate, not an accident of the activity switch. CODEX_HUNG_AFTER_TOOLS_MS
     // is documented as being set well above any realistic single inference
