@@ -122,6 +122,9 @@ interface GhUsageWindow {
   /** GraphQL points spent in the window, as billed by GitHub's `rateLimit.cost`. */
   graphqlCost: number;
   bySubcommand: Map<string, number>;
+  pendingGraphql: number;
+  closedAtMs: number | null;
+  emitted: boolean;
 }
 
 export type GhPollCycleKind = "attention" | "github_source";
@@ -148,6 +151,13 @@ let minuteWindow: GhUsageWindow | null = null;
 let hourWindow: GhUsageWindow | null = null;
 let minutePauseEmittedUntilMs = 0;
 let hourPauseEmittedUntilMs = 0;
+interface GhGraphqlAttribution {
+  startedAt: number;
+  minute: GhUsageWindow;
+  hour: GhUsageWindow;
+  cycle: GhPollCycleContext | undefined;
+}
+const pendingGraphqlAttributions: GhGraphqlAttribution[] = [];
 let budget: GraphqlBudgetLedger = {
   remaining: null,
   resetAtMs: null,
@@ -164,6 +174,7 @@ export function _resetGhUsageForTests(): void {
   hourWindow = null;
   minutePauseEmittedUntilMs = 0;
   hourPauseEmittedUntilMs = 0;
+  pendingGraphqlAttributions.length = 0;
   budget = {
     remaining: null,
     resetAtMs: null,
@@ -256,8 +267,16 @@ function subcommandKey(args: string[]): string {
   return `${first} ${second}`;
 }
 
-function countSubcommand(window: GhUsageWindow, key: string): void {
+function countSubcommand(window: { bySubcommand: Map<string, number> }, key: string): void {
   window.bySubcommand.set(key, (window.bySubcommand.get(key) ?? 0) + 1);
+}
+
+function closeUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs: number): void {
+  window.closedAtMs ??= nowMs;
+  if (!window.emitted && window.pendingGraphql === 0) {
+    emitUsageWindow(window, label, window.closedAtMs);
+    window.emitted = true;
+  }
 }
 
 /** Runs one daemon poll boundary and emits its exact gh cost, including zero. */
@@ -326,12 +345,12 @@ function emitUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs:
  */
 function flushUsageWindows(nowMs: number): void {
   if (minuteWindow && nowMs >= minutePauseEmittedUntilMs) {
-    emitUsageWindow(minuteWindow, "minute", nowMs);
+    closeUsageWindow(minuteWindow, "minute", nowMs);
     minutePauseEmittedUntilMs = minuteWindow.startedAt + GH_USAGE_MINUTE_MS;
     minuteWindow = null;
   }
   if (hourWindow && nowMs >= hourPauseEmittedUntilMs) {
-    emitUsageWindow(hourWindow, "hour", nowMs);
+    closeUsageWindow(hourWindow, "hour", nowMs);
     hourPauseEmittedUntilMs = hourWindow.startedAt + GH_USAGE_HOUR_MS;
     hourWindow = null;
   }
@@ -342,19 +361,43 @@ function flushUsageWindows(nowMs: number): void {
  * Cost, not calls, is what the 5000/hr ceiling counts.
  */
 export function noteGraphqlCost(points: number, nowMs: number = Date.now()): void {
-  if (!Number.isFinite(points) || points <= 0) {
+  const cycle = ghPollCycleStorage.getStore();
+  let attributionIndex = -1;
+  let attributionDistance = Number.POSITIVE_INFINITY;
+  for (const [index, candidate] of pendingGraphqlAttributions.entries()) {
+    if (candidate.cycle !== cycle) continue;
+    const distance = Math.abs(candidate.startedAt - nowMs);
+    if (distance < attributionDistance) {
+      attributionIndex = index;
+      attributionDistance = distance;
+    }
+  }
+  const attribution =
+    attributionIndex >= 0 ? pendingGraphqlAttributions.splice(attributionIndex, 1)[0] : undefined;
+  if (attribution) {
+    attribution.minute.pendingGraphql -= 1;
+    attribution.hour.pendingGraphql -= 1;
+    if (Number.isFinite(points) && points > 0) {
+      attribution.minute.graphqlCost += points;
+      attribution.hour.graphqlCost += points;
+      if (attribution.cycle) attribution.cycle.graphqlCost += points;
+    }
+    if (attribution.minute.closedAtMs !== null) {
+      closeUsageWindow(attribution.minute, "minute", attribution.minute.closedAtMs);
+    }
+    if (attribution.hour.closedAtMs !== null) {
+      closeUsageWindow(attribution.hour, "hour", attribution.hour.closedAtMs);
+    }
     return;
   }
-  if (minuteWindow && nowMs - minuteWindow.startedAt < GH_USAGE_MINUTE_MS) {
+  if (!Number.isFinite(points) || points <= 0) return;
+  if (minuteWindow) {
     minuteWindow.graphqlCost += points;
   }
-  if (hourWindow && nowMs - hourWindow.startedAt < GH_USAGE_HOUR_MS) {
+  if (hourWindow) {
     hourWindow.graphqlCost += points;
   }
-  const cycle = ghPollCycleStorage.getStore();
-  if (cycle) {
-    cycle.graphqlCost += points;
-  }
+  if (cycle) cycle.graphqlCost += points;
 }
 
 /**
@@ -370,11 +413,11 @@ export function noteGhInvocation(args: string[], nowMs: number = Date.now()): vo
     countSubcommand(cycle, key);
   }
   if (minuteWindow && nowMs - minuteWindow.startedAt >= GH_USAGE_MINUTE_MS) {
-    emitUsageWindow(minuteWindow, "minute", nowMs);
+    closeUsageWindow(minuteWindow, "minute", nowMs);
     minuteWindow = null;
   }
   if (hourWindow && nowMs - hourWindow.startedAt >= GH_USAGE_HOUR_MS) {
-    emitUsageWindow(hourWindow, "hour", nowMs);
+    closeUsageWindow(hourWindow, "hour", nowMs);
     hourWindow = null;
   }
   if (!minuteWindow) {
@@ -383,6 +426,9 @@ export function noteGhInvocation(args: string[], nowMs: number = Date.now()): vo
       calls: 0,
       graphqlCost: 0,
       bySubcommand: new Map(),
+      pendingGraphql: 0,
+      closedAtMs: null,
+      emitted: false,
     };
   }
   if (!hourWindow) {
@@ -391,12 +437,25 @@ export function noteGhInvocation(args: string[], nowMs: number = Date.now()): vo
       calls: 0,
       graphqlCost: 0,
       bySubcommand: new Map(),
+      pendingGraphql: 0,
+      closedAtMs: null,
+      emitted: false,
     };
   }
   minuteWindow.calls += 1;
   hourWindow.calls += 1;
   countSubcommand(minuteWindow, key);
   countSubcommand(hourWindow, key);
+  if (key === "api graphql") {
+    minuteWindow.pendingGraphql += 1;
+    hourWindow.pendingGraphql += 1;
+    pendingGraphqlAttributions.push({
+      startedAt: nowMs,
+      minute: minuteWindow,
+      hour: hourWindow,
+      cycle,
+    });
+  }
 }
 
 /**
@@ -435,11 +494,17 @@ export function recordGraphqlBudgetFromEnvelope(
   envelope: unknown,
   observedAtMs: number = Date.now(),
 ): void {
-  if (!isRecord(envelope) || !isRecord(envelope["data"])) return;
+  if (!isRecord(envelope) || !isRecord(envelope["data"])) {
+    noteGraphqlCost(0, observedAtMs);
+    return;
+  }
   const rateLimit = envelope["data"]["rateLimit"];
-  if (!isRecord(rateLimit)) return;
+  if (!isRecord(rateLimit)) {
+    noteGraphqlCost(0, observedAtMs);
+    return;
+  }
   const cost = rateLimit["cost"];
-  if (typeof cost === "number") noteGraphqlCost(cost, observedAtMs);
+  noteGraphqlCost(typeof cost === "number" ? cost : 0, observedAtMs);
   const remaining = rateLimit["remaining"];
   if (typeof remaining !== "number") return;
   const resetAt = rateLimit["resetAt"];

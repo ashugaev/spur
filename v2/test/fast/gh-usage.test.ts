@@ -60,7 +60,9 @@ describe("gh usage accounting", () => {
 
   it("emits exactly one minute event per window with the per-subcommand breakdown", () => {
     noteGhInvocation(["api", "graphql", "-f", "query=..."], T0);
+    noteGraphqlCost(0, T0);
     noteGhInvocation(["api", "graphql", "-f", "query=..."], T0 + 1_000);
+    noteGraphqlCost(0, T0 + 1_000);
     noteGhInvocation(["pr", "view", "42"], T0 + 2_000);
 
     // Nothing emitted while the window is still open.
@@ -92,7 +94,9 @@ describe("gh usage accounting", () => {
 
   it("rolls up one hour event per hour", () => {
     noteGhInvocation(["api", "graphql"], T0);
+    noteGraphqlCost(0, T0);
     noteGhInvocation(["api", "graphql"], T0 + 30 * MINUTE);
+    noteGraphqlCost(0, T0 + 30 * MINUTE);
     expect(usageEvents("hour")).toHaveLength(0);
 
     noteGhInvocation(["pr", "list"], T0 + HOUR + 1_000);
@@ -118,6 +122,7 @@ describe("gh usage accounting", () => {
     }
     noteGhInvocation(["search", "prs", "--json", "number"], T0 + 30);
     noteGhInvocation(["api", "graphql", "-f", "query=..."], T0 + 40);
+    noteGraphqlCost(0, T0 + 40);
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
 
     const bySubcommand = usageEvents("minute")[0]?.["bySubcommand"] as Record<string, number>;
@@ -126,6 +131,7 @@ describe("gh usage accounting", () => {
 
   it("classifies hostname-qualified GraphQL calls separately from REST", () => {
     noteGhInvocation(["api", "--hostname", "github.corp.example", "graphql"], T0);
+    noteGraphqlCost(0, T0);
     noteGhInvocation(["api", "--hostname", "github.corp.example", "repos/o/r"], T0 + 1);
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
 
@@ -154,6 +160,20 @@ describe("gh usage accounting", () => {
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
     expect(usageEvents("minute")[0]).toMatchObject({ calls: 3, graphqlCost: 6 });
     expect(usageEvents("hour")).toHaveLength(0);
+  });
+
+  it("attributes concurrent rollover responses to their invocation windows", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
+
+    noteGraphqlCost(2, T0 + MINUTE + 1);
+    expect(usageEvents("minute")).toHaveLength(0);
+
+    noteGraphqlCost(3, T0);
+    expect(usageEvents("minute")[0]).toMatchObject({ calls: 1, graphqlCost: 3 });
+
+    noteGhInvocation(["pr", "view", "42"], T0 + 2 * MINUTE + 2);
+    expect(usageEvents("minute")[1]).toMatchObject({ calls: 1, graphqlCost: 2 });
   });
 
   it("emits the open windows when the budget pauses lookups", () => {

@@ -711,7 +711,10 @@ async function requestGraphqlEnvelope(
     envelope = readGraphqlEnvelope(await gh(cwd, ...args));
   } catch (error) {
     envelope = graphqlEnvelopeFromError(error);
-    if (!envelope) throw error;
+    if (!envelope) {
+      recordGraphqlBudgetFromEnvelope(null, requestedAtMs);
+      throw error;
+    }
   }
   if (!envelope) throw new Error("invalid GitHub GraphQL response");
   recordGraphqlBudgetFromEnvelope(envelope, requestedAtMs);
