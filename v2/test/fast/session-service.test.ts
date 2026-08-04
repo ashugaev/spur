@@ -4039,6 +4039,56 @@ describe("SessionService", () => {
       await firstSend;
     });
 
+    it("keeps a third send parked behind a second send still parked on its own ack wait", async () => {
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const service = await createDisposedSessionService();
+
+      let releaseFirstAck: () => void = () => {};
+      const firstAckGate = new Promise<void>((resolve) => {
+        releaseFirstAck = resolve;
+      });
+      let releaseSecondAck: () => void = () => {};
+      const secondAckGate = new Promise<void>((resolve) => {
+        releaseSecondAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+        .mockImplementationOnce(async () => {
+          await firstAckGate;
+          return { found: true, lastScannedFile: null };
+        })
+        .mockImplementationOnce(async () => {
+          await secondAckGate;
+          return { found: true, lastScannedFile: null };
+        })
+        .mockImplementationOnce(async () => {
+          return { found: true, lastScannedFile: null };
+        });
+
+      const session = codexSession("api-1");
+      const firstSend = sessionServiceInternals(service).sendAgentMessage(session, "first");
+      const secondSend = sessionServiceInternals(service).sendAgentMessage(session, "second");
+      await vi.advanceTimersByTimeAsync(0);
+
+      releaseFirstAck();
+      await firstSend;
+
+      // The second send released the lock's own promise chain in its
+      // `finally`, but it is still parked in its own ack wait, so a third
+      // send created now must queue behind it, not race its still-pending
+      // write against a lock entry an earlier holder deleted out from
+      // under it.
+      const thirdSend = sessionServiceInternals(service).sendAgentMessage(session, "third");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith("api-1", "third", { agent: "codex" });
+
+      releaseSecondAck();
+      await secondSend;
+      await thirdSend;
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "third", { agent: "codex" });
+    });
+
     it("releases the pane lock when a send throws", async () => {
       createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
       const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
@@ -4049,14 +4099,10 @@ describe("SessionService", () => {
       const firstAckGate = new Promise<void>((resolve) => {
         releaseFirstAck = resolve;
       });
-      let firstAckParked = false;
       vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
         async (_binding, messageText) => {
           if (messageText === "first") {
-            if (!firstAckParked) {
-              firstAckParked = true;
-              await firstAckGate;
-            }
+            await firstAckGate;
             return { found: false, lastScannedFile: null };
           }
           return { found: true, lastScannedFile: null };
