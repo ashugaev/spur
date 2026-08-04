@@ -88,6 +88,7 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  pruneRepoWorktrees,
   readDoctorBranchHint,
   resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
@@ -554,6 +555,34 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("pruneRepoWorktrees", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("acquires the workspace lock and runs git worktree prune", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
+
+    await pruneRepoWorktrees("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "prune", "--expire", "now"],
+      { cwd: "/repo/api" },
+    );
+  });
+
+  it("does not throw when git worktree prune fails", async () => {
+    mockWorkspaceLockResolution();
+    mockGitFailure("prune failed");
+
+    await expect(pruneRepoWorktrees("/repo/api")).resolves.toBeUndefined();
   });
 });
 
