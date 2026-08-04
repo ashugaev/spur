@@ -4,10 +4,11 @@ import type * as ghModule from "../../src/gh.js";
 import type { PrLookupOutcome, PrLookupRequest } from "../../src/pr-lookup.js";
 import type { PrRepoSlug } from "../../src/pr-lookup-cache.js";
 
-const { ghMock, readRemoteUrlsMock, existsSyncMock } = vi.hoisted(() => ({
+const { ghMock, readRemoteUrlsMock, existsSyncMock, logSpurEventMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   readRemoteUrlsMock: vi.fn(),
   existsSyncMock: vi.fn((_path: string) => true),
+  logSpurEventMock: vi.fn(),
 }));
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -22,7 +23,7 @@ vi.mock("node:fs", async (importOriginal) => ({
   existsSync: existsSyncMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
-  logSpurEvent: vi.fn(),
+  logSpurEvent: logSpurEventMock,
 }));
 
 const {
@@ -38,12 +39,15 @@ const {
 const {
   GH_POLL_MIN_GRAPHQL_REMAINING,
   _resetGhUsageForTests,
+  noteGhInvocation,
   noteGitHubRateLimitHit,
   recordGraphqlBudget,
+  runGhPollCycle,
+  setGhEventSink,
 } = await import("../../src/gh.js");
 
-const SLUG: PrRepoSlug = { owner: "ashugaev", name: "spur" };
-const OTHER_SLUG: PrRepoSlug = { owner: "ashugaev", name: "other" };
+const SLUG: PrRepoSlug = { host: "github.com", owner: "ashugaev", name: "spur" };
+const OTHER_SLUG: PrRepoSlug = { host: "github.com", owner: "ashugaev", name: "other" };
 const CWD = "/tmp/spur-worktrees/api-a1b2";
 
 function prNode(number: number, state: "OPEN" | "CLOSED" | "MERGED"): unknown {
@@ -101,6 +105,8 @@ describe("pr lookup batching", () => {
     existsSyncMock.mockReset().mockReturnValue(true);
     _resetPrLookupsForTests();
     _resetGhUsageForTests();
+    logSpurEventMock.mockReset();
+    setGhEventSink("/tmp/spur-data");
   });
 
   afterEach(() => {
@@ -121,7 +127,8 @@ describe("pr lookup batching", () => {
     for (const call of ghMock.mock.calls) {
       expect(call[0]).toBe(CWD);
       expect(call[1]).toBe("api");
-      expect(call[2]).toBe("graphql");
+      expect(call.slice(1, 4)).toEqual(["api", "--hostname", "github.com"]);
+      expect(call[4]).toBe("graphql");
     }
     expect(outcomes).toHaveLength(120);
     expect(outcomes.every((outcome) => outcome.status === "absent")).toBe(true);
@@ -139,6 +146,19 @@ describe("pr lookup batching", () => {
     expect(ghMock.mock.calls[0]).toContain("owner=ashugaev");
     expect(ghMock.mock.calls[0]).toContain("name=spur");
     expect(ghMock.mock.calls[1]).toContain("name=other");
+  });
+
+  it("groups identical owner/repo names by GitHub hostname", async () => {
+    const enterprise = { ...SLUG, host: "github.corp.example" };
+    ghMock.mockResolvedValue(envelope({ a0: [] }));
+
+    await resolvePrLookups([
+      ...requestsFor(["feature/public"]),
+      ...requestsFor(["feature/enterprise"], enterprise),
+    ]);
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls.map((call) => call[3])).toEqual(["github.com", "github.corp.example"]);
   });
 
   it("collapses duplicate branches into one alias", async () => {
@@ -334,6 +354,41 @@ describe("pr lookup batching", () => {
     expect(outcomes.every((outcome) => outcome.status === "absent")).toBe(true);
   });
 
+  it("drains an auto-flush before emitting the poll-cycle cost", async () => {
+    let release = (_value: string): void => {
+      throw new Error("auto-flush did not start");
+    };
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      noteGhInvocation(args);
+      return new Promise<string>((resolve) => {
+        release = resolve;
+      });
+    });
+
+    const cycle = runGhPollCycle({ kind: "attention" }, async () => {
+      const outcomes = Array.from({ length: 50 }, (_unused, index) =>
+        enqueuePrLookup({ slug: SLUG, branch: `feature/${index}`, worktreePath: CWD }),
+      );
+      await flushPrLookups();
+      await Promise.all(outcomes);
+    });
+    await vi.waitFor(() => expect(ghMock).toHaveBeenCalledTimes(1));
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "gh.poll_cycle" }),
+    );
+    release(envelope(allNodesEmpty(50)));
+    await cycle;
+
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "gh.poll_cycle",
+        details: expect.objectContaining({ calls: 1, graphqlCost: 1 }),
+      }),
+    );
+  });
+
   it("cancels pending lookups without leaving a promise unsettled", async () => {
     const promise = enqueuePrLookup({ slug: SLUG, branch: "feature/a", worktreePath: CWD });
     cancelPendingPrLookups();
@@ -350,8 +405,16 @@ describe("pr lookup batching", () => {
       ]),
     );
 
-    await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({ owner: "base-org", name: "spur" });
-    await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({ owner: "base-org", name: "spur" });
+    await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({
+      host: "github.com",
+      owner: "base-org",
+      name: "spur",
+    });
+    await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({
+      host: "github.com",
+      owner: "base-org",
+      name: "spur",
+    });
     expect(readRemoteUrlsMock).toHaveBeenCalledTimes(1);
   });
 
@@ -369,9 +432,7 @@ describe("pr lookup batching", () => {
     readRemoteUrlsMock.mockResolvedValueOnce(new Map());
     await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toBeNull();
 
-    readRemoteUrlsMock.mockResolvedValue(
-      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
-    );
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@github.com:ashugaev/spur.git"]]));
     // Inside the miss TTL the memo still answers null, but only for seconds.
     await expect(resolvePrLookupRepo(CWD, { nowMs: t0 + 5_000 })).resolves.toBeNull();
     await expect(resolvePrLookupRepo(CWD, { nowMs: t0 + 20_000 })).resolves.toEqual(SLUG);
@@ -382,9 +443,7 @@ describe("pr lookup batching", () => {
     readRemoteUrlsMock.mockResolvedValueOnce(new Map());
     await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toBeNull();
 
-    readRemoteUrlsMock.mockResolvedValue(
-      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
-    );
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@github.com:ashugaev/spur.git"]]));
     await expect(
       resolvePrLookupRepo(CWD, { nowMs: t0 + 1_000, bypassMissMemo: true }),
     ).resolves.toEqual(SLUG);
@@ -392,9 +451,7 @@ describe("pr lookup batching", () => {
 
   it("keeps a resolved slug memoized for the full TTL", async () => {
     const t0 = 1_800_000_000_000;
-    readRemoteUrlsMock.mockResolvedValue(
-      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
-    );
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@github.com:ashugaev/spur.git"]]));
 
     await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toEqual(SLUG);
     await expect(
@@ -407,13 +464,23 @@ describe("pr lookup batching", () => {
     expect(parseRepoSlugFromRemoteUrl("git@github.com:ashugaev/spur.git")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("https://github.com/ashugaev/spur")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("ssh://git@github.com/ashugaev/spur.git")).toEqual(SLUG);
-    // Multi-key ssh alias: gh resolves the host from its own config, so the
-    // slug is all this needs to produce.
-    expect(parseRepoSlugFromRemoteUrl("git@github-work:ashugaev/spur.git")).toEqual(SLUG);
+    expect(parseRepoSlugFromRemoteUrl("git@github-work:ashugaev/spur.git")).toEqual({
+      ...SLUG,
+      host: "github-work",
+    });
     // GitHub Enterprise hosts.
-    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com/ashugaev/spur.git")).toEqual(SLUG);
-    expect(parseRepoSlugFromRemoteUrl("git@github.corp.example:ashugaev/spur.git")).toEqual(SLUG);
-    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com:8443/ashugaev/spur")).toEqual(SLUG);
+    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com/ashugaev/spur.git")).toEqual({
+      ...SLUG,
+      host: "github.mycorp.com",
+    });
+    expect(parseRepoSlugFromRemoteUrl("git@github.corp.example:ashugaev/spur.git")).toEqual({
+      ...SLUG,
+      host: "github.corp.example",
+    });
+    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com:8443/ashugaev/spur")).toEqual({
+      ...SLUG,
+      host: "github.mycorp.com",
+    });
     // Other forges keep their own review provider.
     expect(parseRepoSlugFromRemoteUrl("https://gitlab.com/ashugaev/spur.git")).toBeNull();
     expect(parseRepoSlugFromRemoteUrl("git@bitbucket.org:ashugaev/spur.git")).toBeNull();

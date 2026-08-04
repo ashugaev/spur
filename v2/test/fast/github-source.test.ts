@@ -45,9 +45,7 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
-  readRemoteUrls: vi.fn().mockResolvedValue(
-    new Map([["origin", "git@github.com:acme/api.git"]]),
-  ),
+  readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
 vi.mock("../../src/user-action-log.js", () => ({
@@ -124,7 +122,7 @@ function graphqlAuthor(user: unknown): { login: unknown } | null {
 }
 
 async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
-  if (args[0] !== "api" || args[1] !== "graphql") {
+  if (args[0] !== "api" || !args.includes("graphql")) {
     return ghMock(cwd, ...args) as Promise<string>;
   }
   const prRaw = await ghMock(cwd, "pr", "view");
@@ -362,10 +360,13 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("skips a session whose worktree is not a git repository and warns exactly once", async () => {
+  it("does not spawn a git worktree probe on the review-poll hot path", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([makeSession()]);
     isGitWorktreeMock.mockResolvedValue(false);
+    mockLifecyclePoll(prView());
+    mockLifecyclePoll(prView());
+    mockLifecyclePoll(prView());
     const logger = { info: vi.fn(), warn: vi.fn() };
 
     const handle = await githubSourceModule.start({
@@ -378,7 +379,6 @@ describe("github source", () => {
       logger,
     });
 
-    // The proactive validity gate short-circuits before any shell-out, on every poll.
     handle.runOnStart?.();
     await flushPollCycle();
     handle.runOnStart?.();
@@ -386,22 +386,16 @@ describe("github source", () => {
     handle.runOnStart?.();
     await flushPollCycle();
 
-    expect(ghMock).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("worktree missing or not a git repository"),
-    );
+    expect(ghMock).toHaveBeenCalledTimes(15);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
     const deadWorktreeEvents = logSpurEventMock.mock.calls.filter(
       (call) =>
         typeof call[1] === "object" &&
         call[1] !== null &&
         (call[1] as { event?: string }).event === "source.poll.dead_worktree",
     );
-    expect(deadWorktreeEvents).toHaveLength(1);
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
-      expect.objectContaining({ event: "source.poll.dead_worktree", sessionId: "api-a1b2" }),
-    );
+    expect(deadWorktreeEvents).toHaveLength(0);
     handle.stop();
   });
 
@@ -435,10 +429,9 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("resumes polling once a dead worktree is repaired (self-healing, no one-way latch)", async () => {
+  it("uses structured session state instead of the git worktree probe", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    // tick1: worktree gone -> skip; tick2 onward: repaired -> poll resumes.
     isGitWorktreeMock.mockResolvedValueOnce(false).mockResolvedValue(true);
     mockLifecyclePoll(prView());
     const logger = { info: vi.fn(), warn: vi.fn() };
@@ -453,25 +446,17 @@ describe("github source", () => {
       logger,
     });
 
-    // tick1: dead worktree, no shell-out.
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(ghMock).not.toHaveBeenCalled();
-
-    // tick2: repaired, polling resumes.
     handle.runOnStart?.();
     await flushPollCycle();
     expect(ghMock).toHaveBeenCalled();
-
-    // The warning only fired during the dead phase and never again after healing.
-    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
     handle.stop();
   });
 
-  it("re-warns after a healed worktree dies again, logging once per dead phase", async () => {
+  it("does not emit dead-worktree events from review polling", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    // dead, dead (still same phase -> warn once), healed, dead again (new phase -> warn twice).
     isGitWorktreeMock
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
@@ -490,19 +475,14 @@ describe("github source", () => {
       logger,
     });
 
-    // Two dead ticks: warn logged once for the phase.
     handle.runOnStart?.();
     await flushPollCycle();
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-
-    // Heal, then die again: a fresh dead phase warns a second time.
-    handle.runOnStart?.();
-    await flushPollCycle();
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "source.poll.dead_worktree" }),
+    );
     handle.stop();
   });
 
@@ -1288,11 +1268,7 @@ describe("github source", () => {
     ]);
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existing]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    recordGraphqlBudget(
-      GH_POLL_MIN_GRAPHQL_REMAINING - 1,
-      Date.now() + 60_000,
-      Date.now(),
-    );
+    recordGraphqlBudget(GH_POLL_MIN_GRAPHQL_REMAINING - 1, Date.now() + 60_000, Date.now());
 
     const handle = await startLifecycle(vi.fn());
 
@@ -2181,7 +2157,9 @@ describe("github source", () => {
     const REAL_INTERVAL_MS = 20;
 
     function queuePollResponse(checksState: string): void {
-      ghMock.mockResolvedValueOnce(prView());
+      ghMock.mockResolvedValueOnce(
+        prView({ statusCheckRollup: [{ name: "check", state: checksState }] }),
+      );
       ghMock.mockResolvedValueOnce(JSON.stringify([{ name: "check", state: checksState }]));
       ghMock.mockResolvedValueOnce("[]");
       ghMock.mockResolvedValueOnce("[]");
@@ -2195,6 +2173,20 @@ describe("github source", () => {
         if (waited >= timeoutMs) {
           throw new Error(
             `timed out waiting for ghMock call count >= ${target}, saw ${ghMock.mock.calls.length}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+        waited += stepMs;
+      }
+    }
+
+    async function waitForTransportCallCount(target: number, timeoutMs = 4000): Promise<void> {
+      const stepMs = 10;
+      let waited = 0;
+      while (ghTransportMock.mock.calls.length < target) {
+        if (waited >= timeoutMs) {
+          throw new Error(
+            `timed out waiting for gh transport call count >= ${target}, saw ${ghTransportMock.mock.calls.length}`,
           );
         }
         await new Promise((resolve) => setTimeout(resolve, stepMs));
@@ -2368,8 +2360,7 @@ describe("github source", () => {
       });
       listSessionsMock.mockReturnValue([makeSession(), newSession]);
       queuePollResponse("SUCCESS");
-      queuePollResponse("SUCCESS");
-      await waitForGhCallCount(15);
+      await waitForGhCallCount(10);
 
       handle.stop();
     });
@@ -2464,7 +2455,7 @@ describe("github source", () => {
       handle.stop();
     });
 
-    it("preserves the CI-active hysteresis flag when a session's CI-check fetch fails but the rest of the cycle succeeds", async () => {
+    it("preserves the CI-active hysteresis flag when the batched request fails", async () => {
       // Seed lastCycleCiActive = true via the ungated startup poll.
       queuePollResponse("IN_PROGRESS");
       const logger = { info: vi.fn(), warn: vi.fn() };
@@ -2487,18 +2478,9 @@ describe("github source", () => {
 
       expect(ghMock).toHaveBeenCalledTimes(5);
 
-      // Next real tick bypasses the deadline gate on lastCycleCiActive. `gh pr view`
-      // succeeds, but `gh pr checks` fails with a generic (non "no checks configured")
-      // error — collectSignals itself does not throw (fetchChecks swallows it), so
-      // this cycle completes "successfully" from pollSignals' point of view, yet it
-      // never actually observed whether CI settled.
-      ghMock.mockResolvedValueOnce(prView());
-      ghMock.mockRejectedValueOnce(new Error("gh: connection reset by peer"));
-      ghMock.mockResolvedValueOnce("[]");
-      ghMock.mockResolvedValueOnce("[]");
-      ghMock.mockResolvedValueOnce("[]");
-      await waitForGhCallCount(10);
-      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+      ghTransportMock.mockRejectedValueOnce(new Error("gh: connection reset by peer"));
+      await waitForTransportCallCount(2);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
 
       // A buggy implementation would count the failed checks fetch as a clean
       // observation (no exception propagated) and reset lastCycleCiActive to false,
@@ -2506,7 +2488,7 @@ describe("github source", () => {
       // instead survive, keeping ticks forced well inside the slow window (deadline
       // stays at 00:10:00).
       queuePollResponse("SUCCESS");
-      await waitForGhCallCount(15);
+      await waitForGhCallCount(10);
 
       handle.stop();
     });

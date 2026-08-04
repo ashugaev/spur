@@ -1,12 +1,15 @@
-import {
-  extractGithubErrorText,
-  gh,
-  noteGraphqlCost,
-  pollBudgetState,
-  recordGraphqlBudget,
-} from "../gh.js";
+import { gh, noteGraphqlCost, pollBudgetState, recordGraphqlBudget } from "../gh.js";
 import { readCommentSeenRegistry } from "../metadata.js";
 import { gqlErrorsByAlias, resolvePrLookupRepo } from "../pr-lookup.js";
+import {
+  clearPrLookupEntry,
+  isPrLookupDue,
+  markPrLookupMiss,
+  markPrLookupTerminal,
+  PR_LOOKUP_LIVE_CAP_MS,
+  readPrLookupEntry,
+  type PrRepoSlug,
+} from "../pr-lookup-cache.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -47,6 +50,12 @@ const TERMINAL_GITHUB_CI_STATES = new Set([
 // intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
 // actionable.
 const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+const GITHUB_REVIEW_BATCH_MAX_TARGETS = 50;
+const reviewBatchCursor = new Map<string, number>();
+
+export function _resetGitHubReviewBatchForTests(): void {
+  reviewBatchCursor.clear();
+}
 
 export function reviewCommentSeenKey(id: number | string): string {
   return `review-comment:${id}`;
@@ -106,12 +115,12 @@ export type GitHubCollectedSignals = {
 
 export type GitHubSignalBatchResult =
   | { status: "ok"; collected: GitHubCollectedSignals | null }
-  | { status: "skipped"; reason: "budget" | "repo_unresolved" }
+  | { status: "skipped"; reason: "budget" | "cached" | "capacity" | "repo_unresolved" }
   | { status: "error"; error: unknown };
 
 interface GitHubBatchTarget {
   session: SessionRecord;
-  repo: string;
+  slug: PrRepoSlug;
   branch: string | null;
   number: number | null;
 }
@@ -238,13 +247,13 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `number title url reviewDecision mergeable mergeStateStatus isDraft state
-  commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{
+  commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
   }}}}}}
-  reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId body path line author{login}}}}}
-  reviews(first:100){nodes{databaseId state body author{login}}}
-  comments(first:100){nodes{databaseId body author{login}}}`;
+  reviewThreads(last:100){nodes{isResolved comments(last:1){nodes{databaseId body path line author{login}}}}}
+  reviews(last:100){nodes{databaseId state body author{login}}}
+  comments(last:100){nodes{databaseId body author{login}}}`;
 
 function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
   query: string;
@@ -333,7 +342,9 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
   });
 }
 
-function summaryAndNode(value: unknown): { summary: GitHubPrStatusSummary; node: Record<string, unknown> } | null {
+function summaryAndNode(
+  value: unknown,
+): { summary: GitHubPrStatusSummary; node: Record<string, unknown> } | null {
   if (!isRecord(value)) return null;
   const checks = checksFromPrNode(value);
   const summary = readPrStatusSummary({ ...value, statusCheckRollup: checks });
@@ -614,18 +625,35 @@ function parseRepoName(repo: string): { owner: string; name: string } | null {
   return owner && name && extra === undefined ? { owner, name } : null;
 }
 
-async function targetForSession(session: SessionRecord): Promise<GitHubBatchTarget | null> {
+function boundRepoSlug(session: SessionRecord): PrRepoSlug | null {
+  if (!session.pr) return null;
+  const repo = parseRepoName(session.pr.repo);
+  if (!repo) return null;
+  try {
+    return { host: new URL(session.pr.url).hostname.toLowerCase(), ...repo };
+  } catch {
+    return { host: "github.com", ...repo };
+  }
+}
+
+async function targetForSession(
+  session: SessionRecord,
+  dataDir: string,
+): Promise<GitHubBatchTarget | "cached" | null> {
   if (session.pr) {
-    return parseRepoName(session.pr.repo)
-      ? { session, repo: session.pr.repo, branch: null, number: session.pr.number }
-      : null;
+    const slug = boundRepoSlug(session);
+    return slug ? { session, slug, branch: null, number: session.pr.number } : null;
   }
   const slug = await resolvePrLookupRepo(session.worktreePath);
   if (!slug) return null;
+  const branch = session.branch;
+  if (!isPrLookupDue(readPrLookupEntry(dataDir, slug, branch), PR_LOOKUP_LIVE_CAP_MS)) {
+    return "cached";
+  }
   return {
     session,
-    repo: `${slug.owner}/${slug.name}`,
-    branch: await resolveTrackedBranch(session.worktreePath, session.branch),
+    slug,
+    branch,
     number: null,
   };
 }
@@ -658,11 +686,30 @@ async function runReviewRepoBatch(
   sourceId: string,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
-  const repo = parseRepoName(targets[0]?.repo ?? "");
-  if (!repo) return results;
-  const { query, aliases } = buildGitHubReviewBatchQuery(targets);
-  const args = ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${repo.owner}`, "-f", `name=${repo.name}`];
-  for (const [index, target] of targets.entries()) {
+  const slug = targets[0]?.slug;
+  if (!slug) return results;
+  const uniqueTargets = [
+    ...new Map(
+      targets.map((target) => [
+        target.number === null ? `branch:${target.branch ?? ""}` : `number:${target.number}`,
+        target,
+      ]),
+    ).values(),
+  ];
+  const { query, aliases } = buildGitHubReviewBatchQuery(uniqueTargets);
+  const args = [
+    "api",
+    "--hostname",
+    slug.host,
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-f",
+    `owner=${slug.owner}`,
+    "-f",
+    `name=${slug.name}`,
+  ];
+  for (const [index, target] of uniqueTargets.entries()) {
     if (target.number !== null) {
       args.push("-F", `n${index}=${target.number}`);
     } else {
@@ -682,7 +729,9 @@ async function runReviewRepoBatch(
   }
   const data = envelope && isRecord(envelope.data) ? envelope.data : null;
   if (!data || !isRecord(data.r)) {
-    const error = new Error(`invalid GitHub review batch for ${repo.owner}/${repo.name}`);
+    const error = new Error(
+      `invalid GitHub review batch for ${slug.host}/${slug.owner}/${slug.name}`,
+    );
     for (const target of targets) results.set(target.session.id, { status: "error", error });
     return results;
   }
@@ -692,27 +741,48 @@ async function runReviewRepoBatch(
     new Set(aliases.map((entry) => entry.alias)),
   );
   for (const { alias, target } of aliases) {
+    const matchingTargets = targets.filter(
+      (candidate) => candidate.number === target.number && candidate.branch === target.branch,
+    );
     const aliasError = aliasErrors.get(alias);
     if (aliasError) {
-      results.set(target.session.id, { status: "error", error: new Error(aliasError) });
+      for (const matching of matchingTargets) {
+        results.set(matching.session.id, { status: "error", error: new Error(aliasError) });
+      }
       continue;
     }
     const selected = selectSummaryAndNode(data.r[alias], target.number !== null);
+    if (target.branch !== null) {
+      if (!selected) {
+        markPrLookupMiss(dataDir, target.slug, target.branch);
+      } else if (selected.summary.state === "CLOSED" || selected.summary.state === "MERGED") {
+        markPrLookupTerminal(dataDir, target.slug, target.branch, {
+          number: selected.summary.number,
+          state: selected.summary.state,
+        });
+      } else {
+        clearPrLookupEntry(dataDir, target.slug, target.branch);
+      }
+    }
     if (!selected) {
-      results.set(target.session.id, { status: "ok", collected: null });
+      for (const matching of matchingTargets) {
+        results.set(matching.session.id, { status: "ok", collected: null });
+      }
       continue;
     }
-    results.set(target.session.id, {
-      status: "ok",
-      collected: collectSignalsFromNode(
-        target.session,
-        selected.summary,
-        selected.node,
-        dataDir,
-        projectId,
-        sourceId,
-      ),
-    });
+    for (const matching of matchingTargets) {
+      results.set(matching.session.id, {
+        status: "ok",
+        collected: collectSignalsFromNode(
+          matching.session,
+          selected.summary,
+          selected.node,
+          dataDir,
+          projectId,
+          sourceId,
+        ),
+      });
+    }
   }
   return results;
 }
@@ -726,23 +796,53 @@ export async function collectGitHubSignalsBatch(
   const results = new Map<string, GitHubSignalBatchResult>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
   for (const session of sessions) {
-    const target = await targetForSession(session);
+    const target = await targetForSession(session, dataDir);
+    if (target === "cached") {
+      results.set(session.id, { status: "skipped", reason: "cached" });
+      continue;
+    }
     if (!target) {
       results.set(session.id, { status: "skipped", reason: "repo_unresolved" });
       continue;
     }
-    const group = byRepo.get(target.repo) ?? [];
+    const repoKey = `${target.slug.host}/${target.slug.owner}/${target.slug.name}`;
+    const group = byRepo.get(repoKey) ?? [];
     group.push(target);
-    byRepo.set(target.repo, group);
+    byRepo.set(repoKey, group);
   }
-  for (const targets of byRepo.values()) {
+  for (const [repoKey, targets] of byRepo) {
     if (pollBudgetState().blocked) {
       for (const target of targets) {
         results.set(target.session.id, { status: "skipped", reason: "budget" });
       }
       continue;
     }
-    const batch = await runReviewRepoBatch(targets, dataDir, projectId, sourceId);
+    const targetsByKey = new Map<string, GitHubBatchTarget[]>();
+    for (const target of targets) {
+      const key =
+        target.number === null ? `branch:${target.branch ?? ""}` : `number:${target.number}`;
+      const grouped = targetsByKey.get(key) ?? [];
+      grouped.push(target);
+      targetsByKey.set(key, grouped);
+    }
+    const groupedTargets = [...targetsByKey.values()];
+    const start = (reviewBatchCursor.get(repoKey) ?? 0) % groupedTargets.length;
+    const selectedGroups = Array.from(
+      { length: Math.min(GITHUB_REVIEW_BATCH_MAX_TARGETS, groupedTargets.length) },
+      (_, offset) => groupedTargets[(start + offset) % groupedTargets.length] ?? [],
+    );
+    const selected = selectedGroups.flat();
+    const selectedIds = new Set(selected.map((target) => target.session.id));
+    for (const target of targets) {
+      if (!selectedIds.has(target.session.id)) {
+        results.set(target.session.id, { status: "skipped", reason: "capacity" });
+      }
+    }
+    reviewBatchCursor.set(
+      repoKey,
+      (start + GITHUB_REVIEW_BATCH_MAX_TARGETS) % groupedTargets.length,
+    );
+    const batch = await runReviewRepoBatch(selected, dataDir, projectId, sourceId);
     for (const [sessionId, result] of batch) {
       results.set(sessionId, result);
     }

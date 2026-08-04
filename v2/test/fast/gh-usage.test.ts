@@ -122,6 +122,17 @@ describe("gh usage accounting", () => {
     expect(bySubcommand).toEqual({ "api rest": 25, "search prs": 1, "api graphql": 1 });
   });
 
+  it("classifies hostname-qualified GraphQL calls separately from REST", () => {
+    noteGhInvocation(["api", "--hostname", "github.corp.example", "graphql"], T0);
+    noteGhInvocation(["api", "--hostname", "github.corp.example", "repos/o/r"], T0 + 1);
+    noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
+
+    expect(usageEvents("minute")[0]?.["bySubcommand"]).toEqual({
+      "api graphql": 1,
+      "api rest": 1,
+    });
+  });
+
   it("keys a bare subcommand and an unknown command without inventing keys", () => {
     noteGhInvocation(["auth", "--help"], T0);
     noteGhInvocation(["--version"], T0 + 1);

@@ -29,7 +29,6 @@ import {
 } from "../metadata.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
 import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
-import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -272,7 +271,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
-  const deadWorktreeSessions = new Set<string>();
   const adaptive = deps.config.adaptivePoll;
   const attemptedSessionIds = new Set<string>();
   // Tracks consecutive poll failures per session (catch-block errors or a failed CI
@@ -319,9 +317,9 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (Date.now() >= nextEligiblePollAtMs) return true;
     if (lastCycleCiActive) return true;
     for (const session of listPollableSessions()) {
-      if (deadWorktreeSessions.has(session.id)) continue;
       const existing = snapshots.get(session.id);
-      if (existing && (existing.has("merged") || existing.has("closed"))) continue;
+      if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
+        continue;
       if (!attemptedSessionIds.has(session.id)) return true;
       if (
         hasRecentSessionUserAction(
@@ -402,28 +400,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
         }
-        // Proactively skip sessions whose worktree is missing or no longer a git repo:
-        // shelling out to gh there just spams "not a git repository". The check is
-        // cheap (stat short-circuit + rev-parse) and self-healing — the moment the
-        // worktree is repaired the next poll clears the flag and resumes polling.
-        if (!(await isGitWorktree(session.worktreePath))) {
-          if (!deadWorktreeSessions.has(session.id)) {
-            deadWorktreeSessions.add(session.id);
-            deps.logger.warn?.(
-              `[source:${deps.projectId}/${deps.sourceId}] skipping ${session.id}: worktree missing or not a git repository (will retry when repaired)`,
-            );
-            logSpurEvent(deps.dataDir, {
-              event: "source.poll.dead_worktree",
-              level: "warn",
-              projectId: deps.projectId,
-              sourceId: deps.sourceId,
-              sessionId: session.id,
-              message: `Skipping ${deps.projectId}/${deps.sourceId}/${session.id}: worktree missing or not a git repository`,
-            });
-          }
-          continue;
-        }
-        deadWorktreeSessions.delete(session.id);
         pollableSessions.push(session);
       }
 
@@ -577,10 +553,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
           lifecycleBaselined.delete(sessionId);
         }
-      }
-
-      for (const sessionId of [...deadWorktreeSessions]) {
-        if (!currentSessionIds.has(sessionId)) deadWorktreeSessions.delete(sessionId);
       }
 
       for (const sessionId of [...attemptedSessionIds]) {

@@ -242,7 +242,7 @@ function subcommandKey(args: string[]): string {
   if (first === "api") {
     // The GraphQL budget and the REST budget are separate ceilings, so the two
     // shapes are separate keys — and neither carries the path.
-    return second === "graphql" ? "api graphql" : "api rest";
+    return args.includes("graphql") ? "api graphql" : "api rest";
   }
   if (!second || !GH_USAGE_SUBCOMMANDS.has(second)) {
     return first;
@@ -422,7 +422,9 @@ function isObservationExpired(nowMs: number): boolean {
   if (budget.resetAtMs !== null) {
     return nowMs >= budget.resetAtMs;
   }
-  return budget.observedAtMs !== null && nowMs - budget.observedAtMs >= GH_BUDGET_OBSERVATION_MAX_AGE_MS;
+  return (
+    budget.observedAtMs !== null && nowMs - budget.observedAtMs >= GH_BUDGET_OBSERVATION_MAX_AGE_MS
+  );
 }
 
 export type GhPollBudgetState =

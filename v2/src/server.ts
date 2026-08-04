@@ -400,16 +400,16 @@ export async function startServer(
     );
   }
   const service = new SessionService(configPath);
+  let ready = false;
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
     setEventLogConfig(cfg.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
     setUserActionLogConfig(cfg.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
-    setGhEventSink(cfg.dataDir);
+    if (ready) setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
   const bus = new EventBus();
-  let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
   let backlogs: { stop(): void } | null = null;
@@ -1512,6 +1512,7 @@ export async function startServer(
       port: service.config.server.port,
     },
   });
+  setGhEventSink(service.config.dataDir);
 
   let shutdownPromise: Promise<void> | null = null;
   const shutdown = (exitProcess: boolean): Promise<void> => {

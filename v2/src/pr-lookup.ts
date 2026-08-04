@@ -10,10 +10,9 @@ import { readRemoteUrls } from "./workspace.js";
 // for 250 nodes, which GitHub bills as 3 points of the 5000/hr GraphQL budget
 // (nodes/100, rounded up, summed across connections) — the response's
 // `rateLimit` block carries the measured `cost`, so nothing here has to assert
-// it. The same block teaches the shared budget ledger for free. Auth and the
-// target host stay inside `gh`: no GITHUB_TOKEN and no hostname handling here,
-// and gh stays the process's sole spawner so invocation accounting keeps
-// covering everything.
+// it. The same block teaches the shared budget ledger for free. Auth stays
+// inside `gh`; the parsed remote hostname selects the matching gh host. gh
+// stays the process's sole spawner so invocation accounting covers every call.
 
 // 50 aliases build a ~7 KB query string: 5% of the 131072-byte single-argv
 // ceiling (MAX_ARG_STRLEN) and 0.3% of ARG_MAX, so argv cannot approach E2BIG
@@ -69,14 +68,16 @@ interface PendingRequest {
 
 const slugMemo = new Map<string, SlugMemoEntry>();
 const pending = new Map<string, PendingRequest[]>();
+const activeFlushes = new Set<Promise<void>>();
 
 export function _resetPrLookupsForTests(): void {
   slugMemo.clear();
   pending.clear();
+  activeFlushes.clear();
 }
 
 function slugKey(slug: PrRepoSlug): string {
-  return `${slug.owner}/${slug.name}`;
+  return `${slug.host}/${slug.owner}/${slug.name}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,7 +116,7 @@ export function parseRepoSlugFromRemoteUrl(url: string): PrRepoSlug | null {
   if (!owner || !name) {
     return null;
   }
-  return { owner, name };
+  return { host: host.toLowerCase(), owner, name };
 }
 
 export interface ResolvePrLookupRepoOptions {
@@ -295,7 +296,7 @@ function forkParentOf(slug: PrRepoSlug, repo: Record<string, unknown>): PrRepoSl
   if (!owner || !name) {
     return null;
   }
-  const parentSlug: PrRepoSlug = { owner, name };
+  const parentSlug: PrRepoSlug = { host: slug.host, owner, name };
   if (slugKey(parentSlug) === slugKey(slug)) {
     return null;
   }
@@ -316,6 +317,8 @@ async function runChunkOnce(
   const { query, aliases } = buildAliasedBranchQuery(branches);
   const args = [
     "api",
+    "--hostname",
+    slug.host,
     "graphql",
     "-f",
     `query=${query}`,
@@ -526,9 +529,15 @@ export function enqueuePrLookup(request: PrLookupRequest): Promise<PrLookupOutco
   return new Promise<PrLookupOutcome>((resolve) => {
     queue.push({ request, settle: resolve });
     if (queue.length >= PR_LOOKUP_BATCH_SIZE) {
-      void flushRepo(key);
+      startFlushRepo(key);
     }
   });
+}
+
+function startFlushRepo(key: string): void {
+  const flush = flushRepo(key);
+  activeFlushes.add(flush);
+  void flush.finally(() => activeFlushes.delete(flush));
 }
 
 /**
@@ -561,7 +570,12 @@ async function flushRepo(key: string): Promise<void> {
 }
 
 export async function flushPrLookups(): Promise<void> {
-  await Promise.all([...pending.keys()].map((key) => flushRepo(key)));
+  for (const key of [...pending.keys()]) {
+    startFlushRepo(key);
+  }
+  while (activeFlushes.size > 0) {
+    await Promise.all([...activeFlushes]);
+  }
 }
 
 /**

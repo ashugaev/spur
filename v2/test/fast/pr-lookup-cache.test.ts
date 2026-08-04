@@ -14,14 +14,14 @@ import {
   readPrLookupEntry,
 } from "../../src/pr-lookup-cache.js";
 
-const SLUG: PrRepoSlug = { owner: "ashugaev", name: "spur" };
+const SLUG: PrRepoSlug = { host: "github.com", owner: "ashugaev", name: "spur" };
 const T0 = 1_800_000_000_000;
 const MINUTE = 60_000;
 
 let dataDir = "";
 
 function repoFile(dir: string = dataDir): string {
-  return join(dir, "source-state", "pr-lookup", SLUG.owner, `${SLUG.name}.json`);
+  return join(dir, "source-state", "pr-lookup", SLUG.host, SLUG.owner, `${SLUG.name}.json`);
 }
 
 describe("pr lookup cache", () => {
@@ -160,9 +160,22 @@ describe("pr lookup cache", () => {
   });
 
   it("keys each repo in its own file", () => {
-    const other: PrRepoSlug = { owner: "ashugaev", name: "other" };
+    const other: PrRepoSlug = { host: "github.com", owner: "ashugaev", name: "other" };
     markPrLookupMiss(dataDir, SLUG, "feature/x", T0);
     expect(readPrLookupEntry(dataDir, other, "feature/x", T0)).toBeNull();
+  });
+
+  it("does not collide identical owner/repo names across GitHub hosts", () => {
+    const enterprise: PrRepoSlug = { ...SLUG, host: "github.corp.example" };
+    markPrLookupMiss(dataDir, SLUG, "feature/x", T0);
+
+    expect(readPrLookupEntry(dataDir, enterprise, "feature/x", T0)).toBeNull();
+    markPrLookupTerminal(dataDir, enterprise, "feature/x", { number: 9, state: "MERGED" }, T0);
+    expect(readPrLookupEntry(dataDir, SLUG, "feature/x", T0)?.terminal).toBeUndefined();
+    expect(readPrLookupEntry(dataDir, enterprise, "feature/x", T0)?.terminal).toEqual({
+      number: 9,
+      state: "MERGED",
+    });
   });
 
   it("degrades to in-memory when the dataDir cannot be written", () => {

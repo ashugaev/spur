@@ -206,7 +206,8 @@ describe("session-pr", () => {
     const call = ghMock.mock.calls[0] ?? [];
     expect(call[0]).toBe("/tmp/spur-worktrees/api-a1b2");
     expect(call[1]).toBe("api");
-    expect(call[2]).toBe("graphql");
+    expect(call.slice(1, 4)).toEqual(["api", "--hostname", "github.com"]);
+    expect(call[4]).toBe("graphql");
     expect(call).toContain("owner=acme");
     expect(call).toContain("name=api");
     expect(call).toContain("b0=feature/native-pr-binding");
@@ -264,7 +265,9 @@ describe("session-pr", () => {
   });
 
   it("throws instead of reporting no PR when GitHub answers HTTP 502", async () => {
-    ghMock.mockRejectedValue(new Error("gh: HTTP 502: Bad gateway (https://api.github.com/graphql)"));
+    ghMock.mockRejectedValue(
+      new Error("gh: HTTP 502: Bad gateway (https://api.github.com/graphql)"),
+    );
 
     await expect(
       discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),

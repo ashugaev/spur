@@ -13,7 +13,6 @@ import {
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
-import type * as ghModule from "../../src/gh.js";
 
 const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
@@ -26,9 +25,7 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
-  readRemoteUrls: vi.fn().mockResolvedValue(
-    new Map([["origin", "git@github.com:acme/api.git"]]),
-  ),
+  readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
 
@@ -43,8 +40,16 @@ const {
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
 
-const { resolveBoundPrSummary, hasActiveChecks, githubReviewProvider } =
-  await import("../../src/review-providers/github.js");
+const {
+  _resetGitHubReviewBatchForTests,
+  collectGitHubSignalsBatch,
+  resolveBoundPrSummary,
+  hasActiveChecks,
+  githubReviewProvider,
+} = await import("../../src/review-providers/github.js");
+const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
+const { _resetPrLookupCacheForTests, readPrLookupEntry } =
+  await import("../../src/pr-lookup-cache.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -402,54 +407,39 @@ describe("resolveBoundPrSummary", () => {
   });
 });
 
-describe("collectSignals ciCheckFetchFailed", () => {
+describe("collectSignals GraphQL batch", () => {
   beforeEach(() => {
     ghMock.mockReset();
   });
 
-  function prView(overrides: Record<string, unknown> = {}): string {
+  function graphqlResult(checks: unknown[]): string {
     return JSON.stringify({
-      number: 42,
-      title: "Fix CI alert",
-      url: "https://github.com/acme/api/pull/42",
-      reviewDecision: null,
-      mergeable: "MERGEABLE",
-      mergeStateStatus: "CLEAN",
-      statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
-      isDraft: false,
-      state: "OPEN",
-      ...overrides,
+      data: {
+        rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+        r: {
+          a0: {
+            number: 42,
+            title: "Fix CI alert",
+            url: "https://github.com/acme/api/pull/42",
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: {
+              nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: checks } } } }],
+            },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+        },
+      },
     });
   }
 
-  // gh call order for a bound PR session in collectSignals:
-  // pr view, pr checks, review comments, issue comments, reviews.
-  it("reports ciCheckFetchFailed=true when `gh pr checks` fails for a reason other than no checks configured", async () => {
-    ghMock
-      .mockResolvedValueOnce(prView())
-      .mockRejectedValueOnce(new Error("gh: connection reset by peer"))
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
-
-    const result = await githubReviewProvider.collectSignals(
-      sourceSession("/wt"),
-      "/tmp/spur-data",
-      "api",
-      "pr-watch",
-    );
-
-    expect(result?.ciActive).toBe(false);
-    expect(result?.ciCheckFetchFailed).toBe(true);
-  });
-
-  it("reports ciCheckFetchFailed=false when `gh pr checks` fails because the PR genuinely has no checks configured", async () => {
-    ghMock
-      .mockResolvedValueOnce(prView())
-      .mockRejectedValueOnce(new Error("no checks reported on the 'feature/test' branch"))
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+  it("reports no active CI for an empty check rollup", async () => {
+    ghMock.mockResolvedValueOnce(graphqlResult([]));
 
     const result = await githubReviewProvider.collectSignals(
       sourceSession("/wt"),
@@ -462,13 +452,10 @@ describe("collectSignals ciCheckFetchFailed", () => {
     expect(result?.ciCheckFetchFailed).toBe(false);
   });
 
-  it("reports ciCheckFetchFailed=false when `gh pr checks` succeeds", async () => {
-    ghMock
-      .mockResolvedValueOnce(prView())
-      .mockResolvedValueOnce(JSON.stringify([{ name: "workflow", state: "IN_PROGRESS" }]))
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+  it("reports active CI from the batched rollup", async () => {
+    ghMock.mockResolvedValueOnce(
+      graphqlResult([{ name: "workflow", status: "IN_PROGRESS", conclusion: null }]),
+    );
 
     const result = await githubReviewProvider.collectSignals(
       sourceSession("/wt"),
@@ -583,6 +570,197 @@ describe("resolveTrackedBranch", () => {
   });
 });
 
+describe("GitHub review batching", () => {
+  const tempDirs: string[] = [];
+
+  beforeEach(() => {
+    ghMock.mockReset();
+    _resetGitHubReviewBatchForTests();
+    _resetPrLookupsForTests();
+    _resetPrLookupCacheForTests();
+  });
+
+  afterEach(async () => {
+    _resetGitHubReviewBatchForTests();
+    _resetPrLookupsForTests();
+    _resetPrLookupCacheForTests();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function makeDataDir(): Promise<string> {
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-review-batch-"));
+    tempDirs.push(dataDir);
+    return dataDir;
+  }
+
+  function unboundSession(id: string): SessionRecord {
+    const { pr: _pr, ...session } = sourceSession(`/tmp/${id}`);
+    return { ...session, id, branch: "feature/no-pr" };
+  }
+
+  it("shares the persisted absent cache with branch attention lookups", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: { nodes: [] } },
+        },
+      }),
+    );
+    const sessions = [unboundSession("api-1"), unboundSession("api-2")];
+
+    await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect([...second.values()]).toEqual([
+      { status: "skipped", reason: "cached" },
+      { status: "skipped", reason: "cached" },
+    ]);
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      )?.misses,
+    ).toBe(1);
+  });
+
+  it("parks an unbound terminal PR in the shared cache", async () => {
+    const dataDir = await makeDataDir();
+    const terminal = {
+      number: 41,
+      title: "Merged work",
+      url: "https://github.com/acme/api/pull/41",
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isDraft: false,
+      state: "MERGED",
+      commits: { nodes: [] },
+      reviewThreads: { nodes: [] },
+      reviews: { nodes: [] },
+      comments: { nodes: [] },
+    };
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: { nodes: [terminal] } },
+        },
+      }),
+    );
+    const session = unboundSession("api-1");
+
+    await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "cached" });
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      )?.terminal,
+    ).toEqual({ number: 41, state: "MERGED" });
+  });
+
+  it("limits each repo cycle to 50 targets and rotates the remainder", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 51 }, (_unused, index) => ({
+      ...sourceSession(`/tmp/api-${index}`),
+      id: `api-${index}`,
+      pr: {
+        number: index + 1,
+        repo: "acme/api",
+        url: `https://github.com/acme/api/pull/${index + 1}`,
+      },
+    }));
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const numbers = args
+        .filter((arg) => /^n\d+=/.test(arg))
+        .map((arg) => Number(arg.slice(arg.indexOf("=") + 1)));
+      const aliases = Object.fromEntries(
+        numbers.map((number, index) => [
+          `a${index}`,
+          {
+            number,
+            title: `PR ${number}`,
+            url: `https://github.com/acme/api/pull/${number}`,
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: { nodes: [] },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+        ]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const first = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(50);
+    expect(first.get("api-50")).toEqual({ status: "skipped", reason: "capacity" });
+    expect(second.get("api-50")?.status).toBe("ok");
+  });
+
+  it("requests the newest 100 signals and surfaces the newest item", async () => {
+    const dataDir = await makeDataDir();
+    const comments = Array.from({ length: 100 }, (_unused, index) => ({
+      id: index + 2,
+      body: `comment ${index + 2}`,
+      author: { login: "reviewer" },
+    }));
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope(
+        {
+          number: 42,
+          title: "Newest feedback",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          isDraft: false,
+          state: "OPEN",
+        },
+        comments,
+      ),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    const call = ghMock.mock.calls[0]?.join(" ") ?? "";
+    expect(call).toContain("comments(last:100)");
+    expect(call).toContain("reviewThreads(last:100)");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("comment:101")).toBe(true);
+    expect(collected.collected.snapshot.has("comment:1")).toBe(false);
+  });
+});
+
 describe("github source rearm", () => {
   const tempDirs: string[] = [];
 
@@ -613,14 +791,14 @@ describe("github source rearm", () => {
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     ghMock.mockResolvedValueOnce(
       reviewBatchEnvelope({
-          number: 42,
-          title: "Keep branch mergeable",
-          url: "https://github.com/acme/api/pull/42",
-          reviewDecision: null,
-          mergeable: "CONFLICTING",
-          mergeStateStatus: "DIRTY",
-          state: "OPEN",
-          isDraft: false,
+        number: 42,
+        title: "Keep branch mergeable",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "DIRTY",
+        state: "OPEN",
+        isDraft: false,
       }),
     );
 
@@ -665,14 +843,14 @@ describe("github source rearm", () => {
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     ghMock.mockResolvedValueOnce(
       reviewBatchEnvelope({
-          number: 42,
-          title: "Keep branch mergeable",
-          url: "https://github.com/acme/api/pull/42",
-          reviewDecision: null,
-          mergeable: "MERGEABLE",
-          mergeStateStatus: "CLEAN",
-          state: "OPEN",
-          isDraft: false,
+        number: 42,
+        title: "Keep branch mergeable",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        state: "OPEN",
+        isDraft: false,
       }),
     );
 

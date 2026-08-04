@@ -275,7 +275,7 @@ async function loadModule() {
 }
 
 const PR_WAITING_LIMIT = 5;
-const PR_SLUG = { owner: "acme", name: "api" };
+const PR_SLUG = { host: "github.com", owner: "acme", name: "api" };
 const DATA_DIR = "/tmp/spur-data";
 
 interface GraphqlPrNode {
@@ -373,7 +373,8 @@ describe("PR auto-detect", () => {
     const call = ghMock.mock.calls[0] ?? [];
     expect(call[0]).toBe(session.worktreePath);
     expect(call[1]).toBe("api");
-    expect(call[2]).toBe("graphql");
+    expect(call.slice(1, 4)).toEqual(["api", "--hostname", "github.com"]);
+    expect(call[4]).toBe("graphql");
     expect(call).toContain("owner=acme");
     expect(call).toContain("name=api");
     expect(call).toContain(`b0=${session.branch}`);

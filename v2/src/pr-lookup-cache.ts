@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 // re-burst a lookup for every branch that has no PR.
 
 export interface PrRepoSlug {
+  host: string;
   owner: string;
   name: string;
 }
@@ -61,6 +62,7 @@ function repoFilePath(dataDir: string, slug: PrRepoSlug): string {
     dataDir,
     "source-state",
     "pr-lookup",
+    sanitizePathSegment(slug.host),
     sanitizePathSegment(slug.owner),
     `${sanitizePathSegment(slug.name)}.json`,
   );
