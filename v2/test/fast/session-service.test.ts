@@ -85,6 +85,7 @@ const waitForPlaywrightReadyMock = vi.fn();
 const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
+const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
@@ -418,6 +419,10 @@ vi.mock("../../src/sidecars/builtins.js", () => ({
 vi.mock("../../src/port-probe.js", () => ({
   clearPortListener: clearPortListenerMock,
   isHostPortFree: isHostPortFreeMock,
+}));
+
+vi.mock("../../src/disk-space.js", () => ({
+  readFreeKb: readFreeKbMock,
 }));
 
 vi.mock("../../src/runtime-tmux.js", () => ({
@@ -1017,6 +1022,11 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(() => ({ exists: workspaceExistsMock(), missing: false }));
     logSpurEventMock.mockReset();
+    // Default: probe unavailable, matching `readFreeKb`'s own real "swallow
+    // and return undefined" contract — no `host.disk.low` event unless a
+    // test explicitly opts in, so the huge pre-existing spawn-event-sequence
+    // fixture stays unaffected.
+    readFreeKbMock.mockReset().mockResolvedValue(undefined);
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
@@ -1198,6 +1208,73 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  describe("host.disk.low pre-spawn probe", () => {
+    it("emits host.disk.low at level warn when readFreeKb is below the diskRetention.warnFreeGb threshold", async () => {
+      mockClaudeJsonlState("waiting");
+      readFreeKbMock.mockResolvedValue(5 * 1024 * 1024); // 5GB free, below the 10GB default floor
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(result.id).toBe("api-1");
+      expect(readFreeKbMock).toHaveBeenCalledWith(TEST_DATA_DIR, expect.any(Number));
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "host.disk.low",
+          level: "warn",
+          details: expect.objectContaining({ freeGb: 5, warnFreeGb: 10 }),
+        }),
+      );
+      // Emitted before session.spawn.started — the probe runs at the very
+      // top of spawn()'s try, immediately after resolveSpawnTarget.
+      const events = logSpurEventMock.mock.calls.map(([, entry]) => entry.event);
+      expect(events.indexOf("host.disk.low")).toBeLessThan(events.indexOf("session.spawn.started"));
+    });
+
+    it("emits nothing when readFreeKb is above the threshold, and spawn still resolves normally", async () => {
+      mockClaudeJsonlState("waiting");
+      readFreeKbMock.mockResolvedValue(20 * 1024 * 1024); // 20GB free, above the 10GB default floor
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(result.id).toBe("api-1");
+      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "host.disk.low")).toBe(
+        false,
+      );
+    });
+
+    it("emits nothing when readFreeKb returns undefined (probe unavailable), and spawn still resolves normally", async () => {
+      mockClaudeJsonlState("waiting");
+      readFreeKbMock.mockResolvedValue(undefined);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(result.id).toBe("api-1");
+      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "host.disk.low")).toBe(
+        false,
+      );
+    });
+
+    it("calls readFreeKb exactly once for two spawns within the 60s cache window", async () => {
+      mockClaudeJsonlState("waiting");
+      readFreeKbMock.mockResolvedValue(20 * 1024 * 1024);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await service.spawn({ project: "api", prompt: "hello again" });
+
+      expect(readFreeKbMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("gives a desk-sibling spawn the anchor's shared artifacts dir while keeping its own SPUR_SESSION", async () => {

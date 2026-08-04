@@ -119,6 +119,7 @@ import {
   type UserInputKind,
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
+import { readFreeKb } from "./disk-space.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -1804,6 +1805,9 @@ export class SessionService {
   private readonly claudeCompactingOverrides = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
+  // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
+  // cached 60s in-memory so a burst of spawns costs at most one `df`.
+  private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
@@ -2698,6 +2702,42 @@ export class SessionService {
     },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private static readonly HOST_DISK_PROBE_TTL_MS = 60_000;
+  private static readonly HOST_DISK_PROBE_TIMEOUT_MS = 2_000;
+
+  // Report-only: never throws, never blocks or fails a spawn. `readFreeKb`
+  // already swallows its own `df` failure and returns `undefined`, so when
+  // the probe is unavailable this emits nothing at all — that keeps the
+  // exact spawn-event-sequence assertion in session-service.test.ts valid.
+  // No config toggle; a 60s in-memory cache bounds cost under a spawn burst.
+  private async warnIfHostDiskLow(): Promise<void> {
+    const now = Date.now();
+    if (
+      !this.hostDiskProbe ||
+      now - this.hostDiskProbe.checkedAtMs >= SessionService.HOST_DISK_PROBE_TTL_MS
+    ) {
+      const freeKb = await readFreeKb(
+        this.config.dataDir,
+        SessionService.HOST_DISK_PROBE_TIMEOUT_MS,
+      );
+      this.hostDiskProbe = { checkedAtMs: now, freeKb };
+    }
+    const freeKb = this.hostDiskProbe.freeKb;
+    if (freeKb === undefined) {
+      return;
+    }
+    const warnFreeKb = this.config.diskRetention.warnFreeGb * 1024 * 1024;
+    if (freeKb >= warnFreeKb) {
+      return;
+    }
+    const freeGb = freeKb / (1024 * 1024);
+    this.logEvent("host.disk.low", {
+      level: "warn",
+      message: `Host disk on ${this.config.dataDir} has only ${freeGb.toFixed(1)}GB free (below the ${this.config.diskRetention.warnFreeGb}GB floor)`,
+      details: { freeGb, warnFreeGb: this.config.diskRetention.warnFreeGb },
+    });
   }
 
   private logUserInput(
@@ -4996,6 +5036,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
+      await this.warnIfHostDiskLow();
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
