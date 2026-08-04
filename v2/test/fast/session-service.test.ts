@@ -6879,11 +6879,13 @@ describe("SessionService", () => {
       };
     }
 
-    it("rejects spawn over the global cap, naming the cap, the live count, and a candidate", async () => {
-      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 2 }));
+    it("rejects spawn over the global cap with the 3 stalest fleet candidates", async () => {
+      loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 4 }));
       listSessionsMock.mockReturnValue([
-        sessionRecord({ id: "api-1", updatedAt: "2026-03-18T09:00:00.000Z" }),
-        sessionRecord({ id: "api-2", updatedAt: "2026-03-18T09:30:00.000Z" }),
+        sessionRecord({ id: "api-newest", updatedAt: "2026-03-18T09:45:00.000Z" }),
+        sessionRecord({ id: "api-oldest", updatedAt: "2026-03-18T09:00:00.000Z" }),
+        sessionRecord({ id: "api-new", updatedAt: "2026-03-18T09:30:00.000Z" }),
+        sessionRecord({ id: "api-old", updatedAt: "2026-03-18T09:15:00.000Z" }),
       ]);
 
       const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
@@ -6898,9 +6900,9 @@ describe("SessionService", () => {
 
       expect(caught).toBeInstanceOf(SessionAdmissionDeniedError);
       expect((caught as InstanceType<typeof SessionAdmissionDeniedError>).statusCode).toBe(429);
-      const message = (caught as Error).message;
-      expect(message).toContain("2");
-      expect(message).toMatch(/api-1 \(api\)/);
+      expect((caught as Error).message).toBe(
+        'Cannot spawn session for project "api": at the global cap of 4 live sessions (4 slots claimed: 4 live, 0 reserved). Stop one of: api-oldest (api), api-old (api), api-new (api).',
+      );
       expect(writeSessionMock).not.toHaveBeenCalled();
       expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
     });
@@ -6985,7 +6987,7 @@ describe("SessionService", () => {
             }),
         );
 
-        const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+        const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
         const spawn =
           mode === "foreground"
@@ -6997,7 +6999,14 @@ describe("SessionService", () => {
           mode === "foreground"
             ? service.spawn({ project: "api", agent: "cursor", prompt: "second" })
             : service.spawnInBackground({ project: "api", agent: "cursor", prompt: "second" });
-        await expect(competingSpawn).rejects.toThrow(SessionAdmissionDeniedError);
+        const expectedMessage =
+          capScope === "global"
+            ? 'Cannot spawn session for project "api": at the global cap of 1 live sessions (1 slot claimed: 0 live, 1 reserved). Wait for an in-flight spawn to finish, then stop a live session or retry.'
+            : 'Cannot spawn session for project "api": at its per-project cap of 1 live sessions (1 slot claimed: 0 live, 1 reserved). Wait for an in-flight spawn to finish, then stop a live session or retry.';
+        await expect(competingSpawn).rejects.toMatchObject({
+          message: expectedMessage,
+          statusCode: 429,
+        });
         expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1);
         expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
 
@@ -7090,7 +7099,7 @@ describe("SessionService", () => {
         admission: { ...config.admission, maxLiveSessions: 10 },
         projects: {
           ...config.projects,
-          api: { ...config.projects.api, maxLiveSessions: 1 },
+          api: { ...config.projects.api, maxLiveSessions: 2 },
           web: {
             path: "/repo/web",
             defaultBranch: "main",
@@ -7112,20 +7121,27 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T08:00:00.000Z",
         }),
         sessionRecord({
-          id: "api-1",
+          id: "api-new",
           project: "api",
           updatedAt: "2026-03-18T09:00:00.000Z",
+        }),
+        sessionRecord({
+          id: "api-old",
+          project: "api",
+          updatedAt: "2026-03-18T08:30:00.000Z",
         }),
       ]);
       reserveNextSessionIdMock.mockResolvedValue("web-1");
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const denied = service.spawn({ project: "api", prompt: "hello" });
-      await expect(denied).rejects.toThrow(SessionAdmissionDeniedError);
-      await expect(denied).rejects.toThrow("api-1 (api)");
-      await expect(denied).rejects.not.toThrow("web-old");
+      await expect(denied).rejects.toMatchObject({
+        message:
+          'Cannot spawn session for project "api": at its per-project cap of 2 live sessions (2 slots claimed: 2 live, 0 reserved). Stop one of: api-old (api), api-new (api).',
+        statusCode: 429,
+      });
       const webResult = await service.spawn({ project: "web", prompt: "hello" });
       expect(webResult.id).toBe("web-1");
     });

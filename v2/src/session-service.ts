@@ -5228,9 +5228,7 @@ export class SessionService {
     const admissionReservation =
       options?.admissionReservation ??
       this.reserveAdmission(request.project, "spawn", {
-        ...(options?.replacingSessionId
-          ? { replacingSessionId: options.replacingSessionId }
-          : {}),
+        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
       });
     let admissionReserved = true;
     let stage = "validating";
@@ -9951,6 +9949,18 @@ export class SessionService {
       .join(", ");
   }
 
+  private admissionOccupancy(live: number, reserved: number): string {
+    const claimed = live + reserved;
+    return `${claimed} ${claimed === 1 ? "slot" : "slots"} claimed: ${live} live, ${reserved} reserved`;
+  }
+
+  private admissionDenialAction(records: SessionRecord[]): string {
+    const candidates = this.admissionCandidateList(records);
+    return candidates
+      ? `Stop one of: ${candidates}.`
+      : "Wait for an in-flight spawn to finish, then stop a live session or retry.";
+  }
+
   // Runs at both admission gates (resolveSpawnTarget, restore). Never
   // mutates state, never kills, never acts retroactively on sessions already
   // above the cap — a denial only refuses the *new* spawn/restore in front
@@ -10006,11 +10016,12 @@ export class SessionService {
       if (reservedProjectId === projectId) projectReserved += 1;
     }
     const projectCap = this.config.projects[projectId]?.maxLiveSessions;
-    const projectLive = (live.byProject.get(projectId) ?? 0) + projectReserved;
-    if (projectCap !== undefined && projectLive >= projectCap) {
+    const projectLive = live.byProject.get(projectId) ?? 0;
+    const projectClaimed = projectLive + projectReserved;
+    if (projectCap !== undefined && projectClaimed >= projectCap) {
       const projectCandidates = live.records.filter((session) => session.project === projectId);
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${this.admissionCandidateList(projectCandidates)}.`,
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -10022,7 +10033,7 @@ export class SessionService {
     const totalLive = live.total + reservedTotal;
     if (totalLive >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${totalLive} live or reserved now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
