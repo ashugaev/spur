@@ -175,6 +175,33 @@ describe("runtime-tmux shared probe cache", () => {
     }
   });
 
+  it("attributes a terminal workspace anchor's shared sidecar rss once to its live successor", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: [
+            "api-1--dev 1 1 0 1001 /dev/pts/1",
+            "api-2 1 1 0 1002 /dev/pts/2",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        return {
+          stdout: ["1001 pts/1 20480 node dev", "1002 pts/2 51200 node agent"].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetSessionRssBytes } = await import("../../src/runtime-tmux.js");
+    const rssBySessionId = await getFleetSessionRssBytes(new Map([["api-1", "api-2"]]));
+
+    expect(rssBySessionId.get("api-2")).toBe((20_480 + 51_200) * 1024);
+    expect(rssBySessionId.has("api-1")).toBe(false);
+  });
+
   it("caches capture-pane per (session, lines) so a repeat scan within the TTL forks nothing extra", async () => {
     let captureCalls = 0;
     execFileAsyncMock.mockImplementation(async (file, args) => {

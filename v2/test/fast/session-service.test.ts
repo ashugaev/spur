@@ -61,6 +61,9 @@ const agentSubmitAckMaxResendsMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
+const resolveCursorLaunchModelMock = vi.fn(
+  async (model: string | undefined): Promise<string | undefined> => model,
+);
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
@@ -101,7 +104,7 @@ const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolve
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const getFleetSessionRssBytesMock = vi
-  .fn<() => Promise<Map<string, number>>>()
+  .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
 const readHostMemoryMock =
   vi.fn<() => { totalBytes: number; availableBytes: number; swapFreeBytes: number } | null>();
@@ -409,6 +412,10 @@ vi.mock("../../src/agents/codex.js", () => ({
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
+}));
+
+vi.mock("../../src/agents/models.js", () => ({
+  resolveCursorLaunchModel: resolveCursorLaunchModelMock,
 }));
 
 vi.mock("../../src/sidecars/builtins.js", () => ({
@@ -1032,6 +1039,9 @@ describe("SessionService", () => {
     writeServiceInstanceMock.mockReset();
     resetServiceStore();
     createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
+    resolveCursorLaunchModelMock
+      .mockReset()
+      .mockImplementation(async (model: string | undefined) => model);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
@@ -6909,6 +6919,26 @@ describe("SessionService", () => {
       expect(report.sessions.map((session) => session.id)).toEqual(["api-old", "api-new"]);
     });
 
+    it("maps a terminal workspace anchor's shared rss to its live successor", async () => {
+      listSessionsMock.mockReturnValue([
+        sessionRecord({ id: "api-1", status: "completed" }),
+        sessionRecord({ id: "api-2", workspaceId: "api-1", status: "running" }),
+      ]);
+      getFleetSessionRssBytesMock.mockImplementationOnce(async (liveSessionByWorkspaceId) => {
+        expect(liveSessionByWorkspaceId?.get("api-1")).toBe("api-2");
+        return new Map([["api-2", 71_680 * 1024]]);
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const report = await service.getHeadroom();
+
+      expect(report.sessions).toEqual([
+        expect.objectContaining({ id: "api-2", rssBytes: 71_680 * 1024 }),
+      ]);
+    });
+
     it("spawns normally under the cap", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 2 }));
@@ -6922,6 +6952,62 @@ describe("SessionService", () => {
       expect(result.id).toBe("api-1");
       expect(writeSessionMock).toHaveBeenCalled();
     });
+
+    it.each([
+      ["foreground", "global"],
+      ["foreground", "project"],
+      ["background", "global"],
+      ["background", "project"],
+    ] as const)(
+      "reserves %s spawn admission across async preparation at the %s cap",
+      async (mode, capScope) => {
+        mockClaudeJsonlState("waiting");
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          admission: {
+            ...config.admission,
+            maxLiveSessions: capScope === "global" ? 1 : 10,
+          },
+          projects: {
+            ...config.projects,
+            api: {
+              ...config.projects.api,
+              ...(capScope === "project" ? { maxLiveSessions: 1 } : {}),
+            },
+          },
+        });
+        let releaseModel: ((value: string | undefined) => void) | undefined;
+        resolveCursorLaunchModelMock.mockImplementationOnce(
+          () =>
+            new Promise<string | undefined>((resolve) => {
+              releaseModel = resolve;
+            }),
+        );
+
+        const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const spawn =
+          mode === "foreground"
+            ? service.spawn({ project: "api", agent: "cursor", prompt: "first" })
+            : service.spawnInBackground({ project: "api", agent: "cursor", prompt: "first" });
+        await vi.waitFor(() => expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1));
+
+        const competingSpawn =
+          mode === "foreground"
+            ? service.spawn({ project: "api", agent: "cursor", prompt: "second" })
+            : service.spawnInBackground({ project: "api", agent: "cursor", prompt: "second" });
+        await expect(competingSpawn).rejects.toThrow(SessionAdmissionDeniedError);
+        expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1);
+        expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+
+        releaseModel?.("composer-1.5");
+        await expect(spawn).resolves.toMatchObject({ id: "api-1" });
+        if (mode === "background") {
+          await service.settleBackgroundSpawns();
+        }
+      },
+    );
 
     it("counts a status:running, state:waiting session toward the cap", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
