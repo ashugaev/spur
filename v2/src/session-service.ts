@@ -8243,10 +8243,14 @@ export class SessionService {
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
     // otherwise see a wiped shepherd workspace as unrestorable. Gated on
-    // isRestorableStatus so a killed/completed shepherd is rejected below
-    // rather than having its workspace re-created as a side effect first.
+    // !isTerminalSessionStatus (not isRestorableStatus, which excludes
+    // "errored") so an errored shepherd still heals here, matching
+    // isRestorableSession's own errored+state==="error" branch and the
+    // send-path sibling above. A killed/completed shepherd is still rejected
+    // below rather than having its workspace re-created as a side effect
+    // first.
     if (
-      isRestorableStatus(session.status) &&
+      !isTerminalSessionStatus(session.status) &&
       session.project === SHEPHERD_PROJECT_ID &&
       !workspaceExists(session.worktreePath)
     ) {
