@@ -735,9 +735,7 @@ function graphqlEnvelopeErrorMessage(errors: unknown): string {
   const messages = errors.flatMap((error) =>
     isRecord(error) && typeof error.message === "string" ? [error.message] : [],
   );
-  return messages.length > 0
-    ? messages.join("; ")
-    : "GitHub review batch returned GraphQL errors";
+  return messages.length > 0 ? messages.join("; ") : "GitHub review batch returned GraphQL errors";
 }
 
 interface ReviewThreadPage {
