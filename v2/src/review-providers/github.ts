@@ -4,16 +4,14 @@ import {
   readGitHubReviewPagination,
   writeGitHubReviewPagination,
 } from "../metadata.js";
-import { gqlErrorsByAlias, resolvePrLookupRepo } from "../pr-lookup.js";
 import {
-  clearPrLookupEntry,
-  isPrLookupDue,
-  markPrLookupMiss,
-  markPrLookupTerminal,
-  PR_LOOKUP_LIVE_CAP_MS,
-  readPrLookupEntry,
-  type PrRepoSlug,
-} from "../pr-lookup-cache.js";
+  claimPollPrLookup,
+  gqlErrorsByAlias,
+  resolvePrLookupRepo,
+  type PollPrLookupClaim,
+  type PrLookupOutcome,
+} from "../pr-lookup.js";
+import { PR_LOOKUP_LIVE_CAP_MS, type PrRepoSlug } from "../pr-lookup-cache.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -146,6 +144,7 @@ interface GitHubBatchTarget {
   slug: PrRepoSlug;
   branch: string | null;
   number: number | null;
+  lookupClaim?: Extract<PollPrLookupClaim, { status: "owner" }>;
 }
 
 interface GitHubBatchAlias {
@@ -673,26 +672,23 @@ function boundRepoSlug(session: SessionRecord): PrRepoSlug | null {
   }
 }
 
-async function targetForSession(
-  session: SessionRecord,
-  dataDir: string,
-): Promise<GitHubBatchTarget | "cached" | null> {
+async function targetForSession(session: SessionRecord): Promise<GitHubBatchTarget | null> {
   if (session.pr) {
     const slug = boundRepoSlug(session);
     return slug ? { session, slug, branch: null, number: session.pr.number } : null;
   }
   const slug = await resolvePrLookupRepo(session.worktreePath);
   if (!slug) return null;
-  const branch = session.branch;
-  if (!isPrLookupDue(readPrLookupEntry(dataDir, slug, branch), PR_LOOKUP_LIVE_CAP_MS)) {
-    return "cached";
-  }
   return {
     session,
     slug,
-    branch,
+    branch: session.branch,
     number: null,
   };
+}
+
+function settleTargetLookup(target: GitHubBatchTarget, outcome: PrLookupOutcome): void {
+  target.lookupClaim?.settle(outcome);
 }
 
 function readGraphqlEnvelope(raw: string): Record<string, unknown> | null {
@@ -722,10 +718,7 @@ async function requestGraphqlEnvelope(
   return envelope;
 }
 
-function assertGraphqlEnvelopeSucceeded(
-  envelope: Record<string, unknown>,
-  context: string,
-): void {
+function assertGraphqlEnvelopeSucceeded(envelope: Record<string, unknown>, context: string): void {
   if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
     throw new Error(`${context} returned GraphQL errors`);
   }
@@ -1201,7 +1194,10 @@ async function runReviewRepoBatch(
   try {
     envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
   } catch (error) {
-    for (const target of targets) results.set(target.session.id, { status: "error", error });
+    for (const target of targets) {
+      settleTargetLookup(target, { status: "skipped", reason: "error" });
+      results.set(target.session.id, { status: "error", error });
+    }
     return results;
   }
   const data = isRecord(envelope.data) ? envelope.data : null;
@@ -1209,7 +1205,10 @@ async function runReviewRepoBatch(
     const error = new Error(
       `invalid GitHub review batch for ${slug.host}/${slug.owner}/${slug.name}`,
     );
-    for (const target of targets) results.set(target.session.id, { status: "error", error });
+    for (const target of targets) {
+      settleTargetLookup(target, { status: "skipped", reason: "error" });
+      results.set(target.session.id, { status: "error", error });
+    }
     return results;
   }
   const repository = data.r;
@@ -1241,7 +1240,10 @@ async function runReviewRepoBatch(
       await paginatePullRequestSignals(targets, aliases, repository, cursors);
       writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
     } catch (error) {
-      for (const target of targets) results.set(target.session.id, { status: "error", error });
+      for (const target of targets) {
+        settleTargetLookup(target, { status: "skipped", reason: "error" });
+        results.set(target.session.id, { status: "error", error });
+      }
       return results;
     }
   }
@@ -1252,6 +1254,7 @@ async function runReviewRepoBatch(
     const aliasError = aliasErrors.get(alias);
     if (aliasError) {
       for (const matching of matchingTargets) {
+        settleTargetLookup(matching, { status: "skipped", reason: "error" });
         results.set(matching.session.id, { status: "error", error: new Error(aliasError) });
       }
       continue;
@@ -1259,6 +1262,7 @@ async function runReviewRepoBatch(
     if (invalidAliases.has(alias)) {
       const error = new Error(`invalid GitHub pullRequests payload for ${alias}`);
       for (const matching of matchingTargets) {
+        settleTargetLookup(matching, { status: "skipped", reason: "error" });
         results.set(matching.session.id, { status: "error", error });
       }
       continue;
@@ -1266,14 +1270,22 @@ async function runReviewRepoBatch(
     const selected = selectSummaryAndNode(repository[alias], target.number !== null);
     if (target.branch !== null) {
       if (!selected) {
-        markPrLookupMiss(dataDir, target.slug, target.branch);
+        settleTargetLookup(target, { status: "absent" });
       } else if (selected.summary.state === "CLOSED" || selected.summary.state === "MERGED") {
-        markPrLookupTerminal(dataDir, target.slug, target.branch, {
-          number: selected.summary.number,
-          state: selected.summary.state,
+        settleTargetLookup(target, {
+          status: "terminal",
+          pr: { number: selected.summary.number, state: selected.summary.state },
         });
       } else {
-        clearPrLookupEntry(dataDir, target.slug, target.branch);
+        settleTargetLookup(target, {
+          status: "found",
+          pr: {
+            number: selected.summary.number,
+            title: selected.summary.title,
+            url: selected.summary.url,
+            state: "OPEN",
+          },
+        });
       }
     }
     if (!selected) {
@@ -1308,11 +1320,7 @@ export async function collectGitHubSignalsBatch(
   const results = new Map<string, GitHubSignalBatchResult>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
   for (const session of sessions) {
-    const target = await targetForSession(session, dataDir);
-    if (target === "cached") {
-      results.set(session.id, { status: "skipped", reason: "cached" });
-      continue;
-    }
+    const target = await targetForSession(session);
     if (!target) {
       results.set(session.id, { status: "skipped", reason: "repo_unresolved" });
       continue;
@@ -1357,8 +1365,9 @@ export async function collectGitHubSignalsBatch(
         { length: Math.min(limit, groupedTargets.length) },
         (_, offset) => groupedTargets[(start + offset) % groupedTargets.length] ?? [],
       );
-      const selected = selectedGroups.flat();
-      const selectedIds = new Set(selected.map((target) => target.session.id));
+      const selectedIds = new Set(
+        selectedGroups.flatMap((group) => group.map((target) => target.session.id)),
+      );
       for (const group of groupedTargets) {
         for (const target of group) {
           if (!selectedIds.has(target.session.id)) {
@@ -1367,9 +1376,45 @@ export async function collectGitHubSignalsBatch(
         }
       }
       reviewBatchCursor.set(cursorKey, (start + limit) % groupedTargets.length);
+      const selected: GitHubBatchTarget[] = [];
+      for (const group of selectedGroups) {
+        const representative = group[0];
+        if (!representative) continue;
+        if (representative.branch === null) {
+          selected.push(...group);
+          continue;
+        }
+        const claim = claimPollPrLookup({
+          dataDir,
+          slug: representative.slug,
+          branch: representative.branch,
+          capMs: PR_LOOKUP_LIVE_CAP_MS,
+        });
+        if (claim.status === "owner") {
+          selected.push(...group.map((target) => ({ ...target, lookupClaim: claim })));
+          continue;
+        }
+        const outcome = claim.status === "cached" ? claim.outcome : await claim.outcome;
+        for (const target of group) {
+          results.set(
+            target.session.id,
+            outcome.status === "skipped" && outcome.reason === "budget"
+              ? { status: "skipped", reason: "budget" }
+              : outcome.status === "skipped"
+                ? { status: "error", error: new Error(outcome.message ?? outcome.reason) }
+                : { status: "skipped", reason: "cached" },
+          );
+        }
+      }
+      if (selected.length === 0) continue;
       const admission = await withGhPollBudget(() =>
         runReviewRepoBatch(selected, dataDir, projectId, sourceId),
       );
+      if (admission.status === "blocked") {
+        for (const target of selected) {
+          settleTargetLookup(target, { status: "skipped", reason: "budget" });
+        }
+      }
       const batch =
         admission.status === "blocked"
           ? new Map(

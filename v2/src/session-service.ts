@@ -251,6 +251,7 @@ import {
 import {
   type PrLookupOutcome,
   cancelPendingPrLookups,
+  claimPollPrLookup,
   enqueuePrLookup,
   flushPrLookups,
   resolvePrLookupRepo,
@@ -259,10 +260,7 @@ import {
   PR_LOOKUP_IDLE_CAP_MS,
   PR_LOOKUP_LIVE_CAP_MS,
   type PrRepoSlug,
-  clearPrLookupEntry,
   isPrLookupDue,
-  markPrLookupMiss,
-  markPrLookupTerminal,
   readPrLookupEntry,
 } from "./pr-lookup-cache.js";
 import {
@@ -1945,7 +1943,6 @@ export class SessionService {
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
-  private readonly prLookupResolutions = new Map<string, Promise<PrLookupOutcome>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
@@ -3559,7 +3556,7 @@ export class SessionService {
     // Fire and forget, but tracked so teardown can drain it — an unawaited
     // `gh` call outliving its caller lands on whatever runs next. The queue
     // registration inside is synchronous, so the caller's flush sees it.
-    const run = this.runPrCheck(session, discoveryBranch, slug).catch((error) => {
+    const run = this.runPrCheck(session, discoveryBranch, slug, capMs).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.pr_auto_detect.failed", {
         level: "warn",
@@ -3581,52 +3578,31 @@ export class SessionService {
     slug: PrRepoSlug,
     branch: string,
     worktreePath: string,
+    capMs: number,
   ): Promise<PrLookupOutcome> {
-    const key = JSON.stringify([slug.host, slug.owner, slug.name, branch]);
-    const active = this.prLookupResolutions.get(key);
-    if (active) {
-      return active;
-    }
-    const resolution = this.resolveAndCacheQueuedPrLookup(slug, branch, worktreePath);
-    this.prLookupResolutions.set(key, resolution);
-    void resolution.then(
-      () => this.prLookupResolutions.delete(key),
-      () => this.prLookupResolutions.delete(key),
-    );
-    return resolution;
-  }
-
-  private async resolveAndCacheQueuedPrLookup(
-    slug: PrRepoSlug,
-    branch: string,
-    worktreePath: string,
-  ): Promise<PrLookupOutcome> {
+    const claim = claimPollPrLookup({
+      dataDir: this.config.dataDir,
+      slug,
+      branch,
+      capMs,
+    });
+    if (claim.status === "cached") return claim.outcome;
+    if (claim.status === "joined") return claim.outcome;
     const outcome = await enqueuePrLookup({ slug, branch, worktreePath });
-    const dataDir = this.config.dataDir;
-    switch (outcome.status) {
-      case "found":
-        clearPrLookupEntry(dataDir, slug, branch);
-        return outcome;
-      case "absent":
-        markPrLookupMiss(dataDir, slug, branch);
-        return outcome;
-      case "terminal":
-        markPrLookupTerminal(dataDir, slug, branch, outcome.pr);
-        return outcome;
-      case "skipped":
-        return outcome;
-    }
+    claim.settle(outcome);
+    return outcome;
   }
 
   private async runPrCheck(
     session: SessionRecord,
     discoveryBranch: string,
     slug: PrRepoSlug | null,
+    capMs: number,
   ): Promise<void> {
     // No GitHub remote: nothing to look up and nothing to cache, but the
     // non-github review providers still get their turn below.
     const outcome: PrLookupOutcome = slug
-      ? await this.resolveQueuedPrLookup(slug, discoveryBranch, session.worktreePath)
+      ? await this.resolveQueuedPrLookup(slug, discoveryBranch, session.worktreePath, capMs)
       : { status: "absent" };
     // Budget/cancellation means no provider was attempted. A transport error
     // from a two-segment remote is different: arbitrary GitHub Enterprise

@@ -5,7 +5,15 @@ import {
   withGhPollBudget,
   type GhPollBudgetState,
 } from "./gh.js";
-import type { PrLookupTerminalPr, PrRepoSlug } from "./pr-lookup-cache.js";
+import {
+  clearPrLookupEntry,
+  isPrLookupDue,
+  markPrLookupMiss,
+  markPrLookupTerminal,
+  readPrLookupEntry,
+  type PrLookupTerminalPr,
+  type PrRepoSlug,
+} from "./pr-lookup-cache.js";
 import { readRemoteUrls } from "./workspace.js";
 
 // Batched PR discovery.
@@ -74,11 +82,79 @@ interface PendingRequest {
 const slugMemo = new Map<string, SlugMemoEntry>();
 const pending = new Map<string, PendingRequest[]>();
 const activeFlushes = new Set<Promise<void>>();
+const activePollLookups = new Map<string, Promise<PrLookupOutcome>>();
 
 export function _resetPrLookupsForTests(): void {
   slugMemo.clear();
   pending.clear();
   activeFlushes.clear();
+  activePollLookups.clear();
+}
+
+export type PollPrLookupClaim =
+  | { status: "cached"; outcome: Extract<PrLookupOutcome, { status: "absent" | "terminal" }> }
+  | { status: "joined"; outcome: Promise<PrLookupOutcome> }
+  | { status: "owner"; settle: (outcome: PrLookupOutcome) => void };
+
+/**
+ * Claims one poll lookup across every daemon poller. Due state, query ownership,
+ * and cache mutation live in this boundary so two concurrent cycles cannot both
+ * query or advance the same repo/branch miss.
+ */
+export function claimPollPrLookup(input: {
+  dataDir: string;
+  slug: PrRepoSlug;
+  branch: string;
+  capMs: number;
+  nowMs?: number;
+}): PollPrLookupClaim {
+  const key = JSON.stringify([
+    input.dataDir,
+    input.slug.host,
+    input.slug.owner,
+    input.slug.name,
+    input.branch,
+  ]);
+  const active = activePollLookups.get(key);
+  if (active) return { status: "joined", outcome: active };
+
+  const nowMs = input.nowMs ?? Date.now();
+  const entry = readPrLookupEntry(input.dataDir, input.slug, input.branch, nowMs);
+  if (!isPrLookupDue(entry, input.capMs, nowMs)) {
+    return {
+      status: "cached",
+      outcome: entry?.terminal ? { status: "terminal", pr: entry.terminal } : { status: "absent" },
+    };
+  }
+
+  let resolveOutcome = (_outcome: PrLookupOutcome): void => {};
+  const outcome = new Promise<PrLookupOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  activePollLookups.set(key, outcome);
+  let settled = false;
+  return {
+    status: "owner",
+    settle: (next) => {
+      if (settled) return;
+      settled = true;
+      switch (next.status) {
+        case "found":
+          clearPrLookupEntry(input.dataDir, input.slug, input.branch);
+          break;
+        case "absent":
+          markPrLookupMiss(input.dataDir, input.slug, input.branch);
+          break;
+        case "terminal":
+          markPrLookupTerminal(input.dataDir, input.slug, input.branch, next.pr);
+          break;
+        case "skipped":
+          break;
+      }
+      activePollLookups.delete(key);
+      resolveOutcome(next);
+    },
+  };
 }
 
 function slugKey(slug: PrRepoSlug): string {

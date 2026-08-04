@@ -50,7 +50,8 @@ const {
   hasActiveChecks,
   githubReviewProvider,
 } = await import("../../src/review-providers/github.js");
-const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
+const { _resetPrLookupsForTests, claimPollPrLookup, enqueuePrLookup, flushPrLookups } =
+  await import("../../src/pr-lookup.js");
 const { _resetPrLookupCacheForTests, readPrLookupEntry } =
   await import("../../src/pr-lookup-cache.js");
 const { _resetGhUsageForTests } = await import("../../src/gh.js");
@@ -631,6 +632,49 @@ describe("GitHub review batching", () => {
         "feature/no-pr",
       )?.misses,
     ).toBe(1);
+  });
+
+  it("shares one in-flight branch lookup across attention and review polling", async () => {
+    const dataDir = await makeDataDir();
+    const slug = { host: "github.com", owner: "acme", name: "api" };
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: { nameWithOwner: "acme/api", isFork: false, parent: null, a0: { nodes: [] } },
+        },
+      }),
+    );
+    const claim = claimPollPrLookup({
+      dataDir,
+      slug,
+      branch: "feature/no-pr",
+      capMs: 5 * 60_000,
+    });
+    if (claim.status !== "owner") throw new Error("attention did not own lookup");
+    const attention = enqueuePrLookup({
+      slug,
+      branch: "feature/no-pr",
+      worktreePath: "/tmp/api-attention",
+    }).then((outcome) => {
+      claim.settle(outcome);
+      return outcome;
+    });
+    const review = collectGitHubSignalsBatch(
+      [unboundSession("api-review")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    await flushPrLookups();
+
+    await expect(attention).resolves.toEqual({ status: "absent" });
+    await expect(review).resolves.toEqual(
+      new Map([["api-review", { status: "skipped", reason: "cached" }]]),
+    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(readPrLookupEntry(dataDir, slug, "feature/no-pr")?.misses).toBe(1);
   });
 
   it.each([
