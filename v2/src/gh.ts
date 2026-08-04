@@ -146,6 +146,8 @@ interface GraphqlBudgetLedger {
 
 let minuteWindow: GhUsageWindow | null = null;
 let hourWindow: GhUsageWindow | null = null;
+let minutePauseEmittedUntilMs = 0;
+let hourPauseEmittedUntilMs = 0;
 let budget: GraphqlBudgetLedger = {
   remaining: null,
   resetAtMs: null,
@@ -160,6 +162,8 @@ let ghPollAdmissionTail: Promise<void> = Promise.resolve();
 export function _resetGhUsageForTests(): void {
   minuteWindow = null;
   hourWindow = null;
+  minutePauseEmittedUntilMs = 0;
+  hourPauseEmittedUntilMs = 0;
   budget = {
     remaining: null,
     resetAtMs: null,
@@ -321,12 +325,14 @@ function emitUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs:
  * lookups — the hour in which the budget was exhausted.
  */
 function flushUsageWindows(nowMs: number): void {
-  if (minuteWindow) {
+  if (minuteWindow && nowMs >= minutePauseEmittedUntilMs) {
     emitUsageWindow(minuteWindow, "minute", nowMs);
+    minutePauseEmittedUntilMs = minuteWindow.startedAt + GH_USAGE_MINUTE_MS;
     minuteWindow = null;
   }
-  if (hourWindow) {
+  if (hourWindow && nowMs >= hourPauseEmittedUntilMs) {
     emitUsageWindow(hourWindow, "hour", nowMs);
+    hourPauseEmittedUntilMs = hourWindow.startedAt + GH_USAGE_HOUR_MS;
     hourWindow = null;
   }
 }
@@ -372,10 +378,20 @@ export function noteGhInvocation(args: string[], nowMs: number = Date.now()): vo
     hourWindow = null;
   }
   if (!minuteWindow) {
-    minuteWindow = { startedAt: nowMs, calls: 0, graphqlCost: 0, bySubcommand: new Map() };
+    minuteWindow = {
+      startedAt: nowMs,
+      calls: 0,
+      graphqlCost: 0,
+      bySubcommand: new Map(),
+    };
   }
   if (!hourWindow) {
-    hourWindow = { startedAt: nowMs, calls: 0, graphqlCost: 0, bySubcommand: new Map() };
+    hourWindow = {
+      startedAt: nowMs,
+      calls: 0,
+      graphqlCost: 0,
+      bySubcommand: new Map(),
+    };
   }
   minuteWindow.calls += 1;
   hourWindow.calls += 1;

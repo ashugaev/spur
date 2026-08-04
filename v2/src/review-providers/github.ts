@@ -274,10 +274,10 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergea
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
-  }}}}}}
+  } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
-  reviews(last:100){nodes{databaseId state body author{login}}}
-  comments(last:100){nodes{databaseId body author{login}}}`;
+  reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
+  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
   const nodesPerTarget = bound ? GITHUB_BOUND_PR_NODE_BUDGET : GITHUB_UNBOUND_TARGET_NODE_BUDGET;
@@ -773,11 +773,8 @@ async function paginateReviewThreads(
   targets: GitHubBatchTarget[],
   aliases: GitHubBatchAlias[],
   repository: Record<string, unknown>,
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
+  cursors: Map<string, string>,
 ): Promise<void> {
-  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
   const resumedPullRequests = new Set(
     [...cursors.keys()].filter((key) => key.startsWith("pull-request:")),
   );
@@ -859,7 +856,6 @@ async function paginateReviewThreads(
       }
     }
   }
-  writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
 }
 
 function threadPageToFetch(
@@ -895,9 +891,9 @@ async function paginateReviewThreadComments(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  cursors: Map<string, string>,
 ): Promise<void> {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
-  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
   const pullRequests = new Map<string, Record<string, unknown>>();
   for (const { alias, target } of aliases) {
     const selected = selectSummaryAndNode(repository[alias], target.number !== null);
@@ -1012,7 +1008,135 @@ async function paginateReviewThreadComments(
       }
     }
   }
-  writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
+}
+
+type PullRequestSignalConnection = "checks" | "reviews" | "comments";
+
+interface PullRequestSignalPage {
+  pullRequest: Record<string, unknown>;
+  pullRequestId: string;
+  kind: PullRequestSignalConnection;
+  before: string;
+}
+
+function signalCursorKey(kind: PullRequestSignalConnection, pullRequestId: string): string {
+  return `pull-request-signal:${kind}:${encodeURIComponent(pullRequestId)}`;
+}
+
+function signalConnection(
+  pullRequest: Record<string, unknown>,
+  kind: PullRequestSignalConnection,
+): Record<string, unknown> | null {
+  if (kind !== "checks") return isRecord(pullRequest[kind]) ? pullRequest[kind] : null;
+  const commit = connectionNodes(pullRequest.commits).at(-1);
+  return isRecord(commit) &&
+    isRecord(commit.commit) &&
+    isRecord(commit.commit.statusCheckRollup) &&
+    isRecord(commit.commit.statusCheckRollup.contexts)
+    ? commit.commit.statusCheckRollup.contexts
+    : null;
+}
+
+function signalPageToFetch(
+  pullRequest: Record<string, unknown>,
+  kind: PullRequestSignalConnection,
+  resumeBefore?: string,
+): PullRequestSignalPage | null {
+  const pullRequestId = readString(pullRequest.id);
+  const connection = signalConnection(pullRequest, kind);
+  const pageInfo = connection && isRecord(connection.pageInfo) ? connection.pageInfo : null;
+  const before = resumeBefore ?? (pageInfo ? readString(pageInfo.startCursor) : null);
+  return pullRequestId && connection && pageInfo?.hasPreviousPage === true && before
+    ? { pullRequest, pullRequestId, kind, before }
+    : null;
+}
+
+function signalPageField(index: number, page: PullRequestSignalPage): string {
+  const connection =
+    page.kind === "checks"
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      : page.kind === "reviews"
+        ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
+        : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+  return `s${index}:node(id:$id${index}){... on PullRequest{${connection}}}`;
+}
+
+async function paginatePullRequestSignals(
+  targets: GitHubBatchTarget[],
+  aliases: GitHubBatchAlias[],
+  repository: Record<string, unknown>,
+  cursors: Map<string, string>,
+): Promise<void> {
+  const pending: PullRequestSignalPage[] = [];
+  for (const { alias, target } of aliases) {
+    const selected = selectSummaryAndNode(repository[alias], target.number !== null);
+    if (!selected) continue;
+    const pullRequestId = readString(selected.node.id);
+    if (!pullRequestId) continue;
+    for (const kind of ["checks", "reviews", "comments"] as const) {
+      const page = signalPageToFetch(
+        selected.node,
+        kind,
+        cursors.get(signalCursorKey(kind, pullRequestId)),
+      );
+      if (page) pending.push(page);
+    }
+  }
+  pending.sort(
+    (left, right) =>
+      Number(cursors.has(signalCursorKey(right.kind, right.pullRequestId))) -
+      Number(cursors.has(signalCursorKey(left.kind, left.pullRequestId))),
+  );
+  for (const page of pending) {
+    cursors.set(signalCursorKey(page.kind, page.pullRequestId), page.before);
+  }
+  let requests = 0;
+  let nodes = 0;
+  while (
+    pending.length > 0 &&
+    !pollBudgetState().blocked &&
+    requests < GITHUB_REVIEW_PAGINATION_REQUEST_BUDGET &&
+    nodes + GITHUB_CONNECTION_PAGE_SIZE <= GITHUB_REVIEW_PAGINATION_NODE_BUDGET
+  ) {
+    const pageCount = Math.min(
+      pending.length,
+      GITHUB_REVIEW_PAGINATION_ALIASES_PER_REQUEST,
+      Math.floor((GITHUB_REVIEW_PAGINATION_NODE_BUDGET - nodes) / GITHUB_CONNECTION_PAGE_SIZE),
+    );
+    const pages = pending.splice(0, pageCount);
+    const declarations: string[] = [];
+    const fields: string[] = [];
+    const args = ["api", "--hostname", targets[0]?.slug.host ?? "", "graphql"];
+    for (const [index, page] of pages.entries()) {
+      declarations.push(`$id${index}:ID!`, `$before${index}:String!`);
+      fields.push(signalPageField(index, page));
+      args.push("-f", `id${index}=${page.pullRequestId}`, "-f", `before${index}=${page.before}`);
+    }
+    const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
+    args.splice(4, 0, "-f", `query=${query}`);
+    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    const data = isRecord(envelope.data) ? envelope.data : null;
+    if (!data) throw new Error("invalid GitHub pull request signal pagination response");
+    requests += 1;
+    nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
+    for (const [index, page] of pages.entries()) {
+      const value = data[`s${index}`];
+      if (!isRecord(value)) throw new Error("invalid GitHub pull request signal page");
+      const connection = signalConnection(value, page.kind);
+      const current = signalConnection(page.pullRequest, page.kind);
+      if (!connection || !current) throw new Error("invalid GitHub pull request signal page");
+      current.nodes = [...connectionNodes(connection), ...connectionNodes(current)];
+      current.pageInfo = connection.pageInfo;
+      const next = signalPageToFetch({ ...value, id: page.pullRequestId }, page.kind);
+      const key = signalCursorKey(page.kind, page.pullRequestId);
+      if (next) {
+        cursors.set(key, next.before);
+        pending.push({ ...next, pullRequest: page.pullRequest });
+      } else {
+        cursors.delete(key);
+      }
+    }
+  }
 }
 
 async function runReviewRepoBatch(
@@ -1092,8 +1216,9 @@ async function runReviewRepoBatch(
   const pageableAliases = aliases.filter(
     ({ alias }) => !aliasErrors.has(alias) && !invalidAliases.has(alias),
   );
+  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
   try {
-    await paginateReviewThreads(targets, pageableAliases, repository, dataDir, projectId, sourceId);
+    await paginateReviewThreads(targets, pageableAliases, repository, cursors);
     await paginateReviewThreadComments(
       targets,
       pageableAliases,
@@ -1101,7 +1226,10 @@ async function runReviewRepoBatch(
       dataDir,
       projectId,
       sourceId,
+      cursors,
     );
+    await paginatePullRequestSignals(targets, pageableAliases, repository, cursors);
+    writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
   } catch (error) {
     for (const target of targets) results.set(target.session.id, { status: "error", error });
     return results;

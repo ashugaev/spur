@@ -171,6 +171,27 @@ describe("gh usage accounting", () => {
     expect(usageEvents("minute")).toHaveLength(1);
   });
 
+  it("does not duplicate usage windows across distinct budget pauses", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGraphqlCost(3, T0);
+    recordGraphqlBudget(900, T0 + HOUR, T0 + 1_000);
+    pollBudgetState(T0 + 2_000);
+
+    noteGhInvocation(["api", "graphql"], T0 + 3_000);
+    noteGraphqlCost(2, T0 + 3_000);
+    recordGraphqlBudget(800, T0 + 2 * HOUR, T0 + 4_000);
+    pollBudgetState(T0 + 5_000);
+
+    expect(usageEvents("minute")).toHaveLength(1);
+    expect(usageEvents("hour")).toHaveLength(1);
+    expect(usageEvents("minute")[0]).toMatchObject({ calls: 1, graphqlCost: 3 });
+    expect(usageEvents("hour")[0]).toMatchObject({ calls: 1, graphqlCost: 3 });
+
+    noteGhInvocation(["api", "graphql"], T0 + MINUTE + 4_000);
+    expect(usageEvents("minute")).toHaveLength(2);
+    expect(usageEvents("minute")[1]).toMatchObject({ calls: 1, graphqlCost: 2 });
+  });
+
   it("emits nothing without an event sink", () => {
     _resetGhUsageForTests();
     noteGhInvocation(["api", "graphql"], T0);
