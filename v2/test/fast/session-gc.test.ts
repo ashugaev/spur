@@ -32,10 +32,14 @@ function plan(
     projectFilter: string;
     pathExists: (path: string) => boolean;
     now: Date;
+    protectedSessionIds: ReadonlySet<string>;
   }> = {},
 ) {
   return planSessionGc({
     sessions,
+    ...(overrides.protectedSessionIds
+      ? { protectedSessionIds: overrides.protectedSessionIds }
+      : {}),
     worktreeDir: WORKTREE_DIR,
     now: overrides.now ?? NOW,
     olderThanDays: overrides.olderThanDays ?? 30,
@@ -95,6 +99,20 @@ describe("planSessionGc", () => {
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0]?.action).toBe("blocked");
     expect(result.groups[0]?.blockReasons).toContain("not_eligible_status");
+  });
+
+  it("blocks the whole group when a single member is protected by its caller", () => {
+    const result = plan(
+      [
+        session({ id: "api-1", workspaceId: "api-1" }),
+        session({ id: "api-2", workspaceId: "api-1" }),
+      ],
+      { protectedSessionIds: new Set(["api-2"]) },
+    );
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.action).toBe("blocked");
+    expect(result.groups[0]?.blockReasons).toEqual(["live_session"]);
   });
 
   it("never treats a group younger than the age threshold as a candidate", () => {

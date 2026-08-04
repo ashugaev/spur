@@ -3608,8 +3608,14 @@ export class SessionService {
     this.sessionGcRunning = true;
     this.lastSessionGcSweepAt = Date.now();
     try {
+      const sessions = listSessions(this.config.dataDir);
       const plan = planSessionGc({
-        sessions: listSessions(this.config.dataDir),
+        sessions,
+        protectedSessionIds: new Set(
+          sessions
+            .filter((session) => this.isLiveSessionRecord(session))
+            .map((session) => session.id),
+        ),
         worktreeDir: this.config.worktreeDir,
         now: new Date(),
         olderThanDays: gcConfig.olderThanDays,
@@ -3619,10 +3625,14 @@ export class SessionService {
       });
       // sizes: true so the sweep can report freed bytes; the du cost is bounded
       // by maxGroupsPerSweep, and only reclaim groups are measured.
-      const report = await executeSessionGc(plan, createGcDeps(this.config), {
-        dryRun: false,
-        sizes: true,
-      });
+      const report = await executeSessionGc(
+        plan,
+        createGcDeps(this.config, (session) => this.isLiveSessionRecord(session)),
+        {
+          dryRun: false,
+          sizes: true,
+        },
+      );
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,

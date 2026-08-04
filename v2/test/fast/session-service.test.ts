@@ -14158,6 +14158,183 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("does not collect a shared workspace while a stopped member is restoring", async () => {
+    const sessions = createSessionStore();
+    const shared = {
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped" as const,
+      stopReason: "manual_pause" as const,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    sessions.set("api-1", { ...shared, id: "api-1", tmuxSession: "api-1" });
+    sessions.set("api-2", { ...shared, id: "api-2", tmuxSession: "api-2" });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: {
+        ...baseConfig().sessionGc,
+        enabled: true,
+        olderThanDays: 0,
+        intervalMinutes: 0,
+      },
+    });
+    mockExitedThenRestoredProcess();
+    agentSessionConfigMock.mockReturnValue({});
+    let releaseRestore!: () => void;
+    const restorePlanGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    buildAgentRestorePlanMock.mockImplementation(async () => {
+      await restorePlanGate;
+      return {
+        agent: "claude",
+        launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+        initialMessage: "",
+        readyMarkers: ["❯"],
+      };
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      restore(sessionId: string): Promise<SessionView>;
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      restoreWarmupUntil: Map<string, number>;
+      dispose(): void;
+    };
+    service.dispose();
+    service.lastSessionGcSweepAt = 0;
+
+    const restore = service.restore("api-2");
+    for (let i = 0; i < 50 && !service.restoreWarmupUntil.has("api-2"); i += 1) {
+      await Promise.resolve();
+    }
+    expect(service.restoreWarmupUntil.has("api-2")).toBe(true);
+
+    await service.runSessionGcSweep();
+
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(archiveSessionsMock).not.toHaveBeenCalled();
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.gc.completed",
+    );
+    expect(completed?.[1].details).toMatchObject({
+      totals: { groups: 1, worktreesRemoved: 0, recordsArchived: 0 },
+      sessionIds: ["api-1", "api-2"],
+    });
+
+    releaseRestore();
+    await restore;
+  });
+
+  it("rechecks a shared workspace when restore starts after GC planning", async () => {
+    const sessions = createSessionStore();
+    const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+    const sharedWorktreePath = join(worktreeDir, "api", "api-1");
+    mkdirSync(sharedWorktreePath, { recursive: true });
+    const shared = {
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: sharedWorktreePath,
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped" as const,
+      stopReason: "manual_pause" as const,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    sessions.set("api-1", { ...shared, id: "api-1", tmuxSession: "api-1" });
+    sessions.set("api-2", { ...shared, id: "api-2", tmuxSession: "api-2" });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      worktreeDir,
+      sessionGc: {
+        ...baseConfig().sessionGc,
+        enabled: true,
+        olderThanDays: 0,
+        intervalMinutes: 0,
+      },
+    });
+    mockExitedThenRestoredProcess();
+    agentSessionConfigMock.mockReturnValue({});
+
+    let releaseGc!: () => void;
+    let markGcPaused!: () => void;
+    const gcGate = new Promise<void>((resolve) => {
+      releaseGc = resolve;
+    });
+    const gcPaused = new Promise<void>((resolve) => {
+      markGcPaused = resolve;
+    });
+    hasUncommittedChangesMock.mockImplementationOnce(async () => {
+      markGcPaused();
+      await gcGate;
+      return false;
+    });
+
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    buildAgentRestorePlanMock.mockImplementation(async () => {
+      await restoreGate;
+      return {
+        agent: "claude",
+        launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+        initialMessage: "",
+        readyMarkers: ["❯"],
+      };
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      restore(sessionId: string): Promise<SessionView>;
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      restoreWarmupUntil: Map<string, number>;
+      dispose(): void;
+    };
+    service.dispose();
+    service.lastSessionGcSweepAt = 0;
+    pruneRepoWorktreesMock.mockClear();
+
+    const sweep = service.runSessionGcSweep();
+    await gcPaused;
+
+    const restore = service.restore("api-2");
+    for (let i = 0; i < 50 && !service.restoreWarmupUntil.has("api-2"); i += 1) {
+      await Promise.resolve();
+    }
+    expect(service.restoreWarmupUntil.has("api-2")).toBe(true);
+
+    releaseGc();
+    await sweep;
+
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(pruneRepoWorktreesMock).not.toHaveBeenCalled();
+    expect(archiveSessionsMock).not.toHaveBeenCalled();
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.gc.completed",
+    );
+    expect(completed?.[1].details).toMatchObject({
+      totals: { groups: 1, worktreesRemoved: 0, recordsArchived: 0 },
+      sessionIds: ["api-1", "api-2"],
+    });
+
+    releaseRestore();
+    await restore;
+  });
+
   it("waits out intervalMinutes before sweeping again, so a restart never sweeps immediately", async () => {
     createSessionStore();
     loadConfigMock.mockReturnValue({
