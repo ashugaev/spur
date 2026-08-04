@@ -114,14 +114,15 @@ const SHUTDOWN_GRACE_MS = 5_000;
 // (source poller stop, trigger drain, connection close) can overrun the service
 // manager's stop timeout. The packaged systemd unit uses the default
 // TimeoutStopSec=90s; overrunning that means SIGKILL, which skips teardown entirely
-// and leaves half-written state behind.
-const SHUTDOWN_DEADLINE_MS = 15_000;
+// and leaves half-written state behind. 45s leaves room for the slowest healthy
+// teardown observed in production (~17s) while keeping a wide margin under 90s.
+const SHUTDOWN_DEADLINE_MS = 45_000;
 
 // Hard backstop for the signal path: if teardown itself wedges past the budget (a step
 // that never yields back, a pending microtask chain), exit anyway and log the handles
 // still open. Sits above SHUTDOWN_DEADLINE_MS so the bounded path always wins the race
 // when it is working, and far below TimeoutStopSec so systemd never has to SIGKILL.
-const SHUTDOWN_FORCE_EXIT_MS = 20_000;
+const SHUTDOWN_FORCE_EXIT_MS = 60_000;
 
 // Upper bound on how long a reload waits for triggers.stop() to drain in-flight
 // deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
@@ -1652,40 +1653,49 @@ export async function startServer(
             process.exit(0);
           })
         : null;
-      service.dispose();
-      const closePromise = closeServer();
-      const sourceController = sources;
-      if (sourceController) {
+      try {
+        // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
+        // poll, sidecar reaper, session reaper, 2s dashboard tick — before the first
+        // await, so no tick can re-enter teardown or hold the loop open behind it.
+        service.dispose();
+        const closePromise = closeServer();
+        const sourceController = sources;
+        if (sourceController) {
+          await awaitBounded(
+            "daemon.shutdown.sources_stop_timeout",
+            "sources.stop",
+            // SourceGroupController.stop() is sync-or-async by contract.
+            Promise.resolve(sourceController.stop()),
+          );
+        }
+        backlogs?.stop();
+        runtimeLogs?.stop();
+        const triggerController = triggers;
+        if (triggerController) {
+          await stopTriggersBounded(triggerController, remainingBudgetMs(), (message) =>
+            logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
+          );
+        }
         await awaitBounded(
-          "daemon.shutdown.sources_stop_timeout",
-          "sources.stop",
-          // SourceGroupController.stop() is sync-or-async by contract.
-          Promise.resolve(sourceController.stop()),
+          "daemon.shutdown.spawn_drain_timeout",
+          "settleBackgroundSpawns",
+          service.settleBackgroundSpawns(),
+          Math.min(BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS, remainingBudgetMs()),
         );
-      }
-      backlogs?.stop();
-      runtimeLogs?.stop();
-      const triggerController = triggers;
-      if (triggerController) {
-        await stopTriggersBounded(triggerController, remainingBudgetMs(), (message) =>
-          logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
-        );
-      }
-      await awaitBounded(
-        "daemon.shutdown.spawn_drain_timeout",
-        "settleBackgroundSpawns",
-        service.settleBackgroundSpawns(),
-        Math.min(BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS, remainingBudgetMs()),
-      );
-      await awaitBounded("daemon.shutdown.server_close_timeout", "server.close", closePromise);
-      flushEventLogCollapse(service.config.dataDir);
-      logEvent("daemon.stopped", {
-        level: "info",
-        message: "Stopped Spur daemon",
-      });
-      disarmBackstop?.();
-      if (exitProcess) {
-        process.exit(0);
+        await awaitBounded("daemon.shutdown.server_close_timeout", "server.close", closePromise);
+        flushEventLogCollapse(service.config.dataDir);
+        logEvent("daemon.stopped", {
+          level: "info",
+          message: "Stopped Spur daemon",
+        });
+      } finally {
+        // Reached even when a teardown step throws, so a failed cleanup costs the signal
+        // path nothing: it still exits here instead of waiting out the backstop or
+        // systemd's SIGKILL. Programmatic stop() keeps propagating the error.
+        disarmBackstop?.();
+        if (exitProcess) {
+          process.exit(0);
+        }
       }
     })();
     return shutdownPromise;
