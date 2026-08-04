@@ -3043,10 +3043,12 @@ export class SessionService {
         }
       }
 
-      // Bounded round-robin over the idle set: a fixed few least-recently-
-      // visited entries per tick via a rotating cursor (O(1), no sort), so
-      // filesystem-only drift still eventually surfaces without making the
-      // tick's cost scale with the idle set's size.
+      // Bounded round-robin over the idle set: clamp(ceil(idle / SWEEP_TICKS),
+      // MIN, MAX) least-recently-visited entries per tick via a rotating
+      // cursor (O(1), no sort), so filesystem-only drift still eventually
+      // surfaces. The quota scales with the idle set to hold the sweep period
+      // near SWEEP_TICKS, and the MAX cap is what keeps the tick's cost
+      // bounded by a constant rather than by the idle set's size.
       if (idle.length > 0) {
         const targetQuota = Math.ceil(idle.length / DASHBOARD_IDLE_REFRESH_SWEEP_TICKS);
         const clampedQuota = Math.min(

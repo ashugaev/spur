@@ -719,13 +719,7 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
 
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) {
-    // No visited entries this call — every cached file under a now-missing
-    // data dir is stale, so prune them all instead of leaking them for the
-    // rest of the process lifetime.
-    pruneStaleSessionFileCacheEntries(rootDir, new Set());
-    return [];
-  }
+  if (!existsSync(rootDir)) return [];
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
