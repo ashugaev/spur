@@ -806,7 +806,11 @@ describe("checkServiceHealth", () => {
           projectCaps: {},
           live: { count: 3, byProject: { demo: 3 } },
           projectedRoom: 7,
-          sessions: [{ id: "demo-1", project: "demo", status: "running", rssBytes: 0 }],
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_610_612_736 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 536_870_912 },
+            { id: "demo-3", project: "demo", status: "running", rssBytes: 0 },
+          ],
           memory: null,
           guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
         },
@@ -816,7 +820,15 @@ describe("checkServiceHealth", () => {
 
       const check = result.checks.find((entry) => entry.id === "session-headroom");
       expect(check).toMatchObject({ ok: true, severity: "warn" });
-      expect(check?.detail).toContain("3/10");
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        [
+          "[ok] 3/10 live sessions, room for 7 more",
+          "Measured RSS per live session:",
+          "  demo-1: 1.5 GiB",
+          "  demo-2: 512.0 MiB",
+          "  demo-3: 0 B",
+        ].join("\n"),
+      );
       expect(hasErrorSeverity(result.checks)).toBe(false);
     });
 
@@ -835,8 +847,8 @@ describe("checkServiceHealth", () => {
           live: { count: 2, byProject: { demo: 2 } },
           projectedRoom: 0,
           sessions: [
-            { id: "demo-1", project: "demo", status: "running", rssBytes: 0 },
-            { id: "demo-2", project: "demo", status: "running", rssBytes: 0 },
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_073_741_824 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 805_306_368 },
           ],
           memory: null,
           guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
@@ -847,8 +859,13 @@ describe("checkServiceHealth", () => {
 
       const check = result.checks.find((entry) => entry.id === "session-headroom");
       expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.detail).toContain("  demo-1: 1.0 GiB");
+      expect(check?.detail).toContain("  demo-2: 768.0 MiB");
       expect(check?.fix).toContain("demo-1");
       expect(check?.fix).toContain("demo-2");
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        "\n  fix: raise admission.maxLiveSessions",
+      );
       expect(hasErrorSeverity(result.checks)).toBe(false);
     });
 
