@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -9,6 +9,7 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  type AdmissionConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
@@ -175,6 +176,17 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive number`);
+  }
+  return value;
+}
+
+// Used for ratio fields (e.g. admission.reserveFraction) that scale a byte
+// count: zero would derive a cap of always-zero, above 1 would reserve more
+// than the host has.
+function asOptionalFraction(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`${label} must be a positive number no greater than 1`);
   }
   return value;
 }
@@ -1326,6 +1338,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const defaultModels = parseDefaultModels(raw["defaultModels"], label);
+  const maxLiveSessions = asOptionalPositiveInteger(
+    raw["maxLiveSessions"],
+    `${label}.maxLiveSessions`,
+  );
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1419,6 +1435,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sources,
     backlog,
     triggers,
+    ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
   };
 }
 
@@ -1541,6 +1558,87 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
       asOptionalPositiveInteger(root["maxGroupsPerSweep"], "sessionGc.maxGroupsPerSweep") ??
       DEFAULT_SESSION_GC.maxGroupsPerSweep,
     statuses: parseSessionGcStatuses(root["statuses"]),
+  };
+}
+
+// Measured on openclaw-dev 2026-08-03 (118 live sessions, 62 GiB): a
+// fully-loaded session (agent ~1000MB + playwright MCP ~170MB + isolated
+// daemon ~70MB) is ~1.21 GiB, so 1.5 GiB brackets the worst case. Non-session
+// host footprint measured at 62 - 43.9 = 18.1 GiB, so reserveFraction 0.70
+// (reserving 18.6 GiB) tracks that without inflating perSessionBytes to
+// absorb it — the two knobs stay semantically distinct (per-session cost vs.
+// host overhead).
+const DEFAULT_ADMISSION_PER_SESSION_BYTES = 1_610_612_736;
+const DEFAULT_ADMISSION_RESERVE_FRACTION = 0.7;
+const DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES = 1_073_741_824;
+const DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES = 0;
+
+export function deriveMaxLiveSessions(
+  totalBytes: number,
+  perSessionBytes: number,
+  reserveFraction: number,
+): number {
+  return Math.max(1, Math.floor((totalBytes * reserveFraction) / perSessionBytes));
+}
+
+// Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
+// per-project `admission` block parses (parseProject tolerates unknown keys)
+// but is never read — only projects.<id>.maxLiveSessions works per-project.
+// Project mode still needs a resolved cap (countLiveSessions/getHeadroom read
+// unconditionally), so it derives the same default from the live host rather
+// than hardcoding a fallback number that would drift from the derivation.
+function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
+  const perSessionBytes = DEFAULT_ADMISSION_PER_SESSION_BYTES;
+  const reserveFraction = DEFAULT_ADMISSION_RESERVE_FRACTION;
+  const derivedDefault = deriveMaxLiveSessions(totalmem(), perSessionBytes, reserveFraction);
+  if (mode !== "instance" || value === undefined) {
+    return {
+      enabled: true,
+      maxLiveSessions: derivedDefault,
+      maxLiveSessionsSource: "derived",
+      perSessionBytes,
+      reserveFraction,
+      memoryGuard: {
+        enforce: false,
+        minAvailableBytes: DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
+        minFreeSwapBytes: DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+      },
+    };
+  }
+  const root = asObject(value, "admission");
+  const resolvedPerSessionBytes =
+    asOptionalNumber(root["perSessionBytes"], "admission.perSessionBytes") ?? perSessionBytes;
+  const resolvedReserveFraction =
+    asOptionalFraction(root["reserveFraction"], "admission.reserveFraction") ?? reserveFraction;
+  const memoryGuardRaw = root["memoryGuard"]
+    ? asObject(root["memoryGuard"], "admission.memoryGuard")
+    : {};
+  const configuredMaxLiveSessions = asOptionalPositiveInteger(
+    root["maxLiveSessions"],
+    "admission.maxLiveSessions",
+  );
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
+    maxLiveSessions:
+      configuredMaxLiveSessions ??
+      deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction),
+    maxLiveSessionsSource: configuredMaxLiveSessions !== undefined ? "config" : "derived",
+    perSessionBytes: resolvedPerSessionBytes,
+    reserveFraction: resolvedReserveFraction,
+    memoryGuard: {
+      enforce:
+        asOptionalBoolean(memoryGuardRaw["enforce"], "admission.memoryGuard.enforce") ?? false,
+      minAvailableBytes:
+        asNonNegativeNumber(
+          memoryGuardRaw["minAvailableBytes"],
+          "admission.memoryGuard.minAvailableBytes",
+        ) ?? DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
+      minFreeSwapBytes:
+        asNonNegativeNumber(
+          memoryGuardRaw["minFreeSwapBytes"],
+          "admission.memoryGuard.minFreeSwapBytes",
+        ) ?? DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+    },
   };
 }
 
@@ -1778,6 +1876,7 @@ function parseConfigFile(
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    admission: parseAdmission(root["admission"], mode),
     projects: normalizedProjects,
     tags,
   };

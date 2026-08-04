@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  deriveMaxLiveSessions,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
@@ -3703,6 +3704,145 @@ projects:
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     });
+  });
+
+  it("parses admission.maxLiveSessions and memoryGuard in instance mode", async () => {
+    const configPath = await writeConfig(`
+admission:
+  enabled: false
+  maxLiveSessions: 5
+  memoryGuard:
+    enforce: true
+    minAvailableBytes: 1000
+    minFreeSwapBytes: 500
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission).toEqual({
+      enabled: false,
+      maxLiveSessions: 5,
+      maxLiveSessionsSource: "config",
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: { enforce: true, minAvailableBytes: 1000, minFreeSwapBytes: 500 },
+    });
+  });
+
+  it("accepts admission.memoryGuard.minFreeSwapBytes and minAvailableBytes of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: 0
+    minFreeSwapBytes: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.memoryGuard.minAvailableBytes).toBe(0);
+    expect(config.admission.memoryGuard.minFreeSwapBytes).toBe(0);
+  });
+
+  it("rejects a negative admission.memoryGuard.minFreeSwapBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minFreeSwapBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minFreeSwapBytes must be a non-negative number",
+    );
+  });
+
+  it("rejects a negative admission.memoryGuard.minAvailableBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minAvailableBytes must be a non-negative number",
+    );
+  });
+
+  it("rejects admission.reserveFraction above 1", async () => {
+    const configPath = await writeConfig(`
+admission:
+  reserveFraction: 1.5
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.reserveFraction must be a positive number no greater than 1",
+    );
+  });
+
+  it("rejects admission.maxLiveSessions of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  maxLiveSessions: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.maxLiveSessions must be a positive integer",
+    );
+  });
+
+  it("discards an admission block in a project spur.yaml without error", async () => {
+    const configPath = await writeConfig(`
+admission:
+  enabled: false
+  maxLiveSessions: 1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.admission.enabled).toBe(true);
+    expect(config.admission.maxLiveSessions).not.toBe(1);
+  });
+
+  it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    maxLiveSessions: 3
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+    expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+  });
+});
+
+describe("deriveMaxLiveSessions", () => {
+  it("derives 28 from 62 GiB at the default perSessionBytes/reserveFraction", () => {
+    expect(deriveMaxLiveSessions(62 * 1024 ** 3, 1_610_612_736, 0.7)).toBe(28);
+  });
+
+  it("floors to 1 rather than 0 on a small host", () => {
+    expect(deriveMaxLiveSessions(1024 ** 3, 1_610_612_736, 0.7)).toBe(1);
   });
 });
 

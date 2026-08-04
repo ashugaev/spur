@@ -142,7 +142,6 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
-  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -158,17 +157,18 @@ export function parseCursorJsonlRecord(
     if (type === "tool_result") {
       hasToolResult = true;
     }
-    if (type === "text" && typeof tool["text"] === "string") {
-      textParts.push(tool["text"]);
-    }
   }
-  const text = textParts.join("\n").trim();
+  // `text` is intentionally not populated here: the only reader of
+  // CursorParsedRecord.text is latestCursorTerminalError, which is gated on
+  // `terminalError` (set only by the turn_ended branch above). Retaining the
+  // full assistant message body on every ordinary record for a value nothing
+  // reads is what made cursorJsonlReaders' 50-record tail expensive per
+  // session.
   return {
     role,
     hasToolUse,
     hasToolResult,
     ...(requestsUserInput ? { requestsUserInput: true } : {}),
-    ...(text ? { text } : {}),
     timestampMs: fallbackTimestampMs,
   };
 }

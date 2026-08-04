@@ -22,7 +22,7 @@ CONFIG FOOTGUNS
 
 Full field reference and example: `docs/configuration.md`. Not in that doc:
 
-  Project `spur.yaml` contributes only to `projects:`. Any other top-level key there (`tags`, `authRotation`, `rateLimitReactivation`, `server`, `dataDir`) parses without error and is silently discarded — those live in `~/.spur/config.yaml` only.
+  Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files parse, then discard them.
   A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
   `emitExisting: true` on a work-item source (`github` with `query`, `sentry`, `github-ci`) emits the suppressed first-poll backlog once, capped at 10.
 

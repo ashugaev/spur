@@ -17,6 +17,7 @@ import {
 import { isReleaseVersion } from "./releases-cache.js";
 import {
   probe,
+  probeHeadroom,
   probeInfo,
   readWebPort,
   resolveDaemonPortReadOnly,
@@ -32,6 +33,7 @@ const DISK_SPACE_PROBE_TIMEOUT_MS = 2_000;
 // A2: `node -e "require('node-pty')"` must never hang doctor on a wedged
 // child process.
 const NODE_PTY_PROBE_TIMEOUT_MS = 5_000;
+const RSS_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
 
 export interface HostInstallCheck {
   id: string;
@@ -46,6 +48,23 @@ export interface SystemdScope {
   unitDir: string;
   ctl: string[];
   restartCmd: string;
+}
+
+function formatRssBytes(bytes: number): string {
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < RSS_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const unit = RSS_UNITS[unitIndex] ?? "B";
+  return unitIndex === 0 ? `${bytes} ${unit}` : `${value.toFixed(1)} ${unit}`;
+}
+
+function renderSessionRss(sessions: Array<{ id: string; rssBytes: number }>): string {
+  if (sessions.length === 0) return "";
+  const lines = sessions.map((session) => `  ${session.id}: ${formatRssBytes(session.rssBytes)}`);
+  return `\nMeasured RSS per live session:\n${lines.join("\n")}`;
 }
 
 function tryExec(
@@ -619,6 +638,39 @@ export async function checkServiceHealth(
       severity: "info",
       detail: `spur-daemon.service responded at ${daemonInfoUrl}`,
     });
+    // Read-only headroom check: daemon unreachable or the fetch/parse
+    // failing pushes no check at all — the daemon-reachable check above
+    // already owns that fact. Never severity "error": a full host is an
+    // operator decision (raise the cap or stop sessions), not a doctor
+    // failure, so hasErrorSeverity can never flip the exit code on it.
+    const headroomUrl = `http://${daemonProbeHost}:${daemonPort}/headroom`;
+    const headroomResult = await probeHeadroom(headroomUrl);
+    if (headroomResult.ok) {
+      const { live, cap, guard, sessions, projectedRoom } = headroomResult.body;
+      const overCap = live.count >= cap.global || guard.crossed;
+      const sessionRss = renderSessionRss(sessions);
+      if (overCap) {
+        const candidateIds = sessions.slice(0, 3).map((session) => session.id);
+        const fix =
+          candidateIds.length > 0
+            ? `raise admission.maxLiveSessions in ~/.spur/config.yaml, or stop sessions: ${candidateIds.join(", ")}`
+            : "free host memory or swap, or adjust admission.memoryGuard.minAvailableBytes or admission.memoryGuard.minFreeSwapBytes in ~/.spur/config.yaml";
+        checks.push({
+          id: "session-headroom",
+          ok: false,
+          severity: "warn",
+          detail: `${live.count}/${cap.global} live sessions${guard.crossed ? " (memory guard crossed)" : ""}${sessionRss}`,
+          fix,
+        });
+      } else {
+        checks.push({
+          id: "session-headroom",
+          ok: true,
+          severity: "warn",
+          detail: `${live.count}/${cap.global} live sessions, room for ${projectedRoom} more${sessionRss}`,
+        });
+      }
+    }
   } else if (daemonActive) {
     checks.push(
       activeButUnreachableCheck(
@@ -973,7 +1025,8 @@ export function renderHostInstallChecks(checks: HostInstallCheck[]): string {
   // a passing check is never rendered as `[error]`.
   const lines = checks.map((check) => {
     const mark = check.ok ? "ok" : check.severity;
-    const fix = check.ok || !check.fix ? "" : ` — fix: ${check.fix}`;
+    const fixSeparator = check.detail.includes("\n") ? "\n  " : " — ";
+    const fix = check.ok || !check.fix ? "" : `${fixSeparator}fix: ${check.fix}`;
     return dimText(`[${mark}] ${check.detail}${fix}`);
   });
   return lines.join("\n");

@@ -2728,7 +2728,7 @@ describe("StatusBar", () => {
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.mouseEnter(githubStatus);
 
-    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(await screen.findByText("GitHub")).toBeInTheDocument();
     expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
@@ -2744,7 +2744,7 @@ describe("StatusBar", () => {
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
     fireEvent.mouseEnter(gitlabStatus);
 
-    expect(screen.getByText("GitLab")).toBeInTheDocument();
+    expect(await screen.findByText("GitLab")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
@@ -2806,7 +2806,7 @@ describe("StatusBar", () => {
 
     const githubStatus = screen.getByLabelText("GitHub connection checking");
     fireEvent.mouseEnter(githubStatus);
-    expect(screen.getByText("Checking")).toBeInTheDocument();
+    expect(await screen.findByText("Checking")).toBeInTheDocument();
   });
 
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {

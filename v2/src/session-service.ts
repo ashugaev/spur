@@ -169,6 +169,7 @@ import {
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
+  getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
   isProcessRunningInTmux,
@@ -183,6 +184,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
+import { readHostMemory } from "./host-memory.js";
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
@@ -292,6 +294,7 @@ import {
   type DeleteProjectResponse,
   type KillSessionRequest,
   type GithubPrCheckUnavailablePayload,
+  type HeadroomReport,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -598,6 +601,14 @@ export class SessionNotRestorableError extends Error {
 
 export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
+}
+
+// Message-only (like SessionRateLimitedError): the candidate session ids to
+// stop are named directly in the message string, not a structured payload —
+// neither client.ts's formatDaemonError nor the web toast decode a payload
+// field, so one here would be written and never read.
+export class SessionAdmissionDeniedError extends Error {
+  readonly statusCode = 429;
 }
 
 export class SessionNotReopenableError extends Error {
@@ -1906,7 +1917,7 @@ export class SessionService {
   // re-parsed the same YAML for the whole fleet — and re-logged the same parse
   // failure forever. A cache hit costs one statSync and no parse. Keyed by
   // session id, invalidated by config path or stamp change (see
-  // tryConfigStamp), pruned against the live id set in runDashboardCacheTick.
+  // tryConfigStamp), pruned against the included id set in runDashboardCacheTick.
   private readonly sessionProjectCache = new Map<
     string,
     { configPath: string; stamp: string; project: ProjectConfig | undefined }
@@ -1917,6 +1928,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // Every spawn owns one future live-session slot from its synchronous
+  // admission check until its spawning record is written. Other admissions
+  // count the slot; a handoff passes its existing reservation to its successor.
+  private readonly admissionReservations = new Map<symbol, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -2983,30 +2998,62 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
+      // Run the sweep before the per-session loop, off this same liveIds
+      // snapshot, so a session that throws below (see the per-session
+      // try/catch) can never skip reclamation for the rest of the daemon's
+      // life. Safe to run first: it only deletes/truncates ids ABSENT from
+      // liveIds, so nothing the loop is about to populate for a live id is at
+      // risk of being evicted on this same pass.
+      const liveIds = new Set(sessions.map((session) => session.id));
+      this.pruneSessionScopedState(liveIds);
       const claudeAccounts = this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of sessions) {
-        const view = await this.enrich(session, claudeAccounts);
-        await this.checkPrForSession(session, view.state);
-        const prevRunState = this.lastObservedRunStates.get(view.id);
-        nextRunStates.set(view.id, view.state);
-        if (!baseline && prevRunState === "working" && view.state === "waiting") {
-          await this.maybeNudgeForgottenReply(view);
-        }
-        const attention: AttentionState | null =
-          view.state === "needs_input"
-            ? "needs_input"
-            : view.state === "error"
-              ? "error"
-              : view.state === "rate_limited"
-                ? "rate_limited"
-                : null;
-        if (!attention) {
-          continue;
-        }
-        nextStates.set(view.id, attention);
-        if (!baseline && this.attentionStates.get(view.id) !== attention) {
-          await this.notifyAttention(view, attention);
+        try {
+          const view = await this.enrich(session, claudeAccounts);
+          await this.checkPrForSession(session, view.state);
+          const prevRunState = this.lastObservedRunStates.get(view.id);
+          nextRunStates.set(view.id, view.state);
+          if (!baseline && prevRunState === "working" && view.state === "waiting") {
+            await this.maybeNudgeForgottenReply(view);
+          }
+          const attention: AttentionState | null =
+            view.state === "needs_input"
+              ? "needs_input"
+              : view.state === "error"
+                ? "error"
+                : view.state === "rate_limited"
+                  ? "rate_limited"
+                  : null;
+          if (!attention) {
+            continue;
+          }
+          nextStates.set(view.id, attention);
+          if (!baseline && this.attentionStates.get(view.id) !== attention) {
+            await this.notifyAttention(view, attention);
+          }
+        } catch (error) {
+          // Carry the previous tick's values forward so an aborted tick can
+          // neither erase a still-current attention state (spurious
+          // re-notify next tick) nor erase a still-current run state (a
+          // working->waiting edge landing on the very next tick would
+          // otherwise never see its "working" predecessor). Only carry
+          // forward what was actually observed before; never invent one.
+          const previousAttention = this.attentionStates.get(session.id);
+          if (previousAttention !== undefined) {
+            nextStates.set(session.id, previousAttention);
+          }
+          const previousRunState = this.lastObservedRunStates.get(session.id);
+          if (previousRunState !== undefined) {
+            nextRunStates.set(session.id, previousRunState);
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.attention_monitor.session_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Attention monitor skipped session ${session.id}: ${message}`,
+          });
         }
       }
       // The sweep is the batch window: every PR lookup this sweep queued goes
@@ -3020,19 +3067,54 @@ export class SessionService {
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
       }
-      const liveIds = new Set(sessions.map((session) => session.id));
-      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.codexMcpDialogOverrides.delete(sessionId);
-        }
-      }
-      for (const sessionId of this.claudeCompactingOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.claudeCompactingOverrides.delete(sessionId);
-        }
-      }
     } finally {
       this.attentionMonitorRunning = false;
+    }
+  }
+
+  // Single sweep for session-scoped maps whose lifetime ends at terminal
+  // status. Runs against the non-terminal id set pollAttentionStates already
+  // computes, so its key set is bounded by "currently live sessions" instead
+  // of "every session ever classified". Deliberately does not touch
+  // dashboardCache, sessionProjectCache, stateHistory, or stateCache. Those
+  // four follow the wider dashboard lifetime because completed and
+  // killed+retainInList sessions are still enriched by its idle round-robin;
+  // runDashboardCacheTick owns their pruning.
+  private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.codexMcpDialogOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeCompactingOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.cursorJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.prCheckTrackers.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.prCheckTrackers.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.usageMenuConfirmedAt.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.usageMenuConfirmedAt.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeRotationEpisode.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeRotationEpisode.delete(sessionId);
+      }
     }
   }
 
@@ -3066,6 +3148,30 @@ export class SessionService {
         return session.status !== "killed" || session.retainInList === true;
       });
       const includedIds = new Set(sessions.map((session) => session.id));
+      const terminalIds = new Set(
+        sessions
+          .filter((session) => isTerminalSessionStatus(session.status))
+          .map((session) => session.id),
+      );
+
+      // These caches serve dashboard enrichment, so their lifetime follows
+      // includedIds rather than the attention monitor's non-terminal set.
+      // Delete records that left the store/dashboard entirely. For retained
+      // terminal records, keep the last history entry: deleting it would make
+      // updateStateHistory re-enter its transition branch every tick, while
+      // retaining the whole array would keep up to STATE_HISTORY_LIMIT entries.
+      for (const [id, history] of this.stateHistory) {
+        if (!includedIds.has(id)) {
+          this.stateHistory.delete(id);
+        } else if (terminalIds.has(id) && history.length > 1) {
+          this.stateHistory.set(id, history.slice(-1));
+        }
+      }
+      for (const id of this.stateCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.stateCache.delete(id);
+        }
+      }
 
       // A session is due for enrichment when it can still change on its own
       // (isLiveSessionRecord), when its on-disk record object changed since
@@ -3135,6 +3241,14 @@ export class SessionService {
           this.dashboardCache.delete(id);
         }
       }
+      // sessionProjectCache's consumer (resolveProjectForSession, via
+      // enrich) is called from both ticks, so its retention has to match
+      // the WIDER dashboard set, not pollAttentionStates' non-terminal
+      // liveIds — a completed or killed+retainInList session still gets
+      // enriched here by the idle round-robin long after it leaves the
+      // attention monitor's live set. Pruning against liveIds would evict
+      // its entry the tick after it goes terminal, forcing a fresh
+      // YAML parse (and a re-logged parse failure) on every idle revisit.
       for (const id of this.sessionProjectCache.keys()) {
         if (!includedIds.has(id)) {
           this.sessionProjectCache.delete(id);
@@ -5363,9 +5477,19 @@ export class SessionService {
 
   async spawn(
     request: SpawnSessionRequest,
-    options?: { promptKind?: UserInputKind },
+    options?: {
+      promptKind?: UserInputKind;
+      replacingSessionId?: string;
+      admissionReservation?: symbol;
+    },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation =
+      options?.admissionReservation ??
+      this.reserveAdmission(request.project, "spawn", {
+        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
+      });
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -5583,6 +5707,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
@@ -5949,6 +6075,9 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
       }
@@ -6211,6 +6340,8 @@ export class SessionService {
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation = this.reserveAdmission(request.project, "spawn");
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -6314,6 +6445,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -6409,6 +6542,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
     }
   }
 
@@ -8552,6 +8689,8 @@ export class SessionService {
       );
     }
 
+    this.assertAdmissible(current.project, "restore");
+
     this.logEvent("session.restore.started", {
       level: "info",
       sessionId,
@@ -9255,6 +9394,11 @@ export class SessionService {
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
+    // Unlike handoff, respawn needs no replacingSessionId exclusion: the
+    // status guard above requires completed/killed/errored, none of which
+    // countLiveSessions treats as live, and the kill() below (source cleanup
+    // for a status other than "completed") only runs after this spawn
+    // already succeeded — so admission never counts the source twice.
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
@@ -9289,130 +9433,143 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-
-    const agent = parseAgentName(request.agent);
-    const notes = request.notes?.trim();
-    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-    const clonedAttachments = this.cloneStartupAttachments(
-      workspaceIdOf(session),
-      session.startupAttachmentIds ?? [],
-    );
-    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
-    const mergedAttachments = [
-      ...clonedAttachments,
-      ...(handoffScreenshot ? [handoffScreenshot] : []),
-    ];
-    let remainingPipelineSteps: string[] | undefined;
-    if (session.pipeline?.status === "running") {
-      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
-      if (steps.length > 0) {
-        remainingPipelineSteps = steps;
-      }
-    }
-    const model = resolveCarriedSpawnModel(session, agent, request.model);
-
-    let sourceForSpawn = session;
-    if (session.status === "running" || session.status === "spawning") {
-      const stopped: SessionRecord = {
-        ...this.sessionWithReleasedSidecarPorts(session),
-        status: "stopped",
-        stopReason: "manual_pause",
-        updatedAt: nowIso(),
-        retainInList: true,
-      };
-      writeSession(this.config.dataDir, stopped);
-      this.stateCache.delete(sessionId);
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(stopped);
-      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
-    }
-
-    const prompt = renderHandoffPrompt({
-      sourceSessionId: session.id,
-      sourceAgent: session.agent,
-      branch: session.branch,
-      worktreePath: session.worktreePath,
-      originalPrompt: originalTask,
-      ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: sourceForSpawn.slots?.links ?? [],
-      ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
-      ...(session.pr ? { pr: session.pr } : {}),
-      ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
-      ...(notes ? { notes } : {}),
-      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+    // Gate before any teardown below. The source session is still on-disk as
+    // running/spawning here, so a denial leaves it fully untouched — no kill,
+    // no status flip. The successor replaces the source rather than adding to
+    // the fleet, so exclude it from the live count: a handoff at exactly the
+    // cap is net-neutral (stop one, start one) and must be allowed.
+    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
+      replacingSessionId: session.id,
     });
-
-    this.logEvent("session.handoff.started", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Handing off ${sessionId} to ${agent}`,
-      details: {
-        sourceAgent: session.agent,
-        targetAgent: agent,
-        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
-      },
-    });
-
-    let spawned = await this.spawn(
-      resolveHandoffSpawnRequest(sourceForSpawn, {
-        prompt,
-        agent,
-        ...(model !== undefined ? { model } : {}),
-        originalTaskPrompt: originalTask,
-        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
-        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
-      }),
-    );
-
-    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
-    if (spawnedRecord) {
-      writeSession(this.config.dataDir, {
-        ...spawnedRecord,
-        ...(session.pr ? { pr: session.pr } : {}),
-        originalTaskPrompt: originalTask,
-        updatedAt: nowIso(),
-      });
-    }
-
-    if (session.slots?.title || session.slots?.tags?.length) {
-      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
-      if (session.slots.title || carryTags.length > 0) {
-        try {
-          spawned = await this.updateSlots(spawned.id, {
-            ...(session.slots.title ? { title: session.slots.title } : {}),
-            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.handoff.carry_slots_failed", {
-            level: "warn",
-            sessionId,
-            projectId: session.project,
-            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
-          });
-        }
-      }
-    }
 
     try {
-      await this.complete(
-        session.id,
-        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+      const agent = parseAgentName(request.agent);
+      const notes = request.notes?.trim();
+      const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
+      const clonedAttachments = this.cloneStartupAttachments(
+        workspaceIdOf(session),
+        session.startupAttachmentIds ?? [],
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.handoff.source_complete_failed", {
-        level: "warn",
+      const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+      const mergedAttachments = [
+        ...clonedAttachments,
+        ...(handoffScreenshot ? [handoffScreenshot] : []),
+      ];
+      let remainingPipelineSteps: string[] | undefined;
+      if (session.pipeline?.status === "running") {
+        const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+        if (steps.length > 0) {
+          remainingPipelineSteps = steps;
+        }
+      }
+      const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+      let sourceForSpawn = session;
+      if (session.status === "running" || session.status === "spawning") {
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          retainInList: true,
+        };
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(sessionId);
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(stopped);
+        sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+      }
+
+      const prompt = renderHandoffPrompt({
+        sourceSessionId: session.id,
+        sourceAgent: session.agent,
+        branch: session.branch,
+        worktreePath: session.worktreePath,
+        originalPrompt: originalTask,
+        ...(session.slots?.title ? { title: session.slots.title } : {}),
+        links: sourceForSpawn.slots?.links ?? [],
+        ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
+        ...(session.pr ? { pr: session.pr } : {}),
+        ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
+        ...(notes ? { notes } : {}),
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      });
+
+      this.logEvent("session.handoff.started", {
+        level: "info",
         sessionId,
         projectId: session.project,
-        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        message: `Handing off ${sessionId} to ${agent}`,
+        details: {
+          sourceAgent: session.agent,
+          targetAgent: agent,
+          ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        },
       });
-    }
 
-    return spawned;
+      let spawned = await this.spawn(
+        resolveHandoffSpawnRequest(sourceForSpawn, {
+          prompt,
+          agent,
+          ...(model !== undefined ? { model } : {}),
+          originalTaskPrompt: originalTask,
+          ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+          ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+        }),
+        { replacingSessionId: session.id, admissionReservation },
+      );
+
+      const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+      if (spawnedRecord) {
+        writeSession(this.config.dataDir, {
+          ...spawnedRecord,
+          ...(session.pr ? { pr: session.pr } : {}),
+          originalTaskPrompt: originalTask,
+          updatedAt: nowIso(),
+        });
+      }
+
+      if (session.slots?.title || session.slots?.tags?.length) {
+        const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+        if (session.slots.title || carryTags.length > 0) {
+          try {
+            spawned = await this.updateSlots(spawned.id, {
+              ...(session.slots.title ? { title: session.slots.title } : {}),
+              ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.handoff.carry_slots_failed", {
+              level: "warn",
+              sessionId,
+              projectId: session.project,
+              message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+            });
+          }
+        }
+      }
+
+      try {
+        await this.complete(
+          session.id,
+          { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+          { retainInList: true },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.handoff.source_complete_failed", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        });
+      }
+
+      return spawned;
+    } finally {
+      this.admissionReservations.delete(admissionReservation);
+    }
   }
 
   private resumeSessionDelivery(): void {
@@ -10014,6 +10171,216 @@ export class SessionService {
       session.status === "spawning" ||
       this.isInRestoreWarmup(session.id)
     );
+  }
+
+  // Single source of truth for "is this session live" across the two
+  // admission gates, /headroom, and the daemon-startup log. Never calls
+  // enrich() — running|spawning is the on-disk status predicate
+  // reconcileStoppedSessions already uses, unioned with sessions mid-restore
+  // (on-disk status still stopped/errored, see restore()'s comment above
+  // restoreWarmupUntil.set) so a restore in flight is counted exactly once.
+  // `excludeSessionId` drops one session from the live count before admission
+  // math runs. Used to make a "replace this session" admission decision
+  // (handoff) net-neutral: the source is still on-disk as running/spawning
+  // when the check runs (it must be, so a denial leaves it untouched), but
+  // it is about to be torn down and replaced, so it should not count against
+  // the very spawn that replaces it.
+  private countLiveSessions(excludeSessionId?: string): {
+    total: number;
+    byProject: Map<string, number>;
+    records: SessionRecord[];
+  } {
+    const live = listSessions(this.config.dataDir).filter(
+      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+    );
+    const byProject = new Map<string, number>();
+    for (const session of live) {
+      byProject.set(session.project, (byProject.get(session.project) ?? 0) + 1);
+    }
+    return { total: live.length, byProject, records: live };
+  }
+
+  private admissionDenialAction(records: SessionRecord[]): string {
+    const candidates = [...records]
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .slice(0, 3)
+      .map((session) => `${session.id} (${session.project})`)
+      .join(", ");
+    return candidates
+      ? `Stop one of: ${candidates}.`
+      : "Wait for an in-flight spawn to finish, then stop a live session or retry.";
+  }
+
+  private admissionOccupancy(live: number, reserved: number): string {
+    const claimed = live + reserved;
+    return `${claimed} ${claimed === 1 ? "slot" : "slots"} claimed: ${live} live, ${reserved} reserved`;
+  }
+
+  // Runs at both admission gates (resolveSpawnTarget, restore). Never
+  // mutates state, never kills, never acts retroactively on sessions already
+  // above the cap — a denial only refuses the *new* spawn/restore in front
+  // of it. `admission.enabled: false` is a full escape hatch: neither the
+  // cap nor the memory guard can deny, though the guard still logs a
+  // report-only warning when crossed so the condition stays visible.
+  private assertAdmissible(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+  ): void {
+    const admission = this.config.admission;
+    const memory = readHostMemory();
+    let memoryCrossedDetail: string | undefined;
+    if (memory) {
+      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+        memoryCrossedDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+        memoryCrossedDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      }
+    }
+    if (memoryCrossedDetail) {
+      this.logEvent("session.admission.memory_guard", {
+        level: "warn",
+        projectId,
+        message: `Memory guard crossed for ${context} in project "${projectId}": ${memoryCrossedDetail}`,
+      });
+    }
+    if (!admission.enabled) {
+      return;
+    }
+    if (memoryCrossedDetail && admission.memoryGuard.enforce) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": memory guard crossed — ${memoryCrossedDetail}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    const live = this.countLiveSessions(opts?.replacingSessionId);
+    let reservedTotal = 0;
+    let projectReserved = 0;
+    for (const [reservation, reservedProjectId] of this.admissionReservations) {
+      if (reservation === opts?.admissionReservation) continue;
+      reservedTotal += 1;
+      if (reservedProjectId === projectId) projectReserved += 1;
+    }
+    const projectCap = this.config.projects[projectId]?.maxLiveSessions;
+    const projectLive = live.byProject.get(projectId) ?? 0;
+    const projectClaimed = projectLive + projectReserved;
+    if (projectCap !== undefined && projectClaimed >= projectCap) {
+      const projectCandidates = live.records.filter((session) => session.project === projectId);
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    const totalLive = live.total + reservedTotal;
+    if (totalLive >= admission.maxLiveSessions) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+  }
+
+  private reserveAdmission(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string },
+  ): symbol {
+    this.assertAdmissible(projectId, context, opts);
+    const reservation = Symbol(projectId);
+    this.admissionReservations.set(reservation, projectId);
+    return reservation;
+  }
+
+  // Cheap admission snapshot for the daemon-startup log: cap and live count
+  // only. getHeadroom() also awaits getFleetSessionRssBytes() (a `ps` fork
+  // plus `tmux list-panes -a`) for its per-session RSS breakdown, which the
+  // boot log throws away — too costly to run inside the pre-`ready` window.
+  getAdmissionStartupSummary(): {
+    enabled: boolean;
+    cap: { global: number; source: "config" | "derived" };
+    liveCount: number;
+  } {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    return {
+      enabled: admission.enabled,
+      cap: { global: admission.maxLiveSessions, source: admission.maxLiveSessionsSource },
+      liveCount: live.total,
+    };
+  }
+
+  async getHeadroom(): Promise<HeadroomReport> {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    const liveSessionByWorkspaceId = new Map<string, string>();
+    for (const session of live.records) {
+      const workspaceId = workspaceIdOf(session);
+      const currentOwner = liveSessionByWorkspaceId.get(workspaceId);
+      if (!currentOwner || session.id === workspaceId) {
+        liveSessionByWorkspaceId.set(workspaceId, session.id);
+      }
+    }
+    const rssBySessionId = await getFleetSessionRssBytes(liveSessionByWorkspaceId);
+    const projectCaps: Record<string, number> = {};
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      if (project.maxLiveSessions !== undefined) {
+        projectCaps[projectId] = project.maxLiveSessions;
+      }
+    }
+    const byProject: Record<string, number> = {};
+    for (const [projectId, count] of live.byProject) {
+      byProject[projectId] = count;
+    }
+    const memory = readHostMemory();
+    const guardCrossed =
+      memory !== null &&
+      (memory.availableBytes < admission.memoryGuard.minAvailableBytes ||
+        memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes);
+    return {
+      cap: {
+        global: admission.maxLiveSessions,
+        source: admission.maxLiveSessionsSource,
+        perSessionBytes: admission.perSessionBytes,
+        reserveFraction: admission.reserveFraction,
+      },
+      projectCaps,
+      live: { count: live.total, byProject },
+      projectedRoom: Math.max(0, admission.maxLiveSessions - live.total),
+      sessions: [...live.records]
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+        .map((session) => ({
+          id: session.id,
+          project: session.project,
+          status: session.status,
+          rssBytes: rssBySessionId.get(session.id) ?? 0,
+        })),
+      memory,
+      guard: {
+        enforce: admission.memoryGuard.enforce,
+        minAvailableBytes: admission.memoryGuard.minAvailableBytes,
+        minFreeSwapBytes: admission.memoryGuard.minFreeSwapBytes,
+        crossed: guardCrossed,
+      },
+    };
   }
 
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
