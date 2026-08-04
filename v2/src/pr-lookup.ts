@@ -227,11 +227,7 @@ function recordBudgetFromEnvelope(data: Record<string, unknown>, nowMs: number):
   }
   const resetAt = rateLimit["resetAt"];
   const resetAtMs = typeof resetAt === "string" ? Date.parse(resetAt) : Number.NaN;
-  recordGraphqlBudget(
-    rateLimit["remaining"],
-    Number.isFinite(resetAtMs) ? resetAtMs : null,
-    nowMs,
-  );
+  recordGraphqlBudget(rateLimit["remaining"], Number.isFinite(resetAtMs) ? resetAtMs : null, nowMs);
 }
 
 /**
@@ -267,7 +263,16 @@ async function runChunk(
 ): Promise<Map<string, PrLookupOutcome>> {
   const results = new Map<string, PrLookupOutcome>();
   const { query, aliases } = buildAliasedBranchQuery(branches);
-  const args = ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${slug.owner}`, "-f", `name=${slug.name}`];
+  const args = [
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-f",
+    `owner=${slug.owner}`,
+    "-f",
+    `name=${slug.name}`,
+  ];
   for (const [index, entry] of aliases.entries()) {
     args.push("-f", `b${index}=${entry.branch}`);
   }

@@ -28,8 +28,12 @@ const {
   resolvePrLookupRepo,
   resolvePrLookups,
 } = await import("../../src/pr-lookup.js");
-const { GH_POLL_MIN_GRAPHQL_REMAINING, _resetGhUsageForTests, noteGitHubRateLimitHit, recordGraphqlBudget } =
-  await import("../../src/gh.js");
+const {
+  GH_POLL_MIN_GRAPHQL_REMAINING,
+  _resetGhUsageForTests,
+  noteGitHubRateLimitHit,
+  recordGraphqlBudget,
+} = await import("../../src/gh.js");
 
 const SLUG: PrRepoSlug = { owner: "ashugaev", name: "spur" };
 const OTHER_SLUG: PrRepoSlug = { owner: "ashugaev", name: "other" };
@@ -118,7 +122,10 @@ describe("pr lookup batching", () => {
   it("issues one call per repo", async () => {
     ghMock.mockResolvedValue(envelope({ a0: [] }));
 
-    await resolvePrLookups([...requestsFor(["feature/a"]), ...requestsFor(["feature/b"], OTHER_SLUG)]);
+    await resolvePrLookups([
+      ...requestsFor(["feature/a"]),
+      ...requestsFor(["feature/b"], OTHER_SLUG),
+    ]);
 
     expect(ghMock).toHaveBeenCalledTimes(2);
     expect(ghMock.mock.calls[0]).toContain("owner=ashugaev");
@@ -331,8 +338,8 @@ describe("pr lookup batching", () => {
     expect(query).toContain("a0: pullRequests(headRefName:$b0,first:5");
     expect(query).toContain("a1: pullRequests(headRefName:$b1,first:5");
     // Well under the 131072-byte single-argv ceiling even at 50 aliases.
-    expect(buildAliasedBranchQuery(Array.from({ length: 50 }, (_u, i) => `feature/${i}`)).query.length).toBeLessThan(
-      16_000,
-    );
+    expect(
+      buildAliasedBranchQuery(Array.from({ length: 50 }, (_u, i) => `feature/${i}`)).query.length,
+    ).toBeLessThan(16_000);
   });
 });

@@ -233,12 +233,29 @@ import {
 import {
   closeSessionPr,
   deriveSessionSlots,
-  discoverSessionPrBinding,
   parseSessionPrBinding,
+  prLookupBindingOf,
   resolvePrDiscoveryBranch,
   resolveSessionPrBinding,
   viewSessionPrState,
 } from "./session-pr.js";
+import {
+  type PrLookupOutcome,
+  cancelPendingPrLookups,
+  enqueuePrLookup,
+  flushPrLookups,
+  resolvePrLookupRepo,
+} from "./pr-lookup.js";
+import {
+  PR_LOOKUP_IDLE_CAP_MS,
+  PR_LOOKUP_LIVE_CAP_MS,
+  type PrRepoSlug,
+  clearPrLookupEntry,
+  isPrLookupDue,
+  markPrLookupMiss,
+  markPrLookupTerminal,
+  readPrLookupEntry,
+} from "./pr-lookup-cache.js";
 import {
   addUnconfiguredProject,
   buildMergedConfig,
@@ -417,6 +434,12 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // session's runtime is not supposed to exist anymore".
 const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
 const PR_CHECK_THROTTLE_MS = 30_000;
+// A session that is not running cannot open a PR by itself, but a user still
+// can, by hand, long after the agent stopped. So the cadence drops instead of
+// stopping: worst case such a PR binds within this throttle plus the lookup
+// backoff cap. isTerminalSessionStatus is deliberately not widened for this —
+// 16 other call sites depend on its current meaning.
+const PR_CHECK_IDLE_THROTTLE_MS = 30 * 60_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
@@ -1912,6 +1935,9 @@ export class SessionService {
   }
 
   dispose(): void {
+    // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
+    // cannot hang on a batch that will never flush.
+    cancelPendingPrLookups();
     if (this.attentionMonitorTimer) {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
@@ -2859,7 +2885,7 @@ export class SessionService {
       const claudeAccounts = this.computeClaudeAccountsView();
       for (const session of sessions) {
         const view = await this.enrich(session, claudeAccounts);
-        this.checkPrForSession(session, view.state);
+        await this.checkPrForSession(session, view.state);
         const prevRunState = this.lastObservedRunStates.get(view.id);
         nextRunStates.set(view.id, view.state);
         if (!baseline && prevRunState === "working" && view.state === "waiting") {
@@ -2881,6 +2907,9 @@ export class SessionService {
           await this.notifyAttention(view, attention);
         }
       }
+      // The sweep is the batch window: every PR lookup this sweep queued goes
+      // out as one `gh api graphql` per repo instead of one call per branch.
+      await flushPrLookups();
       this.attentionStates.clear();
       for (const [sessionId, attention] of nextStates) {
         this.attentionStates.set(sessionId, attention);
@@ -3081,7 +3110,13 @@ export class SessionService {
     }
   }
 
-  private checkPrForSession(session: SessionRecord, state: SessionState): void {
+  /**
+   * Resolves once this session's lookup is registered with the batch queue (or
+   * ruled out), not once it has an answer. The caller awaits this per session
+   * and then flushes the queue, so the whole sweep leaves as one query per
+   * repo. The answer itself lands through the fire-and-forget run.
+   */
+  private async checkPrForSession(session: SessionRecord, state: SessionState): Promise<void> {
     // PR binding is workspace-owned: skip once any desk member already has
     // one. resolveWorkspaceState is the dual-read (workspace file, else the
     // legacy owning-record fallback) that replaces a plain anchor-record read.
@@ -3094,6 +3129,12 @@ export class SessionService {
     }
     // Skip if no worktree
     if (!session.worktree || !session.worktreePath) {
+      return;
+    }
+    // A removed worktree can never grow a PR. Sync stat, no spawn — mirrors the
+    // GitHub review source's session filter. isGitWorktree is deliberately not
+    // used here: it spawns git.
+    if (!existsSync(session.worktreePath)) {
       return;
     }
 
@@ -3124,8 +3165,14 @@ export class SessionService {
       return;
     }
 
-    // Throttle between gh calls
-    if (Date.now() - tracker.lastCheckAt < PR_CHECK_THROTTLE_MS) {
+    // Throttle between lookups. A running session keeps the 30s cadence; every
+    // other status drops to the idle cadence, which is what the bulk of the
+    // eligible set is.
+    const live = session.status === "running";
+    if (
+      Date.now() - tracker.lastCheckAt <
+      (live ? PR_CHECK_THROTTLE_MS : PR_CHECK_IDLE_THROTTLE_MS)
+    ) {
       return;
     }
 
@@ -3134,9 +3181,23 @@ export class SessionService {
       tracker.waitingChecks += 1;
     }
 
+    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
+    // git only, no GitHub budget, and memoized per worktree.
+    const slug = await resolvePrLookupRepo(session.worktreePath);
+    if (
+      slug &&
+      !isPrLookupDue(
+        readPrLookupEntry(this.config.dataDir, slug, discoveryBranch),
+        live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS,
+      )
+    ) {
+      return;
+    }
+
     // Fire and forget, but tracked so teardown can drain it — an unawaited
-    // `gh` call outliving its caller lands on whatever runs next.
-    const run = this.runPrCheck(session).catch((error) => {
+    // `gh` call outliving its caller lands on whatever runs next. The queue
+    // registration inside is synchronous, so the caller's flush sees it.
+    const run = this.runPrCheck(session, discoveryBranch, slug).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.pr_auto_detect.failed", {
         level: "warn",
@@ -3149,8 +3210,49 @@ export class SessionService {
     void run.finally(() => this.prCheckRuns.delete(run));
   }
 
-  private async runPrCheck(session: SessionRecord): Promise<void> {
-    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+  /**
+   * Runs one session's queued lookup and keeps the persisted negative cache in
+   * step. Returns null when there is no answer to act on, i.e. the lookup was
+   * skipped (budget, unresolved repo, error, cancelled). A skip must never
+   * advance the cache or count as "no PR" — a false negative written during a
+   * rate-limit window would outlive the window.
+   */
+  private async resolveQueuedPrLookup(
+    slug: PrRepoSlug,
+    branch: string,
+    worktreePath: string,
+  ): Promise<PrLookupOutcome | null> {
+    const outcome = await enqueuePrLookup({ slug, branch, worktreePath });
+    const dataDir = this.config.dataDir;
+    switch (outcome.status) {
+      case "found":
+        clearPrLookupEntry(dataDir, slug, branch);
+        return outcome;
+      case "absent":
+        markPrLookupMiss(dataDir, slug, branch);
+        return outcome;
+      case "terminal":
+        markPrLookupTerminal(dataDir, slug, branch, outcome.pr);
+        return outcome;
+      case "skipped":
+        return null;
+    }
+  }
+
+  private async runPrCheck(
+    session: SessionRecord,
+    discoveryBranch: string,
+    slug: PrRepoSlug | null,
+  ): Promise<void> {
+    // No GitHub remote: nothing to look up and nothing to cache, but the
+    // non-github review providers still get their turn below.
+    const outcome: PrLookupOutcome | null = slug
+      ? await this.resolveQueuedPrLookup(slug, discoveryBranch, session.worktreePath)
+      : { status: "absent" };
+    if (!outcome) {
+      return;
+    }
+    const binding = outcome.status === "found" ? prLookupBindingOf(outcome.pr) : null;
     // PR binding write lands on the workspace's own state so every desk
     // member shares it. `workspaceIdOf(session) === session.id` for a
     // non-desk session, so this is the same re-read as before (no extra IO
@@ -3186,7 +3288,6 @@ export class SessionService {
     }
 
     const project = this.config.projects[session.project];
-    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
     const providerIds = (await orderedReviewProviderIds(session.worktreePath, project)).filter(
       (providerId) => providerId !== "github",
     );
