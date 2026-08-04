@@ -7985,8 +7985,7 @@ export class SessionService {
       }
     }
 
-    const workspacePresent =
-      session.worktree && session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     this.logEvent("session.recover.check", {
       level: "info",
       sessionId: session.id,
@@ -8008,8 +8007,18 @@ export class SessionService {
     if (session.status === "completed") {
       throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
-    if (!session.worktree || !session.worktreePath || !workspacePresent) {
-      throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
+    if (!session.worktreePath || !workspacePresent) {
+      // Shepherd's workspace is a plain directory (worktree: false), never a
+      // git worktree Spur removes on its own — see shouldRemoveWorktreeOnTerminal.
+      // If an operator (or a wiped host) deletes it out from under a stopped
+      // session, re-materialize the same empty dir spawnShepherd creates on
+      // first spawn rather than leaving shepherd permanently unrecoverable.
+      if (session.project !== SHEPHERD_PROJECT_ID) {
+        throw new Error(
+          `Session ${session.id} cannot be recovered because its workspace is missing`,
+        );
+      }
+      ensureShepherdWorkspace(this.config.dataDir);
     }
 
     const project = this.getProject(session.project);
@@ -8229,6 +8238,13 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+    // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
+    // path reads the session directly rather than through that method, so
+    // isRestorableSession's workspaceExists (computed by enrich() below) would
+    // otherwise see a wiped shepherd workspace as unrestorable.
+    if (session.project === SHEPHERD_PROJECT_ID && !workspaceExists(session.worktreePath)) {
+      ensureShepherdWorkspace(this.config.dataDir);
     }
 
     const current = await this.enrich(session);
