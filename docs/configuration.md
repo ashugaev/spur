@@ -285,7 +285,7 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 Tmux agent sessions survive daemon restarts. The systemd unit uses `KillMode=process`, so `systemctl restart` stops only the node process — tmux and agents keep running. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, and restarts attention monitoring.
 
-Trigger pending batches persist under `dataDir` (`pending-send-batches.json`) and reload at startup, minus any record whose trigger no longer matches config. State that does not survive a restart: retry counters (a reloaded batch restarts at attempt 1), the state-classification cache (rebuilt within seconds), and the state-history ring buffer (starts empty).
+Trigger pending batches persist under `dataDir` (`pending-send-batches.json`) and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. State that does not survive a restart: retry counters (a reloaded batch restarts at attempt 1), the state-classification cache (rebuilt within seconds), and the state-history ring buffer (starts empty).
 
 Unit templates live in `deploy/`. After editing, copy to `/etc/systemd/system/` and run `systemctl daemon-reload`.
 
