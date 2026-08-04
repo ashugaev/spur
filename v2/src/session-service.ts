@@ -2028,6 +2028,9 @@ export class SessionService {
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
+  // Serializes sendAgentMessage per tmux pane so two trigger batches on one
+  // session queue instead of racing two pastes into the same composer.
+  private readonly paneWriteLocks = new Map<string, Promise<void>>();
 
   constructor(
     configPath?: string,
@@ -3442,6 +3445,29 @@ export class SessionService {
       return await task();
     } finally {
       release();
+    }
+  }
+
+  // Keyed chained-promise lock, one entry per tmux pane with a send in
+  // flight. Install `current` before the first await so two acquirers in
+  // one turn chain instead of racing; delete only under the identity guard
+  // so a waiter that already replaced the entry keeps its own (same idiom
+  // as triggers.ts enqueue).
+  private async withPaneWriteLock<T>(paneKey: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.paneWriteLocks.get(paneKey) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.paneWriteLocks.set(paneKey, current);
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.paneWriteLocks.get(paneKey) === current) {
+        this.paneWriteLocks.delete(paneKey);
+      }
     }
   }
 
@@ -8098,6 +8124,19 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<void> {
+    return this.withPaneWriteLock(session.tmuxSession, () =>
+      this.writeAgentMessage(session, message, options),
+    );
+  }
+
+  private async writeAgentMessage(
     session: Pick<
       SessionRecord,
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"

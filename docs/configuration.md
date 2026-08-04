@@ -304,7 +304,7 @@ With `adaptivePoll` configured, a `github` source tick is a no-op — zero `gh` 
 
 Tmux agent sessions survive daemon restarts. The systemd unit uses `KillMode=process`, so `systemctl restart` stops only the node process — tmux and agents keep running. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, and restarts attention monitoring.
 
-State that does not survive a restart: trigger pending batches and retry counters (re-populated on next poll), the state-classification cache (rebuilt within seconds), and the state-history ring buffer (starts empty).
+Trigger pending batches persist under `dataDir` (`pending-send-batches.json`) and reload at startup, minus any record whose trigger no longer matches config. State that does not survive a restart: retry counters (a reloaded batch restarts at attempt 1), the state-classification cache (rebuilt within seconds), and the state-history ring buffer (starts empty).
 
 Unit files in this repository are templates only. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade). System-unit operators adapt and reload them in their own maintenance window.
 
