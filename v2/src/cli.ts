@@ -7,6 +7,13 @@ import {
   runNpmInit,
   type HostInstallCheck,
 } from "./host-install.js";
+import {
+  executePrune,
+  planCachePrune,
+  type CachePlan,
+  type CacheCandidate,
+  type PruneOutcome,
+} from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
@@ -34,6 +41,7 @@ import {
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
+  loadInstanceConfigReadOnly,
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
@@ -849,6 +857,138 @@ function renderDoctorResult(result: DoctorResult): string {
   return lines.join("\n");
 }
 
+function formatGb(kb: number): string {
+  return `${(kb / (1024 * 1024)).toFixed(2)}GB`;
+}
+
+const MAX_LISTED_CANDIDATES = 20;
+
+function formatProtectedReason(candidate: CacheCandidate): string {
+  if (candidate.verdict.kind !== "protected") return "";
+  const reason = candidate.verdict.reason;
+  switch (reason.kind) {
+    case "too-recent":
+      return `too recent (${reason.ageDays}d < ${reason.floorDays}d floor)`;
+    case "in-use":
+      return `in use by pid ${reason.pid} (${reason.evidence})`;
+    case "package-manager-active":
+      return `package manager active (pid ${reason.pid})`;
+    case "pinned-revision":
+      return `pinned browser revision (${reason.dirName})`;
+    case "pin-unresolved":
+      return "no browsers.json pin sources resolved";
+    case "class-never-pruned":
+      return "never pruned (this class is report-only)";
+    case "process-tree-unreadable":
+      return "process tree unreadable";
+    case "not-owned":
+      return `not owned by this user (uid ${reason.uid})`;
+    case "symlink":
+      return "symlink";
+  }
+}
+
+// Ranked by size descending — never rely on filesystem/readdir order.
+function bySizeDesc(a: CacheCandidate, b: CacheCandidate): number {
+  return b.entry.sizeKb - a.entry.sizeKb;
+}
+
+function renderCachePlan(plan: CachePlan): string {
+  const lines: string[] = [boldText("Cache roots")];
+  for (const root of plan.roots) {
+    lines.push(
+      `  ${accent(root.rootId.padEnd(20))}  ${root.status.padEnd(9)}  ${formatGb(root.totalKb).padStart(9)}  ${String(root.entryCount).padStart(5)} entries  ${dimText(root.path)}`,
+    );
+  }
+
+  const prunable = plan.candidates
+    .filter(
+      (candidate): candidate is CacheCandidate & { verdict: { kind: "prunable" } } =>
+        candidate.verdict.kind === "prunable",
+    )
+    .sort(bySizeDesc);
+  const protectedCandidates = plan.candidates
+    .filter(
+      (candidate): candidate is CacheCandidate & { verdict: { kind: "protected" } } =>
+        candidate.verdict.kind === "protected",
+    )
+    .sort(bySizeDesc);
+
+  lines.push(
+    "",
+    boldText(`Prunable: ${prunable.length} entries, ${formatGb(plan.reclaimableKb)} reclaimable`),
+  );
+  for (const candidate of prunable.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      `  ${formatGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}`,
+    );
+  }
+  if (prunable.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${prunable.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  lines.push("", boldText(`Protected: ${protectedCandidates.length} entries`));
+  for (const candidate of protectedCandidates.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      dimText(
+        `  ${formatGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}  — ${formatProtectedReason(candidate)}`,
+      ),
+    );
+  }
+  if (protectedCandidates.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${protectedCandidates.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  if (!plan.processTreeReadable) {
+    lines.push("", dimText("Process tree unreadable — every candidate is protected."));
+  }
+  if (plan.pinSourceCount === 0) {
+    lines.push(
+      dimText(
+        "No playwright browsers.json pin sources resolved — every browser revision is protected.",
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderPruneOutcome(outcome: PruneOutcome): string {
+  const lines = [
+    boldText(`Removed ${outcome.removed.length} entries, freed ${formatGb(outcome.freedKb)}`),
+  ];
+  if (outcome.failures.length > 0) {
+    lines.push(dimText(`${outcome.failures.length} failures:`));
+    for (const failure of outcome.failures.slice(0, MAX_LISTED_CANDIDATES)) {
+      lines.push(dimText(`  ${failure.path}: ${failure.message}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+interface CacheActionResult {
+  plan: CachePlan;
+  outcome?: PruneOutcome;
+  wouldPrune: boolean;
+}
+
+function renderCacheActionResult(result: CacheActionResult): string {
+  const lines = [renderCachePlan(result.plan)];
+  if (result.outcome) {
+    lines.push("", renderPruneOutcome(result.outcome));
+  } else if (result.wouldPrune) {
+    const prunableCount = result.plan.candidates.filter(
+      (c) => c.verdict.kind === "prunable",
+    ).length;
+    lines.push(
+      "",
+      dimText(
+        `Would remove ${prunableCount} entries, ${formatGb(result.plan.reclaimableKb)} — re-run with --prune --yes to actually delete.`,
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
 function collectOptionValue(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
@@ -964,7 +1104,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `cache`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -972,6 +1112,13 @@ function helpNotes(command: Command): string[] {
     return [
       "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
       "`npm install` alone does not register or start services.",
+    ];
+  }
+  if (command.name() === "cache") {
+    return [
+      "Dry-run by default: no flags, or `--prune` alone, only report — never deletes. `--prune --yes` deletes prunable entries.",
+      "Covers ~/.npm, ~/.cache, ~/.cache/ms-playwright(-mcp), and /tmp — never ~/.spur (dataDir/worktreeDir), which a sibling retention path owns.",
+      "Never starts or calls the daemon; works with the daemon stopped.",
     ];
   }
   if (command.name() === "doctor") {
@@ -1854,6 +2001,36 @@ export function createProgram(cliEntrypoint: string): Command {
               : "Host and project checks complete.",
         render: renderDoctorResult,
         exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("cache")
+    .description(
+      "Report host caches outside ~/.spur (npm, browser MCP, ~/.cache, /tmp) and optionally prune them. Dry-run by default.",
+    )
+    .option("--json", "Print raw JSON")
+    .option("--prune", "Preview or execute deletion of prunable entries (dry-run without --yes)")
+    .option("--yes", "Confirm --prune non-interactively; required to actually delete anything")
+    .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }) => {
+      const instanceConfig = loadInstanceConfigReadOnly();
+      await outputResult({
+        json: Boolean(options.json),
+        label: "measuring host caches",
+        action: async (): Promise<CacheActionResult> => {
+          const plan = await planCachePrune({ instanceConfig });
+          if (options.prune && options.yes) {
+            const outcome = await executePrune(plan.candidates, {
+              ...(instanceConfig.status === "ok" ? { dataDir: instanceConfig.config.dataDir } : {}),
+              ...(instanceConfig.status === "ok"
+                ? { worktreeDir: instanceConfig.config.worktreeDir }
+                : {}),
+            });
+            return { plan, outcome, wouldPrune: false };
+          }
+          return { plan, wouldPrune: Boolean(options.prune) };
+        },
+        render: renderCacheActionResult,
       });
     });
 

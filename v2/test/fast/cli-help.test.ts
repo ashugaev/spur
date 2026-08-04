@@ -13,6 +13,7 @@ describe("spur help", () => {
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
     expect(help).toContain("doctor [options]");
+    expect(help).toContain("cache [options]");
     expect(help).toContain("init [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
@@ -53,6 +54,25 @@ describe("spur help", () => {
     expect(help).toContain("Read-only by default: checks npm/systemd host install");
     expect(help).toContain("Run `spur init` if host checks");
     expect(help).toContain("Run `spur list` or `spur spawn` next");
+  });
+
+  it("documents the cache command's dry-run default and flags", () => {
+    const program = buildProgram();
+    const cache = program.commands.find((command) => command.name() === "cache");
+
+    expect(cache).toBeDefined();
+    if (!cache) {
+      throw new Error("Expected cache command to be registered");
+    }
+
+    const help = cache.helpInformation();
+
+    expect(help).toContain("--json");
+    expect(help).toContain("--prune");
+    expect(help).toContain("--yes");
+    expect(help).toContain("Dry-run by default");
+    expect(help).toContain("never deletes");
+    expect(help).toContain("~/.spur");
   });
 
   it("renders subcommand help with compact sections and inherited globals", () => {
