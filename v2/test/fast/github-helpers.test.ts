@@ -866,6 +866,7 @@ describe("GitHub review batching", () => {
             rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
             r: {
               a0: {
+                id: "PR_42",
                 number: 42,
                 title: "Burst feedback",
                 url: "https://github.com/acme/api/pull/42",
@@ -997,6 +998,126 @@ describe("GitHub review batching", () => {
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
     expect(collected.collected.snapshot.has("review-comment:1011")).toBe(true);
+  });
+
+  it("resumes comments on a thread outside the newest 100 after the cycle budget", async () => {
+    const dataDir = await makeDataDir();
+    const newestThreads = Array.from({ length: 100 }, (_unused, index) => ({
+      id: `THREAD_${index + 2}`,
+      comments: {
+        nodes: [],
+        pageInfo: { hasPreviousPage: false, startCursor: `comment-${index + 2}` },
+      },
+    }));
+    const comments = (start: number) =>
+      Array.from({ length: 100 }, (_unused, index) => ({
+        databaseId: start + index,
+        body: `feedback ${start + index}`,
+        author: { login: "reviewer" },
+      }));
+    let commentPage = 0;
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const call = args.join(" ");
+      if (call.includes("r:repository")) {
+        return Promise.resolve(
+          JSON.stringify({
+            data: {
+              rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+              r: {
+                a0: {
+                  id: "PR_42",
+                  number: 42,
+                  title: "Many threads and comments",
+                  url: "https://github.com/acme/api/pull/42",
+                  reviewDecision: null,
+                  mergeable: "MERGEABLE",
+                  mergeStateStatus: "CLEAN",
+                  isDraft: false,
+                  state: "OPEN",
+                  commits: { nodes: [] },
+                  reviewThreads: {
+                    nodes: newestThreads,
+                    pageInfo: { hasPreviousPage: true, startCursor: "thread-2" },
+                  },
+                  reviews: { nodes: [] },
+                  comments: { nodes: [] },
+                },
+              },
+            },
+          }),
+        );
+      }
+      if (call.includes("... on PullRequest{reviewThreads")) {
+        return Promise.resolve(
+          JSON.stringify({
+            data: {
+              rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+              p0: {
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: comments(1_101),
+                        pageInfo: { hasPreviousPage: true, startCursor: "comment-1101" },
+                      },
+                    },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "thread-1" },
+                },
+              },
+            },
+          }),
+        );
+      }
+      commentPage += 1;
+      const start = 1_101 - commentPage * 100;
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_798, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: comments(start),
+                pageInfo: {
+                  hasPreviousPage: commentPage < 11,
+                  startCursor: `comment-${start}`,
+                },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    await collectGitHubSignalsBatch([sourceSession("/tmp/api-1")], dataDir, "api", "pr-watch");
+    const secondCycleCall = ghMock.mock.calls.length;
+    const resumed = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(
+      ghMock.mock.calls
+        .slice(secondCycleCall)
+        .some((call) => call.join(" ").includes("id0=THREAD_1")),
+    ).toBe(true);
+    expect(
+      ghMock.mock.calls
+        .slice(secondCycleCall)
+        .some((call) => call.join(" ").includes("... on PullRequest{reviewThreads")),
+    ).toBe(false);
+    expect(
+      ghMock.mock.calls
+        .slice(secondCycleCall)
+        .some((call) => call.join(" ").includes("before0=comment-101")),
+    ).toBe(true);
+    const collected = resumed.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:1")).toBe(true);
   });
 
   it("paginates to an active review thread outside the newest 100 threads", async () => {

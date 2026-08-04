@@ -714,6 +714,8 @@ function recordBatchBudget(data: Record<string, unknown>): void {
 interface ReviewThreadPage {
   thread: Record<string, unknown>;
   id: string;
+  pullRequestId: string;
+  cursorKey: string;
   before: string;
 }
 
@@ -721,6 +723,28 @@ interface PullRequestThreadPage {
   pullRequest: Record<string, unknown>;
   id: string;
   before: string;
+}
+
+const REVIEW_THREAD_CURSOR_PREFIX = "review-thread:";
+
+function reviewThreadCursorKey(pullRequestId: string, threadId: string): string {
+  return `${REVIEW_THREAD_CURSOR_PREFIX}${encodeURIComponent(pullRequestId)}:${encodeURIComponent(threadId)}`;
+}
+
+function parseReviewThreadCursorKey(
+  key: string,
+): { pullRequestId: string; threadId: string } | null {
+  if (!key.startsWith(REVIEW_THREAD_CURSOR_PREFIX)) return null;
+  const parts = key.slice(REVIEW_THREAD_CURSOR_PREFIX.length).split(":");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  try {
+    return {
+      pullRequestId: decodeURIComponent(parts[0]),
+      threadId: decodeURIComponent(parts[1]),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function pullRequestThreadPageToFetch(
@@ -747,11 +771,18 @@ async function paginateReviewThreads(
   const resumedPullRequests = new Set(
     [...cursors.keys()].filter((key) => key.startsWith("pull-request:")),
   );
+  const pullRequestsWithResumedThreads = new Set(
+    [...cursors.keys()].flatMap((key) => {
+      const parsed = parseReviewThreadCursorKey(key);
+      return parsed ? [parsed.pullRequestId] : [];
+    }),
+  );
   const pending = aliases.flatMap(({ alias, target }) => {
     const selected = selectSummaryAndNode(repository[alias], target.number !== null);
     if (!selected) return [];
     const id = readString(selected.node.id);
     const cursorKey = id ? `pull-request:${id}` : "";
+    if (id && !cursors.has(cursorKey) && pullRequestsWithResumedThreads.has(id)) return [];
     const page = pullRequestThreadPageToFetch(
       selected.node,
       cursorKey ? cursors.get(cursorKey) : undefined,
@@ -825,6 +856,7 @@ async function paginateReviewThreads(
 function threadPageToFetch(
   thread: Record<string, unknown>,
   seen: ReadonlySet<string>,
+  pullRequestId: string,
   resumeBefore?: string,
 ): ReviewThreadPage | null {
   const id = readString(thread.id);
@@ -837,7 +869,15 @@ function threadPageToFetch(
     const databaseId = readNumber(raw.databaseId);
     return databaseId !== null && seen.has(reviewCommentSeenKey(databaseId));
   });
-  return reachedSeenComment && resumeBefore === undefined ? null : { thread, id, before };
+  return reachedSeenComment && resumeBefore === undefined
+    ? null
+    : {
+        thread,
+        id,
+        pullRequestId,
+        cursorKey: reviewThreadCursorKey(pullRequestId, id),
+        before,
+      };
 }
 
 async function paginateReviewThreadComments(
@@ -851,22 +891,58 @@ async function paginateReviewThreadComments(
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
   const resumedThreads = new Set(
-    [...cursors.keys()].filter((key) => !key.startsWith("pull-request:")),
+    [...cursors.keys()].filter((key) => parseReviewThreadCursorKey(key) !== null),
   );
-  const pending = aliases.flatMap(({ alias, target }) => {
+  const pullRequests = aliases.flatMap(({ alias, target }) => {
     const selected = selectSummaryAndNode(repository[alias], target.number !== null);
     if (!selected) return [];
-    return connectionNodes(selected.node.reviewThreads).flatMap((raw): ReviewThreadPage[] => {
-      if (!isRecord(raw)) return [];
-      const id = readString(raw.id);
-      const page = threadPageToFetch(raw, seen, id ? cursors.get(id) : undefined);
-      return page ? [page] : [];
-    });
+    const id = readString(selected.node.id);
+    return id ? [{ id, node: selected.node }] : [];
   });
-  pending.sort(
-    (left, right) => Number(resumedThreads.has(right.id)) - Number(resumedThreads.has(left.id)),
+  const pullRequestsById = new Map(
+    pullRequests.map((pullRequest) => [pullRequest.id, pullRequest]),
   );
-  for (const page of pending) cursors.set(page.id, page.before);
+  for (const [key, before] of cursors) {
+    const persisted = parseReviewThreadCursorKey(key);
+    if (!persisted) continue;
+    const pullRequest = pullRequestsById.get(persisted.pullRequestId);
+    if (!pullRequest) continue;
+    const threads = isRecord(pullRequest.node.reviewThreads)
+      ? pullRequest.node.reviewThreads
+      : null;
+    if (!threads) continue;
+    const existing = connectionNodes(threads).some(
+      (thread) => isRecord(thread) && readString(thread.id) === persisted.threadId,
+    );
+    if (existing) continue;
+    threads.nodes = [
+      ...connectionNodes(threads),
+      {
+        id: persisted.threadId,
+        comments: {
+          nodes: [],
+          pageInfo: { hasPreviousPage: true, startCursor: before },
+        },
+      },
+    ];
+  }
+  const pendingByKey = new Map<string, ReviewThreadPage>();
+  for (const pullRequest of pullRequests) {
+    for (const raw of connectionNodes(pullRequest.node.reviewThreads)) {
+      if (!isRecord(raw)) continue;
+      const id = readString(raw.id);
+      if (!id) continue;
+      const cursorKey = reviewThreadCursorKey(pullRequest.id, id);
+      const page = threadPageToFetch(raw, seen, pullRequest.id, cursors.get(cursorKey));
+      if (page) pendingByKey.set(cursorKey, page);
+    }
+  }
+  const pending = [...pendingByKey.values()];
+  pending.sort(
+    (left, right) =>
+      Number(resumedThreads.has(right.cursorKey)) - Number(resumedThreads.has(left.cursorKey)),
+  );
+  for (const page of pending) cursors.set(page.cursorKey, page.before);
   let requests = 0;
   let nodes = 0;
   while (pending.length > 0) {
@@ -913,13 +989,13 @@ async function paginateReviewThreadComments(
       }
       currentComments.nodes = [...connectionNodes(comments), ...connectionNodes(currentComments)];
       currentComments.pageInfo = comments.pageInfo;
-      const nextPage = threadPageToFetch({ id: page.id, comments }, seen);
+      const nextPage = threadPageToFetch({ id: page.id, comments }, seen, page.pullRequestId);
       const next = nextPage ? { ...nextPage, thread: page.thread } : null;
       if (next) {
-        cursors.set(next.id, next.before);
+        cursors.set(next.cursorKey, next.before);
         pending.push(next);
       } else {
-        cursors.delete(page.id);
+        cursors.delete(page.cursorKey);
       }
     }
   }
