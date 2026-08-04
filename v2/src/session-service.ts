@@ -3069,6 +3069,14 @@ export class SessionService {
       for (const view of enriched) {
         this.dashboardCache.set(view.id, view);
       }
+      // Store the pre-enrich listSessions reference, NOT the classified
+      // session enrichDashboard derived. This map is only ever compared by
+      // identity against the next tick's listSessions output, so it has to
+      // hold objects from that same parse cache; a classified session is a
+      // fresh object and would compare unequal every tick, making every
+      // record look changed. Reconcile-driven disk writes are picked up by
+      // the parse cache's inode check on the next listSessions, not from
+      // anything stored here.
       for (const session of due) {
         this.dashboardEnrichedRecords.set(session.id, session);
       }
