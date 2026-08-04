@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
-  killProcessTree,
   isLeakedManagedPlaywright,
   playwrightMcpUrl,
   PLAYWRIGHT_SIDECAR_CONFIG,
@@ -241,62 +240,16 @@ function alive(pid: number): boolean {
   }
 }
 
-describe("killProcessTree", () => {
-  it("kills the root and every descendant, not just the root", async () => {
-    // Real processes, tree shape declared through a stubbed `ps` (below the
-    // process the sweep would find, a chromium child hangs off the server).
-    const root = spawnIdle();
-    const child = spawnIdle();
-    const grandchild = spawnIdle();
-    vi.resetModules();
-    vi.doMock("node:child_process", () => ({
-      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
-        cb(null, {
-          stdout: [
-            `${root} 1 node cli.js --headless`,
-            `${child} ${root} chromium --type=zygote`,
-            `${grandchild} ${child} chromium --type=renderer`,
-            "",
-          ].join("\n"),
-        });
-      },
-    }));
-    try {
-      const mod = await import("../../../src/sidecars/playwright.js");
-      await mod.killProcessTree(root);
-      // SIGKILL is asynchronous from the signaller's point of view.
-      await sleep(200);
-      expect(alive(root)).toBe(false);
-      expect(alive(child)).toBe(false);
-      expect(alive(grandchild)).toBe(false);
-    } finally {
-      for (const pid of [root, child, grandchild]) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Already dead — the assertion above is what matters.
-        }
-      }
-      vi.doUnmock("node:child_process");
-      vi.resetModules();
-    }
-  });
-
-  it("is exported for the leak sweep and tolerates an already-dead pid", async () => {
-    const pid = spawnIdle();
-    process.kill(pid, "SIGKILL");
-    await sleep(100);
-    await expect(killProcessTree(pid)).resolves.toBeUndefined();
-  });
-});
-
 // Requirement: a session whose agent died leaves an orphaned server; the sweep
 // must reap its whole tree, not only the root it matched.
 describe("sweepLeakedPlaywright", () => {
-  it("reaps the full process tree of a leaked server", async () => {
+  it("reaps the full process tree of a leaked server, every level of it", async () => {
+    // Real processes; the tree shape below the matched root (chromium and its
+    // renderer) is declared through a stubbed `ps`.
     const bin = resolvePlaywrightMcpBin();
     const server = spawnIdle();
     const browser = spawnIdle();
+    const renderer = spawnIdle();
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
@@ -304,6 +257,7 @@ describe("sweepLeakedPlaywright", () => {
           stdout: [
             `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
             `${browser} ${server} /opt/chromium --headless --remote-debugging-pipe`,
+            `${renderer} ${browser} /opt/chromium --type=renderer`,
             "",
           ].join("\n"),
         });
@@ -312,11 +266,13 @@ describe("sweepLeakedPlaywright", () => {
     try {
       const mod = await import("../../../src/sidecars/playwright.js");
       await expect(mod.sweepLeakedPlaywright(new Set<number>())).resolves.toBe(1);
+      // SIGKILL is asynchronous from the signaller's point of view.
       await sleep(200);
       expect(alive(server)).toBe(false);
       expect(alive(browser)).toBe(false);
+      expect(alive(renderer)).toBe(false);
     } finally {
-      for (const pid of [server, browser]) {
+      for (const pid of [server, browser, renderer]) {
         try {
           process.kill(pid, "SIGKILL");
         } catch {

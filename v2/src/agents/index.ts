@@ -304,8 +304,11 @@ async function readHostClaudeMcpServers(args: {
   claudeConfigDir?: string;
 }): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
-  const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
-  const userConfig = await readJsonFile(userConfigPath);
+  // Independent files: read together, merge in precedence order below.
+  const [userConfig, projectConfig] = await Promise.all([
+    readJsonFile(join(args.claudeConfigDir ?? homedir(), ".claude.json")),
+    readJsonFile(join(args.worktreePath, ".mcp.json")),
+  ]);
   let localProject: unknown;
   if (isPlainObject(userConfig)) {
     mergeMcpServers(merged, userConfig.mcpServers);
@@ -314,8 +317,6 @@ async function readHostClaudeMcpServers(args: {
       localProject = projects[args.worktreePath];
     }
   }
-  const projectConfigPath = join(args.worktreePath, ".mcp.json");
-  const projectConfig = await readJsonFile(projectConfigPath);
   if (isPlainObject(projectConfig)) {
     mergeMcpServers(merged, projectConfig.mcpServers);
   }
