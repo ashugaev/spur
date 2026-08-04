@@ -17040,10 +17040,19 @@ describe("SessionService", () => {
         },
       },
     });
-    sidecarTmuxAliveMock
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValue(true);
+    // Keyed off the actual tmux launch rather than an ordered
+    // mockResolvedValueOnce queue: any extra sidecarTmuxAlive call landing in
+    // this test's window — e.g. an unawaited tick from an earlier test's
+    // undisposed SessionService — used to consume a queued `false` and shift
+    // startSidecarInternal onto its "already alive" branch, which skips the
+    // port reservation the URL probe needs, so no link was ever published.
+    let devAlive = false;
+    createTmuxSidecarSessionMock.mockImplementation(async (input: { sidecarName: string }) => {
+      if (input.sidecarName === "dev") devAlive = true;
+    });
+    sidecarTmuxAliveMock.mockImplementation(
+      async (_sessionId: string, sidecarName: string) => sidecarName === "dev" && devAlive,
+    );
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
 
     const { SessionService } = await loadSessionServiceModule();
