@@ -1881,7 +1881,7 @@ export class SessionService {
   // re-parsed the same YAML for the whole fleet — and re-logged the same parse
   // failure forever. A cache hit costs one statSync and no parse. Keyed by
   // session id, invalidated by config path or stamp change (see
-  // tryConfigStamp), pruned against the live id set in runDashboardCacheTick.
+  // tryConfigStamp), pruned against the included id set in runDashboardCacheTick.
   private readonly sessionProjectCache = new Map<
     string,
     { configPath: string; stamp: string; project: ProjectConfig | undefined }
@@ -3026,16 +3026,14 @@ export class SessionService {
     }
   }
 
-  // Single sweep for every session-scoped map that has no delete site of its
-  // own. Runs against the non-terminal id set pollAttentionStates already
+  // Single sweep for session-scoped maps whose lifetime ends at terminal
+  // status. Runs against the non-terminal id set pollAttentionStates already
   // computes, so its key set is bounded by "currently live sessions" instead
   // of "every session ever classified". Deliberately does not touch
-  // dashboardCache or sessionProjectCache (both retained for the full
-  // dashboard list — completed and killed+retainInList sessions the
-  // dashboard's idle round-robin still revisits, see runDashboardCacheTick —
-  // not just the non-terminal set) or stateCache (its 15 delete sites are
-  // deliberate mid-lifecycle reclassification triggers, not termination
-  // cleanup).
+  // dashboardCache, sessionProjectCache, stateHistory, or stateCache. Those
+  // four follow the wider dashboard lifetime because completed and
+  // killed+retainInList sessions are still enriched by its idle round-robin;
+  // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
@@ -3055,19 +3053,6 @@ export class SessionService {
     for (const sessionId of this.cursorJsonlReaders.keys()) {
       if (!liveIds.has(sessionId)) {
         this.cursorJsonlReaders.delete(sessionId);
-      }
-    }
-    for (const [sessionId, history] of this.stateHistory) {
-      // Truncate rather than delete: dropping the key entirely wipes
-      // lastEntry, so the next tick's transition branch (updateStateHistory)
-      // re-enters with prevLen 0 for every terminal session on every tick
-      // forever — a synchronous readSession/writeSession per terminal
-      // session per attention interval, and a swallowed transition log +
-      // subscriber dispatch for the first state change out of the wipe.
-      // Keeping the last element preserves lastEntry (bounding both costs)
-      // while still capping the array at 1 instead of STATE_HISTORY_LIMIT.
-      if (!liveIds.has(sessionId) && history.length > 1) {
-        this.stateHistory.set(sessionId, history.slice(-1));
       }
     }
     for (const sessionId of this.prCheckTrackers.keys()) {
@@ -3117,6 +3102,30 @@ export class SessionService {
         return session.status !== "killed" || session.retainInList === true;
       });
       const includedIds = new Set(sessions.map((session) => session.id));
+      const terminalIds = new Set(
+        sessions
+          .filter((session) => isTerminalSessionStatus(session.status))
+          .map((session) => session.id),
+      );
+
+      // These caches serve dashboard enrichment, so their lifetime follows
+      // includedIds rather than the attention monitor's non-terminal set.
+      // Delete records that left the store/dashboard entirely. For retained
+      // terminal records, keep the last history entry: deleting it would make
+      // updateStateHistory re-enter its transition branch every tick, while
+      // retaining the whole array would keep up to STATE_HISTORY_LIMIT entries.
+      for (const [id, history] of this.stateHistory) {
+        if (!includedIds.has(id)) {
+          this.stateHistory.delete(id);
+        } else if (terminalIds.has(id) && history.length > 1) {
+          this.stateHistory.set(id, history.slice(-1));
+        }
+      }
+      for (const id of this.stateCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.stateCache.delete(id);
+        }
+      }
 
       // A session is due for enrichment when it can still change on its own
       // (isLiveSessionRecord), when its on-disk record object changed since
