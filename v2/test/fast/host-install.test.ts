@@ -1026,7 +1026,13 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     const checks = await collectHostInstallChecks(fakeHome);
     const check = checks.find((check) => check.id === "data-dir-log-bytes");
     expect(check).toMatchObject({ ok: false, severity: "warn" });
-    expect(check?.fix).toContain("eventLog");
+    // The reported total spans both shard families, so the hint must name both
+    // knobs — lowering only eventLog.* cannot bring a user-action-heavy dataDir
+    // back under the threshold.
+    expect(check?.fix).toContain("eventLog.shardHotBytes");
+    expect(check?.fix).toContain("eventLog.retainArchives");
+    expect(check?.fix).toContain("userActionLog.shardHotBytes");
+    expect(check?.fix).toContain("userActionLog.retainArchives");
     // Log growth must never fail `spur doctor` on its own: cli.ts exits 1 only
     // on error severity, and this check tops out at warn.
     expect(hasErrorSeverity(checks.filter((c) => c.id === "data-dir-log-bytes"))).toBe(false);

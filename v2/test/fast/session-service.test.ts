@@ -19671,6 +19671,27 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("caps each shard family with its own retainArchives setting", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        eventLog: { retainArchives: 3 },
+        userActionLog: { retainArchives: 9 },
+      });
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 3);
+      expect(tryRotateMock).toHaveBeenCalledWith(
+        shardPath("api-1", "user-actions.jsonl"),
+        65536,
+        9,
+      );
+      service.dispose();
+    });
+
     it("rotates a manual_pause stopped session's shards, unlike the tmux reaper", async () => {
       seedCompactSession("api-1", { status: "stopped", stopReason: "manual_pause" });
       const { SessionService } = await loadSessionServiceModule();

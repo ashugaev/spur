@@ -557,9 +557,9 @@ function parseDuKb(output: string | undefined): number | undefined {
 
 // The global events.jsonl/user-actions.jsonl logs (and their .gz archives)
 // live at the data-dir root, disjoint from <dataDir>/sessions — eventLog.*
-// governs exactly these files, so the doctor total must include them. A
-// plain readdir+stat over the root (never recursive) stays cheap regardless
-// of how large `sessions` is.
+// governs the events.jsonl family and userActionLog.* the user-actions.jsonl
+// one, so the doctor total must include both. A plain readdir+stat over the
+// root (never recursive) stays cheap regardless of how large `sessions` is.
 function rootLogFileBytes(dataDir: string): number {
   let names: string[];
   try {
@@ -608,7 +608,7 @@ function checkLogBytes(id: string, dataDir: string): HostInstallCheck {
       ok: false,
       severity: "warn",
       detail: `Spur logs under ${dataDir} total ${totalKb}KB (above the ${LOG_BYTES_WARN_KB}KB warn threshold)`,
-      fix: `lower eventLog.shardHotBytes / eventLog.retainArchives in ~/.spur/config.yaml`,
+      fix: `lower eventLog.shardHotBytes / eventLog.retainArchives and userActionLog.shardHotBytes / userActionLog.retainArchives in ~/.spur/config.yaml`,
     };
   }
   return {

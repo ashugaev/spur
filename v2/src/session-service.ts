@@ -121,7 +121,11 @@ import {
   type SpurLogEntry,
   type UserInputKind,
 } from "./event-log.js";
-import { deleteSessionUserActions, sessionUserActionLogPath } from "./user-action-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  deleteSessionUserActions,
+  sessionUserActionLogPath,
+} from "./user-action-log.js";
 import { archivePath, tryRotate } from "./jsonl-log-io.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
@@ -3081,12 +3085,21 @@ export class SessionService {
         this.compactCursor = 0;
         return;
       }
-      const retain = this.config.eventLog?.retainArchives ?? DEFAULT_EVENT_LOG_RETAIN_ARCHIVES;
+      // Each shard family keeps its own retain cap: the two logs are configured
+      // independently (eventLog.* / userActionLog.*), so compaction must not
+      // rotate a user-action shard against the event-log cap even though the
+      // defaults happen to match today.
+      const eventRetain = this.config.eventLog?.retainArchives ?? DEFAULT_EVENT_LOG_RETAIN_ARCHIVES;
+      const userActionRetain =
+        this.config.userActionLog?.retainArchives ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES;
       const start = this.compactCursor % sessions.length;
       const batch = sessions.slice(start, start + COMPACT_MAX_PER_TICK);
       for (const session of batch) {
-        compactShardOnce(sessionEventLogPath(this.config.dataDir, session.id), retain);
-        compactShardOnce(sessionUserActionLogPath(this.config.dataDir, session.id), retain);
+        compactShardOnce(sessionEventLogPath(this.config.dataDir, session.id), eventRetain);
+        compactShardOnce(
+          sessionUserActionLogPath(this.config.dataDir, session.id),
+          userActionRetain,
+        );
       }
       this.compactCursor = start + batch.length >= sessions.length ? 0 : start + batch.length;
     } catch (error) {
