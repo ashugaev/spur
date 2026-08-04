@@ -651,12 +651,16 @@ export async function checkServiceHealth(
       const sessionRss = renderSessionRss(sessions);
       if (overCap) {
         const candidateIds = sessions.slice(0, 3).map((session) => session.id);
+        const fix =
+          candidateIds.length > 0
+            ? `raise admission.maxLiveSessions in ~/.spur/config.yaml, or stop sessions: ${candidateIds.join(", ")}`
+            : "free host memory or swap, or adjust admission.memoryGuard.minAvailableBytes or admission.memoryGuard.minFreeSwapBytes in ~/.spur/config.yaml";
         checks.push({
           id: "session-headroom",
           ok: false,
           severity: "warn",
           detail: `${live.count}/${cap.global} live sessions${guard.crossed ? " (memory guard crossed)" : ""}${sessionRss}`,
-          fix: `raise admission.maxLiveSessions in ~/.spur/config.yaml, or stop sessions: ${candidateIds.join(", ")}`,
+          fix,
         });
       } else {
         checks.push({

@@ -869,6 +869,49 @@ describe("checkServiceHealth", () => {
       expect(hasErrorSeverity(result.checks)).toBe(false);
     });
 
+    it("reports memory guard remediation without an empty stop-sessions suffix", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 0, byProject: {} },
+          projectedRoom: 10,
+          sessions: [],
+          memory: {
+            totalBytes: 68_719_476_736,
+            availableBytes: 536_870_912,
+            swapTotalBytes: 8_589_934_592,
+            swapFreeBytes: 268_435_456,
+          },
+          guard: {
+            enforce: false,
+            minAvailableBytes: 1_073_741_824,
+            minFreeSwapBytes: 536_870_912,
+            crossed: true,
+          },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({
+        ok: false,
+        severity: "warn",
+        fix: "free host memory or swap, or adjust admission.memoryGuard.minAvailableBytes or admission.memoryGuard.minFreeSwapBytes in ~/.spur/config.yaml",
+      });
+      expect(check?.detail).toContain("memory guard crossed");
+      expect(check?.fix).not.toContain("stop sessions:");
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
     it("emits no session-headroom check when the daemon is unreachable", async () => {
       probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
       probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
