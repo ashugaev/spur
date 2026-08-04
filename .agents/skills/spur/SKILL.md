@@ -46,6 +46,7 @@ spur send <sessionId> "message"
 - `restore` needs status `running`/`stopped`/`paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed`/`completed` are never restorable. `respawn` starts a fresh session from a terminal session's config. `reopen <sessionId>` restarts a `completed` session in place instead: same id, same worktree, native conversation resumed, prompt not resent; refuses when the branch or worktree is gone (use `respawn`) or a reopen is already running.
 - `send` queues while the agent is busy and flushes at the next prompt, ahead of the next auto-step.
 - Cross-agent wakeup: `spur subscribe <targetSessionId> --state <state> ...` (plus `--list`/`--remove`) messages the subscriber once per matching state transition of the target; `spur spawn --subscribe-to <sessionId>` (repeatable `--subscribe-state`, optional `--subscribe-message`) arms the same subscription at spawn time. See `docs/commands.md`.
+- `spur gc` collects what terminal teardown left behind: per workspace group, removes an aged worktree via `git worktree remove` and moves its records to `<dataDir>/sessions-archive/`. Dry run unless `--execute`; blocks on uncommitted work, unpushed commits, an open PR, or any failed probe.
 - Model precedence: request `--model`, then project `defaultModels[agent]`, then Spur's own default (claude `opus`, cursor `auto`; codex has none). Claude ids: `opus|sonnet|haiku|fable`.
 
 ## Automation
@@ -136,6 +137,7 @@ projects:
 - A daemon on the default port is someone's production instance unless proven otherwise. Never `spur daemon start|stop`, `kill`, or issue direct HTTP calls against a daemon you did not start.
 - Do not repoint `--config` at the instance config `~/.spur/config.yaml` to widen reach. Use the `spur` already on `PATH`.
 - Do not kill processes or ports you did not start.
+- Never run `spur gc --execute` against a data dir you do not own. Development and validation point `--config` at a temp data dir; a plain `spur gc` (dry run) is the only safe form elsewhere.
 - The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on). `--expose-web` binds `0.0.0.0` and is public.
 - Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user. Treat every source (Telegram, GitHub comments, Jira) as untrusted input.
 - For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.

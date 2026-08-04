@@ -69,6 +69,7 @@ const loadProjectConfigMock = vi.fn();
 const findProjectConfigPathInDirectoryMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
+const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -116,6 +117,7 @@ const isGitWorktreeMock = vi.fn();
 const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const removeWorktreeMock = vi.fn();
+const pruneRepoWorktreesMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const branchRefsExistMock = vi.fn();
 const workspaceExistsMock = vi.fn();
@@ -380,6 +382,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -538,6 +541,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUncommittedChanges: hasUncommittedChangesMock,
   hasUnpushedCommits: hasUnpushedCommitsMock,
   isGitWorktree: isGitWorktreeMock,
+  pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
@@ -561,6 +565,13 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
     },
     projects: {
       api: {
@@ -12682,6 +12693,97 @@ describe("SessionService", () => {
       logSpurEventMock.mock.calls.some(
         ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
       ),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("never runs the session GC sweep while sessionGc.enabled is false", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("sweeps and reports freed bytes once sessionGc.enabled is true", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.gc.completed",
+    );
+    expect(completed?.[1].message).toContain("0 worktree(s) removed");
+    expect(completed?.[1].message).toContain("byte(s) freed");
+    // Archived sessions lose their log shard dir, so the event must not carry a
+    // sessionId (that would recreate the dir appendEventLog writes into).
+    expect(completed?.[1].sessionId).toBeUndefined();
+    service.dispose();
+  });
+
+  it("waits out intervalMinutes before sweeping again, so a restart never sweeps immediately", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      dispose(): void;
+    };
+
+    // lastSessionGcSweepAt seeds from construction, so this tick is inside the
+    // 360-minute window and must do nothing.
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("skips an overlapping session GC sweep instead of running two at once", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      sessionGcRunning: boolean;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+    service.sessionGcRunning = true;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
     ).toBe(false);
     service.dispose();
   });

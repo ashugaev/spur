@@ -3667,6 +3667,82 @@ projects:
   });
 });
 
+describe("sessionGc", () => {
+  it("defaults to disabled with the documented values when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    });
+  });
+
+  it("parses sessionGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  enabled: true
+  olderThanDays: 14
+  intervalMinutes: 120
+  maxGroupsPerSweep: 5
+  statuses: [completed, stopped]
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: true,
+      olderThanDays: 14,
+      intervalMinutes: 120,
+      maxGroupsPerSweep: 5,
+      statuses: ["completed", "stopped"],
+    });
+  });
+
+  it("rejects a status outside the completed|killed|stopped allow-list", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  statuses: [running]
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/sessionGc\.statuses/);
+  });
+
+  it("ignores sessionGc in project mode", async () => {
+    const configPath = await writeConfig(`
+sessionGc:
+  enabled: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.sessionGc).toEqual({
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    });
+  });
+});
+
 describe("buildSidecarLinkUrl", () => {
   it("appends port with colon when template has no token", () => {
     expect(buildSidecarLinkUrl("https://host.example.com", 3000)).toBe(
