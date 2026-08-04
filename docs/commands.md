@@ -24,11 +24,13 @@ Unit of collection is the workspace group, not the session: every session sharin
 
 Actions: `reclaim` removes the worktree, then archives the records; `archive` only moves records (worktree already gone, or the session ran in the project path); `blocked` does nothing and prints its reasons.
 
-Blocked reasons: `not_eligible_status`, `too_recent`, `changed_during_run`, `path_outside_worktree_dir`, `shared_workspace_path`, `path_is_cwd_or_ancestor`, `uncommitted_changes`, `unpushed_commits`, `open_pr`, `pr_state_unknown`, `probe_failed`. Every guard is re-checked immediately before removal, against a fresh record read — a probe that throws blocks, never passes.
+Blocked reasons: `not_eligible_status`, `too_recent`, `changed_during_run`, `path_outside_worktree_dir`, `shared_workspace_path`, `path_is_cwd_or_ancestor`, `uncommitted_changes`, `unpushed_commits`, `open_pr`, `probe_failed`. Every guard is re-checked immediately before removal, against a fresh record read — a probe that throws blocks, never passes. `changed_during_run` covers any change to the fields a guard reads: status, `updatedAt`, `worktree`, `worktreePath`, `branch`, PR binding.
 
 Open-PR detection is one `gh pr list --repo <slug> --state open` per repo per run, matched against the stored `session.pr` number and the session branch. A saturated list is a block, not an empty result.
 
 Worktrees go out through `git worktree remove` plus `git worktree prune`, so the parent repo's metadata stays consistent. Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard dir; `mv` one back into `<dataDir>/sessions/<projectId>/` to un-archive (the index self-heals). A collected `stopped` session can no longer be restored — `spur gc` lists those ids before it acts.
+
+Worktree removal happens before archival. A group whose removal succeeded but whose archival failed reports `removed: true, archived: false` with an error; its record stays in `sessions/` pointing at a deleted path, and the next run collects it as `archive`. Nothing to do by hand.
 
 Freed bytes come from `du -s --block-size=1` measured before removal. A file hardlinked into several worktrees (pnpm store) counts once per worktree, so a large total can overstate the disk actually returned. `--no-sizes` skips measurement (no freed-byte reporting). Exits `1` when any group errored during `--execute`.
 

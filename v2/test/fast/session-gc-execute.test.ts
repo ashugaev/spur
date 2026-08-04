@@ -194,6 +194,31 @@ describe("executeSessionGc", () => {
     expect(report.groups[0]?.blockReasons).toEqual(["changed_during_run"]);
   });
 
+  it.each([
+    ["worktreePath", { worktreePath: `${WORKTREE_DIR}/api/moved` }],
+    ["worktree", { worktree: false }],
+    ["branch", { branch: "feature/renamed" }],
+    [
+      "pr",
+      { pr: { number: 7, repo: "acme/api", url: "https://github.com/acme/api/pull/7" } as const },
+    ],
+  ])(
+    "blocks with changed_during_run when a concurrent write changes %s without bumping updatedAt",
+    async (_field, overrides) => {
+      const record = makeSession({ id: "api-1" });
+      const plan = planOne(record);
+      const deps = makeDeps({
+        readGroupMembers: () => [{ ...record, ...overrides }],
+      });
+
+      const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+      expect(deps.removeWorktree).not.toHaveBeenCalled();
+      expect(deps.archiveGroup).not.toHaveBeenCalled();
+      expect(report.groups[0]?.blockReasons).toEqual(["changed_during_run"]);
+    },
+  );
+
   it("blocks with changed_during_run when a member vanished (already archived elsewhere)", async () => {
     const record = makeSession({ id: "api-1" });
     const plan = planOne(record);

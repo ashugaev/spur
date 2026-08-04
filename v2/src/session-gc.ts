@@ -398,6 +398,22 @@ export interface ExecuteSessionGcOptions {
   sizes: boolean;
 }
 
+// Compares every field a guard or the removal itself reads, not just
+// status/updatedAt: a concurrent writer that changes worktreePath, worktree,
+// branch, or the PR binding without bumping updatedAt would otherwise let the
+// run act on stale plan data (wrong path removed, wrong branch probed).
+function isPlanStillFresh(planned: SessionRecord, fresh: SessionRecord): boolean {
+  return (
+    fresh.status === planned.status &&
+    fresh.updatedAt === planned.updatedAt &&
+    fresh.worktree === planned.worktree &&
+    fresh.worktreePath === planned.worktreePath &&
+    fresh.branch === planned.branch &&
+    fresh.pr?.number === planned.pr?.number &&
+    fresh.pr?.repo === planned.pr?.repo
+  );
+}
+
 function isCwdInsideOrEqual(cwd: string, worktreePath: string): boolean {
   if (!worktreePath) {
     return false;
@@ -440,12 +456,7 @@ export async function executeSessionGc(
         for (let index = 0; index < group.members.length; index += 1) {
           const fresh = freshRaw[index];
           const planned = group.members[index];
-          if (
-            !fresh ||
-            !planned ||
-            fresh.status !== planned.status ||
-            fresh.updatedAt !== planned.updatedAt
-          ) {
+          if (!fresh || !planned || !isPlanStillFresh(planned, fresh)) {
             changed = true;
             break;
           }
@@ -485,6 +496,13 @@ export async function executeSessionGc(
         }
 
         if (action !== "blocked") {
+          // Worktree first, records second — deliberately, not incidentally.
+          // If archival then fails, the record survives in sessions/ pointing
+          // at a deleted path, and the next run reclassifies that group as
+          // "archive" (its path no longer exists) and finishes the job. The
+          // reverse order has no such recovery: an archived record whose
+          // worktree removal failed leaves a worktree no record-driven sweep
+          // can ever see again.
           if (action === "reclaim" && !options.dryRun) {
             await deps.removeWorktree(group, freshMembers);
             await deps.pruneRepo(group, freshMembers);
@@ -573,6 +591,11 @@ async function measureWorktreeSize(worktreePath: string): Promise<number | null>
 }
 
 export function createGcDeps(config: AppConfig): SessionGcExecutorDeps {
+  // One `gh pr list` per repo per run, cached for the whole run. A PR opened
+  // after a repo's first probe is invisible to later groups of that same run;
+  // the window is one run and the next run re-lists. Kept per-run on purpose:
+  // per-group refresh multiplies gh calls by group count, and exhausting the
+  // GraphQL quota would turn every later probe into probe_failed.
   const openPrIndexCache = new Map<string, Promise<GcOpenPrIndex>>();
 
   async function repoPathForGroup(freshMembers: readonly SessionRecord[]): Promise<string> {
