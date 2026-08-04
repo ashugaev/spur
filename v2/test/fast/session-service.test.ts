@@ -7362,7 +7362,7 @@ describe("SessionService", () => {
   });
 
   it("debounce: repeated polls do not extend the hold window forever", async () => {
-    const runningCodexSession = {
+    const runningCodexSession: SessionRecord = {
       id: "api-1",
       project: "api",
       agent: "codex",
@@ -7376,6 +7376,8 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     };
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningCodexSession);
     readSessionMock.mockReturnValue(runningCodexSession);
     readAgentHookStateMock.mockReturnValue({
       state: "working",
@@ -8418,7 +8420,7 @@ describe("SessionService", () => {
   });
 
   it("debounce: does not extend the hold window on repeated polls", async () => {
-    readSessionMock.mockReturnValue({
+    const runningCodexSession: SessionRecord = {
       id: "api-1",
       project: "api",
       agent: "codex",
@@ -8428,10 +8430,13 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-      status: "running",
+      status: "running" as const,
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    };
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningCodexSession);
+    readSessionMock.mockReturnValue(runningCodexSession);
     readAgentHookStateMock.mockReturnValue({
       state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
@@ -22205,13 +22210,14 @@ describe("SessionService", () => {
     });
   });
 
-  describe("session-scoped state sweep (pruneSessionScopedState)", () => {
+  describe("session-scoped state pruning", () => {
     type SessionScopedStateInternals = {
       codexMcpDialogOverrides: Map<string, number>;
       claudeCompactingOverrides: Map<string, number>;
       sessionProjectCache: Map<string, unknown>;
       claudeJsonlReaders: Map<string, unknown>;
       cursorJsonlReaders: Map<string, unknown>;
+      stateCache: Map<string, { state: SessionState; classifiedAt: number }>;
       stateHistory: Map<string, SessionStateTransition[]>;
       prCheckTrackers: Map<string, unknown>;
       usageMenuConfirmedAt: Map<string, number>;
@@ -22233,7 +22239,7 @@ describe("SessionService", () => {
       }
     }
 
-    it("collapses every never-deleted per-session map to only non-terminal ids once sessions go terminal", async () => {
+    it("collapses attention-scoped maps to only non-terminal ids once sessions go terminal", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       // worktree:false so checkPrForSession's early "no worktree" return
@@ -22304,7 +22310,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await drainBaselineTicks(internals);
 
-      // Every one of the 8 maps the sweep owns must drop the terminal ids,
+      // Every map the attention sweep owns must drop the terminal ids,
       // regardless of what else touches them during a live enrich.
       // sessionProjectCache is NOT here: it is pruned against the dashboard's
       // wider includedIds set in runDashboardCacheTick, not against this
@@ -22347,14 +22353,14 @@ describe("SessionService", () => {
         expect(map.has("api-1"), `${name} should keep the non-terminal id`).toBe(true);
       }
 
-      // stateHistory is a special case: the sweep truncates it (keeps only
-      // the last element) instead of deleting the key outright, so a
+      // stateHistory is dashboard-scoped: its prune keeps only the last
+      // element for included terminal sessions, so a
       // dashboard tick's updateStateHistory call (enrichDashboard runs for
       // every listed session, terminal or not) that lands before the sweep
       // can still push one genuine transition into the terminal state; a
-      // later sweep then truncates that back down to 1. It must never
-      // regrow past 1 across a full sweep+settle cycle — that is the whole
-      // point of the sweep, converting an up-to-100-element array into a
+      // later dashboard prune then truncates that back down to 1. It must
+      // never regrow past 1 across a full prune+settle cycle — that is the
+      // point of the prune, converting an up-to-100-element array into a
       // 1-element one instead of an empty one (an empty one would wipe
       // lastEntry and reopen the oscillation covered by the two tests below).
       expect(internals.stateHistory.get("api-2")).toHaveLength(1);
@@ -22399,7 +22405,11 @@ describe("SessionService", () => {
       // Completing the session removes it from pollAttentionStates' liveIds
       // (non-terminal set) but not from the dashboard's included set (see
       // runDashboardCacheTick's completed-status passthrough).
-      sessions.set("api-4", { ...sessions.get("api-4")!, status: "completed" });
+      const api4 = sessions.get("api-4");
+      if (!api4) {
+        throw new Error("api-4 fixture missing");
+      }
+      sessions.set("api-4", { ...api4, status: "completed" });
 
       await vi.advanceTimersByTimeAsync(5_000);
       await drainBaselineTicks(internals);
@@ -22423,13 +22433,53 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps the LAST transition on truncation, not the oldest", async () => {
-      createSessionStore();
+    it("prunes dashboard state for removed records while preserving live and included-terminal semantics", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("live-1", runningSession({ id: "live-1" }));
+      sessions.set("terminal-1", runningSession({ id: "terminal-1", status: "completed" }));
+
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = service as unknown as SessionScopedStateInternals & {
-        pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
-      };
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+
+      const liveHistory: SessionStateTransition[] = [
+        { state: "working", at: "2026-03-18T10:00:00.000Z", source: "jsonl" },
+        { state: "needs_input", at: "2026-03-18T10:01:00.000Z", source: "jsonl" },
+        { state: "waiting", at: "2026-03-18T10:02:00.000Z", source: "jsonl" },
+      ];
+      const terminalHistory: SessionStateTransition[] = [
+        { state: "working", at: "2026-03-18T10:00:00.000Z", source: "jsonl" },
+        { state: "waiting", at: "2026-03-18T10:01:00.000Z", source: "jsonl" },
+        { state: "stopped", at: "2026-03-18T10:02:00.000Z", source: "status" },
+      ];
+      internals.stateHistory.set("live-1", liveHistory);
+      internals.stateHistory.set("terminal-1", terminalHistory);
+      internals.stateHistory.set("removed-1", terminalHistory);
+      internals.stateCache.set("live-1", { state: "waiting", classifiedAt: Date.now() });
+      internals.stateCache.set("terminal-1", { state: "stopped", classifiedAt: Date.now() });
+      internals.stateCache.set("removed-1", { state: "stopped", classifiedAt: Date.now() });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await drainBaselineTicks(internals);
+
+      expect(internals.stateHistory.get("live-1")).toHaveLength(3);
+      expect(internals.stateHistory.get("terminal-1")).toEqual([terminalHistory[2]]);
+      expect(internals.stateHistory.has("removed-1")).toBe(false);
+      expect(internals.stateCache.has("live-1")).toBe(true);
+      expect(internals.stateCache.has("terminal-1")).toBe(true);
+      expect(internals.stateCache.has("removed-1")).toBe(false);
+
+      service.dispose();
+    });
+
+    it("keeps the LAST transition on truncation, not the oldest", async () => {
+      const sessions = createSessionStore();
+      sessions.set("gone-1", runningSession({ id: "gone-1", status: "completed" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
       await drainBaselineTicks(internals);
 
       // Three distinguishable entries: slice(-1) keeps "stopped" (the last),
@@ -22441,7 +22491,8 @@ describe("SessionService", () => {
         { state: "stopped", at: "2026-03-18T10:02:00.000Z", source: "status" },
       ]);
 
-      internals.pruneSessionScopedState(new Set());
+      await vi.advanceTimersByTimeAsync(2_000);
+      await drainBaselineTicks(internals);
 
       const history = internals.stateHistory.get("gone-1");
       expect(history).toHaveLength(1);
@@ -22455,11 +22506,11 @@ describe("SessionService", () => {
     });
 
     it("does not re-enter the transition branch for an unchanged terminal session on the next tick", async () => {
-      createSessionStore();
+      const sessions = createSessionStore();
+      sessions.set("gone-2", runningSession({ id: "gone-2", status: "completed" }));
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = service as unknown as SessionScopedStateInternals & {
-        pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
         updateStateHistory(
           session: SessionRecord,
           state: SessionState,
@@ -22479,9 +22530,10 @@ describe("SessionService", () => {
         { state: "stopped", at: "2026-03-18T10:01:00.000Z", source: "status" },
       ]);
 
-      // First sweep: the id is absent from liveIds, so this is a terminal
-      // session the sweep has already caught up with.
-      internals.pruneSessionScopedState(new Set());
+      // The dashboard includes this completed session and truncates its
+      // history without deleting the last terminal transition.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await drainBaselineTicks(internals);
       expect(internals.stateHistory.get("gone-2")).toHaveLength(1);
 
       // Without the truncate fix (i.e. a plain delete), the key would not
