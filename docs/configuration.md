@@ -7,9 +7,11 @@ Two layers:
 - Global instance config: `~/.spur/config.yaml` by default. Owns daemon host/port, data dirs, tmux socket, default agent, UI port, and `voice:` (see [voice.md](voice.md)).
 - Local project config: nearest `spur.yaml` / `spur.yml`. Owns only `projects:`.
 
-`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present.
+`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present, unless that config lives inside `worktreeDir` — a per-session worktree copy is never auto-connected, and `POST /projects/connect` rejects one with 400 if posted directly. This stops the per-session `spur.yaml` copy that a worktree carries from piling up in the daemon's config registry.
 
 A running session reads only the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one the session uses the project as the daemon has it.
+
+The daemon's config registry (`config-registry.json` in `dataDir`) drops any entry whose file no longer exists or is a directory at every boot and at every connect/disconnect, and persists the pruned list back to disk at boot. A session's worktree-internal config entry is also dropped the moment that session reaches a terminal state or its worktree is removed, so it never depends on an explicit `spur disconnect`. `spur doctor` runs a `config-registry` check (severity `warn`, never affects the exit code) that flags dead entries, worktree-internal entries, and a registry over 24 paths.
 
 ## Local project config
 
