@@ -29,7 +29,7 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
-  assertDaemonStartConfigExists,
+  assertInstanceConfigExists,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
@@ -3012,7 +3012,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
-      assertDaemonStartConfigExists(getConfigPath(command.parent?.parent as Command));
+      assertInstanceConfigExists(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
@@ -3055,6 +3055,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertInstanceConfigExists(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -3070,6 +3071,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertInstanceConfigExists(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),

@@ -1770,6 +1770,14 @@ function isDefaultInstanceConfigPath(configPath: string): boolean {
 // deploy/spur-daemon.service, which has no --config and Restart=always).
 // A default-path config on the prod slot always passes: refusing it would
 // crash-loop production.
+//
+// Known limit: the default path is homedir()-relative, so a child process
+// with a temp HOME running `daemon start` with no --config gets a
+// default-path config under that HOME and is exempted here, even though it
+// can still win the host-global :4310 bind during a restart window. Do not
+// "fix" this by re-basing on os.userInfo().homedir() — if the unit's
+// Environment=HOME ever diverges from the passwd home, that flips this
+// guard fail-closed on the real prod daemon and crash-loops it instead.
 export function assertConfigMayBindProdSlot(
   config: Pick<AppConfig, "configPath" | "dataDir"> & { server: { port: number } },
 ): void {
@@ -1790,18 +1798,20 @@ export function assertConfigMayBindProdSlot(
   );
 }
 
-// `daemon start` must not bootstrap a prod-default config template at an
-// arbitrary path (that is what stole port 4310 from production in the
-// incident this guards against). The default instance config path is exempt
-// so a first boot at the default location still bootstraps as before.
-export function assertDaemonStartConfigExists(input?: string): void {
+// `daemon start`/`stop`/`restart` must not bootstrap a prod-default config
+// template at an arbitrary path (that is what stole port 4310 from
+// production in the incident this guards against — `stop`/`restart` resolve
+// a base URL from the bootstrapped config and can also SIGTERM whatever is
+// listening there). The default instance config path is exempt so a first
+// boot at the default location still bootstraps as before.
+export function assertInstanceConfigExists(input?: string): void {
   const configPath = resolveInstanceConfigPath(input);
   if (existsSync(configPath) || isDefaultInstanceConfigPath(configPath)) {
     return;
   }
   throw new Error(
     `Instance config ${configPath} does not exist. ` +
-      `'daemon start' only bootstraps the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+      `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
       `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
   );
 }

@@ -14,9 +14,9 @@ Read-only. Checks host install, config validity, and daemon/web health; exits no
 
 ## daemon
 
-Hidden: `daemon start|stop|restart`. Normal usage never calls these directly — `spawn`, `list`, etc. auto-start the daemon through the config path already bound to `spur`.
+`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. `stop`/`restart` need the same refusal because they resolve a base URL from that config to find (and signal) a running daemon — a bootstrapped throwaway config could resolve to, and stop, the wrong daemon. Independent of that, any daemon boot — `daemon start`, including the CLI auto-start that spawns it — refuses to bind the production slot (`server.port` `4310` or `dataDir` `~/.spur`) from a config whose resolved path is not `~/.spur/config.yaml`. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
 
-`daemon start --config <path>` refuses instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. Independent of that, any daemon boot — via `daemon start` or the auto-start inside `startServer` — refuses to bind the production slot (`server.port` `4310` or `dataDir` `~/.spur`) from a config whose resolved path is not `~/.spur/config.yaml`. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
 ## spawn
 
@@ -171,13 +171,13 @@ config survive — the merge reads `~/.claude.json` user-scope servers, `~/.clau
 are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
 is silently replaced by Spur's own.
 
-## build, daemon
+## build
 
 ```bash
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+`build` also restarts a running daemon when Spur config is discoverable.
 
 ## Validate
 

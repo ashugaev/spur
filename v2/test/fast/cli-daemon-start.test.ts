@@ -27,7 +27,9 @@ const ensureInstanceConfigMock = vi.fn(() => ({
   initialized: false,
 }));
 
-const assertDaemonStartConfigExistsMock = vi.fn();
+const assertInstanceConfigExistsMock = vi.fn();
+const restartDaemonIfRunningMock = vi.fn();
+const stopDaemonIfRunningMock = vi.fn();
 
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
@@ -44,13 +46,13 @@ vi.mock("../../src/client.js", () => ({
   listProjects: vi.fn(),
   postJson: vi.fn(),
   postPreflight: vi.fn(),
-  restartDaemonIfRunning: vi.fn(),
-  stopDaemonIfRunning: vi.fn(),
+  restartDaemonIfRunning: restartDaemonIfRunningMock,
+  stopDaemonIfRunning: stopDaemonIfRunningMock,
 }));
 
 vi.mock("../../src/config.js", () => ({
   defaultVoiceModelPath: vi.fn(),
-  assertDaemonStartConfigExists: assertDaemonStartConfigExistsMock,
+  assertInstanceConfigExists: assertInstanceConfigExistsMock,
   createProjectConfigScaffold: vi.fn(),
   ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
@@ -89,8 +91,10 @@ describe("spur daemon start CLI", () => {
     startServerMock.mockClear();
     writeStderrMock.mockClear();
     ensureInstanceConfigMock.mockClear();
-    assertDaemonStartConfigExistsMock.mockClear();
-    assertDaemonStartConfigExistsMock.mockImplementation(() => {});
+    restartDaemonIfRunningMock.mockClear();
+    stopDaemonIfRunningMock.mockClear();
+    assertInstanceConfigExistsMock.mockClear();
+    assertInstanceConfigExistsMock.mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -121,7 +125,7 @@ describe("spur daemon start CLI", () => {
   });
 
   it("refuses to start when the --config path does not exist and is not the default", async () => {
-    assertDaemonStartConfigExistsMock.mockImplementation(() => {
+    assertInstanceConfigExistsMock.mockImplementation(() => {
       throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
     });
 
@@ -129,7 +133,37 @@ describe("spur daemon start CLI", () => {
       parseCli(["daemon", "start", "--config", "/tmp/does-not-exist.yaml", "--json"]),
     ).rejects.toThrow("does not exist");
 
+    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
     expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(startServerMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop when the --config path does not exist and is not the default", async () => {
+    assertInstanceConfigExistsMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "stop", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(stopDaemonIfRunningMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart when the --config path does not exist and is not the default", async () => {
+    assertInstanceConfigExistsMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "restart", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(restartDaemonIfRunningMock).not.toHaveBeenCalled();
     expect(startServerMock).not.toHaveBeenCalled();
   });
 });

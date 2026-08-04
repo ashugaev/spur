@@ -5,10 +5,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertConfigMayBindProdSlot,
-  assertDaemonStartConfigExists,
+  assertInstanceConfigExists,
   defaultInstanceConfigPath,
 } from "../../src/config.js";
-import { findFreePort } from "../helpers/common.js";
 
 // This file must never create, write, or delete anything under the real
 // ~/.spur. Every write below goes to a fresh temp dir; reading homedir() to
@@ -62,12 +61,11 @@ describe("assertConfigMayBindProdSlot", () => {
   it("throws for a non-default config path with a free port but dataDir ~/.spur", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-bind-guard-test-"));
     const configPath = join(root, "spur.yaml");
-    const freePort = await findFreePort();
 
     expect(() =>
       assertConfigMayBindProdSlot({
         configPath,
-        server: { port: freePort },
+        server: { port: 4399 },
         dataDir: join(homedir(), ".spur"),
       }),
     ).toThrow();
@@ -77,12 +75,11 @@ describe("assertConfigMayBindProdSlot", () => {
     const root = await mkdtemp(join(tmpdir(), "spur-bind-guard-test-"));
     const configPath = join(root, "spur.yaml");
     const dataDir = join(root, "data");
-    const freePort = await findFreePort();
 
     expect(() =>
       assertConfigMayBindProdSlot({
         configPath,
-        server: { port: freePort },
+        server: { port: 4399 },
         dataDir,
       }),
     ).not.toThrow();
@@ -105,12 +102,12 @@ describe("assertConfigMayBindProdSlot", () => {
   });
 });
 
-describe("assertDaemonStartConfigExists", () => {
+describe("assertInstanceConfigExists", () => {
   it("throws for a non-default config path that does not exist and never creates it", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-bind-guard-test-"));
     const missingPath = join(root, "missing.yaml");
 
-    expect(() => assertDaemonStartConfigExists(missingPath)).toThrow();
+    expect(() => assertInstanceConfigExists(missingPath)).toThrow();
     expect(existsSync(missingPath)).toBe(false);
   });
 
@@ -119,10 +116,10 @@ describe("assertDaemonStartConfigExists", () => {
     const configPath = join(root, "spur.yaml");
     await writeFile(configPath, "server:\n  port: 4400\n", "utf8");
 
-    expect(() => assertDaemonStartConfigExists(configPath)).not.toThrow();
+    expect(() => assertInstanceConfigExists(configPath)).not.toThrow();
   });
 
   it("passes for the default instance config path regardless of existence", () => {
-    expect(() => assertDaemonStartConfigExists(defaultInstanceConfigPath())).not.toThrow();
+    expect(() => assertInstanceConfigExists(defaultInstanceConfigPath())).not.toThrow();
   });
 });
