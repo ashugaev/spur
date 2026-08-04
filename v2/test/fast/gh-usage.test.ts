@@ -222,6 +222,64 @@ describe("gh usage accounting", () => {
     expect(usageEvents("minute")[1]).toMatchObject({ calls: 1, graphqlCost: 2 });
   });
 
+  it("spaces early-pause emissions from the prior emission and keeps later counters", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGraphqlCost(3, T0);
+    recordGraphqlBudget(900, T0 + HOUR, T0 + 500);
+    pollBudgetState(T0 + 1_000);
+
+    noteGhInvocation(["api", "graphql"], T0 + 2_000);
+    noteGraphqlCost(2, T0 + 2_000);
+    noteGhInvocation(["pr", "view", "42"], T0 + 60_500);
+    recordGraphqlBudget(800, T0 + 2 * HOUR, T0 + 59_500);
+    pollBudgetState(T0 + 60_000);
+
+    expect(usageEvents("minute")).toHaveLength(1);
+    expect(usageEvents("hour")).toHaveLength(1);
+
+    recordGraphqlBudget(700, T0 + 3 * HOUR, T0 + 60_500);
+    pollBudgetState(T0 + 61_000);
+    recordGraphqlBudget(600, T0 + 4 * HOUR, T0 + HOUR + 500);
+    pollBudgetState(T0 + HOUR + 1_000);
+
+    const minutes = usageEvents("minute");
+    const hours = usageEvents("hour");
+    expect(minutes[1]).toMatchObject({
+      calls: 2,
+      graphqlCost: 2,
+      bySubcommand: { "api graphql": 1, "pr view": 1 },
+    });
+    expect(hours[1]).toMatchObject({
+      calls: 2,
+      graphqlCost: 2,
+      bySubcommand: { "api graphql": 1, "pr view": 1 },
+    });
+    const minuteEmissionGap =
+      T0 + 2_000 + Number(minutes[1]?.["windowMs"]) - (T0 + Number(minutes[0]?.["windowMs"]));
+    const hourEmissionGap =
+      T0 + 2_000 + Number(hours[1]?.["windowMs"]) - (T0 + Number(hours[0]?.["windowMs"]));
+    expect(minuteEmissionGap).toBeGreaterThanOrEqual(MINUTE);
+    expect(hourEmissionGap).toBeGreaterThanOrEqual(HOUR);
+  });
+
+  it("emits delayed closed windows in invocation order", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
+    noteGraphqlCost(2, T0 + MINUTE + 1, T0 + MINUTE + 2);
+    noteGhInvocation(["pr", "view", "42"], T0 + 2 * MINUTE + 2);
+
+    expect(usageEvents("minute")).toHaveLength(0);
+
+    noteGraphqlCost(3, T0, T0 + 2 * MINUTE + 3);
+    expect(usageEvents("minute")).toEqual([expect.objectContaining({ calls: 1, graphqlCost: 3 })]);
+
+    noteGhInvocation(["pr", "checks", "42"], T0 + 3 * MINUTE + 3);
+    expect(usageEvents("minute").slice(0, 2)).toEqual([
+      expect.objectContaining({ calls: 1, graphqlCost: 3 }),
+      expect.objectContaining({ calls: 1, graphqlCost: 2 }),
+    ]);
+  });
+
   it("emits nothing without an event sink", () => {
     _resetGhUsageForTests();
     noteGhInvocation(["api", "graphql"], T0);
