@@ -887,6 +887,7 @@ describe("PR auto-detect", () => {
     const { GH_POLL_MIN_GRAPHQL_REMAINING, recordGraphqlBudget, _resetGhUsageForTests } =
       await import("../../src/gh.js");
     const { readPrLookupEntry } = await import("../../src/pr-lookup-cache.js");
+    _resetGhUsageForTests();
     recordGraphqlBudget(GH_POLL_MIN_GRAPHQL_REMAINING - 1, Date.now() + 60 * 60_000);
 
     const service = new SessionService();

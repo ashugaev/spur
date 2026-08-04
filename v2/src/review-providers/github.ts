@@ -1,4 +1,4 @@
-import { gh, noteGraphqlCost, pollBudgetState, recordGraphqlBudget } from "../gh.js";
+import { gh, pollBudgetState, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "../gh.js";
 import {
   readCommentSeenRegistry,
   readGitHubReviewPagination,
@@ -393,6 +393,11 @@ function selectSummaryAndNode(value: unknown, bound: boolean) {
     ? (candidates.find((entry) => entry.summary.number === selected.number) ?? null)
     : null;
 }
+
+function isValidUnboundConnection(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.nodes)) return false;
+  return value.nodes.every((node) => summaryAndNode(node) !== null);
+}
 export async function resolvePrSummary(
   worktreePath: string,
   branch: string,
@@ -700,15 +705,21 @@ function graphqlEnvelopeFromError(error: unknown): Record<string, unknown> | nul
   return readGraphqlEnvelope(error.stdout);
 }
 
-function recordBatchBudget(data: Record<string, unknown>): void {
-  if (!isRecord(data.rateLimit)) return;
-  const cost = readNumber(data.rateLimit.cost);
-  if (cost !== null) noteGraphqlCost(cost);
-  const remaining = readNumber(data.rateLimit.remaining);
-  if (remaining === null) return;
-  const resetAt = readString(data.rateLimit.resetAt);
-  const parsedReset = resetAt ? Date.parse(resetAt) : Number.NaN;
-  recordGraphqlBudget(remaining, Number.isFinite(parsedReset) ? parsedReset : null);
+async function requestGraphqlEnvelope(
+  cwd: string,
+  args: string[],
+): Promise<Record<string, unknown>> {
+  const requestedAtMs = Date.now();
+  let envelope: Record<string, unknown> | null;
+  try {
+    envelope = readGraphqlEnvelope(await gh(cwd, ...args));
+  } catch (error) {
+    envelope = graphqlEnvelopeFromError(error);
+    if (!envelope) throw error;
+  }
+  if (!envelope) throw new Error("invalid GitHub GraphQL response");
+  recordGraphqlBudgetFromEnvelope(envelope, requestedAtMs);
+  return envelope;
 }
 
 interface ReviewThreadPage {
@@ -823,10 +834,9 @@ async function paginateReviewThreads(
     }
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
-    const envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
-    const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) throw new Error("invalid GitHub review thread pagination response");
-    recordBatchBudget(data);
     requests += 1;
     nodes += pages.length * GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET;
     for (const [index, page] of pages.entries()) {
@@ -888,9 +898,6 @@ async function paginateReviewThreadComments(
 ): Promise<void> {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
-  const resumedThreads = new Set(
-    [...cursors.keys()].filter((key) => parseReviewThreadCursorKey(key) !== null),
-  );
   const pullRequests = new Map<string, Record<string, unknown>>();
   for (const { alias, target } of aliases) {
     const selected = selectSummaryAndNode(repository[alias], target.number !== null);
@@ -927,10 +934,19 @@ async function paginateReviewThreadComments(
       const id = readString(raw.id);
       if (!id) continue;
       const cursorKey = reviewThreadCursorKey(pullRequestId, id);
-      const page = threadPageToFetch(raw, seen, pullRequestId, cursors.get(cursorKey));
+      const legacyCursor = cursors.get(id);
+      const resumeBefore = cursors.get(cursorKey) ?? legacyCursor;
+      const page = threadPageToFetch(raw, seen, pullRequestId, resumeBefore);
+      if (legacyCursor !== undefined) {
+        cursors.delete(id);
+        if (page) cursors.set(cursorKey, page.before);
+      }
       if (page) pendingByKey.set(cursorKey, page);
     }
   }
+  const resumedThreads = new Set(
+    [...cursors.keys()].filter((key) => parseReviewThreadCursorKey(key) !== null),
+  );
   const pending = [...pendingByKey.values()];
   pending.sort(
     (left, right) =>
@@ -971,10 +987,9 @@ async function paginateReviewThreadComments(
     }
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
-    const envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
-    const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) throw new Error("invalid GitHub review comment pagination response");
-    recordBatchBudget(data);
     requests += 1;
     nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
     for (const [index, page] of pages.entries()) {
@@ -1046,17 +1061,14 @@ async function runReviewRepoBatch(
     }
   }
 
-  let envelope: Record<string, unknown> | null;
+  let envelope: Record<string, unknown>;
   try {
-    envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
+    envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
   } catch (error) {
-    envelope = graphqlEnvelopeFromError(error);
-    if (!envelope) {
-      for (const target of targets) results.set(target.session.id, { status: "error", error });
-      return results;
-    }
+    for (const target of targets) results.set(target.session.id, { status: "error", error });
+    return results;
   }
-  const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+  const data = isRecord(envelope.data) ? envelope.data : null;
   if (!data || !isRecord(data.r)) {
     const error = new Error(
       `invalid GitHub review batch for ${slug.host}/${slug.owner}/${slug.name}`,
@@ -1064,14 +1076,32 @@ async function runReviewRepoBatch(
     for (const target of targets) results.set(target.session.id, { status: "error", error });
     return results;
   }
-  recordBatchBudget(data);
+  const repository = data.r;
   const aliasErrors = gqlErrorsByAlias(
-    envelope?.errors,
+    envelope.errors,
     new Set(aliases.map((entry) => entry.alias)),
   );
+  const invalidAliases = new Set(
+    aliases
+      .filter(
+        ({ alias, target }) =>
+          target.number === null && !isValidUnboundConnection(repository[alias]),
+      )
+      .map(({ alias }) => alias),
+  );
+  const pageableAliases = aliases.filter(
+    ({ alias }) => !aliasErrors.has(alias) && !invalidAliases.has(alias),
+  );
   try {
-    await paginateReviewThreads(targets, aliases, data.r, dataDir, projectId, sourceId);
-    await paginateReviewThreadComments(targets, aliases, data.r, dataDir, projectId, sourceId);
+    await paginateReviewThreads(targets, pageableAliases, repository, dataDir, projectId, sourceId);
+    await paginateReviewThreadComments(
+      targets,
+      pageableAliases,
+      repository,
+      dataDir,
+      projectId,
+      sourceId,
+    );
   } catch (error) {
     for (const target of targets) results.set(target.session.id, { status: "error", error });
     return results;
@@ -1087,7 +1117,14 @@ async function runReviewRepoBatch(
       }
       continue;
     }
-    const selected = selectSummaryAndNode(data.r[alias], target.number !== null);
+    if (invalidAliases.has(alias)) {
+      const error = new Error(`invalid GitHub pullRequests payload for ${alias}`);
+      for (const matching of matchingTargets) {
+        results.set(matching.session.id, { status: "error", error });
+      }
+      continue;
+    }
+    const selected = selectSummaryAndNode(repository[alias], target.number !== null);
     if (target.branch !== null) {
       if (!selected) {
         markPrLookupMiss(dataDir, target.slug, target.branch);
@@ -1191,7 +1228,18 @@ export async function collectGitHubSignalsBatch(
         }
       }
       reviewBatchCursor.set(cursorKey, (start + limit) % groupedTargets.length);
-      const batch = await runReviewRepoBatch(selected, dataDir, projectId, sourceId);
+      const admission = await withGhPollBudget(() =>
+        runReviewRepoBatch(selected, dataDir, projectId, sourceId),
+      );
+      const batch =
+        admission.status === "blocked"
+          ? new Map(
+              selected.map((target) => [
+                target.session.id,
+                { status: "skipped", reason: "budget" } satisfies GitHubSignalBatchResult,
+              ]),
+            )
+          : admission.value;
       for (const [sessionId, result] of batch) {
         results.set(sessionId, result);
       }

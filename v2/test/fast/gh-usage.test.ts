@@ -16,8 +16,10 @@ const {
   noteGraphqlCost,
   pollBudgetState,
   recordGraphqlBudget,
+  recordGraphqlBudgetFromEnvelope,
   runGhPollCycle,
   setGhEventSink,
+  withGhPollBudget,
 } = await import("../../src/gh.js");
 
 const MINUTE = 60_000;
@@ -221,6 +223,24 @@ describe("gh usage accounting", () => {
       ]),
     );
   });
+
+  it("accounts GraphQL cost from an error envelope", async () => {
+    await runGhPollCycle({ kind: "github_source" }, async () => {
+      noteGhInvocation(["api", "graphql"], T0);
+      recordGraphqlBudgetFromEnvelope(
+        {
+          data: {
+            rateLimit: { cost: 7, remaining: 900, resetAt: new Date(T0 + HOUR).toISOString() },
+          },
+          errors: [{ message: "query failed" }],
+        },
+        T0,
+      );
+    });
+
+    expect(cycleEvents()[0]).toMatchObject({ calls: 1, graphqlCost: 7 });
+    expect(pollBudgetState(T0 + 1)).toMatchObject({ blocked: true, remaining: 900 });
+  });
 });
 
 describe("graphql budget ledger", () => {
@@ -309,5 +329,38 @@ describe("graphql budget ledger", () => {
     // hits reset, so the next block starts at the 5min base again.
     noteGitHubRateLimitHit(T0 + 4_000);
     expect(pollBudgetState(T0 + 4_000 + 5 * MINUTE)).toEqual({ blocked: false });
+  });
+
+  it("does not raise remaining from stale or same-window observations", () => {
+    recordGraphqlBudget(900, T0 + HOUR, T0 + 2_000);
+    recordGraphqlBudget(4_800, T0 + HOUR, T0 + 3_000);
+    recordGraphqlBudget(4_900, T0 + 2 * HOUR, T0 + 1_000);
+
+    expect(pollBudgetState(T0 + 4_000)).toMatchObject({ blocked: true, remaining: 900 });
+  });
+
+  it("serializes poll admission and blocks the next task after budget depletion", async () => {
+    let release = (): void => {};
+    let started = false;
+    const first = withGhPollBudget(
+      () =>
+        new Promise<void>((resolve) => {
+          started = true;
+          release = () => {
+            recordGraphqlBudget(900, T0 + HOUR, T0 + 1_000);
+            resolve();
+          };
+        }),
+    );
+    const secondTask = vi.fn(async () => {});
+    const second = withGhPollBudget(secondTask);
+
+    await vi.waitFor(() => expect(started).toBe(true));
+    expect(secondTask).not.toHaveBeenCalled();
+    release();
+
+    await expect(first).resolves.toMatchObject({ status: "admitted" });
+    await expect(second).resolves.toMatchObject({ status: "blocked" });
+    expect(secondTask).not.toHaveBeenCalled();
   });
 });

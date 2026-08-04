@@ -1267,6 +1267,29 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("preserves an unbound snapshot when the pull-request connection is malformed", async () => {
+    const existing = storedSnapshot([
+      { key: "changes_requested", kind: "changes_requested", text: "Changes requested." },
+    ]);
+    const { pr: _pr, ...unbound } = makeSession();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([[unbound.id, existing]]));
+    listSessionsMock.mockReturnValue([unbound]);
+    ghTransportMock.mockReset().mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-06-19T11:00:00.000Z" },
+          r: { a0: null },
+        },
+      }),
+    );
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("spends no review-poll call and preserves snapshots below the GraphQL reserve", async () => {
     const existing = storedSnapshot([
       { key: "changes_requested", kind: "changes_requested", text: "Changes requested." },

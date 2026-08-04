@@ -6,10 +6,12 @@ import type * as ghModule from "../../src/gh.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
   hasGitHubMergeConflictRestoreReplay,
+  readGitHubReviewPagination,
   readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
   recordCommentSeen,
   writeGitHubSourceSnapshot,
+  writeGitHubReviewPagination,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -51,6 +53,7 @@ const {
 const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
 const { _resetPrLookupCacheForTests, readPrLookupEntry } =
   await import("../../src/pr-lookup-cache.js");
+const { _resetGhUsageForTests } = await import("../../src/gh.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -579,12 +582,14 @@ describe("GitHub review batching", () => {
     _resetGitHubReviewBatchForTests();
     _resetPrLookupsForTests();
     _resetPrLookupCacheForTests();
+    _resetGhUsageForTests();
   });
 
   afterEach(async () => {
     _resetGitHubReviewBatchForTests();
     _resetPrLookupsForTests();
     _resetPrLookupCacheForTests();
+    _resetGhUsageForTests();
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
@@ -626,6 +631,81 @@ describe("GitHub review batching", () => {
         "feature/no-pr",
       )?.misses,
     ).toBe(1);
+  });
+
+  it.each([
+    ["missing connection", null],
+    [
+      "partial nodes",
+      {
+        nodes: [
+          {
+            id: "PR_42",
+            number: 42,
+            title: "Partial",
+            url: "https://github.com/acme/api/pull/42",
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: { nodes: [] },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+          null,
+        ],
+      },
+    ],
+  ])("rejects an unbound %s without writing a cache miss", async (_name, connection) => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: connection },
+        },
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [unboundSession("api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(result.get("api-1")?.status).toBe("error");
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      ),
+    ).toBeNull();
+  });
+
+  it("records a failed initial query envelope before rejecting its payload", async () => {
+    const dataDir = await makeDataDir();
+    const error = Object.assign(new Error("GraphQL query failed"), {
+      stdout: JSON.stringify({
+        data: {
+          rateLimit: { cost: 4, remaining: 900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: { a0: null },
+        },
+        errors: [{ message: "partial failure" }],
+      }),
+    });
+    ghMock.mockRejectedValueOnce(error);
+    const session = unboundSession("api-1");
+
+    const first = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(first.get("api-1")?.status).toBe("error");
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "budget" });
+    expect(ghMock).toHaveBeenCalledTimes(1);
   });
 
   it("parks an unbound terminal PR in the shared cache", async () => {
@@ -925,6 +1005,64 @@ describe("GitHub review batching", () => {
     expect(collected.collected.snapshot.has("review-comment:1")).toBe(false);
   });
 
+  it("records a failed pagination envelope before rejecting its payload", async () => {
+    const dataDir = await makeDataDir();
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Failed pagination",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: [],
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-100" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockRejectedValueOnce(
+        Object.assign(new Error("GraphQL page failed"), {
+          stdout: JSON.stringify({
+            data: {
+              rateLimit: { cost: 6, remaining: 900, resetAt: "2099-08-04T18:00:00.000Z" },
+              t0: null,
+            },
+            errors: [{ message: "page failure" }],
+          }),
+        }),
+      );
+    const session = sourceSession("/tmp/api-1");
+
+    const first = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(first.get("api-1")?.status).toBe("error");
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "budget" });
+    expect(ghMock).toHaveBeenCalledTimes(2);
+  });
+
   it("persists and resumes a comment cursor after the cycle budget", async () => {
     const dataDir = await makeDataDir();
     const initial = () =>
@@ -998,6 +1136,75 @@ describe("GitHub review batching", () => {
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
     expect(collected.collected.snapshot.has("review-comment:1011")).toBe(true);
+  });
+
+  it("migrates and resumes a legacy thread-only comment cursor", async () => {
+    const dataDir = await makeDataDir();
+    writeGitHubReviewPagination(
+      dataDir,
+      "api",
+      "pr-watch",
+      new Map([["THREAD_LEGACY", "cursor-10"]]),
+    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Legacy cursor",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_LEGACY",
+                      comments: {
+                        nodes: [],
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-0" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: [{ databaseId: 1, body: "old feedback", author: { login: "reviewer" } }],
+                pageInfo: { hasPreviousPage: false, startCursor: "cursor-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=cursor-10");
+    expect(result.get("api-1")?.status).toBe("ok");
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(new Map());
   });
 
   it("resumes comments on a thread outside the newest 100 after the cycle budget", async () => {

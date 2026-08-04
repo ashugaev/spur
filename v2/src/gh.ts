@@ -155,6 +155,7 @@ let budget: GraphqlBudgetLedger = {
 };
 let lastPausedEventKey: string | null = null;
 const ghPollCycleStorage = new AsyncLocalStorage<GhPollCycleContext>();
+let ghPollAdmissionTail: Promise<void> = Promise.resolve();
 
 export function _resetGhUsageForTests(): void {
   minuteWindow = null;
@@ -168,6 +169,7 @@ export function _resetGhUsageForTests(): void {
   };
   lastPausedEventKey = null;
   ghEventSinkDataDir = null;
+  ghPollAdmissionTail = Promise.resolve();
 }
 
 // Fixed key set. A gh argv must never be able to invent a key: the REST paths
@@ -391,6 +393,15 @@ export function recordGraphqlBudget(
   resetAtMs: number | null,
   nowMs: number = Date.now(),
 ): void {
+  const olderObservation = budget.observedAtMs !== null && nowMs < budget.observedAtMs;
+  const raisesSameWindow =
+    resetAtMs !== null &&
+    budget.remaining !== null &&
+    budget.resetAtMs === resetAtMs &&
+    remaining > budget.remaining;
+  if (olderObservation || raisesSameWindow) {
+    return;
+  }
   budget.remaining = remaining;
   budget.resetAtMs = resetAtMs;
   budget.observedAtMs = nowMs;
@@ -398,6 +409,26 @@ export function recordGraphqlBudget(
     budget.hits = 0;
     budget.blockedUntilMs = null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function recordGraphqlBudgetFromEnvelope(
+  envelope: unknown,
+  observedAtMs: number = Date.now(),
+): void {
+  if (!isRecord(envelope) || !isRecord(envelope["data"])) return;
+  const rateLimit = envelope["data"]["rateLimit"];
+  if (!isRecord(rateLimit)) return;
+  const cost = rateLimit["cost"];
+  if (typeof cost === "number") noteGraphqlCost(cost, observedAtMs);
+  const remaining = rateLimit["remaining"];
+  if (typeof remaining !== "number") return;
+  const resetAt = rateLimit["resetAt"];
+  const resetAtMs = typeof resetAt === "string" ? Date.parse(resetAt) : Number.NaN;
+  recordGraphqlBudget(remaining, Number.isFinite(resetAtMs) ? resetAtMs : null, observedAtMs);
 }
 
 /**
@@ -465,6 +496,27 @@ export function pollBudgetState(nowMs: number = Date.now()): GhPollBudgetState {
     );
   }
   return { blocked: false };
+}
+
+export type GhPollAdmission<T> =
+  | { status: "blocked"; budget: Extract<GhPollBudgetState, { blocked: true }> }
+  | { status: "admitted"; value: T };
+
+export async function withGhPollBudget<T>(task: () => Promise<T>): Promise<GhPollAdmission<T>> {
+  const previous = ghPollAdmissionTail;
+  let release = (): void => {};
+  ghPollAdmissionTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    const current = pollBudgetState();
+    return current.blocked
+      ? { status: "blocked", budget: current }
+      : { status: "admitted", value: await task() };
+  } finally {
+    release();
+  }
 }
 
 function blockedState(

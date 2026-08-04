@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { gh, noteGraphqlCost, pollBudgetState, recordGraphqlBudget } from "./gh.js";
+import { gh, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "./gh.js";
 import type { PrLookupTerminalPr, PrRepoSlug } from "./pr-lookup-cache.js";
 import { readRemoteUrls } from "./workspace.js";
 
@@ -257,25 +257,6 @@ function outcomeForNodes(nodesRaw: unknown): PrLookupOutcome {
   return { status: "absent" };
 }
 
-function recordBudgetFromEnvelope(data: Record<string, unknown>, nowMs: number): void {
-  const rateLimit = data["rateLimit"];
-  if (!isRecord(rateLimit)) {
-    return;
-  }
-  const cost = rateLimit["cost"];
-  if (typeof cost === "number") {
-    // Points, not calls: the only number that can be compared against the
-    // 5000/hr ceiling.
-    noteGraphqlCost(cost, nowMs);
-  }
-  if (typeof rateLimit["remaining"] !== "number") {
-    return;
-  }
-  const resetAt = rateLimit["resetAt"];
-  const resetAtMs = typeof resetAt === "string" ? Date.parse(resetAt) : Number.NaN;
-  recordGraphqlBudget(rateLimit["remaining"], Number.isFinite(resetAtMs) ? resetAtMs : null, nowMs);
-}
-
 /**
  * The fork's upstream parent, read from the repository block already in the
  * response, or null when the response names no usable one.
@@ -326,12 +307,14 @@ async function runChunkOnce(
 
   let envelope: unknown;
   let failure: string | null = null;
+  const requestedAtMs = Date.now();
   try {
     envelope = JSON.parse(await gh(cwd, ...args)) as unknown;
   } catch (error) {
     envelope = readEnvelopeFromError(error);
     failure = error instanceof Error ? error.message : String(error);
   }
+  recordGraphqlBudgetFromEnvelope(envelope, requestedAtMs);
 
   const data = isRecord(envelope) && isRecord(envelope["data"]) ? envelope["data"] : null;
   if (!data) {
@@ -344,8 +327,6 @@ async function runChunkOnce(
     }
     return { results, forkParent: null };
   }
-  recordBudgetFromEnvelope(data, Date.now());
-
   const repo = data["r"];
   if (!isRecord(repo)) {
     for (const entry of aliases) {
@@ -460,20 +441,27 @@ async function resolveLookups(
   for (const group of byRepo.values()) {
     const branches = [...new Set(group.indices.map((index) => requests[index]?.branch ?? ""))];
     for (const chunk of chunked(branches, PR_LOOKUP_BATCH_SIZE)) {
-      const budget = mode === "poll" ? pollBudgetState() : ({ blocked: false } as const);
       const chunkBranches = new Set(chunk);
-      const results = budget.blocked
-        ? new Map<string, PrLookupOutcome>(
-            chunk.map((branch) => [
-              branch,
-              {
-                status: "skipped",
-                reason: "budget",
-                message: `graphql budget paused (${budget.reason}${budget.resetAt ? `, resets ${budget.resetAt}` : ""})`,
-              } satisfies PrLookupOutcome,
-            ]),
-          )
-        : await runChunk(group.slug, pickGroupCwd(group), chunk);
+      const admission =
+        mode === "poll"
+          ? await withGhPollBudget(() => runChunk(group.slug, pickGroupCwd(group), chunk))
+          : ({
+              status: "admitted",
+              value: await runChunk(group.slug, pickGroupCwd(group), chunk),
+            } as const);
+      const results =
+        admission.status === "blocked"
+          ? new Map<string, PrLookupOutcome>(
+              chunk.map((branch) => [
+                branch,
+                {
+                  status: "skipped",
+                  reason: "budget",
+                  message: `graphql budget paused (${admission.budget.reason}${admission.budget.resetAt ? `, resets ${admission.budget.resetAt}` : ""})`,
+                } satisfies PrLookupOutcome,
+              ]),
+            )
+          : admission.value;
       for (const index of group.indices) {
         const request = requests[index];
         if (!request || !chunkBranches.has(request.branch)) {
