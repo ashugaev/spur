@@ -1264,6 +1264,64 @@ describe("GitHub review batching", () => {
     expect(ghMock).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps pagination cursors unchanged when GitHub returns partial data with errors", async () => {
+    const dataDir = await makeDataDir();
+    const existing = new Map([["pull-request:PR_42", "stored-cursor"]]);
+    writeGitHubReviewPagination(dataDir, "api", "pr-watch", existing);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Partial pagination",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [],
+                  pageInfo: { hasPreviousPage: true, startCursor: "newest-cursor" },
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2099-08-04T18:00:00.000Z" },
+            p0: {
+              reviewThreads: {
+                nodes: [],
+                pageInfo: { hasPreviousPage: false, startCursor: "oldest-cursor" },
+              },
+            },
+          },
+          errors: [{ path: ["p0", "reviewThreads"], message: "partial thread page" }],
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(result.get("api-1")?.status).toBe("error");
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(existing);
+  });
+
   it("commits parent and child cursors atomically after a nested failure", async () => {
     const dataDir = await makeDataDir();
     const newestThreads = Array.from({ length: 100 }, (_unused, index) => ({

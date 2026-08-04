@@ -722,6 +722,15 @@ async function requestGraphqlEnvelope(
   return envelope;
 }
 
+function assertGraphqlEnvelopeSucceeded(
+  envelope: Record<string, unknown>,
+  context: string,
+): void {
+  if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
+    throw new Error(`${context} returned GraphQL errors`);
+  }
+}
+
 interface ReviewThreadPage {
   thread: Record<string, unknown>;
   id: string;
@@ -832,6 +841,7 @@ async function paginateReviewThreads(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    assertGraphqlEnvelopeSucceeded(envelope, "GitHub review thread pagination");
     const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) throw new Error("invalid GitHub review thread pagination response");
     requests += 1;
@@ -984,6 +994,7 @@ async function paginateReviewThreadComments(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    assertGraphqlEnvelopeSucceeded(envelope, "GitHub review comment pagination");
     const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) throw new Error("invalid GitHub review comment pagination response");
     requests += 1;
@@ -1115,6 +1126,7 @@ async function paginatePullRequestSignals(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    assertGraphqlEnvelopeSucceeded(envelope, "GitHub pull request signal pagination");
     const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) throw new Error("invalid GitHub pull request signal pagination response");
     requests += 1;
@@ -1213,26 +1225,25 @@ async function runReviewRepoBatch(
       )
       .map(({ alias }) => alias),
   );
-  const pageableAliases = aliases.filter(
-    ({ alias }) => !aliasErrors.has(alias) && !invalidAliases.has(alias),
-  );
-  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
-  try {
-    await paginateReviewThreads(targets, pageableAliases, repository, cursors);
-    await paginateReviewThreadComments(
-      targets,
-      pageableAliases,
-      repository,
-      dataDir,
-      projectId,
-      sourceId,
-      cursors,
-    );
-    await paginatePullRequestSignals(targets, pageableAliases, repository, cursors);
-    writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
-  } catch (error) {
-    for (const target of targets) results.set(target.session.id, { status: "error", error });
-    return results;
+  if (aliasErrors.size === 0 && invalidAliases.size === 0) {
+    const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
+    try {
+      await paginateReviewThreads(targets, aliases, repository, cursors);
+      await paginateReviewThreadComments(
+        targets,
+        aliases,
+        repository,
+        dataDir,
+        projectId,
+        sourceId,
+        cursors,
+      );
+      await paginatePullRequestSignals(targets, aliases, repository, cursors);
+      writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
+    } catch (error) {
+      for (const target of targets) results.set(target.session.id, { status: "error", error });
+      return results;
+    }
   }
   for (const { alias, target } of aliases) {
     const matchingTargets = targets.filter(
