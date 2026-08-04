@@ -29,8 +29,10 @@ import type {
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
+  SessionState,
   SessionStateTransition,
   SessionView,
+  StateSource,
 } from "../../src/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22729,13 +22731,21 @@ describe("SessionService", () => {
         expect(map.has("api-3"), `${name} should drop the killed id`).toBe(false);
       }
 
-      // For the maps a live classify does not independently overwrite or
-      // self-evict for this agent/config combination (codexMcpDialogOverrides
-      // and claudeCompactingOverrides are codex/claude-compaction live-scan
-      // side effects; sessionProjectCache self-evicts on every call when no
-      // local project config resolves — all three are asserted bounded
-      // elsewhere), also confirm the sweep leaves the non-terminal id alone.
+      // codexMcpDialogOverrides is safe to assert here too: api-1 is a
+      // claude-agent session, so classifySessionRecord's strategy is
+      // claude_jsonl and the codex-only hook branches that read/write
+      // codexMcpDialogOverrides never execute for it — nothing but the sweep
+      // can touch this key for this fixture.
+      //
+      // claudeCompactingOverrides and sessionProjectCache are excluded below:
+      // claudeCompactingOverrides is deleted on every claude_jsonl classify
+      // tick when detectClaudeCompacting(paneText) is false (true for api-1's
+      // mocked pane), and sessionProjectCache self-evicts on every call when
+      // no local project config resolves — both self-evict independent of
+      // the sweep for this fixture, so retention here would not isolate the
+      // sweep's behavior; they are asserted bounded (eviction-only) above.
       const cleanMaps: Array<[string, Map<string, unknown>]> = [
+        ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],
@@ -22746,14 +22756,150 @@ describe("SessionService", () => {
         expect(map.has("api-1"), `${name} should keep the non-terminal id`).toBe(true);
       }
 
-      // stateHistory is a special case: the sweep deletes it like every other
-      // map, but the next dashboard tick's updateStateHistory call
-      // (enrichDashboard runs for every listed session, terminal or not)
-      // re-adds a single transition. It must never regrow past 1 — that is
-      // the whole point of the sweep, converting an up-to-100-element array
-      // into a 1-element one.
+      // stateHistory is a special case: the sweep truncates it (keeps only
+      // the last element) instead of deleting the key outright, so a
+      // dashboard tick's updateStateHistory call (enrichDashboard runs for
+      // every listed session, terminal or not) that lands before the sweep
+      // can still push one genuine transition into the terminal state; a
+      // later sweep then truncates that back down to 1. It must never
+      // regrow past 1 across a full sweep+settle cycle — that is the whole
+      // point of the sweep, converting an up-to-100-element array into a
+      // 1-element one instead of an empty one (an empty one would wipe
+      // lastEntry and reopen the oscillation covered by the two tests below).
       expect(internals.stateHistory.get("api-2")).toHaveLength(1);
       expect(internals.stateHistory.get("api-3")).toHaveLength(1);
+
+      service.dispose();
+    });
+
+    it("keeps the LAST transition on truncation, not the oldest", async () => {
+      createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals & {
+        pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
+      };
+      await drainBaselineTicks(internals);
+
+      // Three distinguishable entries: slice(-1) keeps "stopped" (the last),
+      // slice(0, 1) would incorrectly keep "working" (the first) — this is
+      // the assertion a length-only check cannot make.
+      internals.stateHistory.set("gone-1", [
+        { state: "working", at: "2026-03-18T10:00:00.000Z", source: "jsonl" },
+        { state: "waiting", at: "2026-03-18T10:01:00.000Z", source: "jsonl" },
+        { state: "stopped", at: "2026-03-18T10:02:00.000Z", source: "status" },
+      ]);
+
+      internals.pruneSessionScopedState(new Set());
+
+      const history = internals.stateHistory.get("gone-1");
+      expect(history).toHaveLength(1);
+      expect(history?.[0]).toEqual({
+        state: "stopped",
+        at: "2026-03-18T10:02:00.000Z",
+        source: "status",
+      });
+
+      service.dispose();
+    });
+
+    it("does not re-enter the transition branch for an unchanged terminal session on the next tick", async () => {
+      createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals & {
+        pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
+        updateStateHistory(
+          session: SessionRecord,
+          state: SessionState,
+          stateSource: StateSource,
+          historySourcePath: string | null,
+          serverError: boolean,
+        ): Promise<SessionStateTransition[]>;
+      };
+      await drainBaselineTicks(internals);
+
+      const session = runningSession({ id: "gone-2", status: "completed" });
+      // Already recorded the real terminal transition — this is the steady
+      // state a terminal session settles into after the one genuine
+      // completed/killed push the sweep-then-settle test above exercises.
+      internals.stateHistory.set("gone-2", [
+        { state: "waiting", at: "2026-03-18T10:00:00.000Z", source: "jsonl" },
+        { state: "stopped", at: "2026-03-18T10:01:00.000Z", source: "status" },
+      ]);
+
+      // First sweep: the id is absent from liveIds, so this is a terminal
+      // session the sweep has already caught up with.
+      internals.pruneSessionScopedState(new Set());
+      expect(internals.stateHistory.get("gone-2")).toHaveLength(1);
+
+      // Without the truncate fix (i.e. a plain delete), the key would not
+      // exist here, so the next call below would see prevLen 0 and push —
+      // calling readSession every time. With truncate, lastEntry survives
+      // and already matches the incoming state, so nothing is read or
+      // pushed.
+      readSessionMock.mockClear();
+      const historyAfterFirstTick = await internals.updateStateHistory(
+        session,
+        "stopped",
+        "status",
+        null,
+        false,
+      );
+      expect(historyAfterFirstTick).toHaveLength(1);
+      expect(readSessionMock).not.toHaveBeenCalled();
+
+      // A second "tick" (e.g. the next dashboard-cache interval) must be
+      // equally inert — this is the oscillation check: it must not grow or
+      // re-read on every subsequent tick forever.
+      readSessionMock.mockClear();
+      const historyAfterSecondTick = await internals.updateStateHistory(
+        session,
+        "stopped",
+        "status",
+        null,
+        false,
+      );
+      expect(historyAfterSecondTick).toHaveLength(1);
+      expect(readSessionMock).not.toHaveBeenCalled();
+
+      service.dispose();
+    });
+
+    it("reclaims a terminal session's scoped state even when another session's enrich throws", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", worktree: false, tmuxSession: "api-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", worktree: false, status: "completed" }));
+      sessions.set("api-3", runningSession({ id: "api-3", worktree: false, tmuxSession: "api-3" }));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+
+      // api-2 is terminal (absent from the attention monitor's liveIds) —
+      // seed a scoped-state entry the sweep is responsible for reclaiming.
+      internals.codexMcpDialogOverrides.set("api-2", Date.now());
+
+      // api-1's enrich now throws synchronously inside classifySessionRecord's
+      // runtime read (readRuntimeSnapshot -> tmuxSessionExists). Before this
+      // fix, the sweep ran only after the per-session loop, so this single
+      // persistently-throwing session would abort the tick and disable
+      // reclamation for every map, forever.
+      tmuxSessionExistsMock.mockImplementation(async (tmuxSession: string) => {
+        if (tmuxSession === "api-1") {
+          throw new Error("boom: tmux probe failed");
+        }
+        return true;
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await drainBaselineTicks(internals);
+
+      // The sweep still ran despite api-1's throw: api-2's terminal scoped
+      // state is reclaimed regardless.
+      expect(internals.codexMcpDialogOverrides.has("api-2")).toBe(false);
 
       service.dispose();
     });

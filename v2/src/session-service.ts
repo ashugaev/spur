@@ -2956,29 +2956,47 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
+      // Run the sweep before the per-session loop, off this same liveIds
+      // snapshot, so a session that throws below (see the per-session
+      // try/catch) can never skip reclamation for the rest of the daemon's
+      // life. Safe to run first: it only deletes/truncates ids ABSENT from
+      // liveIds, so nothing the loop is about to populate for a live id is at
+      // risk of being evicted on this same pass.
+      const liveIds = new Set(sessions.map((session) => session.id));
+      this.pruneSessionScopedState(liveIds);
       const claudeAccounts = this.computeClaudeAccountsView();
       for (const session of sessions) {
-        const view = await this.enrich(session, claudeAccounts);
-        this.checkPrForSession(session, view.state);
-        const prevRunState = this.lastObservedRunStates.get(view.id);
-        nextRunStates.set(view.id, view.state);
-        if (!baseline && prevRunState === "working" && view.state === "waiting") {
-          await this.maybeNudgeForgottenReply(view);
-        }
-        const attention: AttentionState | null =
-          view.state === "needs_input"
-            ? "needs_input"
-            : view.state === "error"
-              ? "error"
-              : view.state === "rate_limited"
-                ? "rate_limited"
-                : null;
-        if (!attention) {
-          continue;
-        }
-        nextStates.set(view.id, attention);
-        if (!baseline && this.attentionStates.get(view.id) !== attention) {
-          await this.notifyAttention(view, attention);
+        try {
+          const view = await this.enrich(session, claudeAccounts);
+          this.checkPrForSession(session, view.state);
+          const prevRunState = this.lastObservedRunStates.get(view.id);
+          nextRunStates.set(view.id, view.state);
+          if (!baseline && prevRunState === "working" && view.state === "waiting") {
+            await this.maybeNudgeForgottenReply(view);
+          }
+          const attention: AttentionState | null =
+            view.state === "needs_input"
+              ? "needs_input"
+              : view.state === "error"
+                ? "error"
+                : view.state === "rate_limited"
+                  ? "rate_limited"
+                  : null;
+          if (!attention) {
+            continue;
+          }
+          nextStates.set(view.id, attention);
+          if (!baseline && this.attentionStates.get(view.id) !== attention) {
+            await this.notifyAttention(view, attention);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.attention_monitor.session_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Attention monitor skipped session ${session.id}: ${message}`,
+          });
         }
       }
       this.attentionStates.clear();
@@ -2989,8 +3007,6 @@ export class SessionService {
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
       }
-      const liveIds = new Set(sessions.map((session) => session.id));
-      this.pruneSessionScopedState(liveIds);
     } finally {
       this.attentionMonitorRunning = false;
     }
@@ -3029,9 +3045,17 @@ export class SessionService {
         this.cursorJsonlReaders.delete(sessionId);
       }
     }
-    for (const sessionId of this.stateHistory.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.stateHistory.delete(sessionId);
+    for (const [sessionId, history] of this.stateHistory) {
+      // Truncate rather than delete: dropping the key entirely wipes
+      // lastEntry, so the next tick's transition branch (updateStateHistory)
+      // re-enters with prevLen 0 for every terminal session on every tick
+      // forever — a synchronous readSession/writeSession per terminal
+      // session per attention interval, and a swallowed transition log +
+      // subscriber dispatch for the first state change out of the wipe.
+      // Keeping the last element preserves lastEntry (bounding both costs)
+      // while still capping the array at 1 instead of STATE_HISTORY_LIMIT.
+      if (!liveIds.has(sessionId) && history.length > 1) {
+        this.stateHistory.set(sessionId, history.slice(-1));
       }
     }
     for (const sessionId of this.prCheckTrackers.keys()) {

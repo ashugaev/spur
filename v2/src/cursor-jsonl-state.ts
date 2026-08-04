@@ -142,7 +142,6 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
-  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -157,9 +156,6 @@ export function parseCursorJsonlRecord(
     }
     if (type === "tool_result") {
       hasToolResult = true;
-    }
-    if (type === "text" && typeof tool["text"] === "string") {
-      textParts.push(tool["text"]);
     }
   }
   // `text` is intentionally not populated here: the only reader of

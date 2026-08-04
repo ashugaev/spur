@@ -105,5 +105,5 @@ describe("fetchSentryIssues", () => {
         limit: 25,
       }),
     ).rejects.toThrow();
-  }, 10_000);
+  }, 35_000);
 });

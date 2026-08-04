@@ -14,7 +14,11 @@ export interface FetchJiraIssuesOptions {
 }
 
 const JIRA_SEARCH_MAX_RESULTS = 100;
-const FETCH_TIMEOUT_MS = 5_000;
+// The default poll interval (config.ts's jira backlog intervalMs) is 60s, so
+// this only needs to comfortably beat the poll cadence, not be tight — a
+// maxResults=100 search can legitimately take longer than 5s on a loaded
+// instance, which previously failed every poll and left the backlog stale.
+const FETCH_TIMEOUT_MS = 30_000;
 
 async function requestBody(
   url: URL,
