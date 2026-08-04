@@ -1887,7 +1887,9 @@ export class SessionService {
     const nextConfigPaths = rawConfigPaths.some((path) => canonicalConfigKey(path) === bootstrapKey)
       ? rawConfigPaths
       : [...rawConfigPaths, bootstrap.config.configPath];
-    this.registryPaths = activeConfigPaths(nextConfigPaths, bootstrap.config.worktreeDir);
+    this.registryPaths = activeConfigPaths(nextConfigPaths, bootstrap.config.worktreeDir, {
+      persistedPrune: true,
+    });
     writeConfigRegistry(bootstrap.config.dataDir, this.registryPaths);
     logSpurEvent(bootstrap.config.dataDir, {
       event: "daemon.registry.pruned",

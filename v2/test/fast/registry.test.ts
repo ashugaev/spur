@@ -1,11 +1,12 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   activeConfigPaths,
   addUnconfiguredProject,
   buildMergedConfig,
+  isExistingFile,
   isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
@@ -215,6 +216,34 @@ describe("registry.activeConfigPaths", () => {
 
     expect(activeConfigPaths([existingPath, nonCanonicalForm], worktreeDir)).toEqual([
       existingPath,
+    ]);
+  });
+
+  it("drops a path whose stat fails with an indeterminate errno by default", async () => {
+    const rootDir = await createTempDir("spur-registry-unknown-errno-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
+    const loopA = join(rootDir, "loopA");
+    const loopB = join(rootDir, "loopB");
+    symlinkSync(loopB, loopA);
+    symlinkSync(loopA, loopB);
+
+    expect(isExistingFile(loopA)).toBe(false);
+    expect(activeConfigPaths([loopA], worktreeDir)).toEqual([]);
+  });
+
+  it("keeps a path with an indeterminate stat errno when persistedPrune is set, so the boot write never drops a live project on a transient error", async () => {
+    const rootDir = await createTempDir("spur-registry-persisted-prune-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
+    const loopA = join(rootDir, "loopA");
+    const loopB = join(rootDir, "loopB");
+    symlinkSync(loopB, loopA);
+    symlinkSync(loopA, loopB);
+    const missingPath = join(rootDir, "missing.yaml");
+
+    expect(activeConfigPaths([loopA, missingPath], worktreeDir, { persistedPrune: true })).toEqual([
+      loopA,
     ]);
   });
 });

@@ -1,19 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
-import { isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
+import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
@@ -552,13 +545,7 @@ export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostI
   const deadPaths: string[] = [];
   const worktreeInternalPaths: string[] = [];
   for (const path of configPaths) {
-    let isFile = false;
-    try {
-      isFile = statSync(path).isFile();
-    } catch {
-      isFile = false;
-    }
-    if (!isFile) {
+    if (!isExistingFile(path)) {
       deadPaths.push(path);
       continue;
     }
