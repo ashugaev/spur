@@ -869,6 +869,7 @@ type SessionServiceInternals = {
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
+  paneWriteLocks: Map<string, Promise<void>>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -3883,6 +3884,140 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
     expect(waitForAckSpy).not.toHaveBeenCalled();
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  describe("pane write lock", () => {
+    function codexSession(tmuxSession: string) {
+      return {
+        id: tmuxSession,
+        tmuxSession,
+        agent: "codex" as const,
+        launchCommand: "codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+        worktreePath: `/tmp/spur-worktrees/api/${tmuxSession}`,
+      };
+    }
+
+    it("serializes concurrent sends to one pane behind the submit ack", async () => {
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const service = await createDisposedSessionService();
+      const events: string[] = [];
+
+      sendMessageToTmuxMock.mockImplementation((_tmuxSession: string, message: string) => {
+        events.push(`write:${message}`);
+      });
+      sendSubmitKeyToTmuxMock.mockImplementation(() => {
+        events.push("resend");
+      });
+
+      let releaseFirstAck: () => void = () => {};
+      const firstAckGate = new Promise<void>((resolve) => {
+        releaseFirstAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+        .mockImplementationOnce(async (_binding, messageText) => {
+          await firstAckGate;
+          events.push(`ack:false:${messageText}`);
+          return { found: false, lastScannedFile: null };
+        })
+        .mockImplementationOnce(async (_binding, messageText) => {
+          events.push(`ack:true:${messageText}`);
+          return { found: true, lastScannedFile: null };
+        })
+        .mockImplementationOnce(async (_binding, messageText) => {
+          events.push(`ack:true:${messageText}`);
+          return { found: true, lastScannedFile: null };
+        });
+
+      const session = codexSession("api-1");
+      const firstSend = sessionServiceInternals(service).sendAgentMessage(session, "first");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", { agent: "codex" });
+
+      const secondSend = sessionServiceInternals(service).sendAgentMessage(session, "second");
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Second send is queued behind the pane lock; no write until the first
+      // send's Enter and ack are done.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+      releaseFirstAck();
+      await firstSend;
+      await secondSend;
+
+      expect(events).toEqual([
+        "write:first",
+        "ack:false:first",
+        "resend",
+        "ack:true:first",
+        "write:second",
+        "ack:true:second",
+      ]);
+    });
+
+    it("runs sends to different panes concurrently", async () => {
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const service = await createDisposedSessionService();
+
+      let releaseFirstAck: () => void = () => {};
+      const firstAckGate = new Promise<void>((resolve) => {
+        releaseFirstAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+        async (_binding, messageText) => {
+          if (messageText === "first") {
+            await firstAckGate;
+          }
+          return { found: true, lastScannedFile: null };
+        },
+      );
+
+      const firstSend = sessionServiceInternals(service).sendAgentMessage(
+        codexSession("api-1"),
+        "first",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", { agent: "codex" });
+
+      const secondSend = sessionServiceInternals(service).sendAgentMessage(
+        codexSession("api-2"),
+        "second",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      // A different pane is not blocked behind api-1's in-flight ack wait.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-2", "second", { agent: "codex" });
+      await expect(secondSend).resolves.toBeUndefined();
+
+      releaseFirstAck();
+      await firstSend;
+    });
+
+    it("releases the pane lock when a send throws", async () => {
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.dispose();
+
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+        async (_binding, messageText) =>
+          messageText === "first"
+            ? { found: false, lastScannedFile: null }
+            : { found: true, lastScannedFile: null },
+      );
+
+      const session = codexSession("api-1");
+      const firstSend = sessionServiceInternals(service).sendAgentMessage(session, "first");
+      const secondSend = sessionServiceInternals(service).sendAgentMessage(session, "second");
+
+      await expect(firstSend).rejects.toBeInstanceOf(SubmitAckTimeoutError);
+      await secondSend;
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second", { agent: "codex" });
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+    });
   });
 
   it("queues manual send messages while the agent is busy", async () => {
