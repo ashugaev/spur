@@ -68,6 +68,7 @@ const loadProjectConfigMock = vi.fn();
 const findProjectConfigPathInDirectoryMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
+const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -115,6 +116,7 @@ const isGitWorktreeMock = vi.fn();
 const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const removeWorktreeMock = vi.fn();
+const pruneRepoWorktreesMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const branchRefsExistMock = vi.fn();
 const workspaceExistsMock = vi.fn();
@@ -368,6 +370,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -526,6 +529,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUncommittedChanges: hasUncommittedChangesMock,
   hasUnpushedCommits: hasUnpushedCommitsMock,
   isGitWorktree: isGitWorktreeMock,
+  pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
@@ -549,6 +553,13 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
     },
     projects: {
       api: {
@@ -12672,6 +12683,97 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("never runs the session GC sweep while sessionGc.enabled is false", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("sweeps and reports freed bytes once sessionGc.enabled is true", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+
+    await service.runSessionGcSweep();
+
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.gc.completed",
+    );
+    expect(completed?.[1].message).toContain("0 worktree(s) removed");
+    expect(completed?.[1].message).toContain("byte(s) freed");
+    // Archived sessions lose their log shard dir, so the event must not carry a
+    // sessionId (that would recreate the dir appendEventLog writes into).
+    expect(completed?.[1].sessionId).toBeUndefined();
+    service.dispose();
+  });
+
+  it("waits out intervalMinutes before sweeping again, so a restart never sweeps immediately", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      dispose(): void;
+    };
+
+    // lastSessionGcSweepAt seeds from construction, so this tick is inside the
+    // 360-minute window and must do nothing.
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("skips an overlapping session GC sweep instead of running two at once", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      sessionGc: { ...baseConfig().sessionGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runSessionGcSweep(): Promise<void>;
+      lastSessionGcSweepAt: number;
+      sessionGcRunning: boolean;
+      dispose(): void;
+    };
+    service.lastSessionGcSweepAt = 0;
+    service.sessionGcRunning = true;
+
+    await service.runSessionGcSweep();
+
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
+    ).toBe(false);
+    service.dispose();
+  });
+
   it("rejects a branch override that would mutate the shared workspace", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -20107,7 +20209,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a scheduled wake queued when delivery fails", async () => {
+    it("consumes a one-shot wake and keeps the message queued when delivery fails", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20135,16 +20237,16 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.scheduledWake).toEqual({
-        dueAt: "2026-03-18T10:05:05.000Z",
-        message: "Retry wake",
-      });
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.queuedMessages?.messages).toContain("Retry wake");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.failed")
+          .length,
+      ).toBe(1);
       service.dispose();
     });
 
@@ -20458,7 +20560,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps a daily wake queued when delivery fails", async () => {
+    it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -20487,14 +20589,194 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
-
-      sendMessageToTmuxMock.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(1_000);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
+      expect(sessions.get("shp-1")?.queuedMessages?.messages.join("\n")).toContain(
+        "Retry daily wake",
+      );
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
       service.dispose();
+    });
+
+    it("logs one daily wake failure for a session that cannot receive", async () => {
+      const sessions = seedShepherdSession({
+        status: "completed",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("fires a far-past-due daily wake once and jumps to the next occurrence", async () => {
+      const sessions = seedShepherdSession({
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("does not let a session with a malformed dailyAt starve a later session's wake in the same tick", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      sessions.set("shp-2", {
+        id: "shp-2",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-2",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd-2",
+        tmuxSession: "shp-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        scheduledWake: {
+          dueAt: "2026-03-18T10:00:00.000Z",
+          message: "Due one-shot wake",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.monitor_failed",
+        ).length,
+      ).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      expect(sessions.get("shp-bad-daily")?.dailyWake).toEqual({
+        dailyAt: ["99:99"],
+        nextDueAt: "2026-03-19T10:05:01.000Z",
+        message: "Malformed daily wake",
+        stopCondition: "Stop condition",
+      });
+      expect(sessions.get("shp-2")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-2",
+        expect.stringContaining("Due one-shot wake"),
+        { agent: "claude", interrupt: false },
+      );
+      service.dispose();
+    });
+
+    it("bounds a malformed daily wake to one failure event per day, not a per-poll storm", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-bad-daily", {
+        id: "shp-bad-daily",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-bad-daily",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-bad-daily",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["99:99"],
+          nextDueAt: "2026-03-18T10:00:00.000Z",
+          message: "Malformed daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const serviceDay1 = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Day 1: claims the due occurrence and bumps nextDueAt 24h out.
+      await advanceSeconds(5);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      const nextDueAtAfterDay1 = sessions.get("shp-bad-daily")?.dailyWake?.nextDueAt;
+      expect(nextDueAtAfterDay1).toBe("2026-03-19T10:05:01.000Z");
+      serviceDay1.dispose();
+
+      // Cross the day boundary: jump the clock to when the bumped nextDueAt
+      // comes due, without replaying every intervening 1s poll (the disposed
+      // timer above has nothing pending to catch up). A fresh monitor on the
+      // new day must still emit exactly one more failure, not a storm.
+      logSpurEventMock.mockClear();
+      vi.setSystemTime(new Date(nextDueAtAfterDay1 ?? ""));
+      const serviceDay2 = new SessionService("/tmp/spur.yaml", nextDueAtAfterDay1);
+      await advanceSeconds(5);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.wake.daily_failed" && entry.sessionId === "shp-bad-daily",
+        ).length,
+      ).toBe(1);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      serviceDay2.dispose();
     });
 
     it("requires a stop condition for daily wakes", async () => {

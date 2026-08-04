@@ -207,6 +207,13 @@ import {
 } from "./session-artifacts.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
 import {
+  createGcDeps,
+  executeSessionGc,
+  planSessionGc,
+  resolveSessionCleanupContext,
+  type SessionCleanupContext,
+} from "./session-gc.js";
+import {
   deleteWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
@@ -346,7 +353,6 @@ import {
   isGitWorktree,
   readCurrentBranch,
   removeWorktree,
-  resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
@@ -411,6 +417,11 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
+// Fixed tick cadence for the session GC sweep; the actual sweep frequency is
+// gated inside the tick by sessionGc.intervalMinutes (re-read from
+// this.config on every tick, so a config-only reload takes effect without a
+// daemon restart).
+const SESSION_GC_TICK_MS = 5 * 60_000;
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
@@ -568,10 +579,6 @@ type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
-interface SessionCleanupContext {
-  repoPath: string;
-  symlinks: string[];
-}
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -592,13 +599,6 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
-}
-
-function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
-  if (session.agent !== "cursor") {
-    return symlinks;
-  }
-  return [...symlinks, ".cursor/.workspace-trusted"];
 }
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
@@ -1824,6 +1824,12 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
+  private sessionGcTimer: NodeJS.Timeout | null = null;
+  private sessionGcRunning = false;
+  // Construction time, not epoch 0: a daemon restart must not treat "never
+  // swept before" as "due immediately" — the first tick after a restart
+  // waits out a full intervalMinutes like every other tick.
+  private lastSessionGcSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -1895,6 +1901,7 @@ export class SessionService {
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
     this.startReaperLoop();
+    this.startSessionGcLoop();
   }
 
   /**
@@ -1927,6 +1934,10 @@ export class SessionService {
     if (this.reaperTimer) {
       clearInterval(this.reaperTimer);
       this.reaperTimer = null;
+    }
+    if (this.sessionGcTimer) {
+      clearInterval(this.sessionGcTimer);
+      this.sessionGcTimer = null;
     }
     this.stopDashboardCacheLoop();
   }
@@ -2132,37 +2143,42 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          try {
-            await this.send(session.id, { message: scheduledWake.message });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-              current.scheduledWake.message === scheduledWake.message
-            ) {
-              const { scheduledWake: _scheduledWake, ...base } = current;
-              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-              writeSession(this.config.dataDir, cleared);
+          // Claim the due occurrence BEFORE sending: clear scheduledWake and
+          // persist it first. A slow or failing send must not leave the wake
+          // due, or the `<= now` guard stays true and it re-fires every tick
+          // forever.
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message;
+          if (claimed) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            try {
+              await this.send(session.id, { message: scheduledWake.message });
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
             }
-            this.logEvent("session.wake.sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent scheduled wake to ${session.id}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
           }
         }
 
@@ -2378,54 +2394,96 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        try {
-          await this.send(session.id, {
-            message: this.formatDailyWakeMessage(
-              session.id,
-              dailyWake.message,
-              dailyWake.stopCondition,
-            ),
-          });
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          if (
-            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-            current.dailyWake.message === dailyWake.message &&
-            current.dailyWake.stopCondition === dailyWake.stopCondition
-          ) {
-            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-            const updated: SessionRecord = {
-              ...current,
+        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+        // next future scheduled time and persist it first. A slow or failing
+        // send must not leave the wake due, or the `<= now` guard stays true
+        // and it re-fires every tick forever.
+        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+        const dailyWakeClaimed =
+          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+        if (dailyWakeClaimed) {
+          // Resolving the next occurrence can throw on a malformed dailyAt
+          // (e.g. a stray "99:99" that slipped into an existing record
+          // before validation covered it). Scope this to the session,
+          // mirroring the auto-rotate catch above: one bad record must not
+          // escape the loop and starve every later session's wake
+          // processing this tick. Unlike a delivery failure, a malformed
+          // dailyAt has no next occurrence to advance to, so skip 24h ahead
+          // instead of clearing the schedule -- an absent dailyWake is
+          // invisible in the web UI and in `spur list`, and disabling a
+          // schedule is meant to be an explicit user action (cancelWake).
+          // This bounds the storm to one failure event per day and keeps
+          // message/stopCondition intact for repair via re-arm.
+          let nextDueAt: Date;
+          try {
+            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const skipped: SessionRecord = {
+              ...currentDailyWakeSession,
               dailyWake: {
                 ...dailyWake,
-                nextDueAt: nextDueAt.toISOString(),
+                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
               },
               updatedAt: nowIso(),
             };
-            writeSession(this.config.dataDir, updated);
+            writeSession(this.config.dataDir, skipped);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+            continue;
           }
-          this.logEvent("session.wake.daily_sent", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Sent daily wake to ${session.id}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
+          const updated: SessionRecord = {
+            ...currentDailyWakeSession,
+            dailyWake: {
+              ...dailyWake,
+              nextDueAt: nextDueAt.toISOString(),
             },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.daily_failed", {
-            level: "error",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Failed to send daily wake to ${session.id}: ${message}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, updated);
+          try {
+            await this.send(session.id, {
+              message: this.formatDailyWakeMessage(
+                session.id,
+                dailyWake.message,
+                dailyWake.stopCondition,
+              ),
+            });
+            this.logEvent("session.wake.daily_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent daily wake to ${session.id}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send daily wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          }
         }
       }
     } finally {
@@ -3060,6 +3118,66 @@ export class SessionService {
     }
   }
 
+  private startSessionGcLoop(): void {
+    if (this.sessionGcTimer) {
+      return;
+    }
+    this.sessionGcTimer = setInterval(() => {
+      void this.runSessionGcSweep();
+    }, SESSION_GC_TICK_MS);
+    this.sessionGcTimer.unref();
+  }
+
+  // Config-gated daemon sweep: off unless sessionGc.enabled is true, and both
+  // that flag and intervalMinutes are re-read from this.config on every tick
+  // (not cached at construction), so a config reload takes effect on the next
+  // tick without a daemon restart. lastSessionGcSweepAt seeds from
+  // construction time, so a restart never fires an immediate sweep.
+  private async runSessionGcSweep(): Promise<void> {
+    if (this.sessionGcRunning) {
+      return;
+    }
+    const gcConfig = this.config.sessionGc;
+    if (!gcConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastSessionGcSweepAt < gcConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.sessionGcRunning = true;
+    this.lastSessionGcSweepAt = Date.now();
+    try {
+      const plan = planSessionGc({
+        sessions: listSessions(this.config.dataDir),
+        worktreeDir: this.config.worktreeDir,
+        now: new Date(),
+        olderThanDays: gcConfig.olderThanDays,
+        statuses: gcConfig.statuses,
+        limit: gcConfig.maxGroupsPerSweep,
+        pathExists: (path) => workspaceExists(path),
+      });
+      // sizes: true so the sweep can report freed bytes; the du cost is bounded
+      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      const report = await executeSessionGc(plan, createGcDeps(this.config), {
+        dryRun: false,
+        sizes: true,
+      });
+      this.logEvent("session.gc.completed", {
+        level: "info",
+        message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
+        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.gc.failed", {
+        level: "warn",
+        message: `Session GC sweep failed: ${message}`,
+      });
+    } finally {
+      this.sessionGcRunning = false;
+    }
+  }
+
   private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {
     try {
       const included =
@@ -3410,13 +3528,6 @@ export class SessionService {
     }
 
     return localProject ?? daemonProject;
-  }
-
-  private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
-    const resolvedRepoPath = tryRealpath(repoPath);
-    return Object.values(this.config.projects).find(
-      (project) => tryRealpath(project.path) === resolvedRepoPath,
-    );
   }
 
   private releaseSidecarPortFromSession(
@@ -4129,26 +4240,7 @@ export class SessionService {
   }
 
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
-    const currentProject = this.config.projects[session.project];
-    if (currentProject) {
-      return {
-        repoPath: currentProject.path,
-        symlinks: cleanupIgnoredPaths(session, currentProject.symlinks),
-      };
-    }
-    if (!session.worktree || !session.worktreePath) {
-      throw new Error(`Unknown project: ${session.project}`);
-    }
-    const repoPath = await resolveRepoPathFromWorktree(session.worktreePath);
-    if (!repoPath) {
-      throw new Error(
-        `Cannot resolve repository root for ${session.id} after project rename: ${session.worktreePath}`,
-      );
-    }
-    return {
-      repoPath,
-      symlinks: cleanupIgnoredPaths(session, this.findProjectByRepoPath(repoPath)?.symlinks ?? []),
-    };
+    return resolveSessionCleanupContext(this.config.projects, session);
   }
 
   private requireSessionMemorySession(sessionId: string, key?: string): void {

@@ -589,9 +589,21 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  sessionGc: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxGroupsPerSweep: number;
+    statuses: SessionGcStatus[];
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
+
+// The only statuses session GC ever reclaims: a session still `running`,
+// `spawning`, `paused`, or `errored` may resume work in its worktree, so GC
+// must never treat it as a candidate regardless of age.
+export type SessionGcStatus = "completed" | "killed" | "stopped";
 
 export interface SessionPipelineState {
   steps: string[];

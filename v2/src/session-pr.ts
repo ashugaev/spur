@@ -250,6 +250,90 @@ export async function closeSessionPr(worktreePath: string, pr: SessionPrBinding)
   await gh(worktreePath, "pr", "close", String(pr.number));
 }
 
+export interface OpenPullRequestSummary {
+  number: number;
+  headRefName: string;
+}
+
+const DEFAULT_OPEN_PR_LIST_LIMIT = 1000;
+
+function isOpenPullRequestSummary(value: unknown): value is OpenPullRequestSummary {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record["number"] === "number" && typeof record["headRefName"] === "string";
+}
+
+// Session GC's PR probe: one batch call per repo (github-ci.ts's `gh run
+// list --repo` precedent) instead of one `gh pr view` per session. Any
+// failure — bad JSON, a non-array payload, a malformed item, or the result
+// count saturating `limit` (meaning the true open-PR set may be larger than
+// what came back) — throws, never returns a partial or "assume none" result.
+// The GC invariant is "any probe error blocks", so a throw here is exactly
+// the contract the caller needs.
+export async function listOpenPullRequests(
+  repo: string,
+  limit = DEFAULT_OPEN_PR_LIST_LIMIT,
+): Promise<OpenPullRequestSummary[]> {
+  const raw = await gh(
+    process.cwd(),
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--json",
+    "number,headRefName",
+    "--limit",
+    String(limit),
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error(`gh pr list --repo ${repo} returned invalid JSON`, { cause: error });
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`gh pr list --repo ${repo} returned a non-array payload`);
+  }
+  const items: OpenPullRequestSummary[] = [];
+  for (const entry of parsed) {
+    if (!isOpenPullRequestSummary(entry)) {
+      throw new Error(`gh pr list --repo ${repo} returned an item with an unexpected shape`);
+    }
+    items.push({ number: entry.number, headRefName: entry.headRefName });
+  }
+  if (items.length >= limit) {
+    throw new Error(
+      `gh pr list --repo ${repo} returned ${items.length} open PRs, at or above the ${limit} limit; open-PR set is unresolvable`,
+    );
+  }
+  return items;
+}
+
+// Resolves the `owner/repo` slug for a worktree-less project path (a
+// session's `pr` binding already carries its own repo slug; this is only
+// needed as a fallback when no member has one yet).
+export async function resolveRepoSlug(cwd: string): Promise<string> {
+  const raw = await gh(cwd, "repo", "view", "--json", "nameWithOwner");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error(`gh repo view returned invalid JSON for ${cwd}`, { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`gh repo view returned a non-object payload for ${cwd}`);
+  }
+  const nameWithOwner = (parsed as Record<string, unknown>)["nameWithOwner"];
+  if (typeof nameWithOwner !== "string" || !nameWithOwner.trim()) {
+    throw new Error(`gh repo view returned an unexpected shape for ${cwd}`);
+  }
+  return nameWithOwner;
+}
+
 export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
   binding: SessionPrBinding | null;
   updatedSession?: SessionRecord;
