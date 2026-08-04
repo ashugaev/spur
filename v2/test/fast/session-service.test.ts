@@ -1215,7 +1215,9 @@ describe("SessionService", () => {
       mkdirSync(oldWorktreePath, { recursive: true });
       writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
 
-      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
       readConfigRegistryFileMock.mockReset().mockReturnValue({
         configPaths: [oldWorktreeConfigPath],
         unconfiguredProjects: [],
@@ -1270,7 +1272,9 @@ describe("SessionService", () => {
       mkdirSync(oldWorktreePath, { recursive: true });
       writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
 
-      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
       readConfigRegistryFileMock.mockReset().mockReturnValue({
         configPaths: [oldWorktreeConfigPath],
         unconfiguredProjects: [],
