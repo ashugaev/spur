@@ -195,21 +195,87 @@ export async function resolvePrDiscoveryBranch(
  * resolver: one `gh api graphql` instead of one `gh pr list --head`, bypassing
  * the poll queue and the poll budget gate so interactive callers (teardown's
  * open-PR check) keep today's behavior.
+ *
+ * Returns null only for a definite "no open PR". A lookup that produced no
+ * answer at all — rate limit, HTTP 5xx, auth, timeout — throws, because the
+ * caller's fail-safe (the open-PR teardown prompt) reads null as "safe to
+ * remove the branch". Collapsing the two would delete a worktree and branch out
+ * from under an open PR every time GitHub was briefly unreachable.
  */
 export async function discoverSessionPrBinding(
   worktreePath: string,
   sessionBranch: string,
 ): Promise<SessionPrBinding | null> {
   const branch = await resolvePrDiscoveryBranch(worktreePath, sessionBranch);
-  const slug = await resolvePrLookupRepo(worktreePath);
+  const slug = await resolvePrLookupRepo(worktreePath, { bypassMissMemo: true });
   if (!slug) {
-    return null;
+    // No slug from the remotes: a GitHub Enterprise host Spur cannot recognize
+    // by name, an ssh alias, or no GitHub remote at all. gh resolves the host
+    // itself, so ask it per branch rather than reporting "no PR" — and let its
+    // failure propagate, same as before batching.
+    return discoverSessionPrBindingViaPrList(worktreePath, branch);
   }
   const [outcome] = await resolvePrLookups([{ slug, branch, worktreePath }]);
-  if (outcome?.status !== "found") {
+  if (!outcome || outcome.status === "skipped") {
+    throw new Error(
+      `PR lookup for ${slug.owner}/${slug.name}#${branch} produced no answer: ${
+        outcome?.message ?? "no outcome"
+      }`,
+    );
+  }
+  if (outcome.status !== "found") {
     return null;
   }
   return prLookupBindingOf(outcome.pr);
+}
+
+/**
+ * Per-branch discovery through `gh pr list`, for repos whose remote yields no
+ * usable owner/name. gh resolves the host from its own config, so this covers
+ * every host gh is authenticated against; a gh failure throws.
+ */
+async function discoverSessionPrBindingViaPrList(
+  worktreePath: string,
+  branch: string,
+): Promise<SessionPrBinding | null> {
+  const raw = await gh(
+    worktreePath,
+    "pr",
+    "list",
+    "--head",
+    branch,
+    "--json",
+    "number,title,url",
+    "--limit",
+    "1",
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`gh pr list returned unreadable JSON for ${branch}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`gh pr list returned an unexpected payload for ${branch}`);
+  }
+  const first: unknown = parsed[0];
+  if (first === undefined) {
+    return null;
+  }
+  if (
+    typeof first !== "object" ||
+    first === null ||
+    typeof (first as { url?: unknown }).url !== "string" ||
+    typeof (first as { number?: unknown }).number !== "number"
+  ) {
+    throw new Error(`gh pr list returned an unexpected PR entry for ${branch}`);
+  }
+  const entry = first as { number: number; url: string };
+  const binding = parseSessionPrBinding(entry.url);
+  if (!binding) {
+    return null;
+  }
+  return { ...binding, number: entry.number };
 }
 
 /** Maps a found lookup result onto a session PR binding. Open PRs only. */

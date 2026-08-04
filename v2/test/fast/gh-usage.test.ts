@@ -13,6 +13,7 @@ const {
   _resetGhUsageForTests,
   noteGhInvocation,
   noteGitHubRateLimitHit,
+  noteGraphqlCost,
   pollBudgetState,
   recordGraphqlBudget,
   setGhEventSink,
@@ -97,29 +98,56 @@ describe("gh usage accounting", () => {
     expect(usageEvents("hour")[1]).toMatchObject({ calls: 1, bySubcommand: { "pr list": 1 } });
   });
 
-  it("folds subcommand keys past the cap into other", () => {
+  it("never lets a REST path become a key, so api graphql keeps its own", () => {
+    // What the review providers actually build: a unique path per PR per page.
     for (let index = 0; index < 25; index += 1) {
-      noteGhInvocation(["cmd", `sub${index}`], T0 + index);
+      noteGhInvocation(
+        ["api", `repos/ashugaev/spur/pulls/${index}/reviews?page=1`, "--paginate"],
+        T0 + index,
+      );
     }
+    noteGhInvocation(["search", "prs", "--json", "number"], T0 + 30);
+    noteGhInvocation(["api", "graphql", "-f", "query=..."], T0 + 40);
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
 
-    const details = usageEvents("minute")[0];
-    const bySubcommand = details?.["bySubcommand"] as Record<string, number>;
-    // 19 distinct keys plus the reserved "other" slot.
-    expect(Object.keys(bySubcommand)).toHaveLength(20);
-    expect(bySubcommand["cmd sub0"]).toBe(1);
-    expect(bySubcommand["cmd sub18"]).toBe(1);
-    expect(bySubcommand["cmd sub19"]).toBeUndefined();
-    // 25 calls minus the 19 keys kept before the cap is reached.
-    expect(bySubcommand["other"]).toBe(6);
+    const bySubcommand = usageEvents("minute")[0]?.["bySubcommand"] as Record<string, number>;
+    expect(bySubcommand).toEqual({ "api rest": 25, "search prs": 1, "api graphql": 1 });
   });
 
-  it("keys a bare subcommand and a flag-only argv without a second token", () => {
+  it("keys a bare subcommand and an unknown command without inventing keys", () => {
     noteGhInvocation(["auth", "--help"], T0);
     noteGhInvocation(["--version"], T0 + 1);
+    noteGhInvocation(["cmd", "sub0"], T0 + 2);
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
 
-    expect(usageEvents("minute")[0]?.["bySubcommand"]).toEqual({ auth: 1, other: 1 });
+    expect(usageEvents("minute")[0]?.["bySubcommand"]).toEqual({ auth: 1, other: 2 });
+  });
+
+  it("reports graphql points, not just call counts", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGraphqlCost(3, T0);
+    noteGhInvocation(["api", "graphql"], T0 + 1_000);
+    noteGraphqlCost(3, T0 + 1_000);
+    noteGhInvocation(["pr", "view", "42"], T0 + 2_000);
+
+    noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
+    expect(usageEvents("minute")[0]).toMatchObject({ calls: 3, graphqlCost: 6 });
+    expect(usageEvents("hour")).toHaveLength(0);
+  });
+
+  it("emits the open windows when the budget pauses lookups", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGraphqlCost(3, T0);
+    expect(usageEvents("hour")).toHaveLength(0);
+
+    // The pause is exactly the moment the daemon may stop invoking gh, so the
+    // window covering the exhaustion must not wait for a next invocation.
+    recordGraphqlBudget(1, T0 + HOUR, T0 + 1_000);
+    expect(pollBudgetState(T0 + 2_000)).toMatchObject({ blocked: true });
+
+    expect(usageEvents("hour")).toHaveLength(1);
+    expect(usageEvents("hour")[0]).toMatchObject({ calls: 1, graphqlCost: 3 });
+    expect(usageEvents("minute")).toHaveLength(1);
   });
 
   it("emits nothing without an event sink", () => {
@@ -172,13 +200,38 @@ describe("graphql budget ledger", () => {
 
   it("doubles the reactive cooldown from 5min to a 60min cap", () => {
     const expected = [5, 10, 20, 40, 60, 60].map((minutes) => minutes * MINUTE);
-    for (const [index, backoff] of expected.entries()) {
+    for (const backoff of expected) {
       noteGitHubRateLimitHit(T0);
-      const state = pollBudgetState(T0 + backoff - 1);
-      expect(state).toMatchObject({ blocked: true, reason: "cooldown" });
+      expect(pollBudgetState(T0 + backoff - 1)).toMatchObject({
+        blocked: true,
+        reason: "cooldown",
+      });
       expect(pollBudgetState(T0 + backoff)).toEqual({ blocked: false });
-      expect(index).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it("keeps a cooldown that was opened after the last observation's resetAt", () => {
+    // Healthy reading whose window closes in 55min.
+    recordGraphqlBudget(4_800, T0 + 55 * MINUTE, T0);
+    // A review-provider call hits the limit 1min after that window closed.
+    noteGitHubRateLimitHit(T0 + 56 * MINUTE);
+
+    // Rolling the stale observation over must not discard the fresh cooldown.
+    expect(pollBudgetState(T0 + 60 * MINUTE)).toMatchObject({
+      blocked: true,
+      reason: "cooldown",
+    });
+    expect(pollBudgetState(T0 + 61 * MINUTE + 1)).toEqual({ blocked: false });
+  });
+
+  it("expires an observation that carried no resetAt instead of pausing forever", () => {
+    // GitHub Enterprise and malformed payloads produce a null resetAt.
+    recordGraphqlBudget(10, null, T0);
+
+    expect(pollBudgetState(T0 + MINUTE)).toMatchObject({ blocked: true, reason: "remaining" });
+    // One budget window later the reading is meaningless and must be dropped,
+    // even though only the poll path could ever refresh it.
+    expect(pollBudgetState(T0 + 60 * MINUTE)).toEqual({ blocked: false });
   });
 
   it("clears the reactive cooldown on a healthy observation", () => {

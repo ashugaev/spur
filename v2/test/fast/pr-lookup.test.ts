@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as fsModule from "node:fs";
 import type * as ghModule from "../../src/gh.js";
 import type { PrLookupOutcome, PrLookupRequest } from "../../src/pr-lookup.js";
 import type { PrRepoSlug } from "../../src/pr-lookup-cache.js";
 
-const { ghMock, readRemoteUrlMock } = vi.hoisted(() => ({
+const { ghMock, readRemoteUrlsMock, existsSyncMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
-  readRemoteUrlMock: vi.fn(),
+  readRemoteUrlsMock: vi.fn(),
+  existsSyncMock: vi.fn((_path: string) => true),
 }));
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -13,7 +15,11 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
-  readRemoteUrl: readRemoteUrlMock,
+  readRemoteUrls: readRemoteUrlsMock,
+}));
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof fsModule>()),
+  existsSync: existsSyncMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: vi.fn(),
@@ -91,7 +97,8 @@ function allNodesEmpty(count: number): Record<string, unknown[]> {
 describe("pr lookup batching", () => {
   beforeEach(() => {
     ghMock.mockReset();
-    readRemoteUrlMock.mockReset();
+    readRemoteUrlsMock.mockReset().mockResolvedValue(new Map());
+    existsSyncMock.mockReset().mockReturnValue(true);
     _resetPrLookupsForTests();
     _resetGhUsageForTests();
   });
@@ -221,13 +228,35 @@ describe("pr lookup batching", () => {
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "repo_unresolved" });
   });
 
-  it("adopts a fork's upstream parent instead of recording a false negative", async () => {
-    ghMock.mockResolvedValueOnce(
+  it("retries a fork against its parent in the same resolve", async () => {
+    ghMock
+      .mockResolvedValueOnce(
+        envelope(
+          {},
+          {
+            repo: {
+              isFork: true,
+              parent: { nameWithOwner: "upstream-org/spur" },
+              a0: { nodes: [] },
+            },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(envelope({ a0: [prNode(77, "OPEN")] }));
+
+    const outcomes = await resolvePrLookups(requestsFor(["feature/a"]));
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]).toContain("owner=upstream-org");
+    expect(outcomes[0]).toMatchObject({ status: "found", pr: { number: 77 } });
+  });
+
+  it("never answers absent for a fork whose parent is also a fork", async () => {
+    ghMock.mockResolvedValue(
       envelope(
         {},
         {
           repo: {
-            nameWithOwner: "ashugaev/spur",
             isFork: true,
             parent: { nameWithOwner: "upstream-org/spur" },
             a0: { nodes: [] },
@@ -236,18 +265,30 @@ describe("pr lookup batching", () => {
       ),
     );
 
-    const first = await resolvePrLookups(requestsFor(["feature/a"]));
-    expect(first[0]).toMatchObject({ status: "skipped", reason: "repo_unresolved" });
-    expect(ghMock).toHaveBeenCalledTimes(1);
+    const outcomes = await resolvePrLookups(requestsFor(["feature/a"]));
 
-    // The parent slug is adopted for the next resolve of the same worktree.
-    readRemoteUrlMock.mockImplementation((_path: string, remote: string) =>
-      Promise.resolve(remote === "origin" ? "git@github.com:ashugaev/spur.git" : null),
-    );
-    await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({
-      owner: "upstream-org",
-      name: "spur",
-    });
+    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "repo_unresolved" });
+  });
+
+  it("skips a branch whose nodes came back unreadable instead of recording absent", async () => {
+    ghMock.mockResolvedValue(envelope({ a0: [null] }));
+
+    const outcomes = await resolvePrLookups(requestsFor(["feature/a"]));
+
+    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "error" });
+  });
+
+  it("uses a worktree that still exists as gh's cwd for the repo's batch", async () => {
+    ghMock.mockResolvedValue(envelope({ a0: [], a1: [] }));
+    existsSyncMock.mockImplementation((path: string) => path !== "/tmp/gone");
+
+    await resolvePrLookups([
+      { slug: SLUG, branch: "feature/a", worktreePath: "/tmp/gone" },
+      { slug: SLUG, branch: "feature/b", worktreePath: CWD },
+    ]);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(ghMock.mock.calls[0]?.[0]).toBe(CWD);
   });
 
   it("spends zero gh calls and skips on budget when the ledger is blocked", async () => {
@@ -301,29 +342,82 @@ describe("pr lookup batching", () => {
     expect(ghMock).toHaveBeenCalledTimes(0);
   });
 
-  it("resolves the repo slug from upstream first, then origin, and memoizes it", async () => {
-    readRemoteUrlMock.mockImplementation((_path: string, remote: string) =>
-      Promise.resolve(remote === "upstream" ? "https://github.com/base-org/spur.git" : null),
+  it("resolves the repo slug from upstream first, then origin, in one git spawn", async () => {
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([
+        ["origin", "git@github.com:fork-org/spur.git"],
+        ["upstream", "https://github.com/base-org/spur.git"],
+      ]),
     );
 
     await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({ owner: "base-org", name: "spur" });
     await expect(resolvePrLookupRepo(CWD)).resolves.toEqual({ owner: "base-org", name: "spur" });
-    expect(readRemoteUrlMock).toHaveBeenCalledTimes(1);
+    expect(readRemoteUrlsMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns null and spends no gh call when no remote resolves", async () => {
-    readRemoteUrlMock.mockResolvedValue(null);
+    readRemoteUrlsMock.mockResolvedValue(new Map());
 
     await expect(resolvePrLookupRepo(CWD)).resolves.toBeNull();
     expect(ghMock).toHaveBeenCalledTimes(0);
-    expect(readRemoteUrlMock).toHaveBeenCalledTimes(2);
+    expect(readRemoteUrlsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("parses ssh, https and bare github remotes", () => {
+  it("expires a memoized miss in seconds and never blackholes a repo for the full TTL", async () => {
+    const t0 = 1_800_000_000_000;
+    // One transient git failure looks exactly like "no remote".
+    readRemoteUrlsMock.mockResolvedValueOnce(new Map());
+    await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toBeNull();
+
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
+    );
+    // Inside the miss TTL the memo still answers null, but only for seconds.
+    await expect(resolvePrLookupRepo(CWD, { nowMs: t0 + 5_000 })).resolves.toBeNull();
+    await expect(resolvePrLookupRepo(CWD, { nowMs: t0 + 20_000 })).resolves.toEqual(SLUG);
+  });
+
+  it("lets an interactive caller bypass a memoized miss outright", async () => {
+    const t0 = 1_800_000_000_000;
+    readRemoteUrlsMock.mockResolvedValueOnce(new Map());
+    await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toBeNull();
+
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
+    );
+    await expect(
+      resolvePrLookupRepo(CWD, { nowMs: t0 + 1_000, bypassMissMemo: true }),
+    ).resolves.toEqual(SLUG);
+  });
+
+  it("keeps a resolved slug memoized for the full TTL", async () => {
+    const t0 = 1_800_000_000_000;
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([["origin", "git@github.com:ashugaev/spur.git"]]),
+    );
+
+    await expect(resolvePrLookupRepo(CWD, { nowMs: t0 })).resolves.toEqual(SLUG);
+    await expect(
+      resolvePrLookupRepo(CWD, { nowMs: t0 + 29 * 60_000, bypassMissMemo: true }),
+    ).resolves.toEqual(SLUG);
+    expect(readRemoteUrlsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("parses ssh, https, enterprise and ssh-alias github remotes", () => {
     expect(parseRepoSlugFromRemoteUrl("git@github.com:ashugaev/spur.git")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("https://github.com/ashugaev/spur")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("ssh://git@github.com/ashugaev/spur.git")).toEqual(SLUG);
+    // Multi-key ssh alias: gh resolves the host from its own config, so the
+    // slug is all this needs to produce.
+    expect(parseRepoSlugFromRemoteUrl("git@github-work:ashugaev/spur.git")).toEqual(SLUG);
+    // GitHub Enterprise hosts.
+    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com/ashugaev/spur.git")).toEqual(SLUG);
+    expect(parseRepoSlugFromRemoteUrl("git@github.corp.example:ashugaev/spur.git")).toEqual(SLUG);
+    expect(parseRepoSlugFromRemoteUrl("https://github.mycorp.com:8443/ashugaev/spur")).toEqual(SLUG);
+    // Other forges keep their own review provider.
     expect(parseRepoSlugFromRemoteUrl("https://gitlab.com/ashugaev/spur.git")).toBeNull();
+    expect(parseRepoSlugFromRemoteUrl("git@bitbucket.org:ashugaev/spur.git")).toBeNull();
+    expect(parseRepoSlugFromRemoteUrl("/srv/repos/spur")).toBeNull();
     expect(parseRepoSlugFromRemoteUrl("not a url")).toBeNull();
   });
 
@@ -334,7 +428,7 @@ describe("pr lookup batching", () => {
       { alias: "a0", branch: "feature/a" },
       { alias: "a1", branch: "feature/b" },
     ]);
-    expect(query).toContain("rateLimit{limit cost remaining resetAt}");
+    expect(query).toContain("rateLimit{cost remaining resetAt}");
     expect(query).toContain("r: repository(owner:$owner,name:$name)");
     expect(query).toContain("a0: pullRequests(headRefName:$b0,first:5");
     expect(query).toContain("a1: pullRequests(headRefName:$b1,first:5");

@@ -7,7 +7,7 @@ const { existsSyncMock } = vi.hoisted(() => ({
 }));
 const ghMock = vi.fn();
 const glabMock = vi.fn();
-const readRemoteUrlMock = vi.fn();
+const readRemoteUrlsMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -154,7 +154,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUncommittedChanges: vi.fn(),
   hasUnpushedCommits: vi.fn(),
   readCurrentBranch: readCurrentBranchMock,
-  readRemoteUrl: readRemoteUrlMock,
+  readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
@@ -339,11 +339,9 @@ describe("PR auto-detect", () => {
     readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     existsSyncMock.mockReturnValue(true);
-    readRemoteUrlMock
+    readRemoteUrlsMock
       .mockReset()
-      .mockImplementation((_repoPath: string, remote: string) =>
-        Promise.resolve(remote === "origin" ? "git@github.com:acme/api.git" : null),
-      );
+      .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
   });
 
   afterEach(() => {
@@ -623,12 +621,15 @@ describe("PR auto-detect", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
-    // Five attempts spaced past the 30s throttle exhaust the waiting limit.
-    // Only the attempts that also clear the cache backoff spend a gh call: the
-    // attempt at 70s does (60s step), the ones at 35s/105s/140s do not.
+    // Cache-skipped sweeps do not consume the waiting limit. The first 175s
+    // therefore contain only the initial lookup and the 60s-backoff retry.
     await vi.advanceTimersByTimeAsync(5 * 35_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+
+    // The remaining retries follow the 2m, 4m and capped 5m backoff steps.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     const callsAtLimit = ghMock.mock.calls.length;
-    expect(callsAtLimit).toBe(2);
+    expect(callsAtLimit).toBe(PR_WAITING_LIMIT);
     expect(
       (
         service as unknown as { prCheckTrackers: Map<string, { waitingChecks: number }> }

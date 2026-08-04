@@ -440,6 +440,17 @@ const PR_CHECK_THROTTLE_MS = 30_000;
 // backoff cap. isTerminalSessionStatus is deliberately not widened for this —
 // 16 other call sites depend on its current meaning.
 const PR_CHECK_IDLE_THROTTLE_MS = 30 * 60_000;
+// A session's resolved (branch, repo slug) is remembered this long so a session
+// whose lookup is not due yet — and a session flapping between working and
+// waiting, which resets the throttle — costs zero git spawns. A branch renamed
+// inside the window binds one window late at worst.
+const PR_DISCOVERY_MEMO_TTL_MS = 5 * 60_000;
+// Total wall clock one sweep may spend resolving branches and slugs from git.
+// Bounded because the sweep awaits these spawns in sequence: a cold start has no
+// memo for any session, and 400 unbudgeted spawns behind a hung mount would
+// stall attention detection for the whole fleet. Sessions past the budget keep
+// their throttle untouched and are picked up by the next sweep.
+const PR_CHECK_GIT_BUDGET_MS = 2_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
@@ -459,6 +470,8 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+  /** Last git-resolved discovery target, so the cache can be read spawn-free. */
+  discovery?: { branch: string; slug: PrRepoSlug | null; resolvedAt: number };
 }
 
 export class SessionResourceNotFoundError extends Error {
@@ -1881,6 +1894,8 @@ export class SessionService {
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
+  /** Git wall clock spent by the current sweep resolving PR discovery targets. */
+  private prCheckGitSpentMs = 0;
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
   // considered rate-limited; sessionId -> per-episode rotation count.
   private readonly claudeAccountRateLimit = new Map<string, number>();
@@ -2883,6 +2898,7 @@ export class SessionService {
         (session) => !isTerminalSessionStatus(session.status),
       );
       const claudeAccounts = this.computeClaudeAccountsView();
+      this.prCheckGitSpentMs = 0;
       for (const session of sessions) {
         const view = await this.enrich(session, claudeAccounts);
         await this.checkPrForSession(session, view.state);
@@ -3175,23 +3191,44 @@ export class SessionService {
     ) {
       return;
     }
+    const capMs = live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS;
 
-    tracker.lastCheckAt = Date.now();
-    if (state === "waiting") {
-      tracker.waitingChecks += 1;
+    // Persisted cache before any subprocess: a branch whose lookup is not due
+    // must cost nothing at all, or the graphql burst is traded for a git one.
+    const memo = tracker.discovery;
+    if (
+      memo &&
+      Date.now() - memo.resolvedAt < PR_DISCOVERY_MEMO_TTL_MS &&
+      memo.slug &&
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, memo.slug, memo.branch), capMs)
+    ) {
+      tracker.lastCheckAt = Date.now();
+      return;
     }
 
+    // Past here the sweep pays for git. Out of budget means "next sweep", with
+    // the throttle deliberately left untouched.
+    if (this.prCheckGitSpentMs >= PR_CHECK_GIT_BUDGET_MS) {
+      return;
+    }
+    const gitStartedAt = Date.now();
     const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
     // git only, no GitHub budget, and memoized per worktree.
     const slug = await resolvePrLookupRepo(session.worktreePath);
+    this.prCheckGitSpentMs += Date.now() - gitStartedAt;
+    tracker.discovery = { branch: discoveryBranch, slug, resolvedAt: Date.now() };
+
+    tracker.lastCheckAt = Date.now();
     if (
       slug &&
-      !isPrLookupDue(
-        readPrLookupEntry(this.config.dataDir, slug, discoveryBranch),
-        live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS,
-      )
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, slug, discoveryBranch), capMs)
     ) {
       return;
+    }
+    // Counted here, not above: the waiting limit exists to stop repeated
+    // lookups, so an attempt that performed none must not burn a slot.
+    if (state === "waiting") {
+      tracker.waitingChecks += 1;
     }
 
     // Fire and forget, but tracked so teardown can drain it — an unawaited

@@ -90,8 +90,13 @@ export function isGitHubRateLimitError(text: string): boolean {
 
 const GH_USAGE_MINUTE_MS = 60_000;
 const GH_USAGE_HOUR_MS = 60 * 60_000;
-const GH_USAGE_MAX_SUBCOMMAND_KEYS = 20;
 const GH_USAGE_OTHER_KEY = "other";
+// The observation window is at most this stale before it is dropped. GitHub's
+// GraphQL budget refills on a 60min rolling window, and a response that carried
+// no parseable `resetAt` gives no other way to learn that its `remaining`
+// reading has expired — without this bound such a reading would pause the poll
+// path until the daemon restarted.
+const GH_BUDGET_OBSERVATION_MAX_AGE_MS = 60 * 60_000;
 // 20% of the shared 5000/hr GraphQL budget stays reserved for interactive
 // agents; the daemon's poll path stops issuing lookups below it.
 export const GH_POLL_MIN_GRAPHQL_REMAINING = 1000;
@@ -113,6 +118,8 @@ export function setGhEventSink(dataDir: string | null): void {
 interface GhUsageWindow {
   startedAt: number;
   calls: number;
+  /** GraphQL points spent in the window, as billed by GitHub's `rateLimit.cost`. */
+  graphqlCost: number;
   bySubcommand: Map<string, number>;
 }
 
@@ -149,30 +156,88 @@ export function _resetGhUsageForTests(): void {
   ghEventSinkDataDir = null;
 }
 
+// Fixed key set. A gh argv must never be able to invent a key: the REST paths
+// the review providers build (`api repos/<owner>/<repo>/pulls/<n>/reviews?page=2`)
+// are unique per PR per page, and letting them through would bury the one key
+// that matters — `api graphql` — under thousands of one-shot keys.
+const GH_USAGE_COMMANDS = new Set([
+  "alias",
+  "api",
+  "auth",
+  "browse",
+  "cache",
+  "codespace",
+  "config",
+  "extension",
+  "gist",
+  "issue",
+  "label",
+  "org",
+  "pr",
+  "project",
+  "release",
+  "repo",
+  "ruleset",
+  "run",
+  "search",
+  "secret",
+  "status",
+  "variable",
+  "workflow",
+]);
+const GH_USAGE_SUBCOMMANDS = new Set([
+  "cancel",
+  "checks",
+  "clone",
+  "close",
+  "code",
+  "comment",
+  "commits",
+  "create",
+  "delete",
+  "diff",
+  "download",
+  "edit",
+  "get",
+  "issues",
+  "list",
+  "login",
+  "logout",
+  "merge",
+  "prs",
+  "ready",
+  "refresh",
+  "reopen",
+  "repos",
+  "rerun",
+  "set",
+  "set-default",
+  "status",
+  "token",
+  "upload",
+  "view",
+  "watch",
+]);
+
 function subcommandKey(args: string[]): string {
   const first = args[0];
-  if (!first || first.startsWith("-")) {
+  if (!first || !GH_USAGE_COMMANDS.has(first)) {
     return GH_USAGE_OTHER_KEY;
   }
   const second = args[1];
-  if (!second || second.startsWith("-")) {
+  if (first === "api") {
+    // The GraphQL budget and the REST budget are separate ceilings, so the two
+    // shapes are separate keys — and neither carries the path.
+    return second === "graphql" ? "api graphql" : "api rest";
+  }
+  if (!second || !GH_USAGE_SUBCOMMANDS.has(second)) {
     return first;
   }
   return `${first} ${second}`;
 }
 
 function countSubcommand(window: GhUsageWindow, key: string): void {
-  const existing = window.bySubcommand.get(key);
-  if (existing !== undefined) {
-    window.bySubcommand.set(key, existing + 1);
-    return;
-  }
-  // Cardinality ceiling: unknown shapes past the cap fold into "other" so a
-  // long-running daemon cannot grow the details object without bound. One slot
-  // is reserved for "other" itself, so the map never exceeds the cap.
-  const bucket =
-    window.bySubcommand.size >= GH_USAGE_MAX_SUBCOMMAND_KEYS - 1 ? GH_USAGE_OTHER_KEY : key;
-  window.bySubcommand.set(bucket, (window.bySubcommand.get(bucket) ?? 0) + 1);
+  window.bySubcommand.set(key, (window.bySubcommand.get(key) ?? 0) + 1);
 }
 
 function emitUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs: number): void {
@@ -189,10 +254,44 @@ function emitUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs:
       window: label,
       windowMs,
       calls: window.calls,
+      graphqlCost: window.graphqlCost,
       bySubcommand: Object.fromEntries(window.bySubcommand),
       graphqlRemaining: budget.remaining,
     },
   });
+}
+
+/**
+ * Emits whatever is accumulated right now and starts fresh. Windows are
+ * otherwise flushed lazily by the next invocation, which loses exactly the
+ * window that matters when the daemon goes quiet or the budget gate pauses
+ * lookups — the hour in which the budget was exhausted.
+ */
+function flushUsageWindows(nowMs: number): void {
+  if (minuteWindow) {
+    emitUsageWindow(minuteWindow, "minute", nowMs);
+    minuteWindow = null;
+  }
+  if (hourWindow) {
+    emitUsageWindow(hourWindow, "hour", nowMs);
+    hourWindow = null;
+  }
+}
+
+/**
+ * Adds GitHub's billed GraphQL points for one response to the open windows.
+ * Cost, not calls, is what the 5000/hr ceiling counts.
+ */
+export function noteGraphqlCost(points: number, nowMs: number = Date.now()): void {
+  if (!Number.isFinite(points) || points <= 0) {
+    return;
+  }
+  if (minuteWindow && nowMs - minuteWindow.startedAt < GH_USAGE_MINUTE_MS) {
+    minuteWindow.graphqlCost += points;
+  }
+  if (hourWindow && nowMs - hourWindow.startedAt < GH_USAGE_HOUR_MS) {
+    hourWindow.graphqlCost += points;
+  }
 }
 
 /**
@@ -211,10 +310,10 @@ export function noteGhInvocation(args: string[], nowMs: number = Date.now()): vo
     hourWindow = null;
   }
   if (!minuteWindow) {
-    minuteWindow = { startedAt: nowMs, calls: 0, bySubcommand: new Map() };
+    minuteWindow = { startedAt: nowMs, calls: 0, graphqlCost: 0, bySubcommand: new Map() };
   }
   if (!hourWindow) {
-    hourWindow = { startedAt: nowMs, calls: 0, bySubcommand: new Map() };
+    hourWindow = { startedAt: nowMs, calls: 0, graphqlCost: 0, bySubcommand: new Map() };
   }
   minuteWindow.calls += 1;
   hourWindow.calls += 1;
@@ -254,6 +353,18 @@ export function noteGitHubRateLimitHit(nowMs: number = Date.now()): void {
   budget.blockedUntilMs = nowMs + backoff;
 }
 
+/**
+ * Whether the last `remaining` reading has aged out. `resetAtMs` is the exact
+ * answer when GitHub gave one; otherwise the reading is capped by the length of
+ * the budget window so a null `resetAt` cannot produce an unclearable block.
+ */
+function isObservationExpired(nowMs: number): boolean {
+  if (budget.resetAtMs !== null) {
+    return nowMs >= budget.resetAtMs;
+  }
+  return budget.observedAtMs !== null && nowMs - budget.observedAtMs >= GH_BUDGET_OBSERVATION_MAX_AGE_MS;
+}
+
 export type GhPollBudgetState =
   | { blocked: false }
   | {
@@ -268,28 +379,37 @@ export type GhPollBudgetState =
  * flush time by the PR discovery path only.
  */
 export function pollBudgetState(nowMs: number = Date.now()): GhPollBudgetState {
-  if (budget.resetAtMs !== null && nowMs >= budget.resetAtMs) {
-    // The rate-limit window rolled over. Drop the stale observation and the
-    // cooldown without probing; `hits` survives so a repeat exhaustion keeps
-    // climbing the backoff until a healthy observation clears it.
+  if (isObservationExpired(nowMs)) {
+    // The rate-limit window rolled over. Drop the stale observation without
+    // probing. `blockedUntilMs` is NOT cleared here: a reactive cooldown from
+    // `noteGitHubRateLimitHit` is independent of this reading and routinely
+    // outlives it — clearing it would throw away the freshest signal there is.
+    // `hits` survives too, so a repeat exhaustion keeps climbing the backoff.
     budget.remaining = null;
     budget.resetAtMs = null;
     budget.observedAtMs = null;
-    budget.blockedUntilMs = null;
   }
   if (budget.blockedUntilMs !== null) {
     if (nowMs < budget.blockedUntilMs) {
-      return blockedState("cooldown", `cooldown:${budget.blockedUntilMs}`);
+      return blockedState("cooldown", `cooldown:${budget.blockedUntilMs}`, nowMs);
     }
     budget.blockedUntilMs = null;
   }
   if (budget.remaining !== null && budget.remaining < GH_POLL_MIN_GRAPHQL_REMAINING) {
-    return blockedState("remaining", `remaining:${budget.resetAtMs ?? budget.observedAtMs ?? 0}`);
+    return blockedState(
+      "remaining",
+      `remaining:${budget.resetAtMs ?? budget.observedAtMs ?? 0}`,
+      nowMs,
+    );
   }
   return { blocked: false };
 }
 
-function blockedState(reason: "cooldown" | "remaining", eventKey: string): GhPollBudgetState {
+function blockedState(
+  reason: "cooldown" | "remaining",
+  eventKey: string,
+  nowMs: number,
+): GhPollBudgetState {
   const resetAt = budget.resetAtMs === null ? null : new Date(budget.resetAtMs).toISOString();
   if (ghEventSinkDataDir && lastPausedEventKey !== eventKey) {
     lastPausedEventKey = eventKey;
@@ -299,6 +419,9 @@ function blockedState(reason: "cooldown" | "remaining", eventKey: string): GhPol
       message: `GitHub poll lookups paused (${reason})`,
       details: { remaining: budget.remaining, resetAt },
     });
+    // Land the usage windows that cover the exhaustion instead of waiting for
+    // an invocation that the pause itself may prevent.
+    flushUsageWindows(nowMs);
   }
   return { blocked: true, reason, remaining: budget.remaining, resetAt };
 }

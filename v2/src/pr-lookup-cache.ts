@@ -161,15 +161,6 @@ function persist(dataDir: string, slug: PrRepoSlug, entries: RepoEntries): void 
   }
 }
 
-/** All live entries for a repo, pruned and capped. */
-export function readPrLookupCache(
-  dataDir: string,
-  slug: PrRepoSlug,
-  nowMs: number = Date.now(),
-): Map<string, PrLookupEntry> {
-  return loadRepoEntries(dataDir, slug, nowMs);
-}
-
 export function readPrLookupEntry(
   dataDir: string,
   slug: PrRepoSlug,
@@ -241,7 +232,7 @@ export function clearPrLookupEntry(
   persist(dataDir, slug, entries);
 }
 
-export function prLookupBackoffMs(entry: PrLookupEntry, capMs: number): number {
+function prLookupBackoffMs(entry: PrLookupEntry, capMs: number): number {
   const steps = Math.max(0, entry.misses - 1);
   return Math.min(PR_LOOKUP_MISS_BASE_MS * 2 ** steps, capMs);
 }

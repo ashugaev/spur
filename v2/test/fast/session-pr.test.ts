@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
 import type { SessionRecord } from "../../src/types.js";
 
-const { ghMock, readCurrentBranchMock, readRemoteUrlMock } = vi.hoisted(() => ({
+const { ghMock, readCurrentBranchMock, readRemoteUrlsMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   readCurrentBranchMock: vi.fn(),
-  readRemoteUrlMock: vi.fn(),
+  readRemoteUrlsMock: vi.fn(),
 }));
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -14,7 +14,7 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
-  readRemoteUrl: readRemoteUrlMock,
+  readRemoteUrls: readRemoteUrlsMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: vi.fn(),
@@ -54,11 +54,9 @@ describe("session-pr", () => {
   beforeEach(() => {
     ghMock.mockReset();
     readCurrentBranchMock.mockReset().mockResolvedValue("feature/native-pr-binding");
-    readRemoteUrlMock
+    readRemoteUrlsMock
       .mockReset()
-      .mockImplementation((_path: string, remote: string) =>
-        Promise.resolve(remote === "origin" ? "git@github.com:acme/api.git" : null),
-      );
+      .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
     _resetPrLookupsForTests();
   });
 
@@ -214,13 +212,71 @@ describe("session-pr", () => {
     expect(call).not.toContain("list");
   });
 
-  it("returns null without a gh call when no github remote resolves", async () => {
-    readRemoteUrlMock.mockResolvedValue(null);
+  it("falls back to gh pr list when the remote yields no usable owner/name", async () => {
+    // A GitHub Enterprise host Spur cannot recognize by name, or an ssh alias:
+    // gh resolves the host itself, so ask it per branch instead of reporting
+    // "no PR" and letting teardown delete the branch under an open PR.
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@code.mycorp.com:acme/api.git"]]));
+    ghMock.mockResolvedValue(
+      JSON.stringify([
+        { number: 42, title: "Fix checkout", url: "https://github.com/acme/api/pull/42" },
+      ]),
+    );
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).resolves.toEqual({
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api-a1b2",
+      "pr",
+      "list",
+      "--head",
+      "feature/native-pr-binding",
+      "--json",
+      "number,title,url",
+      "--limit",
+      "1",
+    );
+  });
+
+  it("returns null when the per-branch fallback finds no PR", async () => {
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockResolvedValue("[]");
 
     await expect(
       discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
     ).resolves.toBeNull();
-    expect(ghMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("throws instead of reporting no PR when the lookup is rate limited", async () => {
+    ghMock.mockRejectedValue(
+      new Error("gh: API rate limit exceeded for user ID 1; see the rate limit documentation"),
+    );
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).rejects.toThrow(/rate limit exceeded/i);
+  });
+
+  it("throws instead of reporting no PR when GitHub answers HTTP 502", async () => {
+    ghMock.mockRejectedValue(new Error("gh: HTTP 502: Bad gateway (https://api.github.com/graphql)"));
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).rejects.toThrow(/HTTP 502/);
+  });
+
+  it("throws when the per-branch fallback itself fails", async () => {
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockRejectedValue(new Error("gh: HTTP 502: Bad gateway"));
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).rejects.toThrow(/HTTP 502/);
   });
 
   it("returns null for a branch whose newest PR is merged", async () => {

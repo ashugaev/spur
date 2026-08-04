@@ -1,15 +1,19 @@
-import { gh, pollBudgetState, recordGraphqlBudget } from "./gh.js";
+import { existsSync } from "node:fs";
+import { gh, noteGraphqlCost, pollBudgetState, recordGraphqlBudget } from "./gh.js";
 import type { PrLookupTerminalPr, PrRepoSlug } from "./pr-lookup-cache.js";
-import { readRemoteUrl } from "./workspace.js";
+import { readRemoteUrls } from "./workspace.js";
 
 // Batched PR discovery.
 //
 // One `gh api graphql` per repo per flush, many branches per query, instead of
-// one `gh pr list --head` per branch per sweep. The measured GraphQL cost of a
-// 50-alias `first:5` query is 1 point — the same as a single `gh pr list` — and
-// the response carries the `rateLimit` block, so the shared budget is learned
-// for free. Auth stays inside `gh`: no GITHUB_TOKEN handling here, and gh stays
-// the process's sole spawner so invocation accounting keeps covering everything.
+// one `gh pr list --head` per branch per sweep. A 50-alias `first:5` query asks
+// for 250 nodes, which GitHub bills as 3 points of the 5000/hr GraphQL budget
+// (nodes/100, rounded up, summed across connections) — the response's
+// `rateLimit` block carries the measured `cost`, so nothing here has to assert
+// it. The same block teaches the shared budget ledger for free. Auth and the
+// target host stay inside `gh`: no GITHUB_TOKEN and no hostname handling here,
+// and gh stays the process's sole spawner so invocation accounting keeps
+// covering everything.
 
 // 50 aliases build a ~7 KB query string: 5% of the 131072-byte single-argv
 // ceiling (MAX_ARG_STRLEN) and 0.3% of ARG_MAX, so argv cannot approach E2BIG
@@ -18,6 +22,11 @@ const PR_LOOKUP_BATCH_SIZE = 50;
 // A worktree's remote is re-read at most this often. A remote rewrite is picked
 // up on the next expiry.
 const REPO_SLUG_MEMO_TTL_MS = 30 * 60_000;
+// A remote read that resolved nothing is not an answer: it is also what one
+// transient git failure looks like. Memoize a miss for seconds, never for the
+// full TTL — the same memo backs teardown's open-PR check, and blackholing it
+// for half an hour would hide an open PR from the user prompt.
+const REPO_SLUG_MISS_MEMO_TTL_MS = 15_000;
 // Newest PRs per branch. A branch whose newest PRs are all merged/closed is
 // classified terminal instead of climbing the miss backoff.
 const PR_LOOKUP_PRS_PER_BRANCH = 5;
@@ -56,18 +65,14 @@ interface SlugMemoEntry {
 interface PendingRequest {
   request: PrLookupRequest;
   settle: (outcome: PrLookupOutcome) => void;
+  settled: boolean;
 }
 
 const slugMemo = new Map<string, SlugMemoEntry>();
-// Fork redirects: a repo whose PRs live on its upstream parent. Learned from
-// the `isFork`/`parent` fields that ride inside the batch response, so no extra
-// query is spent discovering it.
-const baseRepoRedirects = new Map<string, PrRepoSlug>();
 const pending = new Map<string, PendingRequest[]>();
 
 export function _resetPrLookupsForTests(): void {
   slugMemo.clear();
-  baseRepoRedirects.clear();
   pending.clear();
 }
 
@@ -79,45 +84,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * A host Spur treats as GitHub: github.com, a GitHub Enterprise host, or a
+ * local ssh alias for either. gh resolves the actual API host itself (its own
+ * config, GH_HOST), exactly as every other gh call in the daemon does, so the
+ * slug alone is enough here. Hosts with no `github` label — gitlab.com and
+ * friends — stay unparseable on purpose: their own review provider owns them.
+ */
+function isGithubHost(host: string): boolean {
+  return host
+    .toLowerCase()
+    .split(".")
+    .some((label) => label.includes("github"));
+}
+
 export function parseRepoSlugFromRemoteUrl(url: string): PrRepoSlug | null {
   const trimmed = url.trim().replace(/\.git$/, "");
-  const match =
-    /^(?:https?:\/\/|git:\/\/|ssh:\/\/)?(?:[^@/]+@)?[^/:]*github\.com[/:]([^/]+)\/([^/]+)$/.exec(
-      trimmed,
-    );
-  const owner = match?.[1];
-  const name = match?.[2];
+  // Both remote shapes: scp-like `git@host:owner/repo` and
+  // `scheme://[user@]host[:port]/owner/repo`.
+  const match = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[/:](.+)$/i.exec(trimmed);
+  const host = match?.[1];
+  const path = match?.[2];
+  if (!host || !path || !isGithubHost(host)) {
+    return null;
+  }
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (segments.length !== 2) {
+    return null;
+  }
+  const [owner, name] = segments;
   if (!owner || !name) {
     return null;
   }
   return { owner, name };
 }
 
+export interface ResolvePrLookupRepoOptions {
+  nowMs?: number;
+  /**
+   * Ignore a memoized miss and re-read the remotes. Interactive callers pass
+   * this so a transient git failure recorded by a sweep cannot answer "no
+   * repo" for them.
+   */
+  bypassMissMemo?: boolean;
+}
+
 /**
  * Repo slug for a worktree, from the `upstream` remote when present, else
- * `origin`. Memoized per worktree: git spawns, never GitHub budget.
+ * `origin`. One git spawn, never any GitHub budget, memoized per worktree.
  */
 export async function resolvePrLookupRepo(
   worktreePath: string,
-  nowMs: number = Date.now(),
+  options: ResolvePrLookupRepoOptions = {},
 ): Promise<PrRepoSlug | null> {
+  const nowMs = options.nowMs ?? Date.now();
   const memo = slugMemo.get(worktreePath);
-  if (memo && nowMs - memo.readAt < REPO_SLUG_MEMO_TTL_MS) {
-    return memo.slug === null ? null : (baseRepoRedirects.get(slugKey(memo.slug)) ?? memo.slug);
+  if (memo) {
+    const ttlMs = memo.slug ? REPO_SLUG_MEMO_TTL_MS : REPO_SLUG_MISS_MEMO_TTL_MS;
+    const usable = memo.slug !== null || options.bypassMissMemo !== true;
+    if (usable && nowMs - memo.readAt < ttlMs) {
+      return memo.slug;
+    }
   }
+  const remotes = await readRemoteUrls(worktreePath);
   let slug: PrRepoSlug | null = null;
   for (const remote of ["upstream", "origin"]) {
-    const url = await readRemoteUrl(worktreePath, remote);
+    const url = remotes.get(remote);
     slug = url ? parseRepoSlugFromRemoteUrl(url) : null;
     if (slug) {
       break;
     }
   }
   slugMemo.set(worktreePath, { slug, readAt: nowMs });
-  if (!slug) {
-    return null;
-  }
-  return baseRepoRedirects.get(slugKey(slug)) ?? slug;
+  return slug;
 }
 
 export function buildAliasedBranchQuery(branches: string[]): {
@@ -134,7 +173,7 @@ export function buildAliasedBranchQuery(branches: string[]): {
       `${entry.alias}: pullRequests(headRefName:$${branchVar},first:${PR_LOOKUP_PRS_PER_BRANCH},orderBy:{field:CREATED_AT,direction:DESC}){nodes{number title url state}}`,
     );
   }
-  const query = `query(${varDecls.join(",")}){rateLimit{limit cost remaining resetAt} r: repository(owner:$owner,name:$name){nameWithOwner isFork parent{nameWithOwner} ${fields.join(" ")}}}`;
+  const query = `query(${varDecls.join(",")}){rateLimit{cost remaining resetAt} r: repository(owner:$owner,name:$name){isFork parent{nameWithOwner} ${fields.join(" ")}}}`;
   return { query, aliases };
 }
 
@@ -209,6 +248,11 @@ function outcomeForNodes(nodesRaw: unknown): PrLookupOutcome {
     return { status: "skipped", reason: "error", message: "malformed pullRequests payload" };
   }
   const nodes = nodesRaw.map(parsePrNode).filter((node): node is PrLookupPr => node !== null);
+  if (nodes.length !== nodesRaw.length) {
+    // Some node came back unreadable (a null entry whose per-alias error had no
+    // usable path, say). The branch's state is unknown, not "no PR".
+    return { status: "skipped", reason: "error", message: "unreadable pullRequests node" };
+  }
   const open = nodes.find((node) => node.state === "OPEN");
   if (open) {
     return { status: "found", pr: open };
@@ -222,7 +266,16 @@ function outcomeForNodes(nodesRaw: unknown): PrLookupOutcome {
 
 function recordBudgetFromEnvelope(data: Record<string, unknown>, nowMs: number): void {
   const rateLimit = data["rateLimit"];
-  if (!isRecord(rateLimit) || typeof rateLimit["remaining"] !== "number") {
+  if (!isRecord(rateLimit)) {
+    return;
+  }
+  const cost = rateLimit["cost"];
+  if (typeof cost === "number") {
+    // Points, not calls: the only number that can be compared against the
+    // 5000/hr ceiling.
+    noteGraphqlCost(cost, nowMs);
+  }
+  if (typeof rateLimit["remaining"] !== "number") {
     return;
   }
   const resetAt = rateLimit["resetAt"];
@@ -231,15 +284,10 @@ function recordBudgetFromEnvelope(data: Record<string, unknown>, nowMs: number):
 }
 
 /**
- * Learns a fork's upstream parent from the repository block already in the
- * response, so the next flush queries the repo that actually owns the PRs. The
- * current chunk is skipped rather than answered: a fork's own `pullRequests`
- * connection is empty, and recording that as "no PR" would be a false negative.
+ * The fork's upstream parent, read from the repository block already in the
+ * response, or null when the response names no usable one.
  */
-function adoptBaseRepo(slug: PrRepoSlug, repo: Record<string, unknown>): PrRepoSlug | null {
-  if (repo["isFork"] !== true) {
-    return null;
-  }
+function forkParentOf(slug: PrRepoSlug, repo: Record<string, unknown>): PrRepoSlug | null {
   const parent = repo["parent"];
   if (!isRecord(parent) || typeof parent["nameWithOwner"] !== "string") {
     return null;
@@ -252,15 +300,19 @@ function adoptBaseRepo(slug: PrRepoSlug, repo: Record<string, unknown>): PrRepoS
   if (slugKey(parentSlug) === slugKey(slug)) {
     return null;
   }
-  baseRepoRedirects.set(slugKey(slug), parentSlug);
   return parentSlug;
 }
 
-async function runChunk(
+interface ChunkAttempt {
+  results: Map<string, PrLookupOutcome>;
+  forkParent: PrRepoSlug | null;
+}
+
+async function runChunkOnce(
   slug: PrRepoSlug,
   cwd: string,
   branches: string[],
-): Promise<Map<string, PrLookupOutcome>> {
+): Promise<ChunkAttempt> {
   const results = new Map<string, PrLookupOutcome>();
   const { query, aliases } = buildAliasedBranchQuery(branches);
   const args = [
@@ -295,7 +347,7 @@ async function runChunk(
         message: failure ?? "malformed graphql response",
       });
     }
-    return results;
+    return { results, forkParent: null };
   }
   recordBudgetFromEnvelope(data, Date.now());
 
@@ -308,18 +360,23 @@ async function runChunk(
         message: failure ?? `repository ${slugKey(slug)} not resolvable`,
       });
     }
-    return results;
+    return { results, forkParent: null };
   }
-  const parentSlug = adoptBaseRepo(slug, repo);
-  if (parentSlug) {
+  if (repo["isFork"] === true) {
+    // A fork's own `pullRequests` connection does not contain the PRs it opened
+    // against its parent, so its answer would be a false negative. Never absent
+    // from here — with a parent named, the caller asks the parent instead.
+    const forkParent = forkParentOf(slug, repo);
     for (const entry of aliases) {
       results.set(entry.branch, {
         status: "skipped",
         reason: "repo_unresolved",
-        message: `${slugKey(slug)} is a fork; retrying against ${slugKey(parentSlug)}`,
+        message: forkParent
+          ? `${slugKey(slug)} is a fork of ${slugKey(forkParent)}`
+          : `${slugKey(slug)} is a fork with no resolvable parent`,
       });
     }
-    return results;
+    return { results, forkParent };
   }
 
   const errorsByAlias = gqlErrorsByAlias(
@@ -343,7 +400,22 @@ async function runChunk(
     }
     results.set(entry.branch, outcomeForNodes(field["nodes"]));
   }
-  return results;
+  return { results, forkParent: null };
+}
+
+async function runChunk(
+  slug: PrRepoSlug,
+  cwd: string,
+  branches: string[],
+): Promise<Map<string, PrLookupOutcome>> {
+  const attempt = await runChunkOnce(slug, cwd, branches);
+  if (!attempt.forkParent) {
+    return attempt.results;
+  }
+  // The PRs live on the parent. Ask it right away instead of burning the chunk:
+  // a fork-of-a-fork still comes back repo_unresolved, never absent.
+  const viaParent = await runChunkOnce(attempt.forkParent, cwd, branches);
+  return viaParent.results;
 }
 
 function chunked<T>(values: T[], size: number): T[][] {
@@ -356,34 +428,44 @@ function chunked<T>(values: T[], size: number): T[][] {
 
 /**
  * Resolves lookups now, one gh call per repo per chunk of 50 branches. The
- * budget ledger is deliberately NOT consulted here: this is the interactive
- * entry point (teardown's open-PR check), which keeps today's behavior. Only
- * the queued poll path defers to the ledger.
+ * budget ledger is deliberately NOT consulted on the interactive path (the
+ * teardown open-PR check), which keeps today's behavior. Only the queued poll
+ * path defers to the ledger.
  */
 export async function resolvePrLookups(requests: PrLookupRequest[]): Promise<PrLookupOutcome[]> {
-  return resolveLookups(requests, false);
+  return resolveLookups(requests, "interactive");
+}
+
+interface RepoGroup {
+  slug: PrRepoSlug;
+  /** Every requester's worktree, in request order; gh needs one that exists. */
+  cwds: string[];
+  indices: number[];
 }
 
 async function resolveLookups(
   requests: PrLookupRequest[],
-  respectBudget: boolean,
+  mode: "interactive" | "poll",
 ): Promise<PrLookupOutcome[]> {
   const outcomes = new Array<PrLookupOutcome>(requests.length);
-  const byRepo = new Map<string, { slug: PrRepoSlug; cwd: string; indices: number[] }>();
+  const byRepo = new Map<string, RepoGroup>();
   for (const [index, request] of requests.entries()) {
     const key = slugKey(request.slug);
     const group = byRepo.get(key);
     if (group) {
       group.indices.push(index);
+      if (!group.cwds.includes(request.worktreePath)) {
+        group.cwds.push(request.worktreePath);
+      }
       continue;
     }
-    byRepo.set(key, { slug: request.slug, cwd: request.worktreePath, indices: [index] });
+    byRepo.set(key, { slug: request.slug, cwds: [request.worktreePath], indices: [index] });
   }
 
   for (const group of byRepo.values()) {
     const branches = [...new Set(group.indices.map((index) => requests[index]?.branch ?? ""))];
     for (const chunk of chunked(branches, PR_LOOKUP_BATCH_SIZE)) {
-      const budget = respectBudget ? pollBudgetState() : ({ blocked: false } as const);
+      const budget = mode === "poll" ? pollBudgetState() : ({ blocked: false } as const);
       const chunkBranches = new Set(chunk);
       const results = budget.blocked
         ? new Map<string, PrLookupOutcome>(
@@ -396,7 +478,7 @@ async function resolveLookups(
               } satisfies PrLookupOutcome,
             ]),
           )
-        : await runChunk(group.slug, group.cwd, chunk);
+        : await runChunk(group.slug, pickGroupCwd(group), chunk);
       for (const index of group.indices) {
         const request = requests[index];
         if (!request || !chunkBranches.has(request.branch)) {
@@ -417,6 +499,21 @@ async function resolveLookups(
 }
 
 /**
+ * gh's cwd for a repo's batch. Any worktree of the repo will do, but it has to
+ * still be there at flush time: a worktree removed between enqueue and flush
+ * makes gh refuse the call and would skip the whole repo for the sweep.
+ */
+function pickGroupCwd(group: RepoGroup): string {
+  const first = group.cwds[0] ?? "";
+  for (const cwd of group.cwds) {
+    if (existsSync(cwd)) {
+      return cwd;
+    }
+  }
+  return first;
+}
+
+/**
  * Queues a lookup to ride the next flush. A repo whose pending set fills a
  * whole chunk flushes immediately; everything else is flushed by the caller at
  * the end of its sweep, which is the natural batch window.
@@ -428,27 +525,48 @@ export function enqueuePrLookup(request: PrLookupRequest): Promise<PrLookupOutco
     pending.set(key, queue);
   }
   return new Promise<PrLookupOutcome>((resolve) => {
-    queue.push({ request, settle: resolve });
+    queue.push({ request, settle: resolve, settled: false });
     if (queue.length >= PR_LOOKUP_BATCH_SIZE) {
       void flushRepo(key);
     }
   });
 }
 
+function settleEntry(entry: PendingRequest, outcome: PrLookupOutcome): void {
+  if (entry.settled) {
+    return;
+  }
+  entry.settled = true;
+  entry.settle(outcome);
+}
+
+/**
+ * Flushes one repo's queue. Never rejects and never leaves an entry unsettled:
+ * every awaiting `runPrCheck` must complete or the daemon's teardown drain
+ * hangs on it, and a floating rejection would take the process down.
+ */
 async function flushRepo(key: string): Promise<void> {
   const queue = pending.get(key);
   if (!queue || queue.length === 0) {
     return;
   }
   pending.delete(key);
-  const outcomes = await resolveLookups(
-    queue.map((entry) => entry.request),
-    true,
-  );
-  for (const [index, entry] of queue.entries()) {
-    entry.settle(
-      outcomes[index] ?? { status: "skipped", reason: "error", message: "no lookup outcome" },
+  try {
+    const outcomes = await resolveLookups(
+      queue.map((entry) => entry.request),
+      "poll",
     );
+    for (const [index, entry] of queue.entries()) {
+      settleEntry(
+        entry,
+        outcomes[index] ?? { status: "skipped", reason: "error", message: "no lookup outcome" },
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    for (const entry of queue) {
+      settleEntry(entry, { status: "skipped", reason: "error", message });
+    }
   }
 }
 
@@ -463,7 +581,7 @@ export async function flushPrLookups(): Promise<void> {
 export function cancelPendingPrLookups(): void {
   for (const queue of pending.values()) {
     for (const entry of queue) {
-      entry.settle({ status: "skipped", reason: "cancelled" });
+      settleEntry(entry, { status: "skipped", reason: "cancelled" });
     }
   }
   pending.clear();

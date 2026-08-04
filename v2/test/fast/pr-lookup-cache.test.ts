@@ -11,7 +11,6 @@ import {
   isPrLookupDue,
   markPrLookupMiss,
   markPrLookupTerminal,
-  readPrLookupCache,
   readPrLookupEntry,
 } from "../../src/pr-lookup-cache.js";
 
@@ -105,19 +104,31 @@ describe("pr lookup cache", () => {
     markPrLookupMiss(dataDir, SLUG, "fresh", T0 + 6 * 24 * 60 * MINUTE);
 
     _resetPrLookupCacheForTests();
-    const entries = readPrLookupCache(dataDir, SLUG, T0 + 7 * 24 * 60 * MINUTE + 1);
-    expect([...entries.keys()]).toEqual(["fresh"]);
+    const readAt = T0 + 7 * 24 * 60 * MINUTE + 1;
+    expect(readPrLookupEntry(dataDir, SLUG, "stale", readAt)).toBeNull();
+    expect(readPrLookupEntry(dataDir, SLUG, "fresh", readAt)?.branch).toBe("fresh");
   });
 
   it("caps a repo at 500 entries, evicting the oldest first", () => {
-    for (let index = 0; index < 501; index += 1) {
-      markPrLookupMiss(dataDir, SLUG, `branch-${index}`, T0 + index);
-    }
-    const entries = readPrLookupCache(dataDir, SLUG, T0 + 501);
-    expect(entries.size).toBe(500);
-    expect(entries.has("branch-0")).toBe(false);
-    expect(entries.has("branch-1")).toBe(true);
-    expect(entries.has("branch-500")).toBe(true);
+    const path = repoFile();
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        entries: Array.from({ length: 501 }, (_, index) => ({
+          branch: `branch-${index}`,
+          misses: 1,
+          lastCheckedAt: T0 + index,
+        })),
+      }),
+      "utf-8",
+    );
+    _resetPrLookupCacheForTests();
+
+    expect(readPrLookupEntry(dataDir, SLUG, "branch-0", T0 + 501)).toBeNull();
+    expect(readPrLookupEntry(dataDir, SLUG, "branch-1", T0 + 501)?.branch).toBe("branch-1");
+    expect(readPrLookupEntry(dataDir, SLUG, "branch-500", T0 + 501)?.branch).toBe("branch-500");
   });
 
   it("reads a corrupt file as empty", () => {
@@ -125,7 +136,7 @@ describe("pr lookup cache", () => {
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "{not json", "utf-8");
 
-    expect(readPrLookupCache(dataDir, SLUG, T0).size).toBe(0);
+    expect(readPrLookupEntry(dataDir, SLUG, "x", T0)).toBeNull();
   });
 
   it("reads an unknown version as empty", () => {
@@ -137,7 +148,7 @@ describe("pr lookup cache", () => {
       "utf-8",
     );
 
-    expect(readPrLookupCache(dataDir, SLUG, T0).size).toBe(0);
+    expect(readPrLookupEntry(dataDir, SLUG, "x", T0)).toBeNull();
   });
 
   it("keys a renamed branch separately", () => {
