@@ -7854,6 +7854,133 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("does not re-notify an unchanged needs_input session after enrich throws on one tick", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Baseline tick: no attention yet.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendDesktopNotificationMock).not.toHaveBeenCalled();
+
+    // First real tick: transitions to needs_input, notifies once.
+    mockClaudeJsonlState("needs_input");
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    // Second tick: enrich throws for this session (a transient tmux probe
+    // failure), aborting the loop body before attentionStates.set(view.id, ...)
+    // runs for it. Without carrying the previous value forward, the
+    // subsequent attentionStates.clear() + repopulate leaves this session
+    // absent from the map.
+    tmuxSessionExistsMock.mockImplementation(async () => {
+      throw new Error("boom: transient tmux probe failure");
+    });
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    // Third tick: enrich recovers; state is still needs_input, unchanged.
+    // Without the carry-forward fix, attentionStates.get(view.id) would read
+    // undefined here (not "needs_input"), so this observably-unchanged
+    // session would be re-notified — a duplicate desktop + Telegram ping.
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("carries the working->waiting nudge edge across a tick where enrich throws", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    const codexSessions = createSessionStore();
+    codexSessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    captureTmuxPaneMock.mockResolvedValue("Waiting on your next instruction.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Baseline tick: observed run state is "working".
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The hook file already flipped to "waiting" before the next tick, but
+    // that tick's enrich throws (transient tmux probe failure) before the
+    // loop body can record the observed run state for this session. Without
+    // carrying the previous run state forward, lastObservedRunStates loses
+    // "working" for this session on this aborted tick.
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:05.000Z",
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => {
+      throw new Error("boom: transient tmux probe failure");
+    });
+    await advanceSeconds(5);
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+
+    // Next tick: enrich recovers and observes "waiting" again. Without the
+    // carry-forward fix, prevRunState reads undefined here (not "working"),
+    // so the working->waiting transition is lost forever — this session's
+    // run state never went through "working" from the monitor's point of
+    // view, so maybeNudgeForgottenReply never fires.
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      expect.stringContaining("is waiting."),
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    service.dispose();
+  });
+
   it("sends an urgent desktop notification when a session enters errored state", async () => {
     const sessions = createSessionStore();
     sessions.set(
@@ -22089,6 +22216,7 @@ describe("SessionService", () => {
       prCheckTrackers: Map<string, unknown>;
       usageMenuConfirmedAt: Map<string, number>;
       claudeRotationEpisode: Map<string, unknown>;
+      attentionStates: Map<string, string>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
@@ -22328,12 +22456,11 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("reclaims a terminal session's scoped state even when another session's enrich throws", async () => {
+    it("reclaims a terminal session's scoped state even when another session's enrich never completes (sweep-before-loop ordering)", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ id: "api-1", worktree: false, tmuxSession: "api-1" }));
       sessions.set("api-2", runningSession({ id: "api-2", worktree: false, status: "completed" }));
-      sessions.set("api-3", runningSession({ id: "api-3", worktree: false, tmuxSession: "api-3" }));
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -22344,11 +22471,56 @@ describe("SessionService", () => {
       // seed a scoped-state entry the sweep is responsible for reclaiming.
       internals.codexMcpDialogOverrides.set("api-2", Date.now());
 
-      // api-1's enrich now throws synchronously inside classifySessionRecord's
-      // runtime read (readRuntimeSnapshot -> tmuxSessionExists). Before this
-      // fix, the sweep ran only after the per-session loop, so this single
-      // persistently-throwing session would abort the tick and disable
-      // reclamation for every map, forever.
+      // api-1's enrich never resolves on the next tick (a wedged runtime
+      // probe, not a throw): the per-session loop's sequential `await`
+      // blocks on it forever, so this pins ordering alone, independent of
+      // the per-session try/catch (a throw would be swallowed by the catch
+      // either way; a hang cannot be, so the loop past api-1 never runs
+      // regardless of whether the try/catch exists). If the sweep is moved
+      // back to after the loop, it would never run either, and api-2's
+      // entry would never be reclaimed — this is what distinguishes the
+      // ordering.
+      tmuxSessionExistsMock.mockImplementation((tmuxSession: string) => {
+        if (tmuxSession === "api-1") {
+          return new Promise<boolean>(() => {});
+        }
+        return Promise.resolve(true);
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await drainBaselineTicks(internals);
+
+      // The sweep ran before the loop reached (and hung on) api-1: api-2's
+      // terminal scoped state is reclaimed regardless.
+      expect(internals.codexMcpDialogOverrides.has("api-2")).toBe(false);
+
+      service.dispose();
+    });
+
+    it("still classifies a later session in the loop when an earlier session's enrich throws (per-session try/catch)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", worktree: false, tmuxSession: "api-1" }));
+      sessions.set("api-3", runningSession({ id: "api-3", worktree: false, tmuxSession: "api-3" }));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+
+      // Baseline saw "waiting" for every session (no attention entries yet),
+      // so attentionStates.has("api-3") is false here — the assertion below
+      // can only pass if api-3 is (re)classified during the throwing tick
+      // itself, not merely retained from an earlier tick.
+      mockClaudeJsonlState("needs_input");
+
+      // api-1's enrich throws synchronously inside classifySessionRecord's
+      // runtime read (readRuntimeSnapshot -> tmuxSessionExists). Without the
+      // per-session try/catch, this propagates out of the for loop, out of
+      // pollAttentionStates' own try/finally (uncaught there), and is only
+      // swallowed by runAttentionMonitor's outer catch — which aborts the
+      // whole tick before the nextStates map is ever merged into
+      // attentionStates, so api-3's needs_input transition is lost too.
       tmuxSessionExistsMock.mockImplementation(async (tmuxSession: string) => {
         if (tmuxSession === "api-1") {
           throw new Error("boom: tmux probe failed");
@@ -22359,9 +22531,9 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       await drainBaselineTicks(internals);
 
-      // The sweep still ran despite api-1's throw: api-2's terminal scoped
-      // state is reclaimed regardless.
-      expect(internals.codexMcpDialogOverrides.has("api-2")).toBe(false);
+      // api-1 was skipped, but api-3 was still classified: its needs_input
+      // attention state landed in attentionStates.
+      expect(internals.attentionStates.get("api-3")).toBe("needs_input");
 
       service.dispose();
     });

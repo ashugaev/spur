@@ -2975,6 +2975,20 @@ export class SessionService {
             await this.notifyAttention(view, attention);
           }
         } catch (error) {
+          // Carry the previous tick's values forward so an aborted tick can
+          // neither erase a still-current attention state (spurious
+          // re-notify next tick) nor erase a still-current run state (a
+          // working->waiting edge landing on the very next tick would
+          // otherwise never see its "working" predecessor). Only carry
+          // forward what was actually observed before; never invent one.
+          const previousAttention = this.attentionStates.get(session.id);
+          if (previousAttention !== undefined) {
+            nextStates.set(session.id, previousAttention);
+          }
+          const previousRunState = this.lastObservedRunStates.get(session.id);
+          if (previousRunState !== undefined) {
+            nextRunStates.set(session.id, previousRunState);
+          }
           const message = error instanceof Error ? error.message : String(error);
           this.logEvent("session.attention_monitor.session_failed", {
             level: "warn",
