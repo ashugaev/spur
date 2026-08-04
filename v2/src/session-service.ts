@@ -2603,11 +2603,13 @@ export class SessionService {
     registryPaths: string[],
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
+    const nextRegistryPaths = [...new Set(registryPaths)];
+    this.registryScanner.invalidateRemovedPaths(this.registryPaths, nextRegistryPaths);
     this.config = config;
     // Local project configs are parsed with the daemon config as defaults, so
     // every cached resolution is stale the moment the daemon config changes.
     this.sessionProjectCache.clear();
-    this.registryPaths = [...new Set(registryPaths)];
+    this.registryPaths = nextRegistryPaths;
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });

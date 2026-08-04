@@ -47,6 +47,7 @@ const addUnconfiguredProjectMock = vi.fn();
 const removeUnconfiguredProjectMock = vi.fn();
 const readConfigRegistryFileMock = vi.fn();
 const mutateConfigRegistryMock = vi.fn();
+const invalidateRemovedRegistryPathsMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
@@ -265,6 +266,10 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
           skipInvalid: true,
         });
         return { ...merged, newDiagnostics: [] };
+      }
+
+      invalidateRemovedPaths(previousPaths: string[], nextPaths: string[]): void {
+        invalidateRemovedRegistryPathsMock(previousPaths, nextPaths);
       }
     },
     upsertConfigRegistryPath: upsertConfigRegistryPathMock,
@@ -899,6 +904,7 @@ describe("SessionService", () => {
         },
       ) => mutate({ configPaths: ["/tmp/spur.yaml"], unconfiguredProjects: [] }),
     );
+    invalidateRemovedRegistryPathsMock.mockReset();
 
     buildAgentLaunchPlanMock
       .mockReset()
@@ -16272,6 +16278,21 @@ describe("SessionService", () => {
     await service.get("api-1");
 
     expect(loadProjectConfigMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates scanner ownership before applying fewer registry paths", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const config = baseConfig() as unknown as AppConfig;
+    service.applyConfig(config, ["/tmp/spur.yaml", "/tmp/old/spur.yaml"]);
+    invalidateRemovedRegistryPathsMock.mockClear();
+
+    service.applyConfig(config, ["/tmp/spur.yaml"]);
+
+    expect(invalidateRemovedRegistryPathsMock).toHaveBeenCalledWith(
+      ["/tmp/spur.yaml", "/tmp/old/spur.yaml"],
+      ["/tmp/spur.yaml"],
+    );
   });
 
   it("keeps enriching when the worktree config cannot be stat-ed", async () => {

@@ -2683,6 +2683,96 @@ describe("startServer", () => {
     }
   });
 
+  it("disconnects a symlink alias and reconnects its fresh retarget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const oldDir = join(root, "old");
+    const freshDir = join(root, "fresh");
+    const aliasDir = join(root, "alias");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(oldDir, { recursive: true });
+    await mkdir(freshDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const oldConfigPath = join(oldDir, "spur.yaml");
+    const freshConfigPath = join(freshDir, "spur.yaml");
+    await writeFile(
+      oldConfigPath,
+      ["projects:", "  old:", `    path: ${oldDir}`, "    sessionPrefix: old", ""].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      freshConfigPath,
+      ["projects:", "  fresh:", `    path: ${freshDir}`, "    sessionPrefix: fresh", ""].join("\n"),
+      "utf8",
+    );
+    fs.symlinkSync(oldDir, aliasDir, "dir");
+    const aliasConfigPath = join(aliasDir, "spur.yaml");
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const connectOld = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(connectOld.status).toBe(200);
+
+      const disconnect = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(disconnect.status).toBe(200);
+
+      await rm(aliasDir);
+      fs.symlinkSync(freshDir, aliasDir, "dir");
+
+      const reconnect = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(reconnect.status).toBe(200);
+      const payload = (await reconnect.json()) as { projects: Array<{ id: string }> };
+      expect(payload.projects.some((project) => project.id === "fresh")).toBe(true);
+      expect(payload.projects.some((project) => project.id === "old")).toBe(false);
+
+      expect(readConfigRegistryFile(dataDir).configPaths).toEqual([
+        fs.realpathSync(bootstrapConfigPath),
+        fs.realpathSync(aliasConfigPath),
+      ]);
+      expect(fs.realpathSync(aliasConfigPath)).toBe(fs.realpathSync(freshConfigPath));
+      expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(
+        fs.realpathSync(oldConfigPath),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("DELETE /projects/:id disconnects a configured project without touching its spur.yaml", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
