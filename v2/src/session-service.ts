@@ -9941,24 +9941,20 @@ export class SessionService {
     return { total: live.length, byProject, records: live };
   }
 
-  private admissionCandidateList(records: SessionRecord[]): string {
-    return [...records]
+  private admissionDenialAction(records: SessionRecord[]): string {
+    const candidates = [...records]
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
       .slice(0, 3)
       .map((session) => `${session.id} (${session.project})`)
       .join(", ");
+    return candidates
+      ? `Stop one of: ${candidates}.`
+      : "Wait for an in-flight spawn to finish, then stop a live session or retry.";
   }
 
   private admissionOccupancy(live: number, reserved: number): string {
     const claimed = live + reserved;
     return `${claimed} ${claimed === 1 ? "slot" : "slots"} claimed: ${live} live, ${reserved} reserved`;
-  }
-
-  private admissionDenialAction(records: SessionRecord[]): string {
-    const candidates = this.admissionCandidateList(records);
-    return candidates
-      ? `Stop one of: ${candidates}.`
-      : "Wait for an in-flight spawn to finish, then stop a live session or retry.";
   }
 
   // Runs at both admission gates (resolveSpawnTarget, restore). Never
