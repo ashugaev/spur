@@ -24120,6 +24120,34 @@ describe("SessionService", () => {
         expect.objectContaining({ cwd: "/repo/api" }),
       );
     });
+
+    it("still refuses to recover a worktree:false project session whose shared workspace is missing", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: false,
+        worktreePath: "/repo/api",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      workspaceExistsMock.mockReset().mockReturnValue(false);
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(
+        "Session api-1 cannot be recovered because its workspace is missing",
+      );
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("rate-limit reactivation", () => {
