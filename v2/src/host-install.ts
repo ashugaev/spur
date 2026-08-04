@@ -3,8 +3,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import { planCachePrune, type CachePlan } from "./cache-retention.js";
 import { dimText } from "./cli-view.js";
-import { DEFAULT_DISK_RETENTION, loadInstanceConfigReadOnly } from "./config.js";
+import {
+  DEFAULT_DISK_RETENTION,
+  loadInstanceConfigReadOnly,
+  type InstanceConfigReadResult,
+} from "./config.js";
 import { parseDfField } from "./disk-space.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import {
@@ -545,6 +550,73 @@ function checkHomeDiskHeadroom(home: string, warnFreeGb: number): HostInstallChe
   };
 }
 
+// Bounds the whole `planCachePrune` measurement, independent of any single
+// `du` chunk's own CACHE_MEASURE_TIMEOUT_MS (30s) — a host with several
+// large, unresponsive roots could otherwise chain multiple per-root
+// timeouts into a much longer `spur doctor` hang. Rejecting here never
+// aborts the underlying `du`/readdir work already in flight; it only stops
+// this check from waiting on it, so doctor can still finish and print.
+const RECLAIMABLE_CACHES_BUDGET_MS = 20_000;
+const RECLAIMABLE_CACHES_TOP_N = 5;
+
+function withBudget<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("measurement budget exceeded")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+function formatCacheGb(sizeKb: number): string {
+  return `${(sizeKb / (1024 * 1024)).toFixed(2)}GB`;
+}
+
+function renderReclaimableDetail(plan: CachePlan): string {
+  const prunable = plan.candidates
+    .filter((candidate) => candidate.verdict.kind === "prunable")
+    .sort((a, b) => b.entry.sizeKb - a.entry.sizeKb);
+  if (prunable.length === 0) {
+    return "no reclaimable caches found";
+  }
+  const top = prunable
+    .slice(0, RECLAIMABLE_CACHES_TOP_N)
+    .map(
+      (candidate) =>
+        `${formatCacheGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
+    )
+    .join("; ");
+  return `${formatCacheGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
+}
+
+// Ungated, like `home-disk-headroom` — always `ok:true, severity:"info"`, so
+// it can never move `hasErrorSeverity`/doctor's exit code. `du` writes
+// nothing, so this stays compliant with doctor's read-only contract; it
+// mirrors the `df`-unavailable degrade path (`checkHomeDiskHeadroom` above)
+// on any measurement error/timeout instead of throwing.
+async function checkReclaimableCaches(
+  home: string,
+  instanceConfig: InstanceConfigReadResult,
+): Promise<HostInstallCheck> {
+  const id = "reclaimable-caches";
+  try {
+    const plan = await withBudget(
+      planCachePrune({ home, instanceConfig }),
+      RECLAIMABLE_CACHES_BUDGET_MS,
+    );
+    return { id, ok: true, severity: "info", detail: renderReclaimableDetail(plan) };
+  } catch {
+    return { id, ok: true, severity: "info", detail: "skipped — measurement budget exceeded" };
+  }
+}
+
 async function portConflictCheck(
   id: ServiceId,
   unit: string,
@@ -940,6 +1012,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
       ? instanceConfig.config.diskRetention.warnFreeGb
       : DEFAULT_DISK_RETENTION.warnFreeGb;
   checks.push(checkHomeDiskHeadroom(home, warnFreeGb));
+  checks.push(await checkReclaimableCaches(home, instanceConfig));
 
   // C1/C2/E2 additionally require `unitsInstalled` (not just a readable
   // instance config) — an instance config can legitimately exist (e.g. a
