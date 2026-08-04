@@ -320,6 +320,47 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
   });
 
+  it("forgets pruned canonical paths before an orphan becomes a symlink", async () => {
+    const rootDir = await createTempDir("spur-scanner-pruned-alias-");
+    tempDirs.push(rootDir);
+    const fixture = await setupScannerFixture(rootDir);
+    const mountDir = join(rootDir, "mount");
+    const rawAlias = join(mountDir, "spur.yaml");
+    const targetDir = join(rootDir, "target");
+    mkdirSync(targetDir);
+    const targetPath = await writeConfig(
+      targetDir,
+      "spur.yaml",
+      configYaml({
+        port: 4310,
+        dataDir: fixture.dataDir,
+        worktreeDir: fixture.worktreeDir,
+        projectId: "target",
+        projectPath: join(rootDir, "repo-target"),
+        sessionPrefix: "target",
+      }),
+    );
+    const scanner = new ConfigRegistryScanner();
+
+    const pruned = scanner.scan({
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath, rawAlias],
+      protectedPaths: [fixture.basePath],
+    });
+    expect(pruned.configPaths).not.toContain(rawAlias);
+
+    symlinkSync(targetDir, mountDir, "dir");
+    const result = scanner.scan({
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath, rawAlias, targetPath],
+      protectedPaths: [fixture.basePath],
+    });
+
+    expect(result.configPaths).toEqual([fixture.basePath, realpathSync(targetPath)]);
+    expect(result.config.projects["target"]).toBeDefined();
+    expect(result.newDiagnostics).toHaveLength(0);
+  });
+
   it("emits each diagnostic once across repeated scans, independent of scan count", async () => {
     const rootDir = await createTempDir("spur-scanner-once-");
     tempDirs.push(rootDir);
@@ -531,64 +572,31 @@ describe("registry.ConfigRegistryScanner", () => {
   it("reuses a loaded config while its file stamp is unchanged", async () => {
     const rootDir = await createTempDir("spur-scanner-cache-");
     tempDirs.push(rootDir);
-    const dataDir = join(rootDir, "data");
-    const worktreeDir = join(rootDir, "worktrees");
-
-    const basePath = await writeConfig(
-      rootDir,
-      "base.yaml",
-      configYaml({
-        port: 4310,
-        dataDir,
-        worktreeDir,
-        projectId: "base",
-        projectPath: join(rootDir, "repo-base"),
-        sessionPrefix: "base",
-      }),
-    );
-    const duplicatePath = await writeConfig(
-      rootDir,
-      "duplicate.yaml",
-      configYaml({
-        port: 4310,
-        dataDir,
-        worktreeDir,
-        projectId: "base",
-        projectPath: join(rootDir, "repo-dup"),
-        sessionPrefix: "base-dup",
-      }),
-    );
-    // Pin the mtime to a fixed, whole-second value up front: the filesystem may
-    // store sub-millisecond precision that a Date captured from statSync cannot
-    // round-trip exactly through a second utimesSync call. Pinning both the
-    // "before" and "after" writes to the same coarse Date guarantees the stamp
-    // compares equal.
+    const fixture = await setupScannerFixture(rootDir);
+    const duplicatePath = fixture.duplicatePath;
+    // Pin to whole-second time so utimesSync reproduces the same mtimeMs.
     const pinnedMtime = new Date(2020, 0, 1, 0, 0, 0, 0);
     utimesSync(duplicatePath, pinnedMtime, pinnedMtime);
     const originalStat = statSync(duplicatePath);
 
     const scanner = new ConfigRegistryScanner();
-    const configPaths = [basePath, duplicatePath];
+    const configPaths = [fixture.basePath, duplicatePath];
 
     const first = scanner.scan({
-      bootstrapConfigPath: basePath,
+      bootstrapConfigPath: fixture.basePath,
       configPaths,
-      protectedPaths: [basePath],
+      protectedPaths: [fixture.basePath],
     });
     expect(first.newDiagnostics).toHaveLength(1);
     expect(Object.keys(first.config.projects)).toEqual(["base"]);
 
-    // Same byte length as the original body ("moon" for "base", "moon-dup" for
-    // "base-dup"), so only the mtime differs after the write. Pinning the mtime
-    // back to its original value then reproduces the exact original stamp
-    // (mtimeMs:size), so a real re-parse would surface "moon" as a brand-new,
-    // non-conflicting project if the cache failed to short-circuit it.
+    // Match original byte length, then restore original stamp.
     await writeFile(
       duplicatePath,
       configYaml({
         port: 4310,
-        dataDir,
-        worktreeDir,
+        dataDir: fixture.dataDir,
+        worktreeDir: fixture.worktreeDir,
         projectId: "moon",
         projectPath: join(rootDir, "repo-dup"),
         sessionPrefix: "moon-dup",
@@ -600,23 +608,22 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(statSync(duplicatePath).mtimeMs).toBe(originalStat.mtimeMs);
 
     const second = scanner.scan({
-      bootstrapConfigPath: basePath,
+      bootstrapConfigPath: fixture.basePath,
       configPaths,
-      protectedPaths: [basePath],
+      protectedPaths: [fixture.basePath],
     });
     expect(second.newDiagnostics).toHaveLength(0);
     expect(Object.keys(second.config.projects)).toEqual(["base"]);
     expect(second.config.projects["moon"]).toBeUndefined();
 
-    // Bumping the mtime invalidates the cached stamp, so the revised content is
-    // finally picked up.
+    // Bumped mtime invalidates the cache.
     const bumpedMtime = new Date(originalStat.mtime.getTime() + 5000);
     utimesSync(duplicatePath, bumpedMtime, bumpedMtime);
 
     const third = scanner.scan({
-      bootstrapConfigPath: basePath,
+      bootstrapConfigPath: fixture.basePath,
       configPaths,
-      protectedPaths: [basePath],
+      protectedPaths: [fixture.basePath],
     });
     expect(third.config.projects["moon"]).toBeDefined();
   });
