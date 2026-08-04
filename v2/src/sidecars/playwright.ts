@@ -253,7 +253,7 @@ const KILL_TREE_GRACE_MS = 1000;
  * SIGTERM the process and all descendants (catches chromium children), wait a
  * grace period, then SIGKILL survivors. Guards ESRCH for already-dead pids.
  */
-export async function killProcessTree(pid: number): Promise<void> {
+async function killProcessTree(pid: number): Promise<void> {
   const processes = await listProcesses();
   const tree = collectDescendants(pid, processes);
   // Kill leaves first so parents do not respawn children mid-teardown.
