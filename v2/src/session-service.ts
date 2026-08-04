@@ -1892,10 +1892,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
-  // A handoff owns one future live-session slot from its successful preflight
-  // check until its successor spawn settles. Other admissions count the slot;
-  // the successor identifies the reservation so it does not count itself.
-  private readonly admissionReservations = new Map<string, string>();
+  // Every spawn owns one future live-session slot from its synchronous
+  // admission check until its spawning record is written. Other admissions
+  // count the slot; a handoff passes its existing reservation to its successor.
+  private readonly admissionReservations = new Map<symbol, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -5155,10 +5155,7 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  private resolveSpawnTarget(
-    request: SpawnSessionRequest,
-    options?: { replacingSessionId?: string; admissionReservationId?: string },
-  ): {
+  private resolveSpawnTarget(request: SpawnSessionRequest): {
     project: ProjectConfig;
     prompt: string;
     steps?: string[];
@@ -5167,7 +5164,6 @@ export class SessionService {
     allowedTriggers?: string[];
     selfDestruct?: SelfDestructConfig;
   } {
-    this.assertAdmissible(request.project, "spawn", options);
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -5225,10 +5221,18 @@ export class SessionService {
     options?: {
       promptKind?: UserInputKind;
       replacingSessionId?: string;
-      admissionReservationId?: string;
+      admissionReservation?: symbol;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation =
+      options?.admissionReservation ??
+      this.reserveAdmission(request.project, "spawn", {
+        ...(options?.replacingSessionId
+          ? { replacingSessionId: options.replacingSessionId }
+          : {}),
+      });
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -5258,7 +5262,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request, options));
+        this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -5446,6 +5450,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
@@ -5812,6 +5818,9 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
       }
@@ -6074,6 +6083,8 @@ export class SessionService {
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation = this.reserveAdmission(request.project, "spawn");
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -6177,6 +6188,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -6272,6 +6285,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
     }
   }
 
@@ -9164,8 +9181,9 @@ export class SessionService {
     // no status flip. The successor replaces the source rather than adding to
     // the fleet, so exclude it from the live count: a handoff at exactly the
     // cap is net-neutral (stop one, start one) and must be allowed.
-    this.assertAdmissible(session.project, "spawn", { replacingSessionId: session.id });
-    this.admissionReservations.set(session.id, session.project);
+    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
+      replacingSessionId: session.id,
+    });
 
     try {
       const agent = parseAgentName(request.agent);
@@ -9241,7 +9259,7 @@ export class SessionService {
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
         }),
-        { replacingSessionId: session.id, admissionReservationId: session.id },
+        { replacingSessionId: session.id, admissionReservation },
       );
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);
@@ -9293,7 +9311,7 @@ export class SessionService {
 
       return spawned;
     } finally {
-      this.admissionReservations.delete(session.id);
+      this.admissionReservations.delete(admissionReservation);
     }
   }
 
@@ -9942,7 +9960,7 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string; admissionReservationId?: string },
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
     const memory = readHostMemory();
@@ -9982,8 +10000,8 @@ export class SessionService {
     const live = this.countLiveSessions(opts?.replacingSessionId);
     let reservedTotal = 0;
     let projectReserved = 0;
-    for (const [reservationId, reservedProjectId] of this.admissionReservations) {
-      if (reservationId === opts?.admissionReservationId) continue;
+    for (const [reservation, reservedProjectId] of this.admissionReservations) {
+      if (reservation === opts?.admissionReservation) continue;
       reservedTotal += 1;
       if (reservedProjectId === projectId) projectReserved += 1;
     }
@@ -10015,6 +10033,17 @@ export class SessionService {
     }
   }
 
+  private reserveAdmission(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string },
+  ): symbol {
+    this.assertAdmissible(projectId, context, opts);
+    const reservation = Symbol(projectId);
+    this.admissionReservations.set(reservation, projectId);
+    return reservation;
+  }
+
   // Cheap admission snapshot for the daemon-startup log: cap and live count
   // only. getHeadroom() also awaits getFleetSessionRssBytes() (a `ps` fork
   // plus `tmux list-panes -a`) for its per-session RSS breakdown, which the
@@ -10036,7 +10065,15 @@ export class SessionService {
   async getHeadroom(): Promise<HeadroomReport> {
     const admission = this.config.admission;
     const live = this.countLiveSessions();
-    const rssBySessionId = await getFleetSessionRssBytes();
+    const liveSessionByWorkspaceId = new Map<string, string>();
+    for (const session of live.records) {
+      const workspaceId = workspaceIdOf(session);
+      const currentOwner = liveSessionByWorkspaceId.get(workspaceId);
+      if (!currentOwner || session.id === workspaceId) {
+        liveSessionByWorkspaceId.set(workspaceId, session.id);
+      }
+    }
+    const rssBySessionId = await getFleetSessionRssBytes(liveSessionByWorkspaceId);
     const projectCaps: Record<string, number> = {};
     for (const [projectId, project] of Object.entries(this.config.projects)) {
       if (project.maxLiveSessions !== undefined) {

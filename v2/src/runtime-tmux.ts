@@ -496,8 +496,12 @@ function getPsSnapshot(): Promise<PsRow[]> {
 // (the agent's own tmux session) or `${sessionId}--${sidecarName}` /
 // `${sessionId}--svc--${serviceId}` (sidecarTmuxSession /
 // startMcpSidecars' service naming) — attribute every key to the id before
-// its first "--".
-export async function getFleetSessionRssBytes(): Promise<Map<string, number>> {
+// its first "--". Shared project sidecars retain the workspace anchor in
+// their tmux name after that anchor becomes terminal; callers can map that
+// anchor to one live workspace member so the RSS remains visible exactly once.
+export async function getFleetSessionRssBytes(
+  liveSessionByWorkspaceId: ReadonlyMap<string, string> = new Map(),
+): Promise<Map<string, number>> {
   const [panes, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
   const rssKbByTty = new Map<string, number>();
   for (const row of psRows) {
@@ -506,9 +510,10 @@ export async function getFleetSessionRssBytes(): Promise<Map<string, number>> {
   }
   const rssKbBySessionId = new Map<string, number>();
   for (const [sessionName, entry] of panes) {
-    const sessionId = sessionName.includes("--")
+    const tmuxOwnerId = sessionName.includes("--")
       ? (sessionName.split("--")[0] ?? sessionName)
       : sessionName;
+    const sessionId = liveSessionByWorkspaceId.get(tmuxOwnerId) ?? tmuxOwnerId;
     let rssKb = 0;
     for (const tty of entry.allTtys) {
       rssKb += rssKbByTty.get(tty.replace(/^\/dev\//, "")) ?? 0;
