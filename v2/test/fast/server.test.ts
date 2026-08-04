@@ -2678,6 +2678,52 @@ describe("startServer", () => {
     }
   });
 
+  it("rejects POST /projects/disconnect for a relative configPath with 400 instead of resolving it against the daemon cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: "spur.yaml" }),
+      });
+      expect(response.status).toBe(400);
+
+      const projectsResponse = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await projectsResponse.json()) as Array<{ id: string }>;
+      expect(listed.find((entry) => entry.id === "base")).toBeDefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects/connect removes the matching unconfigured stub in a single registry write", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

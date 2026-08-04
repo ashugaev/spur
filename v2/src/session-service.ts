@@ -2527,6 +2527,9 @@ export class SessionService {
     warnings: string[];
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
     const targetKey = canonicalConfigKey(configPath);
     return this.previewRegistryPaths(
       this.registryPaths.filter((path) => canonicalConfigKey(path) !== targetKey),
