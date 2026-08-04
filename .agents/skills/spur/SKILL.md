@@ -89,6 +89,8 @@ authRotation:                    # instance-only
   autoRotateOnRateLimit: false   # default
   cooldownMinutes: 60
   maxRotationsPerEpisode: 2
+diskRetention:                   # instance-only
+  warnFreeGb: 10                 # default
 projects:
   backend-api:
     path: ~/backend-api

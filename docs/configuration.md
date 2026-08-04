@@ -232,6 +232,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `authRotation.autoRotateOnRateLimit`: optional boolean, default `false`. Instance config only.
 - `authRotation.cooldownMinutes`: optional, default `60`.
 - `authRotation.maxRotationsPerEpisode`: optional, default `2`.
+- `diskRetention.warnFreeGb`: optional, default `10`. Instance config only. Drives `doctor`'s `home-disk-headroom` check and the pre-spawn `host.disk.low` warning; see [commands.md](commands.md#cache) for the `spur cache` command it points at.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 

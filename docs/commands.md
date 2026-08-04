@@ -4,13 +4,36 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## doctor
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
+
+Two checks are `warn`/`info` only, so a low-disk host never flips the exit code: `home-disk-headroom` (`df` on `$HOME`, `warn` below [`diskRetention.warnFreeGb`](configuration.md), default 10GB) and `reclaimable-caches` (an info-only `spur cache` measurement, top 5 prunable entries by size, degrades to "skipped" if it exceeds its own measurement budget).
+
+## cache
+
+```bash
+spur cache [--json] [--prune] [--yes]
+```
+
+Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` deletes every entry verdicted `prunable`. Never starts or calls the daemon; works with the daemon stopped.
+
+Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, the rest of `~/.cache`, and `/tmp` — never `~/.spur` (`dataDir`/`worktreeDir`), which a sibling retention path owns.
+
+Prunable classes and age floors (a global 7-day floor applies to every class on top of its own):
+
+- `vendor-cache` (`~/.npm/_cacache`, one unit) — 7d; protected while any package-manager process (npm/pnpm/npx/yarn) is running.
+- `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if its path appears in a live process's argv.
+- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when zero `browsers.json` sources resolve at all.
+- `browser-profile` (`mcp-*` dirs under either playwright cache root) — 7d; protected by argv or a live session descendant's cwd.
+- `browser-registry` (`~/.cache/ms-playwright/b`) and every other `~/.cache` entry (`generic`) — never pruned, measured and reported only.
+- `tmp-entry` (`/tmp`) — 7d (the global floor, no extra grace); a fixed deny-list (`systemd-private-*`, `tmux-*`, `.X11-unix`, `snap-private-*`, `spur*`, etc.) is never a candidate regardless of age.
+
+Every class also protects a symlink, an entry not owned by the invoking uid, and any entry when the process tree isn't readable (the whole plan degrades to report-only in that case).
 
 ## spawn
 
@@ -65,7 +88,7 @@ Hides `completed` and `killed` by default. Derives live `state` and `lastActivit
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` worktree session, `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
 
-Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery).
+Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery, and a pre-spawn `host.disk.low` warning when free space on `dataDir` is under [`diskRetention.warnFreeGb`](configuration.md) — report-only, never blocks or fails the spawn).
 
 ## spur-slots
 
