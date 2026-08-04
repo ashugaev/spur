@@ -3015,9 +3015,12 @@ export class SessionService {
   // own. Runs against the non-terminal id set pollAttentionStates already
   // computes, so its key set is bounded by "currently live sessions" instead
   // of "every session ever classified". Deliberately does not touch
-  // dashboardCache (retained for the full dashboard list, see
-  // runDashboardCacheTick) or stateCache (its 15 delete sites are deliberate
-  // mid-lifecycle reclassification triggers, not termination cleanup).
+  // dashboardCache or sessionProjectCache (both retained for the full
+  // dashboard list — completed and killed+retainInList sessions the
+  // dashboard's idle round-robin still revisits, see runDashboardCacheTick —
+  // not just the non-terminal set) or stateCache (its 15 delete sites are
+  // deliberate mid-lifecycle reclassification triggers, not termination
+  // cleanup).
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
@@ -3027,11 +3030,6 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.sessionProjectCache.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.sessionProjectCache.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -3173,14 +3171,24 @@ export class SessionService {
           this.dashboardCache.delete(id);
         }
       }
+      // sessionProjectCache's consumer (resolveProjectForSession, via
+      // enrich) is called from both ticks, so its retention has to match
+      // the WIDER dashboard set, not pollAttentionStates' non-terminal
+      // liveIds — a completed or killed+retainInList session still gets
+      // enriched here by the idle round-robin long after it leaves the
+      // attention monitor's live set. Pruning against liveIds would evict
+      // its entry the tick after it goes terminal, forcing a fresh
+      // YAML parse (and a re-logged parse failure) on every idle revisit.
+      for (const id of this.sessionProjectCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.sessionProjectCache.delete(id);
+        }
+      }
       for (const id of this.dashboardEnrichedRecords.keys()) {
         if (!includedIds.has(id)) {
           this.dashboardEnrichedRecords.delete(id);
         }
       }
-      // sessionProjectCache is pruned by pruneSessionScopedState (the
-      // non-terminal sweep in pollAttentionStates), not here: one prune path
-      // per map.
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.failed", {

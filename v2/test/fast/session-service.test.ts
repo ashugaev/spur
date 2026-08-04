@@ -22304,12 +22304,15 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await drainBaselineTicks(internals);
 
-      // Every one of the 9 maps the sweep owns must drop the terminal ids,
+      // Every one of the 8 maps the sweep owns must drop the terminal ids,
       // regardless of what else touches them during a live enrich.
+      // sessionProjectCache is NOT here: it is pruned against the dashboard's
+      // wider includedIds set in runDashboardCacheTick, not against this
+      // sweep's non-terminal liveIds — see the dedicated sweep-survival test
+      // above this describe block's sibling tests.
       const allPrunedMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
         ["claudeCompactingOverrides", internals.claudeCompactingOverrides],
-        ["sessionProjectCache", internals.sessionProjectCache],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],
@@ -22327,13 +22330,11 @@ describe("SessionService", () => {
       // codexMcpDialogOverrides never execute for it — nothing but the sweep
       // can touch this key for this fixture.
       //
-      // claudeCompactingOverrides and sessionProjectCache are excluded below:
-      // claudeCompactingOverrides is deleted on every claude_jsonl classify
-      // tick when detectClaudeCompacting(paneText) is false (true for api-1's
-      // mocked pane), and sessionProjectCache self-evicts on every call when
-      // no local project config resolves — both self-evict independent of
+      // claudeCompactingOverrides is excluded below: it is deleted on every
+      // claude_jsonl classify tick when detectClaudeCompacting(paneText) is
+      // false (true for api-1's mocked pane) — it self-evicts independent of
       // the sweep for this fixture, so retention here would not isolate the
-      // sweep's behavior; they are asserted bounded (eviction-only) above.
+      // sweep's behavior; it is asserted bounded (eviction-only) above.
       const cleanMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
@@ -22358,6 +22359,66 @@ describe("SessionService", () => {
       // lastEntry and reopen the oscillation covered by the two tests below).
       expect(internals.stateHistory.get("api-2")).toHaveLength(1);
       expect(internals.stateHistory.get("api-3")).toHaveLength(1);
+
+      service.dispose();
+    });
+
+    it("keeps a completed session's resolvable sessionProjectCache entry alive across the attention sweep, evicting it only once it leaves the dashboard's included set", async () => {
+      mockClaudeJsonlState("waiting");
+      const worktreePath = join(TEST_DATA_DIR, "worktrees", "api", "api-4");
+      mkdirSync(worktreePath, { recursive: true });
+      writeFileSync(join(worktreePath, "spur.yaml"), "projects: {}\n", "utf8");
+      findProjectConfigPathInDirectoryMock.mockImplementation((directory: string) => {
+        const candidate = join(directory, "spur.yaml");
+        return existsSync(candidate) ? candidate : undefined;
+      });
+      loadProjectConfigMock.mockReturnValue(baseConfig());
+
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-4",
+        runningSession({ id: "api-4", worktree: true, worktreePath, status: "running" }),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+
+      // The baseline attention tick's enrich() call resolves and caches a
+      // real (non-undefined) project for api-4 while it is still
+      // non-terminal — this is a genuinely resolvable local project config,
+      // not a self-evicting no-config entry.
+      expect(internals.sessionProjectCache.get("api-4")).toEqual(
+        expect.objectContaining({ configPath: join(worktreePath, "spur.yaml") }),
+      );
+      expect(internals.sessionProjectCache.get("api-4")).not.toEqual(
+        expect.objectContaining({ project: undefined }),
+      );
+
+      // Completing the session removes it from pollAttentionStates' liveIds
+      // (non-terminal set) but not from the dashboard's included set (see
+      // runDashboardCacheTick's completed-status passthrough).
+      sessions.set("api-4", { ...sessions.get("api-4")!, status: "completed" });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await drainBaselineTicks(internals);
+
+      // This is what regressed: pruning sessionProjectCache against the
+      // attention monitor's non-terminal liveIds would delete this entry
+      // here even though the dashboard still retains and later re-enriches
+      // this completed session.
+      expect(internals.sessionProjectCache.has("api-4")).toBe(true);
+
+      // Now remove the session from the dashboard's included set entirely
+      // (no longer returned by listSessions at all) and let the dashboard
+      // tick's includedIds-based prune run.
+      sessions.delete("api-4");
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await drainBaselineTicks(internals);
+
+      expect(internals.sessionProjectCache.has("api-4")).toBe(false);
 
       service.dispose();
     });
