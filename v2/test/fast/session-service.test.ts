@@ -23864,6 +23864,156 @@ describe("SessionService", () => {
     });
   });
 
+  describe("shepherd workspace recovery across a reboot", () => {
+    it("re-creates a deleted shepherd workspace and recovers on send after a daemon restart", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-workspace-reboot-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const shepherdPath = `${dataDir}/shepherd`;
+      const dailyWake = {
+        dailyAt: ["09:00"],
+        nextDueAt: "2026-03-19T09:00:00.000Z",
+        message: "Daily check-in",
+        stopCondition: "Operator says stop",
+      };
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: shepherdPath,
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        dailyWake,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      // Simulate the reboot wiping ~/.spur/shepherd: no real dir on disk, and
+      // the mocked workspace probe reports it missing too.
+      rmSync(shepherdPath, { recursive: true, force: true });
+      expect(existsSync(shepherdPath)).toBe(false);
+      workspaceExistsMock.mockReset().mockReturnValue(false);
+
+      // A fresh SessionService over the same dataDir stands in for the daemon restart.
+      const service = await createDisposedSessionService();
+
+      const result = await service.send("shp-1", { message: "operator ping" });
+
+      expect(result.status).toBe("running");
+      expect(existsSync(shepherdPath)).toBe(true);
+      expect(sessions.get("shp-1")?.dailyWake).toEqual(dailyWake);
+    });
+
+    it("recovers a stopped shepherd on send when its workspace already exists", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      seedShepherdSession({ status: "stopped" });
+
+      const service = await createDisposedSessionService();
+
+      const result = await service.send("shp-1", { message: "operator ping" });
+
+      expect(result.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: "/tmp/spur-data/shepherd" }),
+      );
+    });
+
+    it("processScheduledWakes recovers and fires a due daily wake on a stopped shepherd", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const sessions = seedShepherdSession({
+        status: "stopped",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          message: "Daily check-in",
+          stopCondition: "Operator says stop",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(61);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.daily_sent")
+          .length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ),
+      ).toBe(false);
+      service.dispose();
+    });
+
+    it("still refuses to recover a worktree:true session whose git worktree is missing", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      workspaceExistsMock.mockReset().mockReturnValue(false);
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(
+        "Session api-1 cannot be recovered because its workspace is missing",
+      );
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("recovers an ordinary project session configured without a worktree", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: false,
+        worktreePath: "/repo/api",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+
+      const service = await createDisposedSessionService();
+
+      const result = await service.send("api-1", { message: "resume work" });
+
+      expect(result.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: "/repo/api" }),
+      );
+    });
+  });
+
   describe("rate-limit reactivation", () => {
     const REACTIVATION_MARKER = "rate limited earlier and should be able to continue now";
 
