@@ -1853,6 +1853,12 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  // Dedupes session.state.classified: emit once per classify call only when
+  // the raw classified state actually changed since the last classify call
+  // for that session (not the message, so a detail-only churn like
+  // records=50 -> records=17 stays silent). Swept alongside the other
+  // classification-scoped maps in pollAttentionStates.
+  private readonly lastClassifiedLogStates = new Map<string, SessionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -3055,6 +3061,11 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.lastClassifiedLogStates.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastClassifiedLogStates.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -10710,6 +10721,11 @@ export class SessionService {
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
+    // Holds the message for the single deduped session.state.classified emit
+    // at the end of this function; undefined means never log (unchanged from
+    // today for non-running/dead-pane sessions). A later branch's assignment
+    // overrides an earlier one exactly as it overrides `state`.
+    let classifiedDetail: string | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -10774,30 +10790,15 @@ export class SessionService {
           state = statusResult.state;
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (claude status=${statusResult.status})`,
-          });
+          classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no claude status/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);
@@ -10808,35 +10809,15 @@ export class SessionService {
         liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`,
-          });
+          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
-          });
+          classifiedDetail = `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`;
         } else if (codexState.hookState) {
           const hookState = codexState.hookState;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
-          });
+          classifiedDetail = `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`;
         } else {
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no hook/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no hook/jsonl)`;
         }
       } else {
         const jsonlResult = await readCursorJsonlState(
@@ -10851,20 +10832,10 @@ export class SessionService {
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no cursor jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       }
 
@@ -10907,12 +10878,7 @@ export class SessionService {
             session.id,
             Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: working (claude compacting)",
-          });
+          classifiedDetail = "State: working (claude compacting)";
         } else {
           this.claudeCompactingOverrides.delete(session.id);
         }
@@ -10926,6 +10892,7 @@ export class SessionService {
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "working";
+          classifiedDetail = "State: working (claude compacting)";
         }
       } else if (scanPane && strategy === "hook") {
         // Codex-specific: a hard rate-limit banner always wins. Otherwise,
@@ -10944,12 +10911,7 @@ export class SessionService {
             session.id,
             Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: needs_input (codex MCP permission dialog)",
-          });
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
         }
@@ -10969,6 +10931,7 @@ export class SessionService {
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "needs_input";
           rateLimit = null;
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
@@ -10979,24 +10942,24 @@ export class SessionService {
       }
       if (rateLimit?.limited) {
         state = "rate_limited";
-        this.logEvent("session.state.classified", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `State: rate_limited (${rateLimit.reason})`,
-        });
+        classifiedDetail = `State: rate_limited (${rateLimit.reason})`;
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
         historySourcePath = serverErrorJsonlPath;
-        this.logEvent("session.state.classified", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: "State: error (claude server error)",
-        });
+        classifiedDetail = "State: error (claude server error)";
       }
     }
+
+    if (classifiedDetail !== undefined && this.lastClassifiedLogStates.get(session.id) !== state) {
+      this.logEvent("session.state.classified", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: classifiedDetail,
+      });
+    }
+    this.lastClassifiedLogStates.set(session.id, state);
 
     return {
       session: effectiveSession,
