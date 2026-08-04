@@ -451,35 +451,75 @@ export async function getTmuxPanePid(sessionName: string): Promise<number | null
 
 interface PsRow {
   tty: string;
+  rssKb: number;
   args: string;
 }
 
 // Shared, TTL-cached `ps` snapshot: the full process table is identical for
 // every session in a tick, so this is one fork per TTL window instead of one
-// per session.
+// per session. Carries rss so getFleetSessionRssBytes (headroom reporting)
+// reuses this exact fork instead of adding a second one.
 const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
 const PS_SNAPSHOT_CACHE_KEY = "ps";
 
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
+      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,rss,args"], {
         timeout: 5_000,
       });
       return psOut
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 3) {
+          if (cols.length < 4) {
             return null;
           }
-          return { tty: cols[1] ?? "", args: cols.slice(2).join(" ") };
+          const rssKb = Number.parseInt(cols[2] ?? "", 10);
+          return {
+            tty: cols[1] ?? "",
+            rssKb: Number.isFinite(rssKb) ? rssKb : 0,
+            args: cols.slice(3).join(" "),
+          };
         })
         .filter((row): row is PsRow => row !== null);
     } catch {
       return [];
     }
   });
+}
+
+// Reporting-only RSS roll-up per session (headroom reporting — never on the
+// admission path). Reuses the two existing TTL-cached fleet snapshots (pane
+// map + ps table) instead of forking, so this costs zero extra forks
+// regardless of fleet size. A pane snapshot key is either a bare session id
+// (the agent's own tmux session) or `${sessionId}--${sidecarName}` /
+// `${sessionId}--svc--${serviceId}` (sidecarTmuxSession /
+// startMcpSidecars' service naming) — attribute every key to the id before
+// its first "--".
+export async function getFleetSessionRssBytes(): Promise<Map<string, number>> {
+  const [panes, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  const rssKbByTty = new Map<string, number>();
+  for (const row of psRows) {
+    if (!row.tty) continue;
+    rssKbByTty.set(row.tty, (rssKbByTty.get(row.tty) ?? 0) + row.rssKb);
+  }
+  const rssKbBySessionId = new Map<string, number>();
+  for (const [sessionName, entry] of panes) {
+    const sessionId = sessionName.includes("--")
+      ? (sessionName.split("--")[0] ?? sessionName)
+      : sessionName;
+    let rssKb = 0;
+    for (const tty of entry.allTtys) {
+      rssKb += rssKbByTty.get(tty.replace(/^\/dev\//, "")) ?? 0;
+    }
+    rssKbBySessionId.set(sessionId, (rssKbBySessionId.get(sessionId) ?? 0) + rssKb);
+  }
+  const rssBytesBySessionId = new Map<string, number>();
+  for (const [sessionId, rssKb] of rssKbBySessionId) {
+    rssBytesBySessionId.set(sessionId, rssKb * 1024);
+  }
+  return rssBytesBySessionId;
 }
 
 // `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —

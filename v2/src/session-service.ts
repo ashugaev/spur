@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { userInfo } from "node:os";
+import { totalmem, userInfo } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -93,6 +93,7 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
+  deriveMaxLiveSessions,
   deriveProjectIdFromDisplayName,
   expandHome,
   findProjectConfigPathInDirectory,
@@ -169,6 +170,7 @@ import {
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
+  getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
   isProcessRunningInTmux,
@@ -183,6 +185,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
+import { readHostMemory } from "./host-memory.js";
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
@@ -275,6 +278,7 @@ import {
   type DeleteProjectResponse,
   type KillSessionRequest,
   type GithubPrCheckUnavailablePayload,
+  type HeadroomReport,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -562,6 +566,14 @@ export class SessionNotRestorableError extends Error {
 
 export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
+}
+
+// Message-only (like SessionRateLimitedError): the candidate session ids to
+// stop are named directly in the message string, not a structured payload —
+// neither client.ts's formatDaemonError nor the web toast decode a payload
+// field, so one here would be written and never read.
+export class SessionAdmissionDeniedError extends Error {
+  readonly statusCode = 429;
 }
 
 export class SessionNotReopenableError extends Error {
@@ -5149,6 +5161,7 @@ export class SessionService {
     allowedTriggers?: string[];
     selfDestruct?: SelfDestructConfig;
   } {
+    this.assertAdmissible(request.project, "spawn");
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -8392,6 +8405,8 @@ export class SessionService {
       );
     }
 
+    this.assertAdmissible(current.project, "restore");
+
     this.logEvent("session.restore.started", {
       level: "info",
       sessionId,
@@ -9854,6 +9869,169 @@ export class SessionService {
       session.status === "spawning" ||
       this.isInRestoreWarmup(session.id)
     );
+  }
+
+  // Single source of truth for "is this session live" across the two
+  // admission gates, /headroom, and the daemon-startup log. Never calls
+  // enrich() — running|spawning is the on-disk status predicate
+  // reconcileStoppedSessions already uses, unioned with sessions mid-restore
+  // (on-disk status still stopped/errored, see restore()'s comment above
+  // restoreWarmupUntil.set) so a restore in flight is counted exactly once.
+  private countLiveSessions(): {
+    total: number;
+    byProject: Map<string, number>;
+    ids: string[];
+    records: SessionRecord[];
+  } {
+    const all = listSessions(this.config.dataDir);
+    const live: SessionRecord[] = [];
+    const seen = new Set<string>();
+    for (const session of all) {
+      if (session.status === "running" || session.status === "spawning") {
+        live.push(session);
+        seen.add(session.id);
+      }
+    }
+    for (const session of all) {
+      if (seen.has(session.id)) continue;
+      if (this.isInRestoreWarmup(session.id)) {
+        live.push(session);
+        seen.add(session.id);
+      }
+    }
+    const byProject = new Map<string, number>();
+    for (const session of live) {
+      byProject.set(session.project, (byProject.get(session.project) ?? 0) + 1);
+    }
+    return { total: live.length, byProject, ids: live.map((session) => session.id), records: live };
+  }
+
+  private admissionCandidateList(records: SessionRecord[]): string {
+    return [...records]
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .slice(0, 3)
+      .map((session) => `${session.id} (${session.project})`)
+      .join(", ");
+  }
+
+  // Runs at both admission gates (resolveSpawnTarget, restore). Never
+  // mutates state, never kills, never acts retroactively on sessions already
+  // above the cap — a denial only refuses the *new* spawn/restore in front
+  // of it. `admission.enabled: false` is a full escape hatch: neither the
+  // cap nor the memory guard can deny, though the guard still logs a
+  // report-only warning when crossed so the condition stays visible.
+  private assertAdmissible(projectId: string, context: "spawn" | "restore"): void {
+    const admission = this.config.admission;
+    const memory = readHostMemory();
+    let memoryCrossedDetail: string | undefined;
+    if (memory) {
+      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+        memoryCrossedDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+        memoryCrossedDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      }
+    }
+    if (memoryCrossedDetail) {
+      this.logEvent("session.admission.memory_guard", {
+        level: "warn",
+        projectId,
+        message: `Memory guard crossed for ${context} in project "${projectId}": ${memoryCrossedDetail}`,
+      });
+    }
+    if (!admission.enabled) {
+      return;
+    }
+    if (memoryCrossedDetail && admission.memoryGuard.enforce) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": memory guard crossed — ${memoryCrossedDetail}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    const live = this.countLiveSessions();
+    const candidates = this.admissionCandidateList(live.records);
+    const projectCap = this.config.projects[projectId]?.maxLiveSessions;
+    const projectLive = live.byProject.get(projectId) ?? 0;
+    if (projectCap !== undefined && projectLive >= projectCap) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${candidates}.`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    if (live.total >= admission.maxLiveSessions) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${live.total} live now). Stop one of: ${candidates}.`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+  }
+
+  async getHeadroom(): Promise<HeadroomReport> {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    const rssBySessionId = await getFleetSessionRssBytes();
+    const projectCaps: Record<string, number> = {};
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      if (project.maxLiveSessions !== undefined) {
+        projectCaps[projectId] = project.maxLiveSessions;
+      }
+    }
+    const byProject: Record<string, number> = {};
+    for (const [projectId, count] of live.byProject) {
+      byProject[projectId] = count;
+    }
+    const memory = readHostMemory();
+    const guardCrossed =
+      memory !== null &&
+      (memory.availableBytes < admission.memoryGuard.minAvailableBytes ||
+        memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes);
+    const derivedCap = deriveMaxLiveSessions(
+      totalmem(),
+      admission.perSessionBytes,
+      admission.reserveFraction,
+    );
+    return {
+      cap: {
+        global: admission.maxLiveSessions,
+        source: admission.maxLiveSessions === derivedCap ? "derived" : "config",
+        perSessionBytes: admission.perSessionBytes,
+        reserveFraction: admission.reserveFraction,
+      },
+      projectCaps,
+      live: { count: live.total, byProject },
+      projectedRoom: Math.max(0, admission.maxLiveSessions - live.total),
+      sessions: live.records.map((session) => ({
+        id: session.id,
+        project: session.project,
+        status: session.status,
+        rssBytes: rssBySessionId.get(session.id) ?? 0,
+      })),
+      memory,
+      guard: {
+        enforce: admission.memoryGuard.enforce,
+        minAvailableBytes: admission.memoryGuard.minAvailableBytes,
+        minFreeSwapBytes: admission.memoryGuard.minFreeSwapBytes,
+        crossed: guardCrossed,
+      },
+    };
   }
 
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {

@@ -17,6 +17,7 @@ import {
 import { isReleaseVersion } from "./releases-cache.js";
 import {
   probe,
+  probeHeadroom,
   probeInfo,
   readWebPort,
   resolveDaemonPortReadOnly,
@@ -619,6 +620,35 @@ export async function checkServiceHealth(
       severity: "info",
       detail: `spur-daemon.service responded at ${daemonInfoUrl}`,
     });
+    // Read-only headroom check: daemon unreachable or the fetch/parse
+    // failing pushes no check at all — the daemon-reachable check above
+    // already owns that fact. Never severity "error": a full host is an
+    // operator decision (raise the cap or stop sessions), not a doctor
+    // failure, so hasErrorSeverity can never flip the exit code on it.
+    const headroomUrl = `http://${daemonProbeHost}:${daemonPort}/headroom`;
+    const headroomResult = await probeHeadroom(headroomUrl);
+    if (headroomResult.ok) {
+      const { live, cap, guard, sessions } = headroomResult.body;
+      const room = Math.max(0, cap.global - live.count);
+      const overCap = live.count >= cap.global || guard.crossed;
+      if (overCap) {
+        const candidateIds = sessions.slice(0, 3).map((session) => session.id);
+        checks.push({
+          id: "session-headroom",
+          ok: false,
+          severity: "warn",
+          detail: `${live.count}/${cap.global} live sessions${guard.crossed ? " (memory guard crossed)" : ""}`,
+          fix: `raise admission.maxLiveSessions in ~/.spur/config.yaml, or stop sessions: ${candidateIds.join(", ")}`,
+        });
+      } else {
+        checks.push({
+          id: "session-headroom",
+          ok: true,
+          severity: "warn",
+          detail: `${live.count}/${cap.global} live sessions, room for ${room} more`,
+        });
+      }
+    }
   } else if (daemonActive) {
     checks.push(
       activeButUnreachableCheck(

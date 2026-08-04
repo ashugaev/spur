@@ -60,6 +60,13 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    admission: {
+      enabled: true,
+      maxLiveSessions: 1000,
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: { enforce: false, minAvailableBytes: 1_073_741_824, minFreeSwapBytes: 0 },
+    },
     tags: [],
     projects: {
       api: {

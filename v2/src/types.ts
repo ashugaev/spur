@@ -548,6 +548,51 @@ export interface ProjectConfig {
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
+  maxLiveSessions?: number;
+}
+
+// Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
+// `admission` block parses without error but is discarded, same footgun as
+// rateLimitReactivation/authRotation/tags. All fields are resolved
+// (defaults already applied) so callers never re-derive them.
+export interface AdmissionConfig {
+  enabled: boolean;
+  maxLiveSessions: number;
+  perSessionBytes: number;
+  reserveFraction: number;
+  memoryGuard: {
+    enforce: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+  };
+}
+
+export interface HeadroomReport {
+  cap: {
+    global: number;
+    source: "config" | "derived";
+    perSessionBytes: number;
+    reserveFraction: number;
+  };
+  projectCaps: Record<string, number>;
+  live: {
+    count: number;
+    byProject: Record<string, number>;
+  };
+  projectedRoom: number;
+  sessions: Array<{
+    id: string;
+    project: string;
+    status: SessionStatus;
+    rssBytes: number;
+  }>;
+  memory: { totalBytes: number; availableBytes: number; swapFreeBytes: number } | null;
+  guard: {
+    enforce: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    crossed: boolean;
+  };
 }
 
 export interface AppConfig {
@@ -618,6 +663,7 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
