@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ProcessTreeModule from "../../src/process-tree.js";
-import type { CacheEntry, CacheEntryClass, EntryOwnership, LivenessSnapshot } from "../../src/cache-retention.js";
+import type {
+  CacheEntry,
+  CacheEntryClass,
+  EntryOwnership,
+  LivenessSnapshot,
+} from "../../src/cache-retention.js";
 
 const { execFileMock, canReadProcessTreeMock } = vi.hoisted(() => ({
   execFileMock: vi.fn(),
@@ -83,12 +88,18 @@ describe("classifyEntry", () => {
   });
 
   it("classifies a non-matching name in a playwright root as browser-registry (C4 fallback)", () => {
-    expect(classifyEntry("playwright-browsers", "some-other-thing")).toEqual({ kind: "browser-registry" });
+    expect(classifyEntry("playwright-browsers", "some-other-thing")).toEqual({
+      kind: "browser-registry",
+    });
   });
 
   it("classifies mcp-* in either playwright root as browser-profile", () => {
-    expect(classifyEntry("playwright-browsers", "mcp-chrome-abc123")).toEqual({ kind: "browser-profile" });
-    expect(classifyEntry("playwright-mcp-profiles", "mcp-chrome-abc123")).toEqual({ kind: "browser-profile" });
+    expect(classifyEntry("playwright-browsers", "mcp-chrome-abc123")).toEqual({
+      kind: "browser-profile",
+    });
+    expect(classifyEntry("playwright-mcp-profiles", "mcp-chrome-abc123")).toEqual({
+      kind: "browser-profile",
+    });
   });
 
   it("classifies npm-npx entries by hash", () => {
@@ -125,7 +136,11 @@ describe("verdictFor", () => {
     });
     expect(verdictFor(at6, makeOwnership(), liveness, MY_UID)).toEqual({
       kind: "protected",
-      reason: { kind: "too-recent", ageDays: GLOBAL_MIN_AGE_DAYS - 1, floorDays: GLOBAL_MIN_AGE_DAYS },
+      reason: {
+        kind: "too-recent",
+        ageDays: GLOBAL_MIN_AGE_DAYS - 1,
+        floorDays: GLOBAL_MIN_AGE_DAYS,
+      },
     });
     const at7 = makeEntry({
       entryClass: { kind: "vendor-cache" },
@@ -212,14 +227,20 @@ describe("verdictFor", () => {
       entryClass: { kind: "generic", name: "yarn" },
       ageDays: GENERIC_MIN_AGE_DAYS,
     });
-    expect(verdictFor(genericOld, makeOwnership(), makeLiveness(), MY_UID)).toEqual({ kind: "prunable" });
+    expect(verdictFor(genericOld, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
+      kind: "prunable",
+    });
     const genericYoung = makeEntry({
       entryClass: { kind: "generic", name: "yarn" },
       ageDays: GENERIC_MIN_AGE_DAYS - 1,
     });
     expect(verdictFor(genericYoung, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
       kind: "protected",
-      reason: { kind: "too-recent", ageDays: GENERIC_MIN_AGE_DAYS - 1, floorDays: GENERIC_MIN_AGE_DAYS },
+      reason: {
+        kind: "too-recent",
+        ageDays: GENERIC_MIN_AGE_DAYS - 1,
+        floorDays: GENERIC_MIN_AGE_DAYS,
+      },
     });
   });
 
@@ -261,7 +282,14 @@ describe("verdictFor", () => {
   });
 
   it("CORR-A: a /tmp entry matching the deny-list is class-never-pruned regardless of age or ownership", () => {
-    for (const name of ["systemd-private-abc", "tmux-1000", ".X11-unix", "snap-private-tmp", "spur.yaml", "spur-worktree"]) {
+    for (const name of [
+      "systemd-private-abc",
+      "tmux-1000",
+      ".X11-unix",
+      "snap-private-tmp",
+      "spur.yaml",
+      "spur-worktree",
+    ]) {
       const entry = makeEntry({
         path: `/tmp/${name}`,
         rootId: "tmp",
@@ -282,7 +310,9 @@ describe("verdictFor", () => {
       entryClass: { kind: "tmp-entry", name: "some-scratch-dir" },
       ageDays: GLOBAL_MIN_AGE_DAYS,
     });
-    expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({ kind: "prunable" });
+    expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
+      kind: "prunable",
+    });
   });
 });
 
@@ -292,16 +322,10 @@ describe("listProcesses (real implementation, mocked execFile)", () => {
 
   it("parses pid/ppid/args and skips malformed lines", async () => {
     execFileMock.mockImplementation(
-      (
-        _file: string,
-        _args: string[],
-        optionsOrCallback: unknown,
-        maybeCallback?: unknown,
-      ) => {
-        const callback = (typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback) as (
-          error: Error | null,
-          result?: { stdout: string; stderr: string },
-        ) => void;
+      (_file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
+        const callback = (
+          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
         callback(null, { stdout: "1 0 /sbin/init\n42 1 node server.js\nbogus-line\n", stderr: "" });
         return {} as ChildProcess.ChildProcess;
       },
@@ -327,16 +351,10 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     // No live ps rows by default — irrelevant to these tests beyond not
     // throwing.
     execFileMock.mockImplementation(
-      (
-        file: string,
-        args: string[],
-        optionsOrCallback: unknown,
-        maybeCallback?: unknown,
-      ) => {
-        const callback = (typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback) as (
-          error: Error | null,
-          result?: { stdout: string; stderr: string },
-        ) => void;
+      (file: string, args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
+        const callback = (
+          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
         if (file === "ps") {
           callback(null, { stdout: "", stderr: "" });
           return {} as ChildProcess.ChildProcess;
@@ -367,7 +385,11 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     await utimes(join(home, ".cache", "somelib"), old, old);
     canReadProcessTreeMock.mockResolvedValue(false);
 
-    const plan = await planCachePrune({ home, tmpPath: tmpRoot, instanceConfig: { status: "absent" } });
+    const plan = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+    });
 
     expect(plan.processTreeReadable).toBe(false);
     expect(plan.reclaimableKb).toBe(0);
@@ -386,16 +408,10 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     await utimes(join(home, ".npm", "_npx", "somehash"), old, old);
 
     execFileMock.mockImplementation(
-      (
-        file: string,
-        _args: string[],
-        optionsOrCallback: unknown,
-        maybeCallback?: unknown,
-      ) => {
-        const callback = (typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback) as (
-          error: Error | null,
-          result?: { stdout: string; stderr: string },
-        ) => void;
+      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
+        const callback = (
+          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
         if (file === "ps") {
           callback(null, { stdout: "", stderr: "" });
           return {} as ChildProcess.ChildProcess;
@@ -409,7 +425,11 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       },
     );
 
-    const plan = await planCachePrune({ home, tmpPath: tmpRoot, instanceConfig: { status: "absent" } });
+    const plan = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+    });
 
     const npxRoot = plan.roots.find((r) => r.rootId === "npm-npx");
     expect(npxRoot).toMatchObject({ status: "skipped", totalKb: 0, entryCount: 0 });

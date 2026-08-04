@@ -17,7 +17,9 @@ describe("parseDfField", () => {
   });
 
   it("returns undefined for output with no data line", () => {
-    expect(parseDfField("Filesystem 1024-blocks Used Available Capacity Mounted\n", 3)).toBeUndefined();
+    expect(
+      parseDfField("Filesystem 1024-blocks Used Available Capacity Mounted\n", 3),
+    ).toBeUndefined();
   });
 
   it("returns undefined for a non-numeric field", () => {

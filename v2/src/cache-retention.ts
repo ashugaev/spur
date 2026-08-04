@@ -5,7 +5,12 @@ import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { listSessions } from "./metadata.js";
-import { canReadProcessTree, collectDescendants, listProcesses, type ProcessInfo } from "./process-tree.js";
+import {
+  canReadProcessTree,
+  collectDescendants,
+  listProcesses,
+  type ProcessInfo,
+} from "./process-tree.js";
 import { getTmuxPanePid, setTmuxSocketName } from "./runtime-tmux.js";
 import type { InstanceConfigReadResult } from "./config.js";
 
@@ -250,14 +255,20 @@ export function verdictFor(
   const floorDays = classFloorDays(entry.entryClass);
   const effectiveFloor = Math.max(GLOBAL_MIN_AGE_DAYS, floorDays ?? GLOBAL_MIN_AGE_DAYS);
   if (entry.ageDays < effectiveFloor) {
-    return { kind: "protected", reason: { kind: "too-recent", ageDays: entry.ageDays, floorDays: effectiveFloor } };
+    return {
+      kind: "protected",
+      reason: { kind: "too-recent", ageDays: entry.ageDays, floorDays: effectiveFloor },
+    };
   }
   if (entry.entryClass.kind === "browser-revision") {
     if (liveness.pinSourceCount === 0) {
       return { kind: "protected", reason: { kind: "pin-unresolved" } };
     }
     if (liveness.pinnedDirNames.has(entry.entryClass.dirName)) {
-      return { kind: "protected", reason: { kind: "pinned-revision", dirName: entry.entryClass.dirName } };
+      return {
+        kind: "protected",
+        reason: { kind: "pinned-revision", dirName: entry.entryClass.dirName },
+      };
     }
   }
   if (entry.entryClass.kind === "vendor-cache") {
@@ -288,7 +299,11 @@ function cacheRoots(home: string, tmpPath = "/tmp"): CacheRoot[] {
     { id: "npm-cacache", path: join(home, ".npm", "_cacache"), mode: "whole-root" },
     { id: "npm-npx", path: join(home, ".npm", "_npx"), mode: "entries" },
     { id: "playwright-browsers", path: join(home, ".cache", "ms-playwright"), mode: "entries" },
-    { id: "playwright-mcp-profiles", path: join(home, ".cache", "ms-playwright-mcp"), mode: "entries" },
+    {
+      id: "playwright-mcp-profiles",
+      path: join(home, ".cache", "ms-playwright-mcp"),
+      mode: "entries",
+    },
     { id: "xdg-cache", path: join(home, ".cache"), mode: "entries" },
     { id: "tmp", path: tmpPath, mode: "entries" },
   ];
@@ -381,7 +396,9 @@ async function resolvePins(
   // P2: each configured project's own playwright-core, plus any pnpm-store
   // sibling installs under its node_modules/.pnpm.
   for (const projectPath of projectPaths) {
-    addFrom(await readBrowsersJson(join(projectPath, "node_modules", "playwright-core", "browsers.json")));
+    addFrom(
+      await readBrowsersJson(join(projectPath, "node_modules", "playwright-core", "browsers.json")),
+    );
     addFrom(await readPnpmStorePins(projectPath));
   }
 
@@ -390,7 +407,11 @@ async function resolvePins(
   // worktree installs on this host prove this is not a hypothetical source.
   if (instanceConfig.status === "ok") {
     for (const worktreePath of await listWorktreePaths(instanceConfig.config.worktreeDir)) {
-      addFrom(await readBrowsersJson(join(worktreePath, "node_modules", "playwright-core", "browsers.json")));
+      addFrom(
+        await readBrowsersJson(
+          join(worktreePath, "node_modules", "playwright-core", "browsers.json"),
+        ),
+      );
       addFrom(await readPnpmStorePins(worktreePath));
     }
   }
@@ -401,7 +422,11 @@ async function resolvePins(
   try {
     const hashes = await readdir(npxDir);
     for (const hash of hashes) {
-      addFrom(await readBrowsersJson(join(npxDir, hash, "node_modules", "playwright-core", "browsers.json")));
+      addFrom(
+        await readBrowsersJson(
+          join(npxDir, hash, "node_modules", "playwright-core", "browsers.json"),
+        ),
+      );
     }
   } catch {
     // ~/.npm/_npx absent or unreadable — no npx-installed pins.
@@ -420,7 +445,9 @@ async function readPnpmStorePins(rootPath: string): Promise<unknown | undefined>
   }
   for (const entry of entries) {
     if (!entry.startsWith("playwright-core@")) continue;
-    const parsed = await readBrowsersJson(join(pnpmDir, entry, "node_modules", "playwright-core", "browsers.json"));
+    const parsed = await readBrowsersJson(
+      join(pnpmDir, entry, "node_modules", "playwright-core", "browsers.json"),
+    );
     if (parsed !== undefined) {
       return parsed;
     }
@@ -544,11 +571,21 @@ interface StatFacts extends EntryOwnership {
 async function measureRoot(
   root: CacheRoot,
   nowMs: number,
-): Promise<{ measurement: CacheRootMeasurement; entries: CacheEntry[]; ownership: Map<string, EntryOwnership> }> {
+): Promise<{
+  measurement: CacheRootMeasurement;
+  entries: CacheEntry[];
+  ownership: Map<string, EntryOwnership>;
+}> {
   const raw = await listRawEntries(root);
   if (raw === "absent") {
     return {
-      measurement: { rootId: root.id, path: root.path, status: "absent", totalKb: 0, entryCount: 0 },
+      measurement: {
+        rootId: root.id,
+        path: root.path,
+        status: "absent",
+        totalKb: 0,
+        entryCount: 0,
+      },
       entries: [],
       ownership: new Map(),
     };
@@ -581,7 +618,13 @@ async function measureRoot(
   const sizes = await duSizesKb(statted.map((item) => item.path));
   if (sizes === undefined) {
     return {
-      measurement: { rootId: root.id, path: root.path, status: "skipped", totalKb: 0, entryCount: 0 },
+      measurement: {
+        rootId: root.id,
+        path: root.path,
+        status: "skipped",
+        totalKb: 0,
+        entryCount: 0,
+      },
       entries: [],
       ownership,
     };
@@ -607,7 +650,13 @@ async function measureRoot(
   }
 
   return {
-    measurement: { rootId: root.id, path: root.path, status: "measured", totalKb, entryCount: entries.length },
+    measurement: {
+      rootId: root.id,
+      path: root.path,
+      status: "measured",
+      totalKb,
+      entryCount: entries.length,
+    },
     entries,
     ownership,
   };
@@ -706,7 +755,9 @@ export async function executePrune(
         }
       }
       if (guard.worktreeDir) {
-        const worktreeDirReal = await realpath(guard.worktreeDir).catch(() => guard.worktreeDir as string);
+        const worktreeDirReal = await realpath(guard.worktreeDir).catch(
+          () => guard.worktreeDir as string,
+        );
         if (isWithin(worktreeDirReal, targetRealPath)) {
           failures.push({ path, message: "refused: resolves inside worktreeDir" });
           continue;
