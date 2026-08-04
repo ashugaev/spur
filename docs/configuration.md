@@ -7,11 +7,19 @@ Two layers:
 - Global instance config: `~/.spur/config.yaml` by default. Owns daemon host/port, data dirs, tmux socket, default agent, UI port, and `voice:` (see [voice.md](voice.md)).
 - Local project config: nearest `spur.yaml` / `spur.yml`. Owns only `projects:`.
 
-`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present, unless that config lives inside `worktreeDir` — a per-session worktree copy is never auto-connected, and `POST /projects/connect` rejects one with 400 if posted directly. This stops the per-session `spur.yaml` copy that a worktree carries from piling up in the daemon's config registry.
+`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present — except a config inside `worktreeDir`, which is never registered (see [Config registry](#config-registry)).
 
 A running session reads only the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one the session uses the project as the daemon has it.
 
-The daemon's config registry (`config-registry.json` in `dataDir`) drops any entry whose file no longer exists or is a directory at every boot and at every connect/disconnect, and persists the pruned list back to disk at boot. A session's worktree-internal config entry is also dropped the moment that session reaches a terminal state or its worktree is removed, so it never depends on an explicit `spur disconnect`. `spur doctor` runs a `config-registry` check (severity `warn`, never affects the exit code) that flags dead entries, worktree-internal entries, and a registry over 24 paths.
+## Config registry
+
+Registered project config paths persist in `config-registry.json` under `dataDir`. Daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers.
+
+A config inside `worktreeDir` is never registered — a worktree's own `spur.yaml` copy would otherwise add an entry per session. Auto-connect skips such a path; `POST /projects/connect` rejects it with 400, as it does a non-absolute `configPath`.
+
+Pruned at boot and at every connect/disconnect: entries that are not an existing file (deleted, or a directory), worktree-internal leftovers, and duplicates resolving to the same real path. Surviving paths are written back, and boot appends `daemon.registry.pruned` with the before/after count to `<dataDir>/events.jsonl`. Removing a session's worktree unregisters its config too, so a leftover never waits on `spur disconnect`.
+
+`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
 
 ## Local project config
 

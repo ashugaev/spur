@@ -76,7 +76,7 @@ A running session overrides its project only from the `spur.yaml` in its own ses
 
 Footgun: the merge keeps only `projects:` from a project config. Every other key there parses without error, then is discarded — `tags`, `authRotation`, `rateLimitReactivation`, `server`, `dataDir` in a project file do nothing.
 
-The daemon's config registry (`config-registry.json` in `dataDir`) never accepts a config path inside `worktreeDir` — CLI auto-connect skips it, `POST /projects/connect` rejects it with 400. Dead entries (file gone, or a directory) drop at boot and at every connect/disconnect, pruned list persisted once at boot. A session's worktree-internal entry also drops the moment that session goes terminal or its worktree is removed. `spur doctor` carries a `config-registry` check (`warn`, never the exit code) for dead, worktree-internal, or over-cap (24) entries.
+Config registry (`config-registry.json` in `dataDir`) never takes a config path inside `worktreeDir` — auto-connect skips it, `POST /projects/connect` returns 400, same for a non-absolute path. Boot and every connect/disconnect drop entries that are not an existing file, worktree-internal leftovers, and same-realpath duplicates; boot persists the survivors and logs `daemon.registry.pruned`. Removing a session's worktree unregisters its config. `spur connect|disconnect [path]` resolve a relative path against the cwd. `spur doctor` check `config-registry`: `warn`, never the exit code, flags dead, worktree-internal, or over-24 entries; reads `SPUR_CONFIG` or the default instance config, ignores `--config`.
 
 ```yaml
 server:

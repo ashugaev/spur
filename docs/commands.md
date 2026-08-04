@@ -67,6 +67,15 @@ While an agent is busy, manual `send` queues per session and flushes when it ret
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery).
 
+## connect, disconnect
+
+```bash
+spur connect [path]
+spur disconnect [path]
+```
+
+Register or unregister a project config with the running instance. `[path]` resolves against the cwd; omitted, Spur takes the nearest `spur.yaml`/`spur.yml`. What the daemon accepts: [config registry](configuration.md#config-registry).
+
 ## spur-slots
 
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session:
@@ -171,7 +180,7 @@ is silently replaced by Spur's own.
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: a normal CLI command auto-connects its discovered project config into the daemon, unless that config lives inside `worktreeDir` — a per-session worktree copy is never registered, whether discovered by the CLI or posted straight to `POST /projects/connect` (the daemon rejects it with 400). Daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers — but first drops any entry whose file no longer exists or is a directory, and any leftover worktree-internal entry, persisting the pruned list back to `dataDir` before reload. The same live filter runs on every subsequent connect/disconnect and on the internal `spur branch` naming check, so a dead or worktree-internal entry is never parsed. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+`build` also restarts a running daemon when Spur config is discoverable. A normal CLI command auto-connects its discovered project config into the daemon; registration and pruning rules live in [config registry](configuration.md#config-registry). Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
 ## Validate
 
