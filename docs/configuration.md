@@ -235,6 +235,11 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `authRotation.cooldownMinutes`: optional, default `60`.
 - `authRotation.maxRotationsPerEpisode`: optional, default `2`.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
+- `sessionGc.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur gc`](commands.md#gc) policy on a timer; `spur gc` itself works regardless.
+- `sessionGc.olderThanDays`: optional, default `30`. Minimum age of a group's newest record. Also the `spur gc --older-than` default.
+- `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
+- `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
+- `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 
 ## Events

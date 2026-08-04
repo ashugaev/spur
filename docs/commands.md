@@ -4,13 +4,37 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## doctor
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
+
+## gc
+
+```bash
+spur gc [--execute] [--older-than <days>] [--statuses completed,killed,stopped] [--project <id>] [--limit <n>] [--no-sizes] [--json]
+```
+
+Reclaims stale session worktrees and moves terminal session records out of the daemon's 2s scan. Dry run unless `--execute`; prints every candidate group with age, size, and the action it would take. Daemon-free — reads the config and data dir directly, no running daemon needed.
+
+Unit of collection is the workspace group, not the session: every session sharing a `workspaceId`, plus any group sharing an identical `worktreePath`. One non-eligible member blocks the whole group, so a live sibling protects a parked one.
+
+Actions: `reclaim` removes the worktree, then archives the records; `archive` only moves records (worktree already gone, or the session ran in the project path); `blocked` does nothing and prints its reasons.
+
+Blocked reasons: `not_eligible_status`, `too_recent`, `changed_during_run`, `path_outside_worktree_dir`, `shared_workspace_path`, `path_is_cwd_or_ancestor`, `uncommitted_changes`, `unpushed_commits`, `open_pr`, `probe_failed`. Every guard is re-checked immediately before removal, against a fresh record read — a probe that throws blocks, never passes. `changed_during_run` covers any change to the fields a guard reads: status, `updatedAt`, `worktree`, `worktreePath`, `branch`, PR binding.
+
+Open-PR detection is one `gh pr list --repo <slug> --state open` per repo per run, matched against the stored `session.pr` number and the session branch. A saturated list is a block, not an empty result.
+
+Worktrees go out through `git worktree remove` plus `git worktree prune`, so the parent repo's metadata stays consistent. Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard dir; `mv` one back into `<dataDir>/sessions/<projectId>/` to un-archive (the index self-heals). A collected `stopped` session can no longer be restored — `spur gc` lists those ids before it acts.
+
+Worktree removal happens before archival. A group whose removal succeeded but whose archival failed reports `removed: true, archived: false` with an error; its record stays in `sessions/` pointing at a deleted path, and the next run collects it as `archive`. Nothing to do by hand.
+
+Freed bytes come from `du -s --block-size=1` measured before removal. A file hardlinked into several worktrees (pnpm store) counts once per worktree, so a large total can overstate the disk actually returned. `--no-sizes` skips measurement (no freed-byte reporting). Exits `1` when any group errored during `--execute`.
+
+Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
 
 ## daemon
 
@@ -57,7 +81,7 @@ spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message..
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit).
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying.
 
 ## list
 

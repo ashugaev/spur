@@ -336,6 +336,18 @@ async function pruneWorktrees(repoPath: string): Promise<void> {
   }
 }
 
+// Public entry point for a caller outside this module (session GC) that
+// needs to prune stale worktree metadata after removing one out from under
+// git's back (removeWorktree's rmSync/sudo-rm fallback path can leave a
+// worktree entry registered in .git/worktrees even though the directory is
+// gone, which would block a later `git worktree add`/reopen at the same
+// path). Every other caller of pruneWorktrees already runs inside its own
+// withWorkspaceGitLock; this one takes the lock itself since GC calls it
+// standalone, after its own removeWorktree calls have already released theirs.
+export async function pruneRepoWorktrees(repoPath: string): Promise<void> {
+  await withWorkspaceGitLock(repoPath, () => pruneWorktrees(repoPath));
+}
+
 async function gitExitCode(cwd: string, ...args: string[]): Promise<number> {
   try {
     await execFileAsync("git", args, { cwd });
