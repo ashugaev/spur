@@ -569,12 +569,28 @@ export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostI
   if (worktreeInternalPaths.length > 0)
     facts.push(`${worktreeInternalPaths.length} worktree-internal`);
   if (overCap) facts.push(`over the ${CONFIG_REGISTRY_MAX_PATHS}-path cap`);
+  const detail =
+    offending.length > 0
+      ? `${facts.join(", ")}: ${offending.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`
+      : `${facts.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`;
+  // `spur disconnect` only helps a dead entry — it filters `this.registryPaths`,
+  // which never contains a worktree-internal path (the boot/preview prune
+  // already dropped it), so pointing that fix at one is a silent no-op that
+  // keeps this check red forever. Worktree-internal entries only clear on the
+  // next daemon restart, which re-runs the boot prune.
+  const fixParts: string[] = [];
+  if (deadPaths.length > 0) {
+    fixParts.push(`spur disconnect <path> for a dead entry, e.g. spur disconnect ${deadPaths[0]}`);
+  }
+  if (worktreeInternalPaths.length > 0) {
+    fixParts.push("restart the daemon to prune worktree-internal entries at boot");
+  }
   return {
     id: "config-registry",
     ok: false,
     severity: "warn",
-    detail: `${facts.join(", ")}: ${offending.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`,
-    fix: `spur disconnect <path> for the offending entries, e.g. spur disconnect ${offending[0]}`,
+    detail,
+    ...(fixParts.length > 0 ? { fix: fixParts.join("; ") } : {}),
   };
 }
 

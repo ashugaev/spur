@@ -284,6 +284,79 @@ describe("checkConfigRegistry", () => {
     expect(check.severity).toBe("warn");
     expect(check.ok).toBe(false);
     expect(check.detail).toContain(deadPath);
+    // Both dead and worktree-internal offenders are present, so the fix
+    // hint must cover both — and never resolve to a bare `undefined`.
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).toContain("restart the daemon");
+    expect(check.fix).not.toContain("undefined");
+  });
+
+  it("omits fix and points at the count in detail when only the cap is over, with no dead or worktree-internal offenders", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-cap-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+
+    const livePaths = await Promise.all(
+      Array.from({ length: 25 }, async (_, index) => {
+        const path = join(rootDir, `live-${index}.yaml`);
+        await writeFile(path, "stub: true\n", "utf8");
+        return path;
+      }),
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: livePaths, unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("over the");
+    expect(check.detail).not.toContain(": ");
+    expect(check.fix).toBeUndefined();
+  });
+
+  it("points only at spur disconnect, never a daemon restart, when every offender is dead", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-dead-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const deadPath = join(rootDir, "missing.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [deadPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).not.toContain("restart the daemon");
+  });
+
+  it("points only at a daemon restart, never spur disconnect, when every offender is worktree-internal", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-worktree-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [worktreeInternalPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toBe("restart the daemon to prune worktree-internal entries at boot");
+    expect(check.fix).not.toContain("spur disconnect");
   });
 
   it("reports ok when every registered path is live, outside worktreeDir, and under cap", async () => {
