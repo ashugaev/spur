@@ -58,6 +58,7 @@ vi.mock("../../src/port-probe.js", async () => {
 });
 
 import {
+  checkConfigRegistry,
   checkServiceHealth,
   checkSpurOnPath,
   checkVersionDrift,
@@ -242,6 +243,68 @@ afterEach(() => {
   } else {
     process.env["SPUR_CONFIG"] = initialSpurConfig;
   }
+});
+
+describe("checkConfigRegistry", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("warns on dead, worktree-internal, and over-cap registry entries", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    const fillerDeadPaths = Array.from({ length: 22 }, (_, index) =>
+      join(rootDir, `filler-${index}.yaml`),
+    );
+
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({
+        configPaths: [livePath, deadPath, worktreeInternalPath, ...fillerDeadPaths],
+        unconfiguredProjects: [],
+      }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.id).toBe("config-registry");
+    expect(check.severity).toBe("warn");
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain(deadPath);
+  });
+
+  it("reports ok when every registered path is live, outside worktreeDir, and under cap", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-ok-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [livePath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+  });
 });
 
 describe("collectHostInstallChecks", () => {

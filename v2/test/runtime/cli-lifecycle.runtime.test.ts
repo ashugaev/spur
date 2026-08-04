@@ -765,6 +765,40 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
   });
 
+  // Proves the `checkConfigRegistry` push (host-install.ts) is scoped inside
+  // the `instanceConfig.status === "ok" && unitsInstalled` block: a host that
+  // never ran `spur init` (no systemd units here) must not surface it.
+  it("doctor omits config-registry on a host without systemd units", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-no-units-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(doctor.hostChecks.length).toBeGreaterThan(0);
+    expect(doctor.hostChecks.every((check) => check.id !== "config-registry")).toBe(true);
+  });
+
   // Guards the `runDoctorJson` tolerance above: a host-global port conflict is
   // error-severity, so `doctor` exits 1 while its report is perfectly valid on
   // stdout. Squats the pinned daemon port with a 500-answering server, which is

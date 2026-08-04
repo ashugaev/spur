@@ -1,11 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
@@ -528,6 +536,61 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
 }
 
+// A healthy host registers one instance config plus one per real repo
+// (single digits). 24 is ~3x headroom over any plausible fleet and far under
+// the observed 92-entry pathological state (worktree spur.yaml copies
+// auto-registered and never unregistered).
+const CONFIG_REGISTRY_MAX_PATHS = 24;
+
+// Pure over the file it reads: fast-tier testable without a running daemon.
+// `warn` only — never changes hasErrorSeverity or the process exit code.
+// Note: doctor resolves the instance config from SPUR_CONFIG/default and
+// ignores --config, so this check reflects that same instance, not
+// necessarily the one passed via --config.
+export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostInstallCheck {
+  const configPaths = readConfigRegistryFile(dataDir).configPaths;
+  const deadPaths: string[] = [];
+  const worktreeInternalPaths: string[] = [];
+  for (const path of configPaths) {
+    let isFile = false;
+    try {
+      isFile = statSync(path).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!isFile) {
+      deadPaths.push(path);
+      continue;
+    }
+    if (isInsideWorktreeDir(path, worktreeDir)) {
+      worktreeInternalPaths.push(path);
+    }
+  }
+  const overCap = configPaths.length > CONFIG_REGISTRY_MAX_PATHS;
+  const ok = deadPaths.length === 0 && worktreeInternalPaths.length === 0 && !overCap;
+  if (ok) {
+    return {
+      id: "config-registry",
+      ok: true,
+      severity: "warn",
+      detail: `${configPaths.length} registered config path(s), all live and outside worktreeDir`,
+    };
+  }
+  const offending = [...deadPaths, ...worktreeInternalPaths].slice(0, 3);
+  const facts: string[] = [`${configPaths.length} registered config path(s)`];
+  if (deadPaths.length > 0) facts.push(`${deadPaths.length} dead`);
+  if (worktreeInternalPaths.length > 0)
+    facts.push(`${worktreeInternalPaths.length} worktree-internal`);
+  if (overCap) facts.push(`over the ${CONFIG_REGISTRY_MAX_PATHS}-path cap`);
+  return {
+    id: "config-registry",
+    ok: false,
+    severity: "warn",
+    detail: `${facts.join(", ")}: ${offending.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`,
+    fix: `spur disconnect <path> for the offending entries, e.g. spur disconnect ${offending[0]}`,
+  };
+}
+
 async function portConflictCheck(
   id: ServiceId,
   unit: string,
@@ -928,6 +991,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
     checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
     checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+    checks.push(
+      checkConfigRegistry(instanceConfig.config.dataDir, instanceConfig.config.worktreeDir),
+    );
 
     const actualWebPort = readWebPort(scope);
     const configuredWebPort = instanceConfig.config.ui.port;
