@@ -736,7 +736,10 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
 
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return [];
+  if (!existsSync(rootDir)) {
+    pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    return [];
+  }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();

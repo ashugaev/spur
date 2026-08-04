@@ -3136,6 +3136,7 @@ export class SessionService {
       // agent activity, so it only needs the bounded round-robin below.
       const due: SessionRecord[] = [];
       const idle: SessionRecord[] = [];
+      let nextDashboardIdleCursor = this.dashboardIdleCursor;
       for (const session of sessions) {
         const recordChanged = this.dashboardEnrichedRecords.get(session.id) !== session;
         if (
@@ -3168,7 +3169,7 @@ export class SessionService {
             due.push(roundRobinSession);
           }
         }
-        this.dashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
+        nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
       }
 
       const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
@@ -3186,6 +3187,7 @@ export class SessionService {
       for (const session of due) {
         this.dashboardEnrichedRecords.set(session.id, session);
       }
+      this.dashboardIdleCursor = nextDashboardIdleCursor;
 
       // Prune off the enumerated+filtered set, never off the enriched
       // subset, so an idle entry that was seeded once and then never due

@@ -20211,6 +20211,39 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("retries the same idle slice after enrichment fails", async () => {
+      seedDashboardSessions(0, 10);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard", includeCompleted: true });
+
+      const selected: string[] = [];
+      let failSelectedSlice = true;
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        async (session: SessionRecord) => {
+          selected.push(session.id);
+          if (failSelectedSlice && session.id === "done-2") {
+            throw new Error("idle enrichment failed");
+          }
+          return { id: session.id };
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
+
+      selected.length = 0;
+      failSelectedSlice = false;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
+
+      selected.length = 0;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-5", "done-6", "done-7", "done-8"]);
+      service.dispose();
+    });
+
     it("tick enrich count tracks live sessions, not total records", async () => {
       // Hand-mirrored copy of the tick's clamp(ceil(idle / 60), MIN, MAX)
       // quota rule. The constants are not exported, so this copy is kept in
