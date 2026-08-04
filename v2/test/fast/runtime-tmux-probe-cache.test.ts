@@ -179,10 +179,7 @@ describe("runtime-tmux shared probe cache", () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
         return {
-          stdout: [
-            "api-1--dev 1 1 0 1001 /dev/pts/1",
-            "api-2 1 1 0 1002 /dev/pts/2",
-          ].join("\n"),
+          stdout: ["api-1--dev 1 1 0 1001 /dev/pts/1", "api-2 1 1 0 1002 /dev/pts/2"].join("\n"),
           stderr: "",
         };
       }
