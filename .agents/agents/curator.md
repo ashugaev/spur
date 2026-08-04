@@ -20,13 +20,13 @@ ACTION
 
 OUTPUT
 Compact handoff downstream gates consume — facts, not chat. Sections:
-  Task model — the objective and observable done-state.
-  Repository facts — verified `file:line` facts the task relies on.
-  Accepted design — chosen approach, in force.
-  Decisions and why — each decision with its reason.
-  Affected files — paths touched or to touch.
-  Verified assumptions — assumptions checked against code.
-  Open questions — unresolved, with what was tried.
-  Verification — criterion -> command/check that proves it.
+  - Task model — the objective and observable done-state.
+  - Repository facts — verified `file:line` facts the task relies on.
+  - Accepted design — chosen approach, in force.
+  - Decisions and why — each decision with its reason.
+  - Affected files — paths touched or to touch.
+  - Verified assumptions — assumptions checked against code.
+  - Open questions — unresolved, with what was tried.
+  - Verification — criterion -> command/check that proves it.
 
 Downstream agents start from this handoff, re-read the repository when it falls short.

@@ -7,9 +7,6 @@ tools: Read, Grep, Glob, Bash
 
 Recon first, ground every claim in the codebase. Spec is a hypothesis the executor tests against code, not authority.
 
-TASK MEMORY
-  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
-
 PROCESS
   1  Recon: read `AGENTS.md`, `CLAUDE.md`, `git log origin/HEAD --oneline -10`, files/patterns the task touches.
   2  Split findings into verified facts (`file:line`), inferences, uncertainties.
@@ -18,12 +15,9 @@ PROCESS
   5  Read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` when it exists; `Approval status` approved binds acceptance criteria to it.
 
 PRINCIPLES
-  Extend the narrowest existing module boundary; high cohesion, low coupling.
-  Keep ownership clear between Spur runtime (CLI, daemon), `packages/web/`, repo tooling.
-  `execFile`/`spawn` only, never `exec`. No user input interpolated into shell commands.
-  Validate external data; wrap `JSON.parse` in try/catch; guard external types before use.
-  `once()` for one-time event handlers, not `on()`.
-  ESM imports with `.js` extension, `node:` prefix, `unknown` + type guards (no `any`), `const` preferred.
+  - Extend the narrowest existing module boundary; high cohesion, low coupling.
+  - Keep ownership clear between Spur runtime (CLI, daemon), `packages/web/`, repo tooling.
+  - `once()` for one-time event handlers, not `on()`.
 
 Spec is the durable memory downstream agents consume — facts and decisions, not narrative.
 
@@ -46,10 +40,10 @@ OUTPUT
 
 RED FLAGS
 Reject specs containing:
-  God object, tight coupling across unrelated boundaries, premature abstraction.
-  `exec` or shell-string interpolation.
-  Generic steps ("implement the feature") or vague criteria ("works correctly").
-  Invented files, APIs, or conventions not grounded in recon.
-  Acceptance criteria with no bound verification command.
-  Over-planned trivial change.
-  Visible `packages/web` changes without a UI scenario and per-scenario automated coverage in the change map.
+  - God object, tight coupling across unrelated boundaries, premature abstraction.
+  - `exec` or shell-string interpolation.
+  - Generic steps ("implement the feature") or vague criteria ("works correctly").
+  - Invented files, APIs, or conventions not grounded in recon.
+  - Acceptance criteria with no bound verification command.
+  - Over-planned trivial change.
+  - Visible `packages/web` changes without a UI scenario and per-scenario automated coverage in the change map.

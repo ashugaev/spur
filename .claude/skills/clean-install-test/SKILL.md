@@ -9,8 +9,8 @@ A role-play: provision a disposable VM, plant a coding agent on it, then act as 
 
 GROUND RULES
 
-  Touch only the VM created this run — never production Spur, the local box, or another machine. Lifecycle: create -> plant agent -> run test -> analyze -> evolve docs -> report -> wait for user ok -> delete THAT instance; never delete before the user confirms. Ubuntu 24.04 LTS, e2-small-class (~2GB/2 cores) default, e2-micro (~1GB) floor-tests it; npm bundle ships the web UI prebuilt, no on-box build. Never open app ports to the internet — default firewall leaves only SSH reachable, leave it.
-  No hard hacking: the planted agent never bypasses an identity/auth step; lacking the user's own account it records a TODO and moves on — never hint it past friction, fix the doc instead. Copying local Claude credentials onto the VM (step 3) is an ITEST-ONLY harness shortcut for an unattended run: never outside itest, never between real hosts. Secrets and credentials go to the VM only, piped over SSH stdin, never echoed to logs or chat.
+  - Touch only the VM created this run — never production Spur, the local box, or another machine. Lifecycle: create -> plant agent -> run test -> analyze -> evolve docs -> report -> wait for user ok -> delete THAT instance; never delete before the user confirms. Ubuntu 24.04 LTS, e2-small-class (~2GB/2 cores) default, e2-micro (~1GB) floor-tests it; npm bundle ships the web UI prebuilt, no on-box build. Never open app ports to the internet — default firewall leaves only SSH reachable, leave it.
+  - No hard hacking: the planted agent never bypasses an identity/auth step; lacking the user's own account it records a TODO and moves on — never hint it past friction, fix the doc instead. Copying local Claude credentials onto the VM (step 3) is an ITEST-ONLY harness shortcut for an unattended run: never outside itest, never between real hosts. Secrets and credentials go to the VM only, piped over SSH stdin, never echoed to logs or chat.
 
 0 PREREQS (LOCAL BOX)
 

@@ -8,8 +8,8 @@ tools: Read, Grep, Glob, Bash, Write, Skill, ToolSearch
 Author a UI design in Claude Design, export it runtime-neutral, hand off for approval. Contract: `design` skill.
 
 RUNTIME
-  Manager runs this process itself in the main Claude session, only place `DesignSync` works — a Task subagent doesn't inherit it (`ToolSearch select:DesignSync` returns nothing there). Load via `ToolSearch(select:DesignSync)`, confirm scope with `DesignSync list_projects`, run `/design-login` once if missing.
-  No DesignSync (wrong runtime or a subagent): consume-only — read an approved `design-spec.md` from `$SPUR_SESSION_ARTIFACTS_DIR/design/`, hand downstream. None exists: stop, report the gate needs a main Claude session. Never stall silently.
+  - Manager runs this process itself in the main Claude session, only place `DesignSync` works — a Task subagent doesn't inherit it (`ToolSearch select:DesignSync` returns nothing there). Load via `ToolSearch(select:DesignSync)`, confirm scope with `DesignSync list_projects`, run `/design-login` once if missing.
+  - No DesignSync (wrong runtime or a subagent): consume-only — read an approved `design-spec.md` from `$SPUR_SESSION_ARTIFACTS_DIR/design/`, hand downstream. None exists: stop, report the gate needs a main Claude session. Never stall silently.
 
 PROCESS
   1  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
@@ -19,9 +19,9 @@ PROCESS
   5  Return `PENDING_APPROVAL`. Never wait for the user — manager owns the hard-stop, re-invokes for revisions.
 
 RULES
-  Design only, never implement.
-  Export scoped to touched components. On revision, touch only what the manager's change list names.
-  Fail closed if `$SPUR_SESSION_ARTIFACTS_DIR` is unset.
+  - Design only, never implement.
+  - Export scoped to touched components. On revision, touch only what the manager's change list names.
+  - Fail closed if `$SPUR_SESSION_ARTIFACTS_DIR` is unset.
 
 OUTPUT
   Design Author: PENDING_APPROVAL

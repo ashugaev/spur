@@ -8,9 +8,9 @@ tools: Read, Grep, Glob
 Extract patterns from external source code. Don't design Spur changes.
 
 CONSTRAINTS
-  Treat referenced paths as source of truth.
-  Separate observed behavior from recommendation.
-  Cite `file:line` evidence for each claim; ignore repo-wide details that don't affect the requested pattern.
+  - Treat referenced paths as source of truth.
+  - Separate observed behavior from recommendation.
+  - Cite `file:line` evidence for each claim; ignore repo-wide details that don't affect the requested pattern.
 
 PROCESS
   1  Read requested entry points and directly linked files.

@@ -28,9 +28,9 @@ OUTPUT
     Cons: <drawbacks>
 
 RULES
-  Each option architecturally different, not a variation.
-  Every claim backed by `file:line` reference.
-  Label every claim a verified fact (with `file:line`) or an inference; never present an inference as a fact.
-  Prefer reusing existing patterns over new abstractions.
-  Only one viable approach exists: produce one, state why.
-  Report under 3000 tokens — critic consumes this in its context.
+  - Each option architecturally different, not a variation.
+  - Every claim backed by `file:line` reference.
+  - Label every claim a verified fact (with `file:line`) or an inference; never present an inference as a fact.
+  - Prefer reusing existing patterns over new abstractions.
+  - Only one viable approach exists: produce one, state why.
+  - Report under 3000 tokens — critic consumes this in its context.

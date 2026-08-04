@@ -44,11 +44,11 @@ WORKFLOW
 
 RULES
 
-  Never resolve a thread without replying, always explain what was done.
-  Never blindly apply suggestions, verify against codebase.
-  Bot/Copilot comments get extra scrutiny.
-  Suggestion breaks behavior -> reject it.
-  Prefer own fix over suggested one when a better approach exists.
-  Reply only inside the originating thread, never as a new top-level PR comment.
-  No follow-up, status, or summary comments on the main PR thread, no self-narration on own PRs.
-  One reply per thread; multi-item bot reviews get one reply on the originating comment covering each item.
+  - Never resolve a thread without replying, always explain what was done.
+  - Never blindly apply suggestions, verify against codebase.
+  - Bot/Copilot comments get extra scrutiny.
+  - Suggestion breaks behavior -> reject it.
+  - Prefer own fix over suggested one when a better approach exists.
+  - Reply only inside the originating thread, never as a new top-level PR comment.
+  - No follow-up, status, or summary comments on the main PR thread, no self-narration on own PRs.
+  - One reply per thread; multi-item bot reviews get one reply on the originating comment covering each item.

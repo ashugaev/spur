@@ -47,8 +47,9 @@ Traps:
   Prove the replacement CLI before removing the server. Run one real read,
   show the output. cli_status=found means on PATH, not authenticated.
   Untested CLI, server stays.
-  Back up any surface outside the repo before editing it:
-  <skill dir>/scripts/agent-backup <path> <label>
+  Back up any surface outside the repo before editing it. Manual copy into
+  `~/.spur/agent-backups/<UTC>--<label>/`, no script. Repo-tracked file
+  needs none, git already holds it.
   Per-tool disable is unproven. Re-measure /context after, remove the whole
   server if the schema persists.
   Never cut on INERT alone. Absence from claude mcp list first, cut second.

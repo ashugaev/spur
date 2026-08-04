@@ -12,10 +12,27 @@ FORMAT
 
 Markdown file, minimal markdown. Frontmatter is yaml, machinery not style.
 
-  Body is blank lines, two-space indent, UPPERCASE labels. Nothing else.
-  Banned in a body: # heading, ** bold, | table, ``` fence, - bullet, emoji.
+  Body is blank lines, two-space indent, UPPERCASE labels.
+  Banned in a body: # heading, ** bold, | table, ``` fence, emoji.
   Data needing shape: align columns with spaces.
   One screen per file. Longer, split to references/.
+
+Lists use `-`. Number a list only when the number carries meaning: an
+ordered procedure, or a rank a later line refers back to. Unordered set
+of rules or options takes `-`, never 1 2 3.
+
+NEVER DUPLICATE WHAT THE AGENT CAN LOOK UP
+
+  An external tool's help is not skill content. Name the tool, state the
+  project-specific decision, and stop. The agent runs `<tool> --help`.
+  No command catalogue for `gh`, `git`, `aws`, `docker`, `pnpm`.
+  A rule file is not a store for code constants. Point at the file that
+  defines them. Copy a value in only when no file defines it.
+  Same for config keys, schemas, and route lists: reference the doc or the
+  source, never restate it. A restated value goes stale silently.
+  Keep the overview: what this repo is, where things live, which decision
+  is non-obvious. Cut what the agent derives by reading.
+
 
 Command text is data, not prose. The format law stops at it.
 
@@ -137,9 +154,10 @@ CLAUDE.md, or .cursor/BUGBOT.md.
 
 Never APPROVE:
 
-  a banned word from CAVEMAN, HARD
-  a sentence that passes the deletion test
-  duplication of a rule already in AGENTS.md always-on rules
-  a heading, bold, pipe table, fence, or bullet in a body
+- a banned word from CAVEMAN, HARD
+- a sentence that passes the deletion test
+- duplication of a rule already in AGENTS.md always-on rules
+- an external tool's help text, or a code constant a source file defines
+- a heading, bold, pipe table, or fence in a body
 
 One grep hit is CHANGES_REQUESTED. No taste calls, no warnings-only pass.

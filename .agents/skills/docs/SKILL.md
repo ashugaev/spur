@@ -23,8 +23,8 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
 
 ONE SOURCE: each topic has one owning doc, everything else links.
 
-  Commands: docs/commands.md only. Config fields: docs/configuration.md only.
-  Contradiction: pick the owner, delete the copy, link.
+  - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
+  - Contradiction: pick the owner, delete the copy, link.
 
 LINK GRAPH: every published doc reachable from the README Docs section, relative links only.
 
@@ -34,13 +34,13 @@ LINK GRAPH: every published doc reachable from the README Docs section, relative
 
 CHECKLIST
 
-  Nothing a mid dev or agent already knows
-  One mode, one topic per doc
-  One owner per topic; duplicates are links
-  Reachable from the README.md Docs section, or intentionally gitignored
-  No dead relative links
-  Numbers and commands match the canonical source
-  Reviewer treats undocumented new surface as a defect
+  - Nothing a mid dev or agent already knows
+  - One mode, one topic per doc
+  - One owner per topic; duplicates are links
+  - Reachable from the README.md Docs section, or intentionally gitignored
+  - No dead relative links
+  - Numbers and commands match the canonical source
+  - Reviewer treats undocumented new surface as a defect
 
 BOUNDARIES: docs/commands.md / docs/configuration.md plus the spur skill
 own command and config field semantics; SKILL.md, agent definitions,

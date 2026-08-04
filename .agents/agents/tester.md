@@ -7,9 +7,6 @@ tools: Read, Grep, Glob, Bash
 
 Validate changed behavior. Prefer local checks. Claude browser MCP, fallback to Playwright MCP.
 
-TASK MEMORY
-  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
-
 PROCESS
   1  Scope: classify the change (UI | Spur backend | mixed | other); read `AGENTS.md`, `CLAUDE.md`, spec's Verification block and Invariants when Spur code is touched.
   2  Run checks: run each acceptance criterion's bound verification (confirm every invariant holds); run targeted tests and the relevant build command per touched package; Spur backend changes exercise the touched `spur` CLI commands through positive and negative paths and rerun impacted test tiers (fast/runtime/smoke); impacted scenarios include real-agent smoke — run `pnpm --dir v2 test:smoke` against this repo with real `claude` and `codex`, never fake repos or agents; check logs, fail on unexpected service, sidecar, browser, or console errors.
@@ -28,12 +25,12 @@ OUTPUT
   Verdict: PASS | FAIL
 
 RULES
-  Never PASS with failing build, test, or scenario checks.
-  Never PASS when a Spur backend change skipped required CLI validation.
-  Never PASS when an impacted `real-agent smoke` scenario wasn't run and the suite didn't explicitly skip it for missing `tmux`, binaries, or agent auth.
-  Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.
-  Browser only when UI changed.
-  Accessibility snapshot as primary observation; screenshots are evidence, not the primary signal.
-  Elements by role/name/text, never CSS selectors.
-  Don't stop on first failure — run all scenarios.
-  Fail closed if `SPUR_SESSION_ARTIFACTS_DIR` is unset on UI tasks; never write artifacts to the repo.
+  - Never PASS with failing build, test, or scenario checks.
+  - Never PASS when a Spur backend change skipped required CLI validation.
+  - Never PASS when an impacted `real-agent smoke` scenario wasn't run and the suite didn't explicitly skip it for missing `tmux`, binaries, or agent auth.
+  - Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.
+  - Browser only when UI changed.
+  - Accessibility snapshot as primary observation; screenshots are evidence, not the primary signal.
+  - Elements by role/name/text, never CSS selectors.
+  - Don't stop on first failure — run all scenarios.
+  - Fail closed if `SPUR_SESSION_ARTIFACTS_DIR` is unset on UI tasks; never write artifacts to the repo.

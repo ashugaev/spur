@@ -38,18 +38,3 @@ CREATE DRAFT PR
 Closes #<issue-number>
 EOF
 )"
-
-COMMON COMMANDS
-
-  gh pr diff                                          self-review diff
-  gh pr checks                                        CI status
-  gh pr view --json url,state,title,checks -q .       PR snapshot
-  gh pr list
-  gh pr merge --squash --auto
-  gh issue list
-  gh issue view <number>
-  gh issue create --title "<title>" --body "<body>"
-  gh pr review, one of:
-    --approve
-    --request-changes --body "<feedback>"
-    --comment --body "<comment>"

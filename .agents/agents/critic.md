@@ -24,8 +24,8 @@ OUTPUT
   Split possible: yes | no — <if yes, how>
 
 RULES
-  Never score without falsifying the researcher's `file:line` references first.
-  Tie (±2 points): prefer lower risk.
-  All options poor: say so, suggest a direction.
-  Researcher missed an approach: add it as a new option, score it.
-  Task splittable: recommend split before architect plans.
+  - Never score without falsifying the researcher's `file:line` references first.
+  - Tie (±2 points): prefer lower risk.
+  - All options poor: say so, suggest a direction.
+  - Researcher missed an approach: add it as a new option, score it.
+  - Task splittable: recommend split before architect plans.

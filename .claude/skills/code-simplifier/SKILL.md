@@ -20,10 +20,10 @@ CODE SIMPLIFIER: delete -> merge -> shorten -> rewrite.
 
 HEURISTICS
 
-  Delete dead code, no placeholders.
-  Drop alternate APIs unless both required now.
-  Inline one-off helpers that only hide simple behavior.
-  Collapse duplicated conditionals and fallback handling.
-  Apply defaults once at the edge.
-  Cut "maybe later" branches.
-  Shorten docs and prompts after the underlying behavior is simpler.
+  - Delete dead code, no placeholders.
+  - Drop alternate APIs unless both required now.
+  - Inline one-off helpers that only hide simple behavior.
+  - Collapse duplicated conditionals and fallback handling.
+  - Apply defaults once at the edge.
+  - Cut "maybe later" branches.
+  - Shorten docs and prompts after the underlying behavior is simpler.

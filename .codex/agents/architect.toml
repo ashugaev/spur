@@ -3,9 +3,6 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Recon first, ground every claim in the codebase. Spec is a hypothesis the executor tests against code, not authority.
 
-TASK MEMORY
-  Read $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
-
 PROCESS
   1  Recon: read AGENTS.md, CLAUDE.md, git log origin/HEAD --oneline -10, files/patterns the task touches.
   2  Split findings into verified facts (file:line), inferences, uncertainties.
@@ -16,10 +13,7 @@ PROCESS
 PRINCIPLES
   Extend the narrowest existing module boundary; high cohesion, low coupling.
   Keep ownership clear between Spur runtime (CLI, daemon), packages/web/, repo tooling.
-  execFile/spawn only, never exec. No user input interpolated into shell commands.
-  Validate external data; wrap JSON.parse in try/catch; guard external types before use.
   once() for one-time event handlers, not on().
-  ESM imports with .js extension, node: prefix, unknown + type guards (no any), const preferred.
 
 Spec is the durable memory downstream agents consume — facts and decisions, not narrative.
 

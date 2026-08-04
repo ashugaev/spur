@@ -65,6 +65,11 @@ RESPONSE STYLE
   Off only on explicit "stop caveman" / "normal mode".
 
 
+TASK MEMORY
+
+  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
+
+
 ALWAYS-ON RULES
 
   Keep instructions lean. Only include constraints that materially change implementation.
@@ -74,8 +79,12 @@ ALWAYS-ON RULES
   Keep one path per feature. Do not duplicate types, helpers, validation, constants, or cleanup logic.
   Apply defaults at the boundary. Fail fast in core logic. Limit fallback handling to cleanup around external tools and teardown paths.
   Do not write `catch (error) { throw error }` or other no-op wrappers.
-  Prefer narrow types and explicit shapes. Use discriminated unions and validated objects, not index-signature bags.
+  Prefer narrow types and explicit shapes. Use discriminated unions and validated objects, not index-signature bags. No `any` — `unknown` + type guards.
   Trust upstream-validated typed values. Do not re-validate data already validated at the boundary.
+  Wrap `JSON.parse` in try/catch; validate external data before use.
+  ESM imports with `.js` extension, `node:` prefix for builtins.
+  `execFile`/`spawn` only, never `exec`. No user input interpolated into shell commands.
+  `const` preferred, no `var`.
   Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
@@ -92,6 +101,7 @@ ALWAYS-ON RULES
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
   Skill found stale, wrong, or missing a rule while using it: fix it in the same change. Never leave a known-wrong instruction for the next agent.
   No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text or colon labels.
-  Skill and agent bodies follow the FORMAT law in `skill-writer` (.claude/skills/skill-writer/SKILL.md): markdown file, minimal markdown, UPPERCASE labels and two-space indent instead of headings, tables, fences, and bullets.
+  Skill and agent bodies follow the FORMAT law in `skill-writer` (.claude/skills/skill-writer/SKILL.md): markdown file, minimal markdown, UPPERCASE labels and two-space indent instead of headings, tables, and fences. Lists use `-`; number only when the number carries meaning.
+  Never restate an external tool's help, a code constant a source file defines, or a config key a doc owns. Reference it.
   Any change to Spur config (spur.yaml/AppConfig) or the Spur agent interface (CLI commands and flags, daemon HTTP routes, source and event names, in-session tool and env contracts, config-driven behavior) must be recorded in the config docs in the same change. Canonical docs: `docs/configuration.md` (config) and `docs/commands.md` (CLI); mirror the change to both `spur` SKILL.md files, which stay byte-identical. Verify every default you state against current source in the same change; never copy one from another doc's prose. Re-review these docs for drift whenever config or interface changes.
   Document user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) in the same change; never ship it undocumented. Any published-doc edit loads the `docs` skill and follows it — the skill owns the doc standards (single source, granular, link don't restate).

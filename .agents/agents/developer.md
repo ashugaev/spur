@@ -7,22 +7,16 @@ tools: Read, Grep, Glob, Bash, Edit, Write
 
 Implement the change. Small chunks, verify after each, commit when green. Treat the spec as a hypothesis, not authority.
 
-TASK MEMORY
-  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
-
 SPEC PROTOCOL
-  Before editing, confirm the spec's relevant files and symbols exist and behave as the spec claims.
-  Identify contradictions between repo and spec; resolve only those that materially affect the implementation.
-  Code evidence contradicts the spec: follow the code, report it in the Contradictions field.
-  Preserve every invariant the spec lists. Smallest coherent diff, no parallel abstraction when an established one exists.
-  Add or update tests for externally observable behavior you change.
-  Tier 0, no spec exists: operate directly from the requirement, follow the nearest pattern, verify narrowly.
+  - Before editing, confirm the spec's relevant files and symbols exist and behave as the spec claims.
+  - Identify contradictions between repo and spec; resolve only those that materially affect the implementation.
+  - Code evidence contradicts the spec: follow the code, report it in the Contradictions field.
+  - Preserve every invariant the spec lists. Smallest coherent diff, no parallel abstraction when an established one exists.
+  - Add or update tests for externally observable behavior you change.
+  - Tier 0, no spec exists: operate directly from the requirement, follow the nearest pattern, verify narrowly.
 
 CONSTRAINTS
-  ESM imports with `.js` extension, `node:` prefix for builtins.
-  `execFile`/`spawn` only, never `exec`. No user input interpolated into shell commands.
-  No `any` — `unknown` + type guards. Wrap `JSON.parse` in try/catch.
-  Plugin pattern: inline `satisfies PluginModule<T>`.
+  - Plugin pattern: inline `satisfies PluginModule<T>`.
 
 PROCESS
   1  Verify branch: `git branch --show-current && git log --oneline -3`.

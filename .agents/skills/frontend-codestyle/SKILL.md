@@ -5,39 +5,32 @@ description: Visual codestyle and design system rules for packages/web. Use when
 
 FRONTEND CODESTYLE
 
-COLORS (defined in `globals.css` `@theme`)
+COLORS
 
-  `--color-bg-base`           `#0D0D0E`             Page background
-  `--color-bg-surface`        `rgba(17,17,18,0.8)`  Cards, panels, inputs
-  `--color-bg-elevated`       `rgba(23,23,26,0.9)`  Elevated surfaces
-  `--color-border-subtle`     `rgba(35,35,38,0.6)`  Row dividers
-  `--color-border-default`    `rgba(35,35,38,1)`    Input borders, section borders
-  `--color-border-strong`     `rgba(50,50,54,1)`    Emphasized borders
-  `--color-text-primary`      `#E1E1E1`             Headings, values, primary text
-  `--color-text-secondary`    `#A1A1A1`             Body text, labels
-  `--color-text-tertiary`     `#555558`             Dim labels, metadata
-  `--color-text-inverse`      `#0D0D0E`             Text on white buttons
-  `--color-accent`            `#FFFFFF`             Primary interactive (buttons, links)
-  `--color-status-error`      `#FF4D4D`             Error, needs-input
-  `--color-status-attention`  `#FFD700`             Warning, pending
-  `--color-status-working`    `#58a6ff`             Active/working state
-  `--color-status-ready`      `#3fb950`             Online, complete
-  `--color-accent-orange`     `#d18616`             Review state
+  All `--color-*` tokens live in `packages/web/src/app/globals.css`
+  (`@theme` block = dark/default, `:root[data-theme="light"]` = light).
+  Read that file for names and values, never restate a hex here.
+  Use the token, never a raw hex literal. New token needs both theme blocks.
 
 TYPOGRAPHY
 
-  Font: JetBrains Mono everywhere (monospace-first).
-  Body size: 12px set on `<body>`, components inherit.
-  Letter-spacing: `0.02em` base, `0.06em`–`0.14em` on uppercase labels, `-0.02em` on large headings.
+  Font stack: `--font-sans` / `--font-mono` in `globals.css` (`@theme`).
+  Body size and base letter-spacing: `body {}` in `globals.css`, components inherit.
+  Uppercase labels use `tracking-[0.06em]` through `tracking-[0.14em]` inline per
+  component, large headings `tracking-[-0.02em]` inline — no single token, convention
+  only, match the nearest existing component (`ConversationView.tsx`, `Dashboard.tsx`).
   Uppercase: all labels, headers, button text, stat items.
 
 SPACING
 
-  Tight: `px-2 py-1.5` for inputs/buttons, `px-2.5 py-2` for rows. Prefer `gap` over margin between siblings.
+  Tight: `px-2 py-1.5` for inputs/buttons, `px-2.5 py-2` for rows — Tailwind's
+  default spacing scale, no project token, match the nearest existing component
+  (`TagEditor.tsx`, `SessionRow.tsx`). Prefer `gap` over margin between siblings.
 
 BORDERS AND CORNERS
 
-  All border-radius is 0px (set in theme). No rounded corners anywhere.
+  Border radius: `--radius-*` tokens in `globals.css` (`@theme`), all 0px. No
+  rounded corners anywhere.
   Use `border-[var(--color-border-default)]` for structural borders, `border-[var(--color-border-subtle)]` for row separators.
 
 COMPONENTS
@@ -50,11 +43,13 @@ COMPONENTS
 
 ICONS
 
-  Inline SVG, not icon fonts, stroke-based with `strokeWidth="1.5"` (GitHub/Jira icons use `fill="currentColor"` instead). 16px (`h-4 w-4`) for stats, 12px (`h-3 w-3`) for row-level.
+  Inline SVG, not icon fonts, stroke-based with `strokeWidth="1.5"` (GitHub/Jira icons use `fill="currentColor"` instead). 16px (`h-4 w-4`) for stats, 12px (`h-3 w-3`) for row-level — Tailwind scale, no project token, match the nearest existing icon usage.
 
 RESPONSIVE BREAKPOINTS
 
-  `<sm` (640)  Mobile        Header stacks, project/agent columns hidden, stats wrap, status hidden
+  Tailwind's default `sm`/`md`/`lg` (640/768/1024), unmodified in this repo.
+
+  `<sm`        Mobile        Header stacks, project/agent columns hidden, stats wrap, status hidden
   `sm–md`      Small tablet  Project column shows, tracker/PR links show
   `md–lg`      Tablet        Agent column shows
   `lg+`        Desktop       Branch column shows, full layout
@@ -76,9 +71,9 @@ COLOR LITERALS POLICY
 DO NOT
 
   Use `UNDER_SCORE` style in visible UI text — always use spaces.
-  Use `rounded-*` classes (radius is 0 globally) or `text-sm`/`text-xs` etc. (body is 12px, components inherit).
+  Use `rounded-*` classes (radius is 0 globally, see BORDERS AND CORNERS) or `text-sm`/`text-xs` etc. (body size set in `globals.css`, components inherit).
   Hardcode hex colors in components — use CSS variables.
-  Add gradient overlays or shadows heavier than `shadow-[0_8px_30px_rgba(0,0,0,0.3)]`, or show empty attention zones — filter them out.
+  Add gradient overlays or shadows heavier than `shadow-[0_8px_30px_var(--color-shadow-menu)]`, or show empty attention zones — filter them out.
 
 VALIDATION
 
