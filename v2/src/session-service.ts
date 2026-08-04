@@ -9915,24 +9915,9 @@ export class SessionService {
     byProject: Map<string, number>;
     records: SessionRecord[];
   } {
-    const all = listSessions(this.config.dataDir);
-    const live: SessionRecord[] = [];
-    const seen = new Set<string>();
-    for (const session of all) {
-      if (session.id === excludeSessionId) continue;
-      if (session.status === "running" || session.status === "spawning") {
-        live.push(session);
-        seen.add(session.id);
-      }
-    }
-    for (const session of all) {
-      if (session.id === excludeSessionId) continue;
-      if (seen.has(session.id)) continue;
-      if (this.isInRestoreWarmup(session.id)) {
-        live.push(session);
-        seen.add(session.id);
-      }
-    }
+    const live = listSessions(this.config.dataDir).filter(
+      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+    );
     const byProject = new Map<string, number>();
     for (const session of live) {
       byProject.set(session.project, (byProject.get(session.project) ?? 0) + 1);
