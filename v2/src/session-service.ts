@@ -1901,6 +1901,7 @@ export class SessionService {
   private reaperRunning = false;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
+  private backgroundLoopsStarted = false;
   // Construction time, not epoch 0: a daemon restart must not treat "never
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
@@ -1952,7 +1953,11 @@ export class SessionService {
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
 
-  constructor(configPath?: string, startedAt = nowIso()) {
+  constructor(
+    configPath?: string,
+    startedAt = nowIso(),
+    options: { deferBackgroundLoops?: boolean } = {},
+  ) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
@@ -1976,6 +1981,12 @@ export class SessionService {
     });
     this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
+    if (!options.deferBackgroundLoops) this.startBackgroundLoops();
+  }
+
+  startBackgroundLoops(): void {
+    if (this.backgroundLoopsStarted) return;
+    this.backgroundLoopsStarted = true;
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
     this.startSidecarReaper();
