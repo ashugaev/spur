@@ -80,7 +80,7 @@ async function parseCli(args: string[]): Promise<void> {
   await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", ...args]);
 }
 
-describe("spur daemon start CLI", () => {
+describe("spur daemon CLI", () => {
   beforeEach(() => {
     vi.resetModules();
     callOrder.length = 0;
