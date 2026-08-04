@@ -730,6 +730,16 @@ function assertGraphqlEnvelopeSucceeded(envelope: Record<string, unknown>, conte
   }
 }
 
+function graphqlEnvelopeErrorMessage(errors: unknown): string {
+  if (!Array.isArray(errors)) return "GitHub review batch returned GraphQL errors";
+  const messages = errors.flatMap((error) =>
+    isRecord(error) && typeof error.message === "string" ? [error.message] : [],
+  );
+  return messages.length > 0
+    ? messages.join("; ")
+    : "GitHub review batch returned GraphQL errors";
+}
+
 interface ReviewThreadPage {
   thread: Record<string, unknown>;
   id: string;
@@ -1222,6 +1232,19 @@ async function runReviewRepoBatch(
     envelope.errors,
     new Set(aliases.map((entry) => entry.alias)),
   );
+  if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
+    const fallback = graphqlEnvelopeErrorMessage(envelope.errors);
+    for (const { alias, target } of aliases) {
+      const error = new Error(aliasErrors.get(alias) ?? fallback);
+      for (const matching of targets.filter(
+        (candidate) => candidate.number === target.number && candidate.branch === target.branch,
+      )) {
+        settleTargetLookup(matching, { status: "skipped", reason: "error" });
+        results.set(matching.session.id, { status: "error", error });
+      }
+    }
+    return results;
+  }
   const invalidAliases = new Set(
     aliases
       .filter(
@@ -1230,7 +1253,7 @@ async function runReviewRepoBatch(
       )
       .map(({ alias }) => alias),
   );
-  if (aliasErrors.size === 0 && invalidAliases.size === 0) {
+  if (invalidAliases.size === 0) {
     const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
     try {
       await paginateReviewThreads(targets, aliases, repository, cursors);
