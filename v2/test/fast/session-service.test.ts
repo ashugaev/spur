@@ -19534,9 +19534,9 @@ describe("SessionService", () => {
     });
 
     it("tick enrich count tracks live sessions, not total records", async () => {
-      // Mirrors the tick's own clamp(ceil(idle / 60), MIN, MAX) quota rule
-      // rather than hardcoding a constant, so this stays correct if the
-      // constants change.
+      // Hand-mirrored copy of the tick's clamp(ceil(idle / 60), MIN, MAX)
+      // quota rule. The constants are not exported, so this copy is kept in
+      // sync manually -- change MIN/MAX/SWEEP_TICKS and this must change too.
       function expectedIdleQuota(idleCount: number): number {
         return Math.min(32, Math.max(4, Math.ceil(idleCount / 60)));
       }
@@ -19579,6 +19579,7 @@ describe("SessionService", () => {
 
       const small = await countTickEnrichCalls(2, 10);
       const large = await countTickEnrichCalls(2, 100);
+      const huge = await countTickEnrichCalls(2, 2_000);
 
       // liveCount (2) + the bounded idle round-robin quota. Both idle
       // counts here fall on the MIN floor of the quota rule, so cost stays
@@ -19589,10 +19590,20 @@ describe("SessionService", () => {
       expect(small.secondTick).toBe(small.firstTick);
       expect(large.secondTick).toBe(large.firstTick);
 
+      // Above the cap threshold the quota stops scaling: 2000 idle records
+      // cost the MAX of 32 per tick, not 2000/60. This is what pins the
+      // "tick cost is bounded by a constant, not by total record count"
+      // guarantee -- without it, raising MAX to an absurd value would leave
+      // the suite green while restoring the O(total) tick.
+      expect(expectedIdleQuota(2_000)).toBe(32);
+      expect(huge.firstTick).toBe(2 + 32);
+      expect(huge.secondTick).toBe(huge.firstTick);
+
       // The prune must never drop an idle entry a tick skipped: list()
       // still reports every seeded session after a second tick.
       expect(small.totalAfterSecondTick).toBe(2 + 10);
       expect(large.totalAfterSecondTick).toBe(2 + 100);
+      expect(huge.totalAfterSecondTick).toBe(2 + 2_000);
     });
 
     it("re-enriches a terminal session whose record changed without an eager refresh", async () => {
