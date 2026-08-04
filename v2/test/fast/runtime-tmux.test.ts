@@ -2,7 +2,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options?: { timeout?: number; maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
 const execFileMock: ((...args: unknown[]) => void) & {
@@ -556,5 +560,31 @@ describe("runtime-tmux", () => {
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-X"))).toBe(false);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(false);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+  });
+
+  it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: "api-1 1700000000", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "1234 pts/0 node agent", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    await isProcessRunningInTmux("api-1", ["node"]);
+
+    const psCall = execFileAsyncMock.mock.calls.find(([file]) => file === "ps");
+    if (!psCall) {
+      throw new Error("Expected a ps invocation");
+    }
+    const [, , options] = psCall;
+    expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
+    expect(options?.timeout).toBe(5_000);
   });
 });

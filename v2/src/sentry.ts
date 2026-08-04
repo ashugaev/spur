@@ -1,5 +1,3 @@
-import { get } from "node:https";
-
 export interface SentryIssue {
   shortId: string;
   title: string;
@@ -15,24 +13,14 @@ export interface FetchSentryIssuesOptions {
   limit: number;
 }
 
-function requestBody(url: string, token: string): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const request = get(
-      url,
-      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          resolve({
-            status: response.statusCode ?? 0,
-            body: Buffer.concat(chunks).toString("utf8"),
-          });
-        });
-      },
-    );
-    request.on("error", reject);
+const FETCH_TIMEOUT_MS = 5_000;
+
+async function requestBody(url: string, token: string): Promise<{ status: number; body: string }> {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
+  return { status: response.status, body: await response.text() };
 }
 
 function narrowIssue(value: unknown): SentryIssue | null {

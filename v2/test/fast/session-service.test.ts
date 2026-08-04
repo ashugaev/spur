@@ -22075,4 +22075,149 @@ describe("SessionService", () => {
       service.dispose();
     });
   });
+
+  describe("session-scoped state sweep (pruneSessionScopedState)", () => {
+    type SessionScopedStateInternals = {
+      codexMcpDialogOverrides: Map<string, number>;
+      claudeCompactingOverrides: Map<string, number>;
+      sessionProjectCache: Map<string, unknown>;
+      claudeJsonlReaders: Map<string, unknown>;
+      cursorJsonlReaders: Map<string, unknown>;
+      stateHistory: Map<string, SessionStateTransition[]>;
+      prCheckTrackers: Map<string, unknown>;
+      usageMenuConfirmedAt: Map<string, number>;
+      claudeRotationEpisode: Map<string, unknown>;
+      attentionMonitorRunning: boolean;
+      dashboardLoopRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+
+    async function drainBaselineTicks(internals: SessionScopedStateInternals): Promise<void> {
+      await internals.dashboardCacheReady;
+      for (
+        let i = 0;
+        i < 100 && (internals.attentionMonitorRunning || internals.dashboardLoopRunning);
+        i += 1
+      ) {
+        await Promise.resolve();
+      }
+    }
+
+    it("collapses every never-deleted per-session map to only non-terminal ids once sessions go terminal", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      // worktree:false so checkPrForSession's early "no worktree" return
+      // isolates prCheckTrackers from the (unrelated) real PR auto-detect
+      // fire-and-forget call this test does not mock.
+      sessions.set("api-1", runningSession({ id: "api-1", worktree: false }));
+      sessions.set("api-2", runningSession({ id: "api-2", worktree: false }));
+      // retainInList:true so the dashboard tick still lists this killed
+      // session (a killed session without it is excluded from the dashboard
+      // set entirely, which would make stateHistory's regrowth path moot).
+      sessions.set(
+        "api-3",
+        runningSession({ id: "api-3", worktree: false, status: "killed", retainInList: true }),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+
+      const seededIds = ["api-1", "api-2", "api-3"];
+      for (const id of seededIds) {
+        internals.codexMcpDialogOverrides.set(id, Date.now());
+        internals.claudeCompactingOverrides.set(id, Date.now());
+        internals.sessionProjectCache.set(id, {
+          configPath: "/tmp/x/spur.yaml",
+          stamp: "1",
+          project: undefined,
+        });
+        internals.claudeJsonlReaders.set(id, {
+          filePath: "x.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        });
+        internals.cursorJsonlReaders.set(id, {
+          filePath: "x.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        });
+        // Seeded past STATE_HISTORY_LIMIT's low end so the regrowth
+        // assertion below (length 1) cannot pass by coincidence.
+        internals.stateHistory.set(id, [
+          { state: "working", at: "2026-03-18T10:00:00.000Z", source: "jsonl" },
+          { state: "waiting", at: "2026-03-18T10:01:00.000Z", source: "jsonl" },
+          { state: "working", at: "2026-03-18T10:02:00.000Z", source: "jsonl" },
+        ]);
+        internals.prCheckTrackers.set(id, {
+          waitingChecks: 0,
+          lastState: null,
+          lastCheckAt: 0,
+          found: false,
+        });
+        internals.usageMenuConfirmedAt.set(id, Date.now());
+        internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
+      }
+
+      // api-1 stays running (non-terminal). api-2 completes. api-3 was
+      // already seeded above as killed+retainInList.
+      sessions.set("api-2", runningSession({ id: "api-2", status: "completed" }));
+
+      // One attention-monitor interval (fires the sweep), then one more
+      // dashboard-cache interval so the regrowth this test also asserts has
+      // a chance to run after the sweep, draining both loops each time.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await drainBaselineTicks(internals);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await drainBaselineTicks(internals);
+
+      // Every one of the 9 maps the sweep owns must drop the terminal ids,
+      // regardless of what else touches them during a live enrich.
+      const allPrunedMaps: Array<[string, Map<string, unknown>]> = [
+        ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
+        ["claudeCompactingOverrides", internals.claudeCompactingOverrides],
+        ["sessionProjectCache", internals.sessionProjectCache],
+        ["claudeJsonlReaders", internals.claudeJsonlReaders],
+        ["cursorJsonlReaders", internals.cursorJsonlReaders],
+        ["prCheckTrackers", internals.prCheckTrackers],
+        ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
+        ["claudeRotationEpisode", internals.claudeRotationEpisode],
+      ];
+      for (const [name, map] of allPrunedMaps) {
+        expect(map.has("api-2"), `${name} should drop the completed id`).toBe(false);
+        expect(map.has("api-3"), `${name} should drop the killed id`).toBe(false);
+      }
+
+      // For the maps a live classify does not independently overwrite or
+      // self-evict for this agent/config combination (codexMcpDialogOverrides
+      // and claudeCompactingOverrides are codex/claude-compaction live-scan
+      // side effects; sessionProjectCache self-evicts on every call when no
+      // local project config resolves — all three are asserted bounded
+      // elsewhere), also confirm the sweep leaves the non-terminal id alone.
+      const cleanMaps: Array<[string, Map<string, unknown>]> = [
+        ["claudeJsonlReaders", internals.claudeJsonlReaders],
+        ["cursorJsonlReaders", internals.cursorJsonlReaders],
+        ["prCheckTrackers", internals.prCheckTrackers],
+        ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
+        ["claudeRotationEpisode", internals.claudeRotationEpisode],
+      ];
+      for (const [name, map] of cleanMaps) {
+        expect(map.has("api-1"), `${name} should keep the non-terminal id`).toBe(true);
+      }
+
+      // stateHistory is a special case: the sweep deletes it like every other
+      // map, but the next dashboard tick's updateStateHistory call
+      // (enrichDashboard runs for every listed session, terminal or not)
+      // re-adds a single transition. It must never regrow past 1 — that is
+      // the whole point of the sweep, converting an up-to-100-element array
+      // into a 1-element one.
+      expect(internals.stateHistory.get("api-2")).toHaveLength(1);
+      expect(internals.stateHistory.get("api-3")).toHaveLength(1);
+
+      service.dispose();
+    });
+  });
 });

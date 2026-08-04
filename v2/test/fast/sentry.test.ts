@@ -1,7 +1,6 @@
-import { Buffer } from "node:buffer";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { fetchJiraIssues } from "../../src/jira.js";
+import { fetchSentryIssues } from "../../src/sentry.js";
 
 interface CapturedRequest {
   authorization: string | undefined;
@@ -60,50 +59,33 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => closeServer(server)));
 });
 
-describe("fetchJiraIssues", () => {
-  it("uses enhanced JQL search with raw JQL and current page cap", async () => {
+describe("fetchSentryIssues", () => {
+  it("parses issues from a successful response", async () => {
+    const permalink = "https://sentry.io/issues/1/";
     const { baseUrl, requests } = await startServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          issues: [
-            {
-              id: "10001",
-              key: "WEB-17",
-              fields: { summary: " Fix checkout " },
-            },
-          ],
-        }),
-      );
+      response.end(JSON.stringify([{ shortId: "WEB-1", title: "Boom", permalink }]));
     });
 
-    const issues = await fetchJiraIssues({
-      baseUrl,
-      email: "bot@example.com",
+    const issues = await fetchSentryIssues({
       token: "token",
-      jql: "project = WEB AND status != Done",
-      maxResults: 500,
+      baseUrl,
+      org: "acme",
+      project: "web",
+      query: "is:unresolved",
+      limit: 25,
     });
 
-    expect(issues).toEqual([
-      {
-        id: "10001",
-        key: "WEB-17",
-        title: "Fix checkout",
-        url: `${baseUrl}/browse/WEB-17`,
-      },
-    ]);
+    expect(issues).toEqual([{ shortId: "WEB-1", title: "Boom", permalink }]);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.method).toBe("GET");
-    expect(requests[0]?.authorization).toBe(
-      `Basic ${Buffer.from("bot@example.com:token", "utf8").toString("base64")}`,
-    );
+    expect(requests[0]?.authorization).toBe("Bearer token");
 
     const requestUrl = new URL(requests[0]?.url ?? "/", baseUrl);
-    expect(requestUrl.pathname).toBe("/rest/api/3/search/jql");
-    expect(requestUrl.searchParams.get("jql")).toBe("project = WEB AND status != Done");
-    expect(requestUrl.searchParams.get("fields")).toBe("summary");
-    expect(requestUrl.searchParams.get("maxResults")).toBe("100");
+    expect(requestUrl.pathname).toBe("/api/0/organizations/acme/issues/");
+    expect(requestUrl.searchParams.get("project")).toBe("web");
+    expect(requestUrl.searchParams.get("query")).toBe("is:unresolved");
+    expect(requestUrl.searchParams.get("limit")).toBe("25");
   });
 
   it("rejects instead of hanging when the server writes headers and never ends the body", async () => {
@@ -114,12 +96,13 @@ describe("fetchJiraIssues", () => {
     });
 
     await expect(
-      fetchJiraIssues({
-        baseUrl,
-        email: "bot@example.com",
+      fetchSentryIssues({
         token: "token",
-        jql: "project = WEB",
-        maxResults: 10,
+        baseUrl,
+        org: "acme",
+        project: "web",
+        query: "is:unresolved",
+        limit: 25,
       }),
     ).rejects.toThrow();
   }, 10_000);

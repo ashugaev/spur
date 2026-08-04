@@ -459,12 +459,20 @@ interface PsRow {
 // per session.
 const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
 const PS_SNAPSHOT_CACHE_KEY = "ps";
+// execFile's default maxBuffer (1 MiB) truncates a large process table
+// instead of erroring; the catch below would then treat the truncation the
+// same as a genuine ps failure and return []. That makes the only caller,
+// isProcessRunningInTmux, misclassify every live agent in the fleet as dead —
+// a worse outcome than a missed reap — so this is sized well above any
+// observed process table, not just the current one.
+const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
       const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
         timeout: 5_000,
+        maxBuffer: PS_MAX_BUFFER_BYTES,
       });
       return psOut
         .split("\n")
