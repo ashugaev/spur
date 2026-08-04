@@ -1950,6 +1950,110 @@ describe("startServer", () => {
     }
   });
 
+  it("rejects an invalid spawn-time subscriptions payload without spawning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnSpy = vi.spyOn(SessionService.prototype, "spawn");
+    const spawnInBackgroundSpy = vi.spyOn(SessionService.prototype, "spawnInBackground");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const invalidStateResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: [{ targetSessionId: "demo-2", states: ["blocked"] }],
+        }),
+      });
+      expect(invalidStateResponse.status).toBe(400);
+
+      const invalidShapeResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "hi", subscriptions: {} }),
+      });
+      expect(invalidShapeResponse.status).toBe(400);
+
+      const backgroundInvalidResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/background`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: "demo",
+            prompt: "hi",
+            subscriptions: [{ targetSessionId: "demo-2", states: ["blocked"] }],
+          }),
+        },
+      );
+      expect(backgroundInvalidResponse.status).toBe(400);
+
+      const duplicateTargetResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: [
+            { targetSessionId: "demo-2", states: ["waiting"] },
+            { targetSessionId: "demo-2", states: ["stopped"] },
+          ],
+        }),
+      });
+      expect(duplicateTargetResponse.status).toBe(400);
+      const duplicateTargetBody = (await duplicateTargetResponse.json()) as { error?: string };
+      expect(duplicateTargetBody.error).toMatch(/must not repeat targetSessionId/);
+
+      const tooManyResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: Array.from({ length: 21 }, (_, i) => ({
+            targetSessionId: `demo-${i}`,
+            states: ["waiting"],
+          })),
+        }),
+      });
+      expect(tooManyResponse.status).toBe(400);
+      const tooManyBody = (await tooManyResponse.json()) as { error?: string };
+      expect(tooManyBody.error).toMatch(/must not exceed 20 entries/);
+
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(spawnInBackgroundSpy).not.toHaveBeenCalled();
+    } finally {
+      spawnSpy.mockRestore();
+      spawnInBackgroundSpy.mockRestore();
+      await server.stop();
+    }
+  });
+
   it("POST /projects creates an unconfigured project and returns 201 with derived id", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

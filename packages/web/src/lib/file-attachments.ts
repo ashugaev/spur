@@ -1,5 +1,51 @@
 export const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
+// Animated GIFs are excluded from downscaling: redrawing to a canvas would
+// flatten the animation to a single frame.
+const DOWNSCALE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+export const DOWNSCALE_MAX_DIMENSION = 1600;
+export const DOWNSCALE_BYTE_THRESHOLD = 2 * 1024 * 1024; // 2 MB
+
+const REENCODE_QUALITY = 0.85;
+const WEBP_MIME = "image/webp";
+const JPEG_MIME = "image/jpeg";
+
+// Single source for mapping a canvas-produced blob's actual MIME type to a
+// filename extension. An unsupported `toBlob` type silently yields image/png
+// per the canvas spec, so the extension must always be derived from the blob
+// that came back, never assumed from the type that was requested.
+const EXTENSION_BY_BLOB_MIME: Record<string, string> = {
+  [WEBP_MIME]: "webp",
+  [JPEG_MIME]: "jpg",
+  "image/png": "png",
+};
+
+// The daemon's exact JSON body cap is 15,000,000 bytes (v2/src/server.ts
+// readJsonBody maxBytes override on the spawn/send/respawn routes). This
+// check only sums attachment bytes, not the rest of the body (prompt, steps,
+// branch, message text, JSON structure), so the budget is set well below the
+// server cap — 1,000,000 bytes (~1 MB) of headroom, comfortably more than
+// any realistic prompt/steps/branch text — rather than shaving it to a few
+// hundred KB that a long prompt could still blow through.
+export const MAX_ATTACHMENTS_PAYLOAD_BYTES = 14_000_000;
+
+export const ATTACHMENTS_TOO_LARGE_MESSAGE =
+  "Attachments too large to send — try a smaller image or fewer files.";
+
+// Mirrors v2/src/session-service.ts MAX_DECODED_SIZE / MAX_ATTACHMENTS —
+// the server rejects an over-limit attachment regardless of the aggregate
+// request size, so the client pre-flight must check both.
+export const MAX_ATTACHMENT_DECODED_BYTES = 5 * 1024 * 1024;
+export const MAX_ATTACHMENT_COUNT = 10;
+
+// Base64 encodes 3 bytes as 4 characters; this is an upper-bound estimate of
+// the decoded size (padding aside) — safe to overestimate for a pre-flight
+// check that exists to fail fast before the server's exact byte count.
+function estimateDecodedBytes(base64Length: number): number {
+  return Math.ceil((base64Length * 3) / 4);
+}
+
 export interface FileAttachment {
   file: File;
   preview: string;
@@ -23,6 +69,145 @@ export async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+export function shouldDownscaleImage(
+  mimeType: string,
+  width: number,
+  height: number,
+  byteSize: number,
+): boolean {
+  if (!DOWNSCALE_MIME_TYPES.has(mimeType)) {
+    return false;
+  }
+  return (
+    width > DOWNSCALE_MAX_DIMENSION ||
+    height > DOWNSCALE_MAX_DIMENSION ||
+    byteSize > DOWNSCALE_BYTE_THRESHOLD
+  );
+}
+
+export function computeScaledDimensions(
+  width: number,
+  height: number,
+  maxDimension: number,
+): { width: number; height: number } {
+  if (width <= maxDimension && height <= maxDimension) {
+    return { width, height };
+  }
+  const scale = maxDimension / Math.max(width, height);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function withExtension(name: string, extension: string): string {
+  const base = name.replace(/\.[^./\\]+$/, "");
+  return `${base || "image"}.${extension}`;
+}
+
+function loadImageDimensions(
+  file: File,
+): Promise<{ image: HTMLImageElement; width: number; height: number; revoke: () => void }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      resolve({
+        image,
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+        revoke: () => URL.revokeObjectURL(url),
+      });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to decode image"));
+    };
+    image.src = url;
+  });
+}
+
+function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  type: string,
+  quality: number,
+): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality);
+  });
+}
+
+// JPEG has no alpha channel: dropping it composites transparent pixels onto
+// black by default, which turns transparent screenshots (common on macOS)
+// black. Fill white first so transparent regions land on a white backdrop
+// instead. Webp keeps transparency, so it must not be pre-filled.
+function drawToCanvas(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  fillWhite: boolean,
+): HTMLCanvasElement | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  if (fillWhite) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
+
+async function reencodeImage(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+): Promise<{ blob: Blob; extension: string } | null> {
+  const webpCanvas = drawToCanvas(image, width, height, false);
+  const webpBlob = webpCanvas ? await canvasToBlob(webpCanvas, WEBP_MIME, REENCODE_QUALITY) : null;
+  if (webpBlob && webpBlob.type === WEBP_MIME) {
+    return { blob: webpBlob, extension: "webp" };
+  }
+
+  const jpegCanvas = drawToCanvas(image, width, height, true);
+  const jpegBlob = jpegCanvas ? await canvasToBlob(jpegCanvas, JPEG_MIME, REENCODE_QUALITY) : null;
+  if (!jpegBlob) return null;
+
+  const extension = EXTENSION_BY_BLOB_MIME[jpegBlob.type];
+  if (!extension) return null;
+  return { blob: jpegBlob, extension };
+}
+
+async function downscaleImageFile(file: File): Promise<File> {
+  let dimensions: Awaited<ReturnType<typeof loadImageDimensions>> | null = null;
+  try {
+    dimensions = await loadImageDimensions(file);
+    const { image, width, height, revoke } = dimensions;
+    if (!shouldDownscaleImage(file.type, width, height, file.size)) {
+      revoke();
+      return file;
+    }
+    const scaled = computeScaledDimensions(width, height, DOWNSCALE_MAX_DIMENSION);
+    const reencoded = await reencodeImage(image, scaled.width, scaled.height);
+    revoke();
+    // A flat, wide screenshot can re-encode larger and blurrier than the
+    // original (lossy compression vs. a small lossless PNG) — keep whichever
+    // is actually smaller.
+    if (!reencoded || reencoded.blob.size >= file.size) {
+      return file;
+    }
+    return new File([reencoded.blob], withExtension(file.name, reencoded.extension), {
+      type: reencoded.blob.type,
+      lastModified: file.lastModified,
+    });
+  } catch {
+    dimensions?.revoke();
+    return file;
+  }
+}
+
 export async function fileAttachmentsFromFiles(
   files: FileList | File[] | null,
 ): Promise<FileAttachment[]> {
@@ -30,10 +215,13 @@ export async function fileAttachmentsFromFiles(
     return [];
   }
   return Promise.all(
-    Array.from(files).map(async (file) => ({
-      file,
-      preview: await fileToDataUrl(file),
-    })),
+    Array.from(files).map(async (file) => {
+      const optimized = IMAGE_TYPES.has(file.type) ? await downscaleImageFile(file) : file;
+      return {
+        file: optimized,
+        preview: await fileToDataUrl(optimized),
+      };
+    }),
   );
 }
 
@@ -85,4 +273,43 @@ export function encodeFileAttachments(
     name: sanitizeAttachmentFilename(attachment.file.name),
     data: attachment.preview.split(",")[1] ?? "",
   }));
+}
+
+/** Throws with a user-facing message when the encoded payload would be rejected server-side. */
+export function assertAttachmentsWithinLimit(encoded: Array<{ name: string; data: string }>): void {
+  if (encoded.length > MAX_ATTACHMENT_COUNT) {
+    throw new Error(`Too many attachments — max ${MAX_ATTACHMENT_COUNT} files.`);
+  }
+  for (const attachment of encoded) {
+    if (estimateDecodedBytes(attachment.data.length) > MAX_ATTACHMENT_DECODED_BYTES) {
+      throw new Error(`Attachment "${attachment.name}" is too large — max 5 MB per file.`);
+    }
+  }
+  const totalBytes = encoded.reduce((sum, attachment) => sum + attachment.data.length, 0);
+  if (totalBytes > MAX_ATTACHMENTS_PAYLOAD_BYTES) {
+    throw new Error(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  }
+}
+
+/**
+ * Merges newly resolved attachments into the current selection unless the
+ * merge would exceed a server-enforced limit — reuses
+ * assertAttachmentsWithinLimit (the same guard the submit-time fetch calls)
+ * so the user gets the signal at attach time instead of only at submit,
+ * after every file has already been read and base64-encoded for nothing.
+ * The submit-time assert stays the authoritative guard; this only decides
+ * whether to commit the merge.
+ */
+export function mergeAttachmentsWithinLimit(
+  current: FileAttachment[],
+  incoming: FileAttachment[],
+): { attachments: FileAttachment[]; rejectedMessage: string | null } {
+  const merged = [...current, ...incoming];
+  try {
+    assertAttachmentsWithinLimit(encodeFileAttachments(merged));
+    return { attachments: merged, rejectedMessage: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ATTACHMENTS_TOO_LARGE_MESSAGE;
+    return { attachments: current, rejectedMessage: message };
+  }
 }

@@ -839,6 +839,7 @@ export interface SpawnSessionRequest {
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
+  subscriptions?: SubscribeSessionStatesRequest[];
 }
 
 export interface SendMessageAttachment {

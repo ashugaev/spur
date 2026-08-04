@@ -79,12 +79,15 @@ import {
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   addAccount,
-  ensureAccountProjectsLink,
   ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
+  isAccountReady,
   listAccounts,
   removeAccount,
+  seedSessionHome,
+  sessionClaudeHome,
+  swapSessionCredentials,
   touchAccountUsed,
   type ClaudeAccount,
 } from "./claude-accounts.js";
@@ -92,7 +95,7 @@ import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
   expandHome,
-  findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadProjectConfig,
   PROJECT_ID_PATTERN,
 } from "./config.js";
@@ -780,6 +783,20 @@ function tryRealpath(path: string): string {
   }
 }
 
+// Cache stamp for a config file: mtime alone can repeat when two writes land
+// inside the filesystem's mtime resolution, so size rides along. Any stat
+// failure (unlinked mid-call, EACCES, a flaky network mount) yields no stamp
+// rather than throwing — callers on the 2s dashboard tick must not abort a
+// whole cycle over one unreadable file.
+function tryConfigStamp(path: string): string | undefined {
+  try {
+    const stats = statSync(path);
+    return `${stats.mtimeMs}:${stats.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeSpawnRequest(
   request: SpawnSessionRequest,
   defaultSteps?: string[],
@@ -1083,12 +1100,13 @@ function withQueuedMessages(
 }
 
 // Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
-// store. Back-compat: when the session has no bound account (or it was removed),
-// returns {} so claude launches byte-identical to today. Non-claude agents
-// always return {}.
+// store. When an account is bound, seeds the per-session claude home under
+// session-tools/<id>/claude-home and returns it as claudeConfigDir. Session
+// homes isolate credential writeback from the source account directory.
+// Returns {} when no account is bound or the account no longer exists.
 export function resolveClaudeAuthPlanOptions(
   dataDir: string,
-  session: Pick<SessionRecord, "agent" | "claudeAccountId">,
+  session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
 ): { claudeConfigDir?: string } {
   if (session.agent !== "claude" || !session.claudeAccountId) {
     return {};
@@ -1097,8 +1115,10 @@ export function resolveClaudeAuthPlanOptions(
   if (!account) {
     return {};
   }
-  ensureAccountProjectsLink(account);
-  return { claudeConfigDir: account.configDir };
+  const sessionToolDir = join(dataDir, "session-tools", session.id);
+  const sessionHome = sessionClaudeHome(sessionToolDir);
+  seedSessionHome(sessionHome, account);
+  return { claudeConfigDir: sessionHome };
 }
 
 export function isRestorableSession(
@@ -1844,6 +1864,16 @@ export class SessionService {
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private sidecarReaperRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  // Local (in-worktree) project config resolved per session. The 2s dashboard
+  // tick resolves a project for every session, so without this each tick
+  // re-parsed the same YAML for the whole fleet — and re-logged the same parse
+  // failure forever. A cache hit costs one statSync and no parse. Keyed by
+  // session id, invalidated by config path or stamp change (see
+  // tryConfigStamp), pruned against the live id set in runDashboardCacheTick.
+  private readonly sessionProjectCache = new Map<
+    string,
+    { configPath: string; stamp: string; project: ProjectConfig | undefined }
+  >();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
@@ -2137,37 +2167,42 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          try {
-            await this.send(session.id, { message: scheduledWake.message });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-              current.scheduledWake.message === scheduledWake.message
-            ) {
-              const { scheduledWake: _scheduledWake, ...base } = current;
-              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-              writeSession(this.config.dataDir, cleared);
+          // Claim the due occurrence BEFORE sending: clear scheduledWake and
+          // persist it first. A slow or failing send must not leave the wake
+          // due, or the `<= now` guard stays true and it re-fires every tick
+          // forever.
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message;
+          if (claimed) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            try {
+              await this.send(session.id, { message: scheduledWake.message });
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
             }
-            this.logEvent("session.wake.sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent scheduled wake to ${session.id}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
           }
         }
 
@@ -2239,7 +2274,7 @@ export class SessionService {
         // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
         // cooldown, per-episode cap, and all-accounts-limited fall-through) and
         // returns true only when a rotation happened. A successful rotation
-        // relaunches the session and suppresses the afterHours nudge below.
+        // suppresses the afterHours nudge below.
         // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
         // dirty-worktree kill-confirmation, a stale-liveState race, or a
         // concurrently-removed account. Scope the catch to this session so one
@@ -2383,54 +2418,96 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        try {
-          await this.send(session.id, {
-            message: this.formatDailyWakeMessage(
-              session.id,
-              dailyWake.message,
-              dailyWake.stopCondition,
-            ),
-          });
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          if (
-            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-            current.dailyWake.message === dailyWake.message &&
-            current.dailyWake.stopCondition === dailyWake.stopCondition
-          ) {
-            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-            const updated: SessionRecord = {
-              ...current,
+        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+        // next future scheduled time and persist it first. A slow or failing
+        // send must not leave the wake due, or the `<= now` guard stays true
+        // and it re-fires every tick forever.
+        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+        const dailyWakeClaimed =
+          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+        if (dailyWakeClaimed) {
+          // Resolving the next occurrence can throw on a malformed dailyAt
+          // (e.g. a stray "99:99" that slipped into an existing record
+          // before validation covered it). Scope this to the session,
+          // mirroring the auto-rotate catch above: one bad record must not
+          // escape the loop and starve every later session's wake
+          // processing this tick. Unlike a delivery failure, a malformed
+          // dailyAt has no next occurrence to advance to, so skip 24h ahead
+          // instead of clearing the schedule -- an absent dailyWake is
+          // invisible in the web UI and in `spur list`, and disabling a
+          // schedule is meant to be an explicit user action (cancelWake).
+          // This bounds the storm to one failure event per day and keeps
+          // message/stopCondition intact for repair via re-arm.
+          let nextDueAt: Date;
+          try {
+            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const skipped: SessionRecord = {
+              ...currentDailyWakeSession,
               dailyWake: {
                 ...dailyWake,
-                nextDueAt: nextDueAt.toISOString(),
+                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
               },
               updatedAt: nowIso(),
             };
-            writeSession(this.config.dataDir, updated);
+            writeSession(this.config.dataDir, skipped);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+            continue;
           }
-          this.logEvent("session.wake.daily_sent", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Sent daily wake to ${session.id}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
+          const updated: SessionRecord = {
+            ...currentDailyWakeSession,
+            dailyWake: {
+              ...dailyWake,
+              nextDueAt: nextDueAt.toISOString(),
             },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.daily_failed", {
-            level: "error",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Failed to send daily wake to ${session.id}: ${message}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, updated);
+          try {
+            await this.send(session.id, {
+              message: this.formatDailyWakeMessage(
+                session.id,
+                dailyWake.message,
+                dailyWake.stopCondition,
+              ),
+            });
+            this.logEvent("session.wake.daily_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent daily wake to ${session.id}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send daily wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          }
         }
       }
     } finally {
@@ -2499,6 +2576,9 @@ export class SessionService {
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
     this.config = config;
+    // Local project configs are parsed with the daemon config as defaults, so
+    // every cached resolution is stale the moment the daemon config changes.
+    this.sessionProjectCache.clear();
     this.registryPaths = [...new Set(registryPaths)];
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
@@ -2799,12 +2879,9 @@ export class SessionService {
     });
   }
 
-  // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
-  // Back-compat: when the session has no bound account, returns {} so claude
-  // launches byte-identical to today. Non-claude agents always return {}.
-  private resolveClaudeAuthPlanOptions(session: Pick<SessionRecord, "agent" | "claudeAccountId">): {
-    claudeConfigDir?: string;
-  } {
+  private resolveClaudeAuthPlanOptions(
+    session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
+  ): { claudeConfigDir?: string } {
     return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
@@ -2947,6 +3024,11 @@ export class SessionService {
       for (const id of this.dashboardCache.keys()) {
         if (!liveIds.has(id)) {
           this.dashboardCache.delete(id);
+        }
+      }
+      for (const id of this.sessionProjectCache.keys()) {
+        if (!liveIds.has(id)) {
+          this.sessionProjectCache.delete(id);
         }
       }
     } catch (error) {
@@ -3407,21 +3489,38 @@ export class SessionService {
       return buildShepherdProject(this.config.dataDir);
     }
     const daemonProject = this.config.projects[session.project];
+    // Only a config that lives in the session's own worktree counts. Walking
+    // up the tree escapes a deleted or config-less worktree and lands on an
+    // unrelated ancestor spur.yaml (the shared worktree root, say), which then
+    // fails project-mode validation on every single call.
     const projectConfigPath = session.worktreePath
-      ? findProjectConfigPath(session.worktreePath)
+      ? findProjectConfigPathInDirectory(session.worktreePath)
       : undefined;
     if (!projectConfigPath) {
+      this.sessionProjectCache.delete(session.id);
       return daemonProject;
     }
 
+    // No stamp means the file went unreadable between the lookup and the stat.
+    // Parse uncached that once rather than cache a lie; the next call either
+    // resolves no path at all or gets a real stamp.
+    const stamp = tryConfigStamp(projectConfigPath);
+    const cached = this.sessionProjectCache.get(session.id);
+    if (
+      cached &&
+      stamp !== undefined &&
+      cached.configPath === projectConfigPath &&
+      cached.stamp === stamp
+    ) {
+      return cached.project ?? daemonProject;
+    }
+
+    let localProject: ProjectConfig | undefined;
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
-        session.project
-      ];
-      if (localProject) {
-        return localProject;
-      }
+      localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
     } catch (error) {
+      // Logged only on a cache miss, so a permanently broken config warns once
+      // per (session, config stamp) instead of once per tick.
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.project_config.local.failed", {
         level: "warn",
@@ -3430,8 +3529,15 @@ export class SessionService {
         message: `Failed to load local project config for ${session.id}: ${message}`,
       });
     }
+    if (stamp !== undefined) {
+      this.sessionProjectCache.set(session.id, {
+        configPath: projectConfigPath,
+        stamp,
+        project: localProject,
+      });
+    }
 
-    return daemonProject;
+    return localProject ?? daemonProject;
   }
 
   private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
@@ -4311,11 +4417,15 @@ export class SessionService {
     return { records: subscriber.stateSubscriptions ?? [] };
   }
 
-  subscribeToSessionStates(
+  // Shared by subscribeToSessionStates (one entry, writes immediately) and
+  // applyRequestedStateSubscriptions (N entries, accumulated in memory and
+  // written once) so both stay on the same validation/merge rules.
+  private buildNextStateSubscriptions(
     subscriberId: string,
+    existing: SessionStateSubscription[],
     request: SubscribeSessionStatesRequest,
-  ): SessionStateSubscriptionRecordResponse {
-    const subscriber = this.requireSession(subscriberId);
+    now: string,
+  ): { record: SessionStateSubscription; nextSubscriptions: SessionStateSubscription[] } {
     const targetSessionId = request.targetSessionId.trim();
     if (!targetSessionId) {
       throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
@@ -4326,9 +4436,7 @@ export class SessionService {
     }
     const states = canonicalSubscriptionStates(request.states);
     const message = request.message?.trim();
-    const now = nowIso();
     const id = stateSubscriptionId(targetSessionId);
-    const existing = subscriber.stateSubscriptions ?? [];
     const previous = existing.find(
       (subscription) => subscription.targetSessionId === targetSessionId,
     );
@@ -4347,6 +4455,21 @@ export class SessionService {
     const nextSubscriptions = previous
       ? existing.map((subscription) => (subscription.id === id ? record : subscription))
       : [...existing, record];
+    return { record, nextSubscriptions };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const now = nowIso();
+    const { record, nextSubscriptions } = this.buildNextStateSubscriptions(
+      subscriberId,
+      subscriber.stateSubscriptions ?? [],
+      request,
+      now,
+    );
     this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
     return { record };
   }
@@ -4363,6 +4486,59 @@ export class SessionService {
     }
     this.writeStateSubscriptions(subscriber, nextSubscriptions);
     return { records: nextSubscriptions };
+  }
+
+  private applyRequestedStateSubscriptions(
+    session: SessionRecord,
+    requested: SubscribeSessionStatesRequest[] | undefined,
+  ): SessionRecord {
+    if (!requested || requested.length === 0) {
+      return session;
+    }
+    const now = nowIso();
+    let nextSubscriptions = session.stateSubscriptions ?? [];
+    let armedAny = false;
+    // Accumulate every requested entry in memory and persist once — avoids
+    // one readSession/writeSession/syncStateSubscriptionIndex round trip per
+    // entry on the spawn hot path.
+    for (const entry of requested) {
+      try {
+        nextSubscriptions = this.buildNextStateSubscriptions(
+          session.id,
+          nextSubscriptions,
+          entry,
+          now,
+        ).nextSubscriptions;
+        armedAny = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: {
+            targetSessionId: entry.targetSessionId,
+            error: message,
+          },
+        });
+      }
+    }
+    if (armedAny) {
+      try {
+        this.writeStateSubscriptions(session, nextSubscriptions, now);
+      } catch (error) {
+        // A write/index failure here must not fail the spawn — same
+        // non-fatal contract as the per-entry validation above.
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: { error: message },
+        });
+      }
+    }
+    return readSession(this.config.dataDir, session.id) ?? session;
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -5309,9 +5485,18 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      if (request.claudeAccountId) {
+        const account = findAccount(this.config.dataDir, request.claudeAccountId);
+        if (!account || !isAccountReady(account)) {
+          throw new Error(
+            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
+          );
+        }
+      }
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
+          id: sessionId,
           agent,
           ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         }),
@@ -5424,6 +5609,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -6363,6 +6549,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -8619,8 +8806,10 @@ export class SessionService {
     if (!account) {
       throw new Error(`Unknown claude account: ${accountId}`);
     }
-    if (!isAccountAuthenticated(account)) {
-      throw new Error(`Claude account ${accountId} is not logged in`);
+    if (!isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
     }
 
     const force = opts.force === true;
@@ -8632,30 +8821,57 @@ export class SessionService {
         );
       }
     }
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
+    const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    const usesSessionHome = session.launchCommand.startsWith(
+      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
+    );
 
     const updated: SessionRecord = {
       ...session,
       claudeAccountId: accountId,
       updatedAt: nowIso(),
     };
+
+    if (usesSessionHome) {
+      // Session launched against its session home: atomically swap credentials in place.
+      // The live Claude process rereads credentials on its next request,
+      // so no kill/relaunch is needed.
+      swapSessionCredentials(sessionHome, account);
+      writeSession(this.config.dataDir, updated);
+      touchAccountUsed(this.config.dataDir, accountId);
+      this.logEvent("session.auth.switched", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Switched claude account for ${sessionId} to ${accountId}`,
+        details: { accountId, reason: opts.reason, forced: force, method: "in_place" },
+      });
+      return this.enrich(updated);
+    }
+
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
+    // Install target credentials before persisting the record or killing the pane.
+    // If the swap throws, the persisted account and running pane remain old.
+    mkdirSync(sessionHome, { recursive: true });
+    swapSessionCredentials(sessionHome, account);
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
-
+    // Session was launched against an account dir directly.
+    // Relaunch once to migrate onto the new account's session home.
     await killTmuxSession(updated.tmuxSession);
     const relaunched = await this.ensureSessionReadyForSend(updated);
-
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Switched claude account for ${sessionId} to ${accountId}`,
-      details: { accountId, reason: opts.reason, forced: force },
+      details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
     });
     return this.enrich(relaunched);
   }
 
-  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Rotate a rate-limited claude session onto the next ready account.
   // Returns true when a rotation happened; false when disabled, capped, or no
   // fresh candidate exists (caller then falls through to the reactivation nudge).
   private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
@@ -8678,7 +8894,7 @@ export class SessionService {
     }
     const next = listAccounts(this.config.dataDir).find((account) => {
       if (account.id === session.claudeAccountId) return false;
-      if (!isAccountAuthenticated(account)) return false;
+      if (!isAccountReady(account)) return false;
       const limitedUntil = this.claudeAccountRateLimit.get(account.id);
       return limitedUntil === undefined || limitedUntil <= now;
     });
@@ -10378,10 +10594,9 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
-    // (it probes its own tmux id, which never has the pane). Resolving the
-    // project re-reads and re-validates the config file, so this 2s-tick path
-    // only pays for it when the session is actually a desk member with
-    // sidecars — a non-desk session always owns its own panes.
+    // (it probes its own tmux id, which never has the pane). Still gated on
+    // being a desk member with sidecars — a non-desk session always owns its
+    // own panes, so this 2s-tick path skips even the cached lookup.
     const sidecarNames = session.sidecarNames ?? [];
     const deskProject =
       workspaceIdOf(session) !== session.id && sidecarNames.length > 0

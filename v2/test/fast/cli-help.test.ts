@@ -27,11 +27,11 @@ describe("spur help", () => {
     expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("service");
     expect(help).toContain("source");
+    expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
-    expect(help).not.toContain("subscribe");
     expect(help).not.toContain("internal");
     expect(help).not.toContain("playwright");
   });
@@ -103,6 +103,9 @@ describe("spur help", () => {
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
+    expect(help).toContain("--subscribe-to <sessionId>");
+    expect(help).toContain("--subscribe-state <state>");
+    expect(help).toContain("--subscribe-message <message>");
     expect(help).toContain("Agent to start: claude, codex, or cursor");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");

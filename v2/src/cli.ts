@@ -1642,6 +1642,84 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function buildSubscriptionRequest(
+  targetSessionId: string,
+  rawStates: string[] | undefined,
+  rawMessage: string | undefined,
+  emptyStatesError: string,
+): SubscribeSessionStatesRequest {
+  const states = (rawStates ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error(emptyStatesError);
+  }
+  const message = rawMessage?.trim();
+  return {
+    targetSessionId,
+    states,
+    ...(message ? { message } : {}),
+  };
+}
+
+function resolveCliSpawnSubscriptions(options: {
+  subscribeTo?: string;
+  subscribeState?: string[];
+  subscribeMessage?: string;
+}): SubscribeSessionStatesRequest[] | undefined {
+  if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
+    throw new Error("--subscribe-to must be a non-empty session id");
+  }
+  const target = options.subscribeTo?.trim();
+  if (!target) {
+    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
+      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    }
+    return undefined;
+  }
+  return [
+    buildSubscriptionRequest(
+      target,
+      options.subscribeState,
+      options.subscribeMessage,
+      "--subscribe-to requires at least one --subscribe-state",
+    ),
+  ];
+}
+
+// Spawn-time subscribe targets fail silently on the server (spawn stays
+// non-fatal so a typo'd target never blocks the new session — see
+// applyRequestedStateSubscriptions). Validate here instead, before any
+// spawn side effect (tmux/worktree), so a bad --subscribe-to id is a clear
+// CLI error rather than a session that never gets its wakeup.
+async function ensureCliSpawnSubscriptionTargetsExist(
+  cliEntrypoint: string,
+  configPath: string,
+  subscriptions: SubscribeSessionStatesRequest[] | undefined,
+): Promise<void> {
+  if (!subscriptions) {
+    return;
+  }
+  for (const entry of subscriptions) {
+    try {
+      await getJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(entry.targetSessionId)}`,
+        configPath,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/session not found/i.test(message)) {
+        // Not a 404 for this target — a daemon-start failure, 500, or
+        // transport error shouldn't be relabeled as an unknown target.
+        throw error;
+      }
+      throw new Error(
+        `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+        { cause: error },
+      );
+    }
+  }
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -1804,6 +1882,16 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--subscribe-to <sessionId>",
+      "Subscribe the new session to another session's state transitions",
+    )
+    .option(
+      "--subscribe-state <state>",
+      "State to watch for --subscribe-to; repeatable",
+      appendOptionValue,
+    )
+    .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1822,6 +1910,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
+      const subscriptions = resolveCliSpawnSubscriptions(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
@@ -1830,6 +1919,7 @@ export function createProgram(cliEntrypoint: string): Command {
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      await ensureCliSpawnSubscriptionTargetsExist(cliEntrypoint, configPath, subscriptions);
 
       let branch: string | undefined = options.branch;
 
@@ -1868,6 +1958,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(subscriptions ? { subscriptions } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -2096,7 +2187,7 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("subscribe", { hidden: true })
+    .command("subscribe")
     .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
@@ -2153,16 +2244,12 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!target) {
           throw new Error("subscribe requires a targetSessionId, --list, or --remove");
         }
-        const states = (options.state ?? []).map(parseSubscriptionState);
-        if (states.length === 0) {
-          throw new Error("subscribe requires at least one --state");
-        }
-        const message = options.message?.trim();
-        const payload: SubscribeSessionStatesRequest = {
-          targetSessionId: target,
-          states,
-          ...(message ? { message } : {}),
-        };
+        const payload = buildSubscriptionRequest(
+          target,
+          options.state,
+          options.message,
+          "subscribe requires at least one --state",
+        );
         await outputResult({
           json: Boolean(options.json),
           label: "subscribing",

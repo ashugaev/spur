@@ -29,13 +29,21 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
+import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
+import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -48,7 +56,6 @@ import {
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
-  sessionMatchesQuery,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -149,7 +156,7 @@ function sessionMatchesFacetFilters(
   ) {
     return false;
   }
-  if (filters.searchQuery && !sessionMatchesQuery(session, filters.searchQuery)) {
+  if (filters.searchQuery && !matchesSessionSearch(session, filters.searchQuery)) {
     return false;
   }
   if (exclude !== "prReady" && filters.prReadyOnly && filters.prReady.loaded) {
@@ -1328,9 +1335,10 @@ export function Dashboard() {
   }, [agentFilteredSessions, prReadyOnly, prReady]);
 
   const sessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return prReadyFilteredSessions;
-    const narrowed = prReadyFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
+    if (!searchQuery.trim()) return prReadyFilteredSessions;
+    const narrowed = prReadyFilteredSessions.filter((session) =>
+      matchesSessionSearch(session, searchQuery),
+    );
     const keys = new Set(narrowed.map((s) => s.deskKey));
     return prReadyFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [prReadyFilteredSessions, searchQuery]);
@@ -1665,6 +1673,7 @@ export function Dashboard() {
       };
       if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
       if (normalizedBranch) payload.branch = normalizedBranch;
@@ -1687,7 +1696,9 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn Spur session"));
+      }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
@@ -1957,7 +1968,9 @@ export function Dashboard() {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+      }
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -2096,14 +2109,23 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addSpawnFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setSpawnAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
