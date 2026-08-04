@@ -3,6 +3,7 @@ import type * as ghModule from "../../src/gh.js";
 import type { SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
+const ghTransportMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
@@ -22,7 +23,7 @@ const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
-  gh: ghMock,
+  gh: ghTransportMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -44,6 +45,9 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  readRemoteUrls: vi.fn().mockResolvedValue(
+    new Map([["origin", "git@github.com:acme/api.git"]]),
+  ),
   isGitWorktree: isGitWorktreeMock,
 }));
 vi.mock("../../src/user-action-log.js", () => ({
@@ -55,6 +59,8 @@ vi.mock("node:fs", () => ({
 
 const { githubSourceModule, tokenizeSearchQuery } =
   await import("../../src/event-sources/github.js");
+const { GH_POLL_MIN_GRAPHQL_REMAINING, _resetGhUsageForTests, recordGraphqlBudget } =
+  await import("../../src/gh.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -86,6 +92,83 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 // is true) and flush the fire-and-forget pollCycle promise chain between calls.
 const flushPollCycle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
+// Builds the on-disk/in-memory envelope shape `readReviewSourceSnapshotsMock`
+// now returns per session. `prNumber` defaults to 42 to match `makeSession`'s
+// default `pr.number` so the stored snapshot is treated as the baseline for
+// the bound PR unless a test deliberately wants a mismatch (rebind/legacy).
+function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): ReviewSnapshot {
+  return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
+}
+
+function parseMockJson(raw: unknown, fallback: unknown): unknown {
+  if (typeof raw !== "string") return fallback;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return fallback;
+  }
+}
+
+function graphqlAuthor(user: unknown): { login: unknown } | null {
+  return typeof user === "object" && user !== null && "login" in user
+    ? { login: user.login }
+    : null;
+}
+
+async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
+  if (args[0] !== "api" || args[1] !== "graphql") {
+    return ghMock(cwd, ...args) as Promise<string>;
+  }
+  const prRaw = await ghMock(cwd, "pr", "view");
+  const parsedPr = parseMockJson(prRaw, null);
+  const pr = Array.isArray(parsedPr) ? parsedPr[0] : parsedPr;
+  if (typeof pr !== "object" || pr === null) return JSON.stringify({ data: { r: { a0: null } } });
+  const record = pr as Record<string, unknown>;
+  const checks = parseMockJson(await ghMock(cwd, "pr", "checks"), []);
+  const reviewComments = parseMockJson(await ghMock(cwd, "api", "pulls/comments"), []);
+  const issueComments = parseMockJson(await ghMock(cwd, "api", "issues/comments"), []);
+  const terminal = record.state === "MERGED" || record.state === "CLOSED";
+  const reviews = terminal ? [] : parseMockJson(await ghMock(cwd, "api", "pulls/reviews"), []);
+  const rollup = Array.isArray(record.statusCheckRollup) ? record.statusCheckRollup : checks;
+  const mapAuthor = (value: unknown): Record<string, unknown> => {
+    const item = value as Record<string, unknown>;
+    return { ...item, databaseId: item.id, author: graphqlAuthor(item.user) };
+  };
+  const node = {
+    ...record,
+    commits: {
+      nodes: [
+        {
+          commit: {
+            statusCheckRollup: {
+              contexts: { nodes: Array.isArray(rollup) ? rollup : [] },
+            },
+          },
+        },
+      ],
+    },
+    reviewThreads: {
+      nodes: [
+        {
+          isResolved: false,
+          comments: {
+            nodes: Array.isArray(reviewComments) ? reviewComments.map(mapAuthor) : [],
+          },
+        },
+      ],
+    },
+    comments: { nodes: Array.isArray(issueComments) ? issueComments.map(mapAuthor) : [] },
+    reviews: { nodes: Array.isArray(reviews) ? reviews.map(mapAuthor) : [] },
+  };
+  const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+      r: { a0: branchQuery ? { nodes: [node] } : node },
+    },
+  });
+}
+
 function trackSeenComments(initial: readonly string[] = []): Set<string> {
   const seen = new Set<string>(initial);
   readCommentSeenRegistryMock.mockImplementation(() => new Set(seen));
@@ -100,6 +183,8 @@ function trackSeenComments(initial: readonly string[] = []): Set<string> {
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetGhUsageForTests();
+    ghTransportMock.mockImplementation(legacyGhAdapter);
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
@@ -114,6 +199,7 @@ describe("github source", () => {
   });
 
   afterEach(() => {
+    _resetGhUsageForTests();
     vi.useRealTimers();
   });
 
@@ -1172,6 +1258,74 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("collapses two tracked PRs in one repo to one GraphQL invocation", async () => {
+    const second = makeSession({
+      id: "api-c3d4",
+      workspaceId: "api-c3d4",
+      worktreePath: "/tmp/spur-worktrees/api-c3d4",
+      pr: {
+        number: 43,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/43",
+      },
+    });
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession(), second]);
+    const node = (number: number) => ({
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/acme/api/pull/${number}`,
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isDraft: false,
+      state: "OPEN",
+      commits: { nodes: [] },
+      reviewThreads: { nodes: [] },
+      reviews: { nodes: [] },
+      comments: { nodes: [] },
+    });
+    ghTransportMock.mockReset().mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+          r: { a0: node(42), a1: node(43) },
+        },
+      }),
+    );
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    expect(ghTransportMock.mock.calls[0]).toEqual(
+      expect.arrayContaining(["api", "graphql", "-F", "n0=42", "-F", "n1=43"]),
+    );
+    expect(ghTransportMock.mock.calls[0]).not.toContain("view");
+    expect(ghTransportMock.mock.calls[0]).not.toContain("checks");
+    expect(writeReviewSourceSnapshotMock).toHaveBeenCalledTimes(2);
+    handle.stop();
+  });
+
+  it("spends no review-poll call and preserves snapshots below the GraphQL reserve", async () => {
+    const existing = storedSnapshot([
+      { key: "changes_requested", kind: "changes_requested", text: "Changes requested." },
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existing]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    recordGraphqlBudget(
+      GH_POLL_MIN_GRAPHQL_REMAINING - 1,
+      Date.now() + 60_000,
+      Date.now(),
+    );
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("emits github:merged when the PR state is MERGED and not github:closed", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
     listSessionsMock.mockReturnValue([makeSession()]);
@@ -1242,6 +1396,7 @@ describe("github source", () => {
     const handle = await startLifecycle(emit);
 
     expect(ghMock).not.toHaveBeenCalled();
+    expect(ghTransportMock).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     handle.stop();
   });
@@ -1270,6 +1425,7 @@ describe("github source", () => {
     const handle = await startLifecycle(emit);
 
     expect(ghMock).not.toHaveBeenCalled();
+    expect(ghTransportMock).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     handle.stop();
   });

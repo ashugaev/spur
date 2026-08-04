@@ -16,6 +16,7 @@ const {
   noteGraphqlCost,
   pollBudgetState,
   recordGraphqlBudget,
+  runGhPollCycle,
   setGhEventSink,
 } = await import("../../src/gh.js");
 
@@ -34,6 +35,13 @@ function pausedEvents(): Array<Record<string, unknown>> {
   return logSpurEventMock.mock.calls
     .map((call) => call[1] as { event: string; details?: Record<string, unknown> })
     .filter((entry) => entry.event === "gh.poll_budget_paused")
+    .map((entry) => entry.details ?? {});
+}
+
+function cycleEvents(): Array<Record<string, unknown>> {
+  return logSpurEventMock.mock.calls
+    .map((call) => call[1] as { event: string; details?: Record<string, unknown> })
+    .filter((entry) => entry.event === "gh.poll_cycle")
     .map((entry) => entry.details ?? {});
 }
 
@@ -155,6 +163,52 @@ describe("gh usage accounting", () => {
     noteGhInvocation(["api", "graphql"], T0);
     noteGhInvocation(["api", "graphql"], T0 + MINUTE + 1);
     expect(logSpurEventMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("emits one exact counter for each poll cycle, including a zero-call cycle", async () => {
+    await runGhPollCycle({ kind: "attention" }, async () => {
+      noteGhInvocation(["api", "graphql"], T0);
+      noteGraphqlCost(3, T0);
+      noteGhInvocation(["pr", "view", "42"], T0 + 1);
+    });
+    await runGhPollCycle({ kind: "github_source" }, async () => {});
+
+    expect(cycleEvents()).toEqual([
+      {
+        cycle: "attention",
+        durationMs: expect.any(Number),
+        calls: 2,
+        graphqlCost: 3,
+        bySubcommand: { "api graphql": 1, "pr view": 1 },
+      },
+      {
+        cycle: "github_source",
+        durationMs: expect.any(Number),
+        calls: 0,
+        graphqlCost: 0,
+        bySubcommand: {},
+      },
+    ]);
+  });
+
+  it("keeps concurrent cycle counters isolated and emits on failure", async () => {
+    const first = runGhPollCycle({ kind: "attention" }, async () => {
+      await Promise.resolve();
+      noteGhInvocation(["api", "graphql"], T0);
+    });
+    const second = runGhPollCycle({ kind: "github_source" }, async () => {
+      noteGhInvocation(["pr", "checks", "42"], T0);
+      throw new Error("poll failed");
+    });
+
+    await first;
+    await expect(second).rejects.toThrow("poll failed");
+    expect(cycleEvents()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ cycle: "attention", calls: 1 }),
+        expect.objectContaining({ cycle: "github_source", calls: 1 }),
+      ]),
+    );
   });
 });
 

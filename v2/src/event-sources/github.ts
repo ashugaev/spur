@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
-import { extractGithubErrorText, gh, isGitHubRateLimitError } from "../gh.js";
+import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
@@ -25,8 +25,8 @@ import {
   removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
-import { reviewProvider } from "../review-providers/index.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
+import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
 import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
@@ -256,7 +256,6 @@ async function pollWorkItems(
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
-  const provider = reviewProvider("github");
   const snapshots = readReviewSourceSnapshots(
     deps.dataDir,
     "github",
@@ -380,19 +379,22 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     polling = true;
     try {
       const sessions = listPollableSessions();
-      const currentSessionIds = new Set<string>();
+      const currentSessionIds = new Set(sessions.map((session) => session.id));
       let cycleCiActive = false;
       let cycleHadPollError = false;
+      const pollableSessions = [];
 
       for (const session of sessions) {
-        currentSessionIds.add(session.id);
-        // Skip sessions whose PR is already merged/closed: terminal state, no new
-        // signals possible, and re-polling them burns the shared gh rate limit. The
-        // snapshot key persists on disk and reloads at startup so the skip is sticky.
-        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
-        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
+        // Skip only when the session is bound to a PR and the snapshot's terminal
+        // signal is *for that PR*: terminal state, no new signals possible, and
+        // re-polling burns the shared gh rate limit. Scoped by PR number so a
+        // rebind to a new PR (`spur slots --link pr=...`) is always polled again —
+        // a stale terminal snapshot from the PR the session used to be bound to
+        // must never mute it. Unbound sessions are always polled (the only local
+        // authority for "the current PR" is `session.pr`; see decision 2).
+        // The snapshot persists to disk and reloads at startup, so the skip is sticky.
         const existing = snapshots.get(session.id);
-        if (existing && (existing.has("merged") || existing.has("closed"))) {
+        if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
         }
         // Proactively skip sessions whose worktree is missing or no longer a git repo:
@@ -417,6 +419,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           continue;
         }
         deadWorktreeSessions.delete(session.id);
+        pollableSessions.push(session);
+      }
+
+      const collectedBySession = await collectGitHubSignalsBatch(
+        pollableSessions,
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+      );
+      for (const session of pollableSessions) {
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
@@ -425,12 +437,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             session.id,
           );
           attemptedSessionIds.add(session.id);
-          const collected = await provider.collectSignals(
-            session,
-            deps.dataDir,
-            deps.projectId,
-            deps.sourceId,
-          );
+          const batchResult = collectedBySession.get(session.id);
+          if (!batchResult || batchResult.status === "skipped") continue;
+          if (batchResult.status === "error") throw batchResult.error;
+          const collected = batchResult.collected;
           if (collected?.ciActive) {
             cycleCiActive = true;
           }
@@ -615,12 +625,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     // slow window during an outage instead of resuming promptly once it lifts.
     const skippedByCooldown = shouldSkipGitHubCalls();
     try {
-      await pollSignals(emitInitial);
-      if (shouldSkipGitHubCalls()) return;
-      await syncWorkItems();
-      if (!shouldSkipGitHubCalls()) {
-        rateLimitFailures = 0;
-      }
+      await runGhPollCycle(
+        { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
+        async () => {
+          await pollSignals(emitInitial);
+          if (shouldSkipGitHubCalls()) return;
+          await syncWorkItems();
+          if (!shouldSkipGitHubCalls()) {
+            rateLimitFailures = 0;
+          }
+        },
+      );
     } finally {
       if (adaptive && !skippedByCooldown) {
         nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;

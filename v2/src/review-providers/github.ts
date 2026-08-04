@@ -1,5 +1,12 @@
-import { extractGithubErrorText, gh } from "../gh.js";
+import {
+  extractGithubErrorText,
+  gh,
+  noteGraphqlCost,
+  pollBudgetState,
+  recordGraphqlBudget,
+} from "../gh.js";
 import { readCommentSeenRegistry } from "../metadata.js";
+import { gqlErrorsByAlias, resolvePrLookupRepo } from "../pr-lookup.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -72,6 +79,30 @@ type ReviewEntry = {
   user?: { login?: string | null } | null;
 };
 
+export type GitHubCollectedSignals = {
+  data: ReviewEventData;
+  snapshot: Map<string, ReviewSignal>;
+  ciActive: boolean;
+  ciCheckFetchFailed: boolean;
+};
+
+export type GitHubSignalBatchResult =
+  | { status: "ok"; collected: GitHubCollectedSignals | null }
+  | { status: "skipped"; reason: "budget" | "repo_unresolved" }
+  | { status: "error"; error: unknown };
+
+interface GitHubBatchTarget {
+  session: SessionRecord;
+  repo: string;
+  branch: string | null;
+  number: number | null;
+}
+
+interface GitHubBatchAlias {
+  alias: string;
+  target: GitHubBatchTarget;
+}
+
 function parseJson(raw: string): unknown | null {
   try {
     return JSON.parse(raw) as unknown;
@@ -90,6 +121,10 @@ function readString(value: unknown): string | null {
 
 function readNumber(value: unknown): number | null {
   return typeof value === "number" ? value : null;
+}
+
+function connectionNodes(value: unknown): unknown[] {
+  return isRecord(value) && Array.isArray(value.nodes) ? value.nodes : [];
 }
 
 function readRollupState(value: unknown): string {
@@ -169,6 +204,134 @@ export async function resolveTrackedBranch(
   return sessionBranch;
 }
 
+// A branch with `--state all` can list several PRs (e.g. an old closed one
+// plus the current open one). Picking `prs[0]` trusted `gh`'s ordering, which
+// is not a documented contract. Deterministic rule instead: the
+// highest-numbered OPEN PR wins (the branch's live PR); if none is open, fall
+// back to the highest-numbered PR overall so a fully-closed/merged branch
+// still resolves to its most recent history.
+function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | null {
+  const open = prs.filter((pr) => pr.state === "OPEN");
+  const pool = open.length > 0 ? open : prs;
+  return pool.reduce<GitHubPrStatusSummary | null>(
+    (highest, pr) => (!highest || pr.number > highest.number ? pr : highest),
+    null,
+  );
+}
+
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `number title url reviewDecision mergeable mergeStateStatus isDraft state
+  commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{
+    ... on CheckRun{name conclusion status}
+    ... on StatusContext{context state}
+  }}}}}}
+  reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId body path line author{login}}}}}
+  reviews(first:100){nodes{databaseId state body author{login}}}
+  comments(first:100){nodes{databaseId body author{login}}}`;
+
+function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
+  query: string;
+  aliases: GitHubBatchAlias[];
+} {
+  const aliases: GitHubBatchAlias[] = [];
+  const declarations = ["$owner:String!", "$name:String!"];
+  const fields: string[] = [];
+  for (const [index, target] of targets.entries()) {
+    const alias = `a${index}`;
+    aliases.push({ alias, target });
+    if (target.number !== null) {
+      declarations.push(`$n${index}:Int!`);
+      fields.push(`${alias}:pullRequest(number:$n${index}){${GITHUB_REVIEW_BATCH_PR_FIELDS}}`);
+    } else {
+      declarations.push(`$b${index}:String!`);
+      fields.push(
+        `${alias}:pullRequests(headRefName:$b${index},first:5,orderBy:{field:CREATED_AT,direction:DESC}){nodes{${GITHUB_REVIEW_BATCH_PR_FIELDS}}}`,
+      );
+    }
+  }
+  return {
+    query: `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} r:repository(owner:$owner,name:$name){${fields.join(" ")}}}`,
+    aliases,
+  };
+}
+
+function checksFromPrNode(value: Record<string, unknown>): GitHubCheck[] {
+  const commit = connectionNodes(value.commits).at(-1);
+  if (!isRecord(commit) || !isRecord(commit.commit) || !isRecord(commit.commit.statusCheckRollup)) {
+    return [];
+  }
+  return connectionNodes(commit.commit.statusCheckRollup.contexts).flatMap((raw): GitHubCheck[] => {
+    if (!isRecord(raw)) return [];
+    const name = readString(raw.name) ?? readString(raw.context);
+    const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
+    return name && state ? [{ name, state }] : [];
+  });
+}
+
+function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestReviewComment[] {
+  const comments: PullRequestReviewComment[] = [];
+  for (const rawThread of connectionNodes(value.reviewThreads)) {
+    if (!isRecord(rawThread)) continue;
+    for (const raw of connectionNodes(rawThread.comments)) {
+      if (!isRecord(raw)) continue;
+      const id = readNumber(raw.databaseId);
+      const body = readString(raw.body);
+      if (id === null || body === null) continue;
+      const author = isRecord(raw.author) ? readString(raw.author.login) : null;
+      comments.push({
+        id,
+        body,
+        path: readString(raw.path),
+        line: readNumber(raw.line),
+        user: { login: author },
+      });
+    }
+  }
+  return comments;
+}
+
+function reviewsFromPrNode(value: Record<string, unknown>): ReviewEntry[] {
+  return connectionNodes(value.reviews).flatMap((raw): ReviewEntry[] => {
+    if (!isRecord(raw)) return [];
+    const author = isRecord(raw.author) ? readString(raw.author.login) : null;
+    return [
+      {
+        id: readNumber(raw.databaseId),
+        state: readString(raw.state),
+        body: readString(raw.body),
+        user: { login: author },
+      },
+    ];
+  });
+}
+
+function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[] {
+  return connectionNodes(value.comments).flatMap((raw): IssueComment[] => {
+    if (!isRecord(raw)) return [];
+    const id = readNumber(raw.databaseId);
+    const body = readString(raw.body);
+    if (id === null || body === null) return [];
+    const author = isRecord(raw.author) ? readString(raw.author.login) : null;
+    return [{ id, body, user: { login: author } }];
+  });
+}
+
+function summaryAndNode(value: unknown): { summary: GitHubPrStatusSummary; node: Record<string, unknown> } | null {
+  if (!isRecord(value)) return null;
+  const checks = checksFromPrNode(value);
+  const summary = readPrStatusSummary({ ...value, statusCheckRollup: checks });
+  return summary ? { summary, node: value } : null;
+}
+
+function selectSummaryAndNode(value: unknown, bound: boolean) {
+  if (bound) return summaryAndNode(value);
+  const candidates = connectionNodes(value)
+    .map(summaryAndNode)
+    .filter((entry) => entry !== null);
+  const selected = selectPrSummary(candidates.map((entry) => entry.summary));
+  return selected
+    ? (candidates.find((entry) => entry.summary.number === selected.number) ?? null)
+    : null;
+}
 export async function resolvePrSummary(
   worktreePath: string,
   branch: string,
@@ -188,7 +351,7 @@ export async function resolvePrSummary(
   const prs = Array.isArray(parsed)
     ? parsed.map(readPrStatusSummary).filter((pr) => pr !== null)
     : [];
-  const pr = prs[0];
+  const pr = selectPrSummary(prs);
   if (!pr) return null;
 
   let mergeable = pr.mergeable;
@@ -265,70 +428,12 @@ export async function resolveBoundPrSummary(
   };
 }
 
-interface FetchChecksResult {
-  checks: GitHubCheck[];
-  // True when the `gh pr checks` call itself failed (network, transient gh error,
-  // etc.) — distinct from a genuine empty checks array. The caller must not treat a
-  // failed fetch as "CI observed to have zero active checks": that would silently
-  // clear the CI-active hysteresis flag on a transient failure instead of leaving it
-  // untouched, defeating the point of tracking it (see event-sources/github.ts).
-  failed: boolean;
-}
-
-async function fetchChecks(worktreePath: string, prNumber: number): Promise<FetchChecksResult> {
-  try {
-    const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
-    const parsed = parseJson(raw);
-    if (!Array.isArray(parsed)) return { checks: [], failed: false };
-    const checks = parsed.flatMap((value): GitHubCheck[] => {
-      if (!isRecord(value)) return [];
-      const name = readString(value.name);
-      const state = readString(value.state);
-      if (!name || !state) return [];
-      return [{ name, state }];
-    });
-    return { checks, failed: false };
-  } catch (error) {
-    // `gh pr checks` exits non-zero with this exact message when the PR genuinely has
-    // no CI configured — a routine, permanent condition (common for repos without
-    // workflows, or a PR before its first check reports), not a fetch failure. Every
-    // other exception (network error, gh crash, rate limit, etc.) is a real failure.
-    const isNoChecksConfigured = extractGithubErrorText(error)
-      .toLowerCase()
-      .includes("no checks reported");
-    return { checks: [], failed: !isNoChecksConfigured };
-  }
-}
-
-async function fetchPagedArray<T>(
-  cwd: string,
-  pathBuilder: (page: number) => string,
-): Promise<T[]> {
-  const items: T[] = [];
-  for (let page = 1; ; page += 1) {
-    const raw = await gh(cwd, "api", pathBuilder(page));
-    const parsed = parseJson(raw);
-    if (!Array.isArray(parsed)) {
-      throw new Error("invalid GitHub API page");
-    }
-    const next = parsed as T[];
-    items.push(...next);
-    if (next.length < 100) return items;
-  }
-}
-
-async function fetchReviewSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
+function reviewSignalsFromComments(
+  comments: PullRequestReviewComment[],
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Promise<ReviewSignal[]> {
-  const comments = await fetchPagedArray<PullRequestReviewComment>(
-    worktreePath,
-    (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
-  );
+): ReviewSignal[] {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
@@ -346,15 +451,7 @@ async function fetchReviewSignals(
   return signals;
 }
 
-async function fetchReviewSummarySignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<ReviewSignal[]> {
-  const reviews = await fetchPagedArray<ReviewEntry>(
-    worktreePath,
-    (page) => `repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
-  );
+function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[] {
   const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
@@ -393,15 +490,7 @@ async function fetchReviewSummarySignals(
   return signals;
 }
 
-async function fetchIssueCommentSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<ReviewSignal[]> {
-  const comments = await fetchPagedArray<IssueComment>(
-    worktreePath,
-    (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
-  );
+function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal[] {
   // Dedup is handled by the persisted snapshot diff, not by marking comments seen
   // here. Recording seen at generation time dropped the comment from the next poll's
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
@@ -416,39 +505,26 @@ async function fetchIssueCommentSignals(
   });
 }
 
-async function collectSignals(
+function collectSignalsFromNode(
   session: SessionRecord,
+  pr: GitHubPrStatusSummary,
+  node: Record<string, unknown>,
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Promise<{
-  data: ReviewEventData;
-  snapshot: Map<string, ReviewSignal>;
-  ciActive: boolean;
-  ciCheckFetchFailed: boolean;
-} | null> {
-  const pr = session.pr
-    ? await resolveBoundPrSummary(session.worktreePath, session.pr)
-    : await resolvePrSummary(
-        session.worktreePath,
-        await resolveTrackedBranch(session.worktreePath, session.branch),
-      );
-  if (!pr) return null;
-
-  const [checksResult, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
-    fetchChecks(session.worktreePath, pr.number),
-    pr.repo
-      ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
-      : Promise.resolve([]),
-    pr.repo
-      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
-      : Promise.resolve([]),
-    pr.repo && pr.state !== "MERGED" && pr.state !== "CLOSED"
-      ? fetchReviewSummarySignals(session.worktreePath, pr.repo, pr.number)
-      : Promise.resolve([]),
-  ]);
-
-  const checks = checksResult.checks;
+): GitHubCollectedSignals {
+  const checks = checksFromPrNode(node);
+  const reviewSignals = reviewSignalsFromComments(
+    reviewCommentsFromPrNode(node),
+    dataDir,
+    projectId,
+    sourceId,
+  );
+  const commentSignals = issueCommentSignalsFromComments(issueCommentsFromPrNode(node));
+  const approvalSignals =
+    pr.state === "MERGED" || pr.state === "CLOSED"
+      ? []
+      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node));
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
@@ -509,8 +585,163 @@ async function collectSignals(
     },
     snapshot,
     ciActive: hasActiveChecks(checks),
-    ciCheckFetchFailed: checksResult.failed,
+    ciCheckFetchFailed: false,
   };
+}
+
+function parseRepoName(repo: string): { owner: string; name: string } | null {
+  const [owner, name, extra] = repo.split("/");
+  return owner && name && extra === undefined ? { owner, name } : null;
+}
+
+async function targetForSession(session: SessionRecord): Promise<GitHubBatchTarget | null> {
+  if (session.pr) {
+    return parseRepoName(session.pr.repo)
+      ? { session, repo: session.pr.repo, branch: null, number: session.pr.number }
+      : null;
+  }
+  const slug = await resolvePrLookupRepo(session.worktreePath);
+  if (!slug) return null;
+  return {
+    session,
+    repo: `${slug.owner}/${slug.name}`,
+    branch: await resolveTrackedBranch(session.worktreePath, session.branch),
+    number: null,
+  };
+}
+
+function readGraphqlEnvelope(raw: string): Record<string, unknown> | null {
+  const parsed = parseJson(raw);
+  return isRecord(parsed) ? parsed : null;
+}
+
+function graphqlEnvelopeFromError(error: unknown): Record<string, unknown> | null {
+  if (!isRecord(error) || typeof error.stdout !== "string") return null;
+  return readGraphqlEnvelope(error.stdout);
+}
+
+function recordBatchBudget(data: Record<string, unknown>): void {
+  if (!isRecord(data.rateLimit)) return;
+  const cost = readNumber(data.rateLimit.cost);
+  if (cost !== null) noteGraphqlCost(cost);
+  const remaining = readNumber(data.rateLimit.remaining);
+  if (remaining === null) return;
+  const resetAt = readString(data.rateLimit.resetAt);
+  const parsedReset = resetAt ? Date.parse(resetAt) : Number.NaN;
+  recordGraphqlBudget(remaining, Number.isFinite(parsedReset) ? parsedReset : null);
+}
+
+async function runReviewRepoBatch(
+  targets: GitHubBatchTarget[],
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Promise<Map<string, GitHubSignalBatchResult>> {
+  const results = new Map<string, GitHubSignalBatchResult>();
+  const repo = parseRepoName(targets[0]?.repo ?? "");
+  if (!repo) return results;
+  const { query, aliases } = buildGitHubReviewBatchQuery(targets);
+  const args = ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${repo.owner}`, "-f", `name=${repo.name}`];
+  for (const [index, target] of targets.entries()) {
+    if (target.number !== null) {
+      args.push("-F", `n${index}=${target.number}`);
+    } else {
+      args.push("-f", `b${index}=${target.branch ?? ""}`);
+    }
+  }
+
+  let envelope: Record<string, unknown> | null;
+  try {
+    envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
+  } catch (error) {
+    envelope = graphqlEnvelopeFromError(error);
+    if (!envelope) {
+      for (const target of targets) results.set(target.session.id, { status: "error", error });
+      return results;
+    }
+  }
+  const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+  if (!data || !isRecord(data.r)) {
+    const error = new Error(`invalid GitHub review batch for ${repo.owner}/${repo.name}`);
+    for (const target of targets) results.set(target.session.id, { status: "error", error });
+    return results;
+  }
+  recordBatchBudget(data);
+  const aliasErrors = gqlErrorsByAlias(
+    envelope?.errors,
+    new Set(aliases.map((entry) => entry.alias)),
+  );
+  for (const { alias, target } of aliases) {
+    const aliasError = aliasErrors.get(alias);
+    if (aliasError) {
+      results.set(target.session.id, { status: "error", error: new Error(aliasError) });
+      continue;
+    }
+    const selected = selectSummaryAndNode(data.r[alias], target.number !== null);
+    if (!selected) {
+      results.set(target.session.id, { status: "ok", collected: null });
+      continue;
+    }
+    results.set(target.session.id, {
+      status: "ok",
+      collected: collectSignalsFromNode(
+        target.session,
+        selected.summary,
+        selected.node,
+        dataDir,
+        projectId,
+        sourceId,
+      ),
+    });
+  }
+  return results;
+}
+
+export async function collectGitHubSignalsBatch(
+  sessions: SessionRecord[],
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Promise<Map<string, GitHubSignalBatchResult>> {
+  const results = new Map<string, GitHubSignalBatchResult>();
+  const byRepo = new Map<string, GitHubBatchTarget[]>();
+  for (const session of sessions) {
+    const target = await targetForSession(session);
+    if (!target) {
+      results.set(session.id, { status: "skipped", reason: "repo_unresolved" });
+      continue;
+    }
+    const group = byRepo.get(target.repo) ?? [];
+    group.push(target);
+    byRepo.set(target.repo, group);
+  }
+  for (const targets of byRepo.values()) {
+    if (pollBudgetState().blocked) {
+      for (const target of targets) {
+        results.set(target.session.id, { status: "skipped", reason: "budget" });
+      }
+      continue;
+    }
+    const batch = await runReviewRepoBatch(targets, dataDir, projectId, sourceId);
+    for (const [sessionId, result] of batch) {
+      results.set(sessionId, result);
+    }
+  }
+  return results;
+}
+
+async function collectSignals(
+  session: SessionRecord,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Promise<GitHubCollectedSignals | null> {
+  const result = (await collectGitHubSignalsBatch([session], dataDir, projectId, sourceId)).get(
+    session.id,
+  );
+  if (!result || result.status === "skipped") return null;
+  if (result.status === "error") throw result.error;
+  return result.collected;
 }
 
 export const githubReviewProvider: ReviewProvider = {

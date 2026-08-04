@@ -12,6 +12,7 @@ import {
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
+import type * as ghModule from "../../src/gh.js";
 
 const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
   ghMock: vi.fn(),
@@ -24,6 +25,9 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrls: vi.fn().mockResolvedValue(
+    new Map([["origin", "git@github.com:acme/api.git"]]),
+  ),
   isGitWorktree: isGitWorktreeMock,
 }));
 
@@ -74,6 +78,32 @@ function sourceSession(worktreePath: string): SessionRecord {
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
   };
+}
+
+function reviewBatchEnvelope(
+  pr: Record<string, unknown>,
+  issueComments: Array<Record<string, unknown>> = [],
+): string {
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-03-18T11:00:00.000Z" },
+      r: {
+        a0: {
+          ...pr,
+          commits: { nodes: [] },
+          reviewThreads: { nodes: [] },
+          reviews: { nodes: [] },
+          comments: {
+            nodes: issueComments.map((comment) => ({
+              ...comment,
+              databaseId: comment.id,
+              author: comment.user,
+            })),
+          },
+        },
+      },
+    },
+  });
 }
 
 describe("shortText", () => {
@@ -503,21 +533,18 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope({
           number: 42,
           title: "Keep branch mergeable",
           url: "https://github.com/acme/api/pull/42",
           reviewDecision: null,
           mergeable: "CONFLICTING",
           mergeStateStatus: "DIRTY",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+          state: "OPEN",
+          isDraft: false,
+      }),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -558,21 +585,18 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope({
           number: 42,
           title: "Keep branch mergeable",
           url: "https://github.com/acme/api/pull/42",
           reviewDecision: null,
           mergeable: "MERGEABLE",
           mergeStateStatus: "CLEAN",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+          state: "OPEN",
+          isDraft: false,
+      }),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -606,21 +630,19 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope(
+        {
           number: 42,
           title: "Keep branch mergeable",
           url: "https://github.com/acme/api/pull/42",
           reviewDecision: null,
           mergeable: "MERGEABLE",
           mergeStateStatus: "CLEAN",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce(
-        JSON.stringify([
+          state: "OPEN",
+          isDraft: false,
+        },
+        [
           {
             id: 1001,
             body: "Please rerun the focused runtime test.",
@@ -628,9 +650,9 @@ describe("github source rearm", () => {
               login: "reviewer",
             },
           },
-        ]),
-      )
-      .mockResolvedValueOnce("[]");
+        ],
+      ),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();

@@ -53,7 +53,7 @@ import {
   claudeCommand,
   DEFAULT_CLAUDE_MODEL,
 } from "./agents/claude.js";
-import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
+import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
@@ -2875,7 +2875,7 @@ export class SessionService {
 
   private async runAttentionMonitor(baseline: boolean): Promise<void> {
     try {
-      await this.pollAttentionStates(baseline);
+      await runGhPollCycle({ kind: "attention" }, () => this.pollAttentionStates(baseline));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.attention_monitor.failed", {

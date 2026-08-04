@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { promisify } from "node:util";
 import { logSpurEvent } from "./event-log.js";
 
@@ -123,6 +124,18 @@ interface GhUsageWindow {
   bySubcommand: Map<string, number>;
 }
 
+export type GhPollCycleKind = "attention" | "github_source";
+
+interface GhPollCycleContext {
+  kind: GhPollCycleKind;
+  startedAt: number;
+  calls: number;
+  graphqlCost: number;
+  bySubcommand: Map<string, number>;
+  projectId?: string;
+  sourceId?: string;
+}
+
 interface GraphqlBudgetLedger {
   remaining: number | null;
   resetAtMs: number | null;
@@ -141,6 +154,7 @@ let budget: GraphqlBudgetLedger = {
   blockedUntilMs: null,
 };
 let lastPausedEventKey: string | null = null;
+const ghPollCycleStorage = new AsyncLocalStorage<GhPollCycleContext>();
 
 export function _resetGhUsageForTests(): void {
   minuteWindow = null;
@@ -240,6 +254,43 @@ function countSubcommand(window: GhUsageWindow, key: string): void {
   window.bySubcommand.set(key, (window.bySubcommand.get(key) ?? 0) + 1);
 }
 
+/** Runs one daemon poll boundary and emits its exact gh cost, including zero. */
+export async function runGhPollCycle<T>(
+  input: { kind: GhPollCycleKind; projectId?: string; sourceId?: string },
+  task: () => Promise<T>,
+): Promise<T> {
+  const cycle: GhPollCycleContext = {
+    kind: input.kind,
+    startedAt: Date.now(),
+    calls: 0,
+    graphqlCost: 0,
+    bySubcommand: new Map(),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+  };
+  try {
+    return await ghPollCycleStorage.run(cycle, task);
+  } finally {
+    const dataDir = ghEventSinkDataDir;
+    if (dataDir) {
+      logSpurEvent(dataDir, {
+        event: "gh.poll_cycle",
+        level: "info",
+        ...(cycle.projectId ? { projectId: cycle.projectId } : {}),
+        ...(cycle.sourceId ? { sourceId: cycle.sourceId } : {}),
+        message: `gh invoked ${cycle.calls} times in ${cycle.kind} poll cycle`,
+        details: {
+          cycle: cycle.kind,
+          durationMs: Date.now() - cycle.startedAt,
+          calls: cycle.calls,
+          graphqlCost: cycle.graphqlCost,
+          bySubcommand: Object.fromEntries(cycle.bySubcommand),
+        },
+      });
+    }
+  }
+}
+
 function emitUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs: number): void {
   const dataDir = ghEventSinkDataDir;
   if (!dataDir) {
@@ -292,6 +343,10 @@ export function noteGraphqlCost(points: number, nowMs: number = Date.now()): voi
   if (hourWindow && nowMs - hourWindow.startedAt < GH_USAGE_HOUR_MS) {
     hourWindow.graphqlCost += points;
   }
+  const cycle = ghPollCycleStorage.getStore();
+  if (cycle) {
+    cycle.graphqlCost += points;
+  }
 }
 
 /**
@@ -301,6 +356,11 @@ export function noteGraphqlCost(points: number, nowMs: number = Date.now()): voi
  */
 export function noteGhInvocation(args: string[], nowMs: number = Date.now()): void {
   const key = subcommandKey(args);
+  const cycle = ghPollCycleStorage.getStore();
+  if (cycle) {
+    cycle.calls += 1;
+    countSubcommand(cycle, key);
+  }
   if (minuteWindow && nowMs - minuteWindow.startedAt >= GH_USAGE_MINUTE_MS) {
     emitUsageWindow(minuteWindow, "minute", nowMs);
     minuteWindow = null;
@@ -376,7 +436,7 @@ export type GhPollBudgetState =
 
 /**
  * Whether the daemon's poll path may spend GraphQL budget right now. Read at
- * flush time by the PR discovery path only.
+ * flush time by both PR discovery and batched review polling.
  */
 export function pollBudgetState(nowMs: number = Date.now()): GhPollBudgetState {
   if (isObservationExpired(nowMs)) {
