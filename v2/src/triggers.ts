@@ -89,8 +89,9 @@ const CI_FAILED_MAX_ATTEMPTS = 3;
 // double the backoff on each failure (10s, 20s, 40s, ... 640s) and give up
 // after 8 attempts, dropping and logging the batch. Backoff alone sums to
 // 1270s; each attempt can also block up to the submit-ack window
-// (agents/index.ts DEFAULT_SUBMIT_ACK_WINDOW_MS x (1 + resends)), so worst
-// case elapsed time is roughly 2.4h, not just the backoff sum.
+// (agents/index.ts DEFAULT_SUBMIT_ACK_WINDOW_MS x (1 + resends)) and, on a
+// busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
+// so worst case elapsed time is unbounded, not just the backoff sum.
 const DELIVERY_RETRY_BASE_MS = 10_000;
 const DELIVERY_MAX_ATTEMPTS = 8;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;

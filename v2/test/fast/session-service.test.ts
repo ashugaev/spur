@@ -3977,17 +3977,14 @@ describe("SessionService", () => {
 
       const session = codexSession("api-1");
       const firstSend = sessionServiceInternals(service).sendAgentMessage(session, "first");
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", { agent: "codex" });
-
       const secondSend = sessionServiceInternals(service).sendAgentMessage(session, "second");
       await vi.advanceTimersByTimeAsync(0);
 
-      // Second send is queued behind the pane lock; no write until the first
-      // send's Enter and ack are done.
+      // Both sends are created before the first flush, so the lock's own
+      // synchronous `set` (not a later microtask flush) is what keeps the
+      // second one queued: only "first" has written to the pane.
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", { agent: "codex" });
 
       releaseFirstAck();
       await firstSend;
@@ -4048,17 +4045,36 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       service.dispose();
 
+      let releaseFirstAck: () => void = () => {};
+      const firstAckGate = new Promise<void>((resolve) => {
+        releaseFirstAck = resolve;
+      });
+      let firstAckParked = false;
       vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
-        async (_binding, messageText) =>
-          messageText === "first"
-            ? { found: false, lastScannedFile: null }
-            : { found: true, lastScannedFile: null },
+        async (_binding, messageText) => {
+          if (messageText === "first") {
+            if (!firstAckParked) {
+              firstAckParked = true;
+              await firstAckGate;
+            }
+            return { found: false, lastScannedFile: null };
+          }
+          return { found: true, lastScannedFile: null };
+        },
       );
 
       const session = codexSession("api-1");
       const firstSend = sessionServiceInternals(service).sendAgentMessage(session, "first");
       const secondSend = sessionServiceInternals(service).sendAgentMessage(session, "second");
+      await vi.advanceTimersByTimeAsync(0);
 
+      // First send is parked in its ack wait; the pane lock must keep the
+      // second send's write from happening while it's still queued.
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith("api-1", "second", {
+        agent: "codex",
+      });
+
+      releaseFirstAck();
       await expect(firstSend).rejects.toBeInstanceOf(SubmitAckTimeoutError);
       await secondSend;
 
