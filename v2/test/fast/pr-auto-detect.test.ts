@@ -166,6 +166,7 @@ vi.mock("../../src/registry.js", () => ({
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
   ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
+    invalidateRemovedPaths: vi.fn(),
     scan: () => {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {

@@ -331,6 +331,16 @@ export class ConfigRegistryScanner {
     return canonicalPath;
   }
 
+  invalidateRemovedPaths(previousPaths: string[], nextPaths: string[]): void {
+    const nextCanonicalPaths = new Set(
+      normalizeConfigPaths(nextPaths).map((path) => this.canonicalizePath(path)),
+    );
+    for (const path of normalizeConfigPaths(previousPaths)) {
+      const canonicalPath = this.canonicalizePath(path);
+      if (!nextCanonicalPaths.has(canonicalPath)) this.invalidateCanonicalPath(canonicalPath);
+    }
+  }
+
   scan(options: RegistryScanOptions): RegistryScanResult {
     const parentStates = new Map<string, ParentState>();
     const newDiagnostics: RegistryDiagnostic[] = [];
@@ -377,11 +387,8 @@ export class ConfigRegistryScanner {
           : this.loadPath(canonicalPath, base, parentStates);
 
       if (load.kind === "missing" && load.parentState.kind === "enoent") {
-        this.loads.delete(canonicalPath);
         if (!protectedPaths.has(canonicalPath)) {
-          for (const [rawPath, cachedCanonicalPath] of this.canonicalPaths) {
-            if (cachedCanonicalPath === canonicalPath) this.canonicalPaths.delete(rawPath);
-          }
+          this.invalidateCanonicalPath(canonicalPath);
           continue;
         }
       }
@@ -460,6 +467,13 @@ export class ConfigRegistryScanner {
       };
       this.loads.set(path, invalid);
       return invalid;
+    }
+  }
+
+  private invalidateCanonicalPath(canonicalPath: string): void {
+    this.loads.delete(canonicalPath);
+    for (const [rawPath, cachedCanonicalPath] of this.canonicalPaths) {
+      if (cachedCanonicalPath === canonicalPath) this.canonicalPaths.delete(rawPath);
     }
   }
 
