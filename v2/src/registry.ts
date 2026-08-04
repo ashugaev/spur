@@ -379,6 +379,9 @@ export class ConfigRegistryScanner {
       if (load.kind === "missing" && load.parentState.kind === "enoent") {
         this.loads.delete(canonicalPath);
         if (!protectedPaths.has(canonicalPath)) {
+          for (const [rawPath, cachedCanonicalPath] of this.canonicalPaths) {
+            if (cachedCanonicalPath === canonicalPath) this.canonicalPaths.delete(rawPath);
+          }
           continue;
         }
       }

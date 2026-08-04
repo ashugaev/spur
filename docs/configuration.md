@@ -11,7 +11,7 @@ Two layers:
 
 The daemon merges the instance config first, then connected project configs in registry order. The first config claiming a project id or `sessionPrefix` wins. A later config colliding on either value is skipped whole for that scan and reconsidered after the earlier owner changes, disconnects, or moves later in order.
 
-Registry scans canonicalize registered paths and persist the cleaned order. A missing config is removed only when its parent directory is also gone; a missing file under a live parent and filesystem lookup errors stay registered for retry. The instance config is never removed. A canonical problem path emits at most one `daemon.registry.warning` per daemon lifetime.
+Registry scans canonicalize registered paths and persist the cleaned order. A missing config is removed only when its parent directory is also gone. Live-parent misses stay registered and retry after the parent directory changes; lookup errors stay registered and retry on each scan. The instance config is never removed. A canonical problem path emits at most one `daemon.registry.warning` per daemon lifetime.
 
 A running session reads only the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one the session uses the project as the daemon has it.
 

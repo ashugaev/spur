@@ -2877,8 +2877,7 @@ describe("startServer", () => {
       "utf8",
     );
 
-    // Orphan: file and parent directory both gone before the daemon ever starts.
-    // Requirement 1/5 say this self-heals out of config-registry.json at boot.
+    // Orphan: file and parent directory are gone before daemon boot.
     const orphanDir = join(root, "orphan-dir");
     const orphanConfigPath = join(orphanDir, "spur.yaml");
     await mkdir(orphanDir, { recursive: true });
@@ -2891,8 +2890,7 @@ describe("startServer", () => {
       unconfiguredProjects: [],
     });
 
-    // Duplicate: connecting this config conflicts with the bootstrap "demo"
-    // project id, so buildMergedConfig always skips it whole.
+    // Duplicate: this config conflicts with the bootstrap "demo" project id.
     const duplicateProjectDir = join(root, "dup-project");
     const duplicateConfigPath = join(duplicateProjectDir, "spur.yaml");
     await mkdir(duplicateProjectDir, { recursive: true });
