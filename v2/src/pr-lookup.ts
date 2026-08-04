@@ -65,7 +65,6 @@ interface SlugMemoEntry {
 interface PendingRequest {
   request: PrLookupRequest;
   settle: (outcome: PrLookupOutcome) => void;
-  settled: boolean;
 }
 
 const slugMemo = new Map<string, SlugMemoEntry>();
@@ -525,19 +524,11 @@ export function enqueuePrLookup(request: PrLookupRequest): Promise<PrLookupOutco
     pending.set(key, queue);
   }
   return new Promise<PrLookupOutcome>((resolve) => {
-    queue.push({ request, settle: resolve, settled: false });
+    queue.push({ request, settle: resolve });
     if (queue.length >= PR_LOOKUP_BATCH_SIZE) {
       void flushRepo(key);
     }
   });
-}
-
-function settleEntry(entry: PendingRequest, outcome: PrLookupOutcome): void {
-  if (entry.settled) {
-    return;
-  }
-  entry.settled = true;
-  entry.settle(outcome);
 }
 
 /**
@@ -557,15 +548,14 @@ async function flushRepo(key: string): Promise<void> {
       "poll",
     );
     for (const [index, entry] of queue.entries()) {
-      settleEntry(
-        entry,
+      entry.settle(
         outcomes[index] ?? { status: "skipped", reason: "error", message: "no lookup outcome" },
       );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     for (const entry of queue) {
-      settleEntry(entry, { status: "skipped", reason: "error", message });
+      entry.settle({ status: "skipped", reason: "error", message });
     }
   }
 }
@@ -581,7 +571,7 @@ export async function flushPrLookups(): Promise<void> {
 export function cancelPendingPrLookups(): void {
   for (const queue of pending.values()) {
     for (const entry of queue) {
-      settleEntry(entry, { status: "skipped", reason: "cancelled" });
+      entry.settle({ status: "skipped", reason: "cancelled" });
     }
   }
   pending.clear();
