@@ -1098,22 +1098,13 @@ describe("GitHub review batching", () => {
       "api",
       "pr-watch",
     );
+    const secondCycleCalls = ghMock.mock.calls.slice(secondCycleCall).map((call) => call.join(" "));
 
-    expect(
-      ghMock.mock.calls
-        .slice(secondCycleCall)
-        .some((call) => call.join(" ").includes("id0=THREAD_1")),
-    ).toBe(true);
-    expect(
-      ghMock.mock.calls
-        .slice(secondCycleCall)
-        .some((call) => call.join(" ").includes("... on PullRequest{reviewThreads")),
-    ).toBe(false);
-    expect(
-      ghMock.mock.calls
-        .slice(secondCycleCall)
-        .some((call) => call.join(" ").includes("before0=comment-101")),
-    ).toBe(true);
+    expect(secondCycleCalls.some((call) => call.includes("id0=THREAD_1"))).toBe(true);
+    expect(secondCycleCalls.some((call) => call.includes("... on PullRequest{reviewThreads"))).toBe(
+      false,
+    );
+    expect(secondCycleCalls.some((call) => call.includes("before0=comment-101"))).toBe(true);
     const collected = resumed.get("api-1");
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
