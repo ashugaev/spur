@@ -9896,7 +9896,6 @@ export class SessionService {
   private countLiveSessions(excludeSessionId?: string): {
     total: number;
     byProject: Map<string, number>;
-    ids: string[];
     records: SessionRecord[];
   } {
     const all = listSessions(this.config.dataDir);
@@ -9921,7 +9920,7 @@ export class SessionService {
     for (const session of live) {
       byProject.set(session.project, (byProject.get(session.project) ?? 0) + 1);
     }
-    return { total: live.length, byProject, ids: live.map((session) => session.id), records: live };
+    return { total: live.length, byProject, records: live };
   }
 
   private admissionCandidateList(records: SessionRecord[]): string {
