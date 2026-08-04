@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import type { PrLookupOutcome, PrLookupRequest } from "../../src/pr-lookup.js";
 import type { PrRepoSlug } from "../../src/pr-lookup-cache.js";
 
@@ -8,7 +9,7 @@ const { ghMock, readRemoteUrlMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/gh.js")>()),
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({

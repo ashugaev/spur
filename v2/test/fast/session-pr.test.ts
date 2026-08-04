@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import type { SessionRecord } from "../../src/types.js";
 
 const { ghMock, readCurrentBranchMock, readRemoteUrlMock } = vi.hoisted(() => ({
@@ -8,7 +9,7 @@ const { ghMock, readCurrentBranchMock, readRemoteUrlMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/gh.js")>()),
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({

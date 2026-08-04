@@ -277,7 +277,7 @@ async function runChunk(
     args.push("-f", `b${index}=${entry.branch}`);
   }
 
-  let envelope: unknown = null;
+  let envelope: unknown;
   let failure: string | null = null;
   try {
     envelope = JSON.parse(await gh(cwd, ...args)) as unknown;
@@ -411,10 +411,9 @@ async function resolveLookups(
     }
   }
 
-  return outcomes.map(
-    (outcome) =>
-      outcome ?? { status: "skipped", reason: "error", message: "lookup was never resolved" },
-  );
+  // Every index belongs to exactly one repo group and its branch to exactly one
+  // chunk of that group, so the array is fully populated here.
+  return outcomes;
 }
 
 /**
