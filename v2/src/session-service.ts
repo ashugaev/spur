@@ -251,10 +251,12 @@ import {
 import {
   addUnconfiguredProject,
   buildMergedConfig,
+  ConfigRegistryScanner,
   mutateConfigRegistry,
   readConfigRegistryFile,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
+  type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
@@ -1833,6 +1835,9 @@ export class SessionService {
   readonly startedAt: string;
   config: AppConfig;
   private registryPaths: string[];
+  // Shared by boot and later rescans. Keeps path-local loads hot and bounds
+  // registry warnings to one per canonical path for this daemon process.
+  private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
@@ -1928,18 +1933,14 @@ export class SessionService {
       bootstrap.config.dataDir,
       bootstrap.config.configPath,
     );
-    const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
-      skipInvalid: true,
-      warn: (message) => {
-        logSpurEvent(bootstrap.config.dataDir, {
-          event: "daemon.registry.warning",
-          level: "warn",
-          message,
-        });
-      },
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: this.registryPaths,
+      protectedPaths: [bootstrap.config.configPath],
     });
+    this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
-    this.applyConfig(merged.config, merged.configPaths);
+    this.applyConfig(scan.config, scan.configPaths);
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
     this.startSidecarReaper();
@@ -2537,13 +2538,13 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
-      this.registryPaths.includes(configPath)
+      this.registryPaths.includes(canonicalPath)
         ? this.registryPaths
-        : [...this.registryPaths, configPath],
+        : [...this.registryPaths, canonicalPath],
     );
   }
 
@@ -2551,41 +2552,50 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
+    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== canonicalPath));
   }
 
   private previewRegistryPaths(nextRegistryPaths: string[]): {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    const warnings: string[] = [];
-    const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
-      skipInvalid: true,
-      warn: (message) => warnings.push(message),
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: nextRegistryPaths,
+      protectedPaths: [this.bootstrapConfigPath],
     });
+    this.emitRegistryScan(this.config.dataDir, scan);
     const currentSignature = JSON.stringify(this.config.projects);
-    const nextSignature = JSON.stringify(merged.config.projects);
+    const nextSignature = JSON.stringify(scan.config.projects);
     const unconfiguredIds = new Set(this.listUnconfiguredProjects().map((entry) => entry.id));
-    const unconfiguredToRemove = Object.keys(merged.config.projects).filter((id) =>
+    const unconfiguredToRemove = Object.keys(scan.config.projects).filter((id) =>
       unconfiguredIds.has(id),
     );
     return {
-      config: merged.config,
-      registryPaths: merged.configPaths,
-      warnings,
+      config: scan.config,
+      registryPaths: scan.configPaths,
       changed:
         currentSignature !== nextSignature ||
-        merged.configPaths.length !== this.registryPaths.length ||
-        merged.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
+        scan.configPaths.length !== this.registryPaths.length ||
+        scan.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
         unconfiguredToRemove.length > 0,
       unconfiguredToRemove,
     };
+  }
+
+  private emitRegistryScan(dataDir: string, scan: RegistryScanResult): void {
+    for (const diagnostic of scan.newDiagnostics) {
+      logSpurEvent(dataDir, {
+        event: "daemon.registry.warning",
+        level: "warn",
+        message: diagnostic.message,
+      });
+    }
   }
 
   applyConfig(

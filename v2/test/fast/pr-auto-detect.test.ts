@@ -164,6 +164,20 @@ vi.mock("../../src/registry.js", () => ({
     mutate({ configPaths: [], unconfiguredProjects: [] }),
   ),
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
+  // SessionService's constructor and previewRegistryPaths both go through
+  // ConfigRegistryScanner.scan() now, not a direct buildMergedConfig call. This
+  // fake scanner just wraps whatever buildMergedConfigMock is set to return, so
+  // existing per-test mockReturnValue setups keep driving the merged config.
+  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
+    scan: () => {
+      const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
+      return {
+        config: merged.config,
+        configPaths: merged.configPaths,
+        newDiagnostics: [],
+      };
+    },
+  })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,

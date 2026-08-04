@@ -255,6 +255,18 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof registryModule>();
   return {
     ...actual,
+    ConfigRegistryScanner: class {
+      canonicalizePath(configPath: string): string {
+        return resolve(configPath);
+      }
+
+      scan(options: { bootstrapConfigPath: string | undefined; configPaths: string[] }) {
+        const merged = actual.buildMergedConfig(options.bootstrapConfigPath, options.configPaths, {
+          skipInvalid: true,
+        });
+        return { ...merged, newDiagnostics: [] };
+      }
+    },
     upsertConfigRegistryPath: upsertConfigRegistryPathMock,
     addUnconfiguredProject: addUnconfiguredProjectMock,
     removeUnconfiguredProject: removeUnconfiguredProjectMock,
