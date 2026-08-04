@@ -13,7 +13,11 @@ export interface FetchSentryIssuesOptions {
   limit: number;
 }
 
-const FETCH_TIMEOUT_MS = 5_000;
+// The default poll interval (config.ts's sentry source intervalMs) is 60s, so
+// this only needs to comfortably beat the poll cadence, not be tight — an
+// issues query on a loaded self-hosted instance can legitimately take longer
+// than 5s, which previously failed every poll and emitted nothing.
+const FETCH_TIMEOUT_MS = 30_000;
 
 async function requestBody(url: string, token: string): Promise<{ status: number; body: string }> {
   const response = await fetch(url, {

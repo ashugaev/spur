@@ -122,5 +122,5 @@ describe("fetchJiraIssues", () => {
         maxResults: 10,
       }),
     ).rejects.toThrow();
-  }, 10_000);
+  }, 35_000);
 });
