@@ -15,9 +15,11 @@ A running session reads only the `spur.yaml` in its own session directory — th
 
 Registered project config paths persist in `config-registry.json` under `dataDir`. Daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers.
 
-A config inside `worktreeDir` is never registered — a worktree's own `spur.yaml` copy would otherwise add an entry per session. Auto-connect skips such a path; `POST /projects/connect` rejects it with 400, as it does a non-absolute `configPath`.
+A config inside `worktreeDir` is never registered — a worktree's own `spur.yaml` copy would otherwise add an entry per session. Auto-connect skips such a path; `POST /projects/connect` and `POST /projects/disconnect` both reject a non-absolute `configPath`, and `connect` additionally rejects one inside `worktreeDir` — both with 400.
 
-Pruned at boot and at every connect/disconnect: entries that are not an existing file (deleted, or a directory), worktree-internal leftovers, and duplicates resolving to the same real path. Surviving paths are written back, and boot appends `daemon.registry.pruned` with the before/after count to `<dataDir>/events.jsonl`. Removing a session's worktree unregisters its config too, so a leftover never waits on `spur disconnect`.
+Pruned at boot and at every connect/disconnect: entries that are not an existing file (deleted, or a directory), worktree-internal leftovers, and duplicates resolving to the same real path. A stat failure that cannot confirm the file is gone (a permission error, a not-yet-mounted path) is not treated as deleted at boot, so it survives instead of being dropped on a guess. Surviving paths are written back, and boot appends `daemon.registry.pruned` with the before/after count to `<dataDir>/events.jsonl`.
+
+Completing or killing a session also runs a narrow unregister step for its worktree's config path. In the common case that path is already excluded by the prune above (it sits inside the current `worktreeDir`), so the step is a no-op; it only removes a registry entry that outlived the prune because it was registered under a `worktreeDir` the host has since reconfigured away from.
 
 `spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
 

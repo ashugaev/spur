@@ -93,6 +93,7 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
+  DEFAULT_PROJECT_CONFIG_FILES,
   deriveProjectIdFromDisplayName,
   expandHome,
   findProjectConfigPathInDirectory,
@@ -250,7 +251,6 @@ import {
   removeConfigRegistryPath,
   removeUnconfiguredProject,
   writeConfigRegistry,
-  WORKTREE_CONFIG_FILE_NAMES,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
@@ -2613,7 +2613,7 @@ export class SessionService {
   // "worktreeDir-migration leftover" in test/fast/session-service.test.ts.
   private unregisterWorktreeConfig(worktreePath: string): void {
     if (!worktreePath) return;
-    for (const name of WORKTREE_CONFIG_FILE_NAMES) {
+    for (const name of DEFAULT_PROJECT_CONFIG_FILES) {
       const candidate = join(worktreePath, name);
       const candidateKey = canonicalConfigKey(candidate);
       const isRegistered = this.registryPaths.some(

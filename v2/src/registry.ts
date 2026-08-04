@@ -13,13 +13,6 @@ import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
 
-// Candidate config file names inside a worktree directory. Mirrors config.ts's
-// (unexported) DEFAULT_PROJECT_CONFIG_FILES; duplicated rather than imported
-// because config.ts is mocked as an explicit object with no `...actual`
-// spread in test/fast/session-service.test.ts, so any new symbol
-// session-service.ts imports from config.js hard-fails that whole suite.
-export const WORKTREE_CONFIG_FILE_NAMES = ["spur.yaml", "spur.yml"] as const;
-
 export interface UnconfiguredProjectEntry {
   id: string;
   displayName?: string;

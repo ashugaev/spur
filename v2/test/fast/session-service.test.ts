@@ -322,6 +322,7 @@ vi.mock("../../src/config.js", () => ({
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
   deriveProjectIdFromDisplayName: (value: string) =>
     value
       .trim()

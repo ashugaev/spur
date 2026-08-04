@@ -52,6 +52,7 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
