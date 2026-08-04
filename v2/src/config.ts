@@ -1568,6 +1568,7 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
     return {
       enabled: true,
       maxLiveSessions: derivedDefault,
+      maxLiveSessionsSource: "derived",
       perSessionBytes,
       reserveFraction,
       memoryGuard: {
@@ -1585,23 +1586,28 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   const memoryGuardRaw = root["memoryGuard"]
     ? asObject(root["memoryGuard"], "admission.memoryGuard")
     : {};
+  const configuredMaxLiveSessions = asOptionalPositiveInteger(
+    root["maxLiveSessions"],
+    "admission.maxLiveSessions",
+  );
   return {
     enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
     maxLiveSessions:
-      asOptionalPositiveInteger(root["maxLiveSessions"], "admission.maxLiveSessions") ??
+      configuredMaxLiveSessions ??
       deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction),
+    maxLiveSessionsSource: configuredMaxLiveSessions !== undefined ? "config" : "derived",
     perSessionBytes: resolvedPerSessionBytes,
     reserveFraction: resolvedReserveFraction,
     memoryGuard: {
       enforce:
         asOptionalBoolean(memoryGuardRaw["enforce"], "admission.memoryGuard.enforce") ?? false,
       minAvailableBytes:
-        asOptionalNumber(
+        asNonNegativeNumber(
           memoryGuardRaw["minAvailableBytes"],
           "admission.memoryGuard.minAvailableBytes",
         ) ?? DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
       minFreeSwapBytes:
-        asOptionalNumber(
+        asNonNegativeNumber(
           memoryGuardRaw["minFreeSwapBytes"],
           "admission.memoryGuard.minFreeSwapBytes",
         ) ?? DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,

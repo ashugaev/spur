@@ -63,6 +63,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     admission: {
       enabled: true,
       maxLiveSessions: 1000,
+      maxLiveSessionsSource: "derived",
       perSessionBytes: 1_610_612_736,
       reserveFraction: 0.7,
       memoryGuard: { enforce: false, minAvailableBytes: 1_073_741_824, minFreeSwapBytes: 0 },

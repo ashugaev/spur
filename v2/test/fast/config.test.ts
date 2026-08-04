@@ -3625,10 +3625,58 @@ projects:
     expect(config.admission).toEqual({
       enabled: false,
       maxLiveSessions: 5,
+      maxLiveSessionsSource: "config",
       perSessionBytes: 1_610_612_736,
       reserveFraction: 0.7,
       memoryGuard: { enforce: true, minAvailableBytes: 1000, minFreeSwapBytes: 500 },
     });
+  });
+
+  it("accepts admission.memoryGuard.minFreeSwapBytes and minAvailableBytes of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: 0
+    minFreeSwapBytes: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.memoryGuard.minAvailableBytes).toBe(0);
+    expect(config.admission.memoryGuard.minFreeSwapBytes).toBe(0);
+  });
+
+  it("rejects a negative admission.memoryGuard.minFreeSwapBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minFreeSwapBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minFreeSwapBytes must be a non-negative number",
+    );
+  });
+
+  it("rejects a negative admission.memoryGuard.minAvailableBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minAvailableBytes must be a non-negative number",
+    );
   });
 
   it("rejects admission.reserveFraction above 1", async () => {

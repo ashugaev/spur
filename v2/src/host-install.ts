@@ -628,8 +628,7 @@ export async function checkServiceHealth(
     const headroomUrl = `http://${daemonProbeHost}:${daemonPort}/headroom`;
     const headroomResult = await probeHeadroom(headroomUrl);
     if (headroomResult.ok) {
-      const { live, cap, guard, sessions } = headroomResult.body;
-      const room = Math.max(0, cap.global - live.count);
+      const { live, cap, guard, sessions, projectedRoom } = headroomResult.body;
       const overCap = live.count >= cap.global || guard.crossed;
       if (overCap) {
         const candidateIds = sessions.slice(0, 3).map((session) => session.id);
@@ -645,7 +644,7 @@ export async function checkServiceHealth(
           id: "session-headroom",
           ok: true,
           severity: "warn",
-          detail: `${live.count}/${cap.global} live sessions, room for ${room} more`,
+          detail: `${live.count}/${cap.global} live sessions, room for ${projectedRoom} more`,
         });
       }
     }

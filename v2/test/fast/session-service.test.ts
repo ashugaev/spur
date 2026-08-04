@@ -574,6 +574,7 @@ function baseConfig() {
     admission: {
       enabled: true,
       maxLiveSessions: 1000,
+      maxLiveSessionsSource: "derived",
       perSessionBytes: 1_610_612_736,
       reserveFraction: 0.7,
       memoryGuard: { enforce: false, minAvailableBytes: 1_073_741_824, minFreeSwapBytes: 0 },
@@ -18825,6 +18826,67 @@ describe("SessionService", () => {
       await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
         "no reusable workspace",
       );
+    });
+
+    it("denies handoff on an over-cap fleet and leaves the source session live and untouched", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        admission: { ...config.admission, maxLiveSessions: 1 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      // A second live session that stays live even once api-1 is excluded as
+      // "the session being replaced" — the fleet is over cap independent of
+      // the handoff, so it must be refused.
+      sessions.set("api-2", sessionRecord({ id: "api-2", status: "running" }));
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.status).toBe("running");
+    });
+
+    it("succeeds handing off at exactly the cap because the source is excluded from the count", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        admission: { ...config.admission, maxLiveSessions: 1 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(result.id).toBe("api-2");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     });
 
     it("does not forward pipeline steps when the source pipeline already finished", async () => {
