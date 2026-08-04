@@ -1930,6 +1930,7 @@ export class SessionService {
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
+  private readonly prLookupResolutions = new Map<string, Promise<PrLookupOutcome | null>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
@@ -3465,6 +3466,25 @@ export class SessionService {
    * rate-limit window would outlive the window.
    */
   private async resolveQueuedPrLookup(
+    slug: PrRepoSlug,
+    branch: string,
+    worktreePath: string,
+  ): Promise<PrLookupOutcome | null> {
+    const key = JSON.stringify([slug.host, slug.owner, slug.name, branch]);
+    const active = this.prLookupResolutions.get(key);
+    if (active) {
+      return active;
+    }
+    const resolution = this.resolveAndCacheQueuedPrLookup(slug, branch, worktreePath);
+    this.prLookupResolutions.set(key, resolution);
+    void resolution.then(
+      () => this.prLookupResolutions.delete(key),
+      () => this.prLookupResolutions.delete(key),
+    );
+    return resolution;
+  }
+
+  private async resolveAndCacheQueuedPrLookup(
     slug: PrRepoSlug,
     branch: string,
     worktreePath: string,

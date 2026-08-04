@@ -752,12 +752,69 @@ describe("GitHub review batching", () => {
 
     const call = ghMock.mock.calls[0]?.join(" ") ?? "";
     expect(call).toContain("comments(last:100)");
-    expect(call).toContain("reviewThreads(last:100)");
+    expect(call).toContain("reviewThreads(last:20)");
     const collected = result.get("api-1");
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
     expect(collected.collected.snapshot.has("comment:101")).toBe(true);
     expect(collected.collected.snapshot.has("comment:1")).toBe(false);
+  });
+
+  it("surfaces every new same-thread comment returned between polls", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-03-18T11:00:00.000Z" },
+          r: {
+            a0: {
+              number: 42,
+              title: "Thread feedback",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: [
+                  {
+                    isResolved: false,
+                    comments: {
+                      nodes: [101, 102, 103].map((databaseId) => ({
+                        databaseId,
+                        body: `feedback ${databaseId}`,
+                        path: "src/api.ts",
+                        line: databaseId,
+                        author: { login: "reviewer" },
+                      })),
+                    },
+                  },
+                ],
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[0]?.join(" ")).toContain("comments(last:100)");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect([...collected.collected.snapshot.keys()]).toEqual(
+      expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
+    );
   });
 });
 

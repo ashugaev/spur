@@ -417,8 +417,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             session.id,
           );
-          attemptedSessionIds.add(session.id);
           const batchResult = collectedBySession.get(session.id);
+          if (batchResult?.status !== "skipped" || batchResult.reason !== "capacity") {
+            attemptedSessionIds.add(session.id);
+          }
           if (!batchResult || batchResult.status === "skipped") continue;
           if (batchResult.status === "error") throw batchResult.error;
           const collected = batchResult.collected;

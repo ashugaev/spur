@@ -84,20 +84,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/**
- * A host Spur treats as GitHub: github.com, a GitHub Enterprise host, or a
- * local ssh alias for either. gh resolves the actual API host itself (its own
- * config, GH_HOST), exactly as every other gh call in the daemon does, so the
- * slug alone is enough here. Hosts with no `github` label — gitlab.com and
- * friends — stay unparseable on purpose: their own review provider owns them.
- */
-function isGithubHost(host: string): boolean {
-  return host
-    .toLowerCase()
-    .split(".")
-    .some((label) => label.includes("github"));
-}
-
 export function parseRepoSlugFromRemoteUrl(url: string): PrRepoSlug | null {
   const trimmed = url.trim().replace(/\.git$/, "");
   // Both remote shapes: scp-like `git@host:owner/repo` and
@@ -105,7 +91,14 @@ export function parseRepoSlugFromRemoteUrl(url: string): PrRepoSlug | null {
   const match = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[/:](.+)$/i.exec(trimmed);
   const host = match?.[1];
   const path = match?.[2];
-  if (!host || !path || !isGithubHost(host)) {
+  if (
+    !host ||
+    !path ||
+    host
+      .toLowerCase()
+      .split(".")
+      .some((label) => label === "gitlab" || label === "bitbucket")
+  ) {
     return null;
   }
   const segments = path.split("/").filter((segment) => segment.length > 0);

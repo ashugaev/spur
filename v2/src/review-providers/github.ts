@@ -246,12 +246,14 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
   );
 }
 
+// At the 50-target batch cap, 20 threads × 100 comments bounds nested review
+// comment nodes at 100,000 while retaining the newest same-thread activity.
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `number title url reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
   }}}}}}
-  reviewThreads(last:100){nodes{isResolved comments(last:1){nodes{databaseId body path line author{login}}}}}
+  reviewThreads(last:20){nodes{isResolved comments(last:100){nodes{databaseId body path line author{login}}}}}
   reviews(last:100){nodes{databaseId state body author{login}}}
   comments(last:100){nodes{databaseId body author{login}}}`;
 

@@ -775,6 +775,30 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
+  it("coalesces duplicate repo and branch sessions into one miss mutation", async () => {
+    const sessions = [
+      makeSession({ id: "api-a", workspaceId: "api-a", worktreePath: "/tmp/api-a" }),
+      makeSession({ id: "api-b", workspaceId: "api-b", worktreePath: "/tmp/api-b" }),
+    ];
+    listSessionsMock.mockReturnValue(sessions);
+    readSessionMock.mockImplementation((_dataDir: string, id: string) => ({
+      ...(sessions.find((session) => session.id === id) ?? sessions[0]),
+    }));
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const { readPrLookupEntry } = await import("../../src/pr-lookup-cache.js");
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(branchArgsOf(0)).toEqual([`b0=${sessions[0]?.branch ?? ""}`]);
+    expect(readPrLookupEntry(DATA_DIR, PR_SLUG, sessions[0]?.branch ?? "")?.misses).toBe(1);
+
+    service.dispose();
+  });
+
   it("skips a session whose worktree directory is gone", async () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);

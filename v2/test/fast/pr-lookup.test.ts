@@ -149,7 +149,7 @@ describe("pr lookup batching", () => {
   });
 
   it("groups identical owner/repo names by GitHub hostname", async () => {
-    const enterprise = { ...SLUG, host: "github.corp.example" };
+    const enterprise = { ...SLUG, host: "git.corp.internal" };
     ghMock.mockResolvedValue(envelope({ a0: [] }));
 
     await resolvePrLookups([
@@ -158,7 +158,7 @@ describe("pr lookup batching", () => {
     ]);
 
     expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls.map((call) => call[3])).toEqual(["github.com", "github.corp.example"]);
+    expect(ghMock.mock.calls.map((call) => call[3])).toEqual(["github.com", "git.corp.internal"]);
   });
 
   it("collapses duplicate branches into one alias", async () => {
@@ -460,7 +460,7 @@ describe("pr lookup batching", () => {
     expect(readRemoteUrlsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("parses ssh, https, enterprise and ssh-alias github remotes", () => {
+  it("parses ssh, https, enterprise and ssh-alias remotes", () => {
     expect(parseRepoSlugFromRemoteUrl("git@github.com:ashugaev/spur.git")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("https://github.com/ashugaev/spur")).toEqual(SLUG);
     expect(parseRepoSlugFromRemoteUrl("ssh://git@github.com/ashugaev/spur.git")).toEqual(SLUG);
@@ -481,7 +481,10 @@ describe("pr lookup batching", () => {
       ...SLUG,
       host: "github.mycorp.com",
     });
-    // Other forges keep their own review provider.
+    expect(parseRepoSlugFromRemoteUrl("git@git.corp.internal:ashugaev/spur.git")).toEqual({
+      ...SLUG,
+      host: "git.corp.internal",
+    });
     expect(parseRepoSlugFromRemoteUrl("https://gitlab.com/ashugaev/spur.git")).toBeNull();
     expect(parseRepoSlugFromRemoteUrl("git@bitbucket.org:ashugaev/spur.git")).toBeNull();
     expect(parseRepoSlugFromRemoteUrl("/srv/repos/spur")).toBeNull();

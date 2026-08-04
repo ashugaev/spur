@@ -2365,6 +2365,45 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("keeps a capacity-skipped session unattempted for the next in-window tick", async () => {
+      listSessionsMock.mockReturnValue(
+        Array.from({ length: 51 }, (_unused, index) =>
+          makeSession({
+            id: `api-${index}`,
+            worktreePath: `/tmp/api-${index}`,
+            pr: {
+              number: index + 1,
+              repo: "acme/api",
+              url: `https://github.com/acme/api/pull/${index + 1}`,
+            },
+          }),
+        ),
+      );
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+      await waitForGhCallCount(10);
+
+      handle.stop();
+    });
+
     it("keeps the CI-active hysteresis flag intact when a poll cycle is suppressed by a rate-limit cooldown", async () => {
       // Seed lastCycleCiActive = true via the ungated startup poll.
       queuePollResponse("IN_PROGRESS");
