@@ -23947,6 +23947,43 @@ describe("SessionService", () => {
       expect(existsSync(shepherdPath)).toBe(true);
     });
 
+    it("re-creates a deleted shepherd workspace and recovers on restore of an errored shepherd", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-workspace-restore-errored-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const shepherdPath = `${dataDir}/shepherd`;
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: shepherdPath,
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      // Same reboot-wipe simulation as the stopped-shepherd case above, but
+      // pins the "errored" branch of isRestorableSession (status==="errored"
+      // && state==="error"), which isRestorableStatus alone does not cover.
+      rmSync(shepherdPath, { recursive: true, force: true });
+      expect(existsSync(shepherdPath)).toBe(false);
+      workspaceExistsMock.mockReset().mockImplementation(() => existsSync(shepherdPath));
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("shp-1");
+
+      expect(restored.status).toBe("running");
+      expect(existsSync(shepherdPath)).toBe(true);
+    });
+
     it("rejects restore of a killed shepherd without re-creating its wiped workspace", async () => {
       mockClaudeJsonlState("waiting");
       mockExitedThenRestoredProcess();
