@@ -242,8 +242,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
-- `admission.enabled`: optional boolean, default `true`. `false` disables both admission gates entirely (spawn and restore are never refused for being over cap); the memory guard still evaluates and logs report-only. Instance config only — a project-config `admission` block parses without error and is discarded.
-- `admission.maxLiveSessions`: optional positive integer, default derived from host memory — see [Admission control](#admission-control). Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions.
+- `admission.enabled`: optional boolean, default `true`. `false` disables cap and enforced memory-guard refusals for spawn and restore; the memory guard still evaluates and logs report-only. Instance config only — a project-config `admission` block parses without error and is discarded.
+- `admission.maxLiveSessions`: optional positive integer, default derived from host memory — see [Admission control](#admission-control). Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot.
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session; used only to derive the default `maxLiveSessions`.
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions when deriving the default `maxLiveSessions`; the rest stays for the OS and everything else on the host.
 - `admission.memoryGuard.enforce`: optional boolean, default `false`. `false` logs `session.admission.memory_guard` and admits when a threshold is crossed; `true` refuses the spawn or restore instead.
@@ -252,13 +252,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 
 ## Admission control
 
-A configurable cap on concurrent live sessions, enforced at spawn and at restore. Over cap, the caller gets a `429` whose message names the cap, the current live count, and up to 3 candidate session ids to stop (stalest `updatedAt` first). The cap never acts retroactively — sessions already live above a lowered cap keep running; nothing is killed, paused, or reconciled down to fit.
+A configurable cap on concurrent live sessions, enforced at spawn and at restore. One live-session slot covers the agent and its MCP/service sidecar processes. Over cap, the caller gets a `429` whose message names the cap, the current live or reserved count, and up to 3 candidate session ids to stop (stalest `updatedAt` first). Per-project denials list sessions from that project; global denials list the fleet. The cap never acts retroactively — sessions already live above a lowered cap keep running; nothing is killed, paused, or reconciled down to fit.
 
-`GET /headroom` returns the live count, both caps, per-live-session measured RSS, and projected room. `spur doctor` surfaces headroom as a `session-headroom` check — `warn` severity always, so a full host never flips doctor's exit code (see [`doctor`](commands.md#doctor)).
+`GET /headroom` returns `cap.global`, configured `projectCaps`, `live.count`, `live.byProject`, host-memory/guard values, and live sessions ordered by stale `updatedAt`. Each session entry includes `id`, `project`, `status`, and `rssBytes`. `projectedRoom` equals `max(0, cap.global - live.count)`; it excludes per-project caps, memory-guard state, and in-process admission reservations. See [`spur doctor`](commands.md#doctor) for CLI output.
 
 The default `admission.maxLiveSessions` is derived at config load as `max(1, floor(totalHostMemoryBytes * reserveFraction / perSessionBytes))`; restart the daemon to re-derive it after host memory changes. Measured on a reference host (2026-08-03, 118 live sessions, 62 GiB RAM): a fully-loaded session (agent ~1000 MB + Playwright MCP sidecar ~170 MB + isolated daemon ~70 MB) runs about 1.21 GiB, so the default `perSessionBytes` of 1.5 GiB brackets the worst case with headroom. Non-session host footprint measured at 62 - 43.9 = 18.1 GiB, so the default `reserveFraction` of `0.7` (reserving 18.6 GiB for the OS and everything else) tracks that without inflating `perSessionBytes` to absorb it — the two knobs stay semantically distinct: `perSessionBytes` is what one live session costs, `reserveFraction` is what the rest of the host needs. That reference host reports `MemTotal: 65838572 kB` (≈ 62.79 GiB), which derives a default cap of 29.
 
-RSS is measured only for `GET /headroom`'s reporting and is never consulted on the admission path itself.
+`rssBytes` sums process RSS attached to the session's agent, MCP, service, and sidecar tmux panes. Missing pane/process measurements report `0`. RSS is reporting-only; admission uses live-session slots and guard thresholds.
 
 ## Events
 
