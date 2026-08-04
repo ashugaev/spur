@@ -1,4 +1,5 @@
 import { gh } from "./gh.js";
+import { type PrLookupPr, resolvePrLookupRepo, resolvePrLookups } from "./pr-lookup.js";
 import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
 import { readCurrentBranch } from "./workspace.js";
 
@@ -189,40 +190,35 @@ export async function resolvePrDiscoveryBranch(
   return sessionBranch;
 }
 
+/**
+ * One-shot open-PR discovery for a single branch. Thin wrapper over the batched
+ * resolver: one `gh api graphql` instead of one `gh pr list --head`, bypassing
+ * the poll queue and the poll budget gate so interactive callers (teardown's
+ * open-PR check) keep today's behavior.
+ */
 export async function discoverSessionPrBinding(
   worktreePath: string,
   sessionBranch: string,
 ): Promise<SessionPrBinding | null> {
   const branch = await resolvePrDiscoveryBranch(worktreePath, sessionBranch);
-  const raw = await gh(
-    worktreePath,
-    "pr",
-    "list",
-    "--head",
-    branch,
-    "--json",
-    "number,title,url",
-    "--limit",
-    "1",
-  );
-  let prs: Array<{ number: number; url: string }>;
-  try {
-    prs = JSON.parse(raw) as Array<{ number: number; url: string }>;
-  } catch {
+  const slug = await resolvePrLookupRepo(worktreePath);
+  if (!slug) {
     return null;
   }
-  const pr = prs[0];
-  if (!pr?.url) {
+  const [outcome] = await resolvePrLookups([{ slug, branch, worktreePath }]);
+  if (outcome?.status !== "found") {
     return null;
   }
+  return prLookupBindingOf(outcome.pr);
+}
+
+/** Maps a found lookup result onto a session PR binding. Open PRs only. */
+export function prLookupBindingOf(pr: PrLookupPr): SessionPrBinding | null {
   const binding = parseSessionPrBinding(pr.url);
   if (!binding) {
     return null;
   }
-  return {
-    ...binding,
-    number: pr.number,
-  };
+  return { ...binding, number: pr.number };
 }
 
 export async function viewSessionPrState(

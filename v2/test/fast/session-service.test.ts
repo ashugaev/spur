@@ -114,6 +114,7 @@ const hasUncommittedChangesMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
 const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
+const readRemoteUrlMock = vi.fn();
 const removeWorktreeMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const branchRefsExistMock = vi.fn();
@@ -527,6 +528,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUnpushedCommits: hasUnpushedCommitsMock,
   isGitWorktree: isGitWorktreeMock,
   readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrl: readRemoteUrlMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
   workspaceExists: workspaceExistsMock,
@@ -1017,6 +1019,11 @@ describe("SessionService", () => {
     hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
     isGitWorktreeMock.mockReset().mockResolvedValue(true);
     readCurrentBranchMock.mockReset().mockResolvedValue("main");
+    readRemoteUrlMock
+      .mockReset()
+      .mockImplementation((_repoPath: string, remote: string) =>
+        Promise.resolve(remote === "origin" ? "git@github.com:acme/api.git" : null),
+      );
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     resolveRepoPathFromWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);

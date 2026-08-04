@@ -1,20 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
+import type { SessionRecord } from "../../src/types.js";
+
+const { ghMock, readCurrentBranchMock, readRemoteUrlMock } = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  readCurrentBranchMock: vi.fn(),
+  readRemoteUrlMock: vi.fn(),
+}));
+
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/gh.js")>()),
+  gh: ghMock,
+}));
+vi.mock("../../src/workspace.js", () => ({
+  readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrl: readRemoteUrlMock,
+}));
+vi.mock("../../src/event-log.js", () => ({
+  logSpurEvent: vi.fn(),
+}));
+
+const {
   closeSessionPr,
   deriveSessionSlots,
+  listOpenPullRequests,
+  discoverSessionPrBinding,
   normalizeSessionPrBinding,
   parseSessionPrBinding,
   viewSessionPrState,
-} from "../../src/session-pr.js";
-import type { SessionRecord } from "../../src/types.js";
-
-const { ghMock } = vi.hoisted(() => ({
-  ghMock: vi.fn(),
-}));
-
-vi.mock("../../src/gh.js", () => ({
-  gh: ghMock,
-}));
+} = await import("../../src/session-pr.js");
+const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -38,6 +52,13 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 describe("session-pr", () => {
   beforeEach(() => {
     ghMock.mockReset();
+    readCurrentBranchMock.mockReset().mockResolvedValue("feature/native-pr-binding");
+    readRemoteUrlMock
+      .mockReset()
+      .mockImplementation((_path: string, remote: string) =>
+        Promise.resolve(remote === "origin" ? "git@github.com:acme/api.git" : null),
+      );
+    _resetPrLookupsForTests();
   });
 
   it("parses a GitHub PR URL into a native session binding", () => {
@@ -147,6 +168,88 @@ describe("session-pr", () => {
         { label: "pr", url: "https://github.com/acme/api/pull/42" },
       ],
     });
+  });
+
+  it("discovers a binding with exactly one batched graphql call, not pr list", async () => {
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        data: {
+          rateLimit: { limit: 5000, cost: 1, remaining: 4900, resetAt: "2026-08-04T06:00:00Z" },
+          r: {
+            nameWithOwner: "acme/api",
+            isFork: false,
+            parent: null,
+            a0: {
+              nodes: [
+                {
+                  number: 42,
+                  title: "Fix checkout",
+                  url: "https://github.com/acme/api/pull/42",
+                  state: "OPEN",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).resolves.toEqual({
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    });
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const call = ghMock.mock.calls[0] ?? [];
+    expect(call[0]).toBe("/tmp/spur-worktrees/api-a1b2");
+    expect(call[1]).toBe("api");
+    expect(call[2]).toBe("graphql");
+    expect(call).toContain("owner=acme");
+    expect(call).toContain("name=api");
+    expect(call).toContain("b0=feature/native-pr-binding");
+    expect(call).not.toContain("list");
+  });
+
+  it("returns null without a gh call when no github remote resolves", async () => {
+    readRemoteUrlMock.mockResolvedValue(null);
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).resolves.toBeNull();
+    expect(ghMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("returns null for a branch whose newest PR is merged", async () => {
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        data: {
+          rateLimit: { limit: 5000, cost: 1, remaining: 4900, resetAt: "2026-08-04T06:00:00Z" },
+          r: {
+            nameWithOwner: "acme/api",
+            isFork: false,
+            parent: null,
+            a0: {
+              nodes: [
+                {
+                  number: 41,
+                  title: "Old",
+                  url: "https://github.com/acme/api/pull/41",
+                  state: "MERGED",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    await expect(
+      discoverSessionPrBinding("/tmp/spur-worktrees/api-a1b2", "feature/native-pr-binding"),
+    ).resolves.toBeNull();
+    expect(ghMock).toHaveBeenCalledTimes(1);
   });
 
   it("views a session pull request state through gh", async () => {

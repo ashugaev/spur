@@ -265,6 +265,15 @@ export async function readCurrentBranch(repoPath: string): Promise<string> {
   return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
 }
 
+/**
+ * Configured URL of a git remote, or null when the remote (or the repo) is not
+ * there. Used to derive a repo slug without spending any GitHub budget.
+ */
+export async function readRemoteUrl(repoPath: string, remote: string): Promise<string | null> {
+  const url = (await tryGit(repoPath, "remote", "get-url", remote))?.trim();
+  return url ? url : null;
+}
+
 function normalizeBranchHint(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "HEAD") {
