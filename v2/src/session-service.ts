@@ -8242,8 +8242,14 @@ export class SessionService {
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
-    // otherwise see a wiped shepherd workspace as unrestorable.
-    if (session.project === SHEPHERD_PROJECT_ID && !workspaceExists(session.worktreePath)) {
+    // otherwise see a wiped shepherd workspace as unrestorable. Gated on
+    // isRestorableStatus so a killed/completed shepherd is rejected below
+    // rather than having its workspace re-created as a side effect first.
+    if (
+      isRestorableStatus(session.status) &&
+      session.project === SHEPHERD_PROJECT_ID &&
+      !workspaceExists(session.worktreePath)
+    ) {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
