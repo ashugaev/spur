@@ -862,6 +862,13 @@ type SessionServiceInternals = {
     options?: { interrupt?: boolean },
   ): Promise<void>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
+  classifySessionRecord(
+    session: SessionRecord,
+    options?: { scanPane?: boolean },
+  ): Promise<{ state: SessionState }>;
+  codexMcpDialogOverrides: Map<string, number>;
+  claudeCompactingOverrides: Map<string, number>;
+  lastClassifiedLogStates: Map<string, SessionState>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -6074,9 +6081,9 @@ describe("SessionService", () => {
   });
 
   describe("session.state.classified dedupe", () => {
-    function classifiedCalls() {
+    function classifiedCalls(sessionId = "api-1") {
       return logSpurEventMock.mock.calls.filter(
-        ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+        ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === sessionId,
       );
     }
 
@@ -6089,6 +6096,17 @@ describe("SessionService", () => {
       for (let i = 0; i < 10; i += 1) {
         await service.get("api-1");
       }
+
+      expect(classifiedCalls()).toHaveLength(1);
+    });
+
+    it("dedupes concurrent classifications of the same unchanged state", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await Promise.all(Array.from({ length: 10 }, () => service.get("api-1")));
 
       expect(classifiedCalls()).toHaveLength(1);
     });
@@ -6125,6 +6143,85 @@ describe("SessionService", () => {
       // Still just the one classified event from the first call: the detail
       // changed (records=50 -> records=17) but the state stayed "waiting".
       expect(classifiedCalls()).toHaveLength(1);
+    });
+
+    it("does not re-emit for a source change or repeated rate-limit reason change", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      readClaudeSessionStatusMock.mockResolvedValue(null);
+      mockClaudeJsonlState("waiting");
+      await service.get("api-1");
+      expect(classifiedCalls()).toHaveLength(1);
+
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: { limited: true, reason: "first reason" },
+      });
+      await service.get("api-1");
+      expect(classifiedCalls()).toHaveLength(2);
+      expect(classifiedCalls()[1]?.[1].message).toContain("first reason");
+
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: { limited: true, reason: "second reason" },
+      });
+      await service.get("api-1");
+
+      expect(classifiedCalls()).toHaveLength(2);
+    });
+
+    it("logs cached scanPane:false override states with their final details", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      internals.lastClassifiedLogStates.set("api-1", "waiting");
+      internals.claudeCompactingOverrides.set("api-1", Date.now() + 10_000);
+      mockClaudeSessionStatus("waiting", "idle");
+
+      const compacting = await internals.classifySessionRecord(runningSession(), {
+        scanPane: false,
+      });
+
+      expect(compacting.state).toBe("working");
+      expect(classifiedCalls()[0]?.[1].message).toBe("State: working (claude compacting)");
+
+      const codexSession = runningSession({ id: "api-2", agent: "codex" });
+      internals.lastClassifiedLogStates.set("api-2", "waiting");
+      internals.codexMcpDialogOverrides.set("api-2", Date.now() + 10_000);
+      readAgentHookStateMock.mockReturnValue({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "PostToolUse",
+      });
+
+      const mcpDialog = await internals.classifySessionRecord(codexSession, { scanPane: false });
+
+      expect(mcpDialog.state).toBe("needs_input");
+      expect(classifiedCalls("api-2")[0]?.[1].message).toBe(
+        "State: needs_input (codex MCP permission dialog)",
+      );
+    });
+
+    it("re-emits after a no-detail terminal classification resets the stored state", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const running = runningSession({ id: "api-1" });
+      mockClaudeSessionStatus("waiting", "idle");
+
+      await internals.classifySessionRecord(running);
+      await internals.classifySessionRecord({ ...running, status: "completed" });
+      await internals.classifySessionRecord(running);
+
+      expect(classifiedCalls()).toHaveLength(2);
+      expect(classifiedCalls().map((call) => call[1].message)).toEqual([
+        "State: waiting (claude status=idle)",
+        "State: waiting (claude status=idle)",
+      ]);
     });
 
     it("emits exactly one additional classified and one transition on a waiting -> working change", async () => {
@@ -22867,6 +22964,7 @@ describe("SessionService", () => {
     type SessionScopedStateInternals = {
       codexMcpDialogOverrides: Map<string, number>;
       claudeCompactingOverrides: Map<string, number>;
+      lastClassifiedLogStates: Map<string, SessionState>;
       sessionProjectCache: Map<string, unknown>;
       claudeJsonlReaders: Map<string, unknown>;
       cursorJsonlReaders: Map<string, unknown>;
@@ -22917,6 +23015,7 @@ describe("SessionService", () => {
       for (const id of seededIds) {
         internals.codexMcpDialogOverrides.set(id, Date.now());
         internals.claudeCompactingOverrides.set(id, Date.now());
+        internals.lastClassifiedLogStates.set(id, "waiting");
         internals.sessionProjectCache.set(id, {
           configPath: "/tmp/x/spur.yaml",
           stamp: "1",
@@ -22972,6 +23071,7 @@ describe("SessionService", () => {
       const allPrunedMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
         ["claudeCompactingOverrides", internals.claudeCompactingOverrides],
+        ["lastClassifiedLogStates", internals.lastClassifiedLogStates],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],
@@ -22996,6 +23096,7 @@ describe("SessionService", () => {
       // sweep's behavior; it is asserted bounded (eviction-only) above.
       const cleanMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
+        ["lastClassifiedLogStates", internals.lastClassifiedLogStates],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],

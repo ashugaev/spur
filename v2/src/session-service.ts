@@ -10951,15 +10951,19 @@ export class SessionService {
       }
     }
 
-    if (classifiedDetail !== undefined && this.lastClassifiedLogStates.get(session.id) !== state) {
-      this.logEvent("session.state.classified", {
-        level: "info",
-        sessionId: session.id,
-        projectId: session.project,
-        message: classifiedDetail,
-      });
+    if (classifiedDetail === undefined) {
+      this.lastClassifiedLogStates.delete(session.id);
+    } else {
+      if (this.lastClassifiedLogStates.get(session.id) !== state) {
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: classifiedDetail,
+        });
+      }
+      this.lastClassifiedLogStates.set(session.id, state);
     }
-    this.lastClassifiedLogStates.set(session.id, state);
 
     return {
       session: effectiveSession,
