@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -240,12 +240,17 @@ import {
   viewSessionPrState,
 } from "./session-pr.js";
 import {
+  activeConfigPaths,
   addUnconfiguredProject,
   buildMergedConfig,
+  canonicalConfigKey,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
-  upsertConfigRegistryPath,
+  writeConfigRegistry,
+  WORKTREE_CONFIG_FILE_NAMES,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
@@ -443,6 +448,10 @@ export class SessionResourceNotFoundError extends Error {
 }
 
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidConfigPathError extends Error {
   readonly statusCode = 400;
 }
 
@@ -1873,10 +1882,18 @@ export class SessionService {
     this.startedAt = startedAt;
     mkdirSync(bootstrap.config.dataDir, { recursive: true });
     mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
-    this.registryPaths = upsertConfigRegistryPath(
-      bootstrap.config.dataDir,
-      bootstrap.config.configPath,
-    );
+    const rawConfigPaths = readConfigRegistryFile(bootstrap.config.dataDir).configPaths;
+    const bootstrapKey = canonicalConfigKey(bootstrap.config.configPath);
+    const nextConfigPaths = rawConfigPaths.some((path) => canonicalConfigKey(path) === bootstrapKey)
+      ? rawConfigPaths
+      : [...rawConfigPaths, bootstrap.config.configPath];
+    this.registryPaths = activeConfigPaths(nextConfigPaths, bootstrap.config.worktreeDir);
+    writeConfigRegistry(bootstrap.config.dataDir, this.registryPaths);
+    logSpurEvent(bootstrap.config.dataDir, {
+      event: "daemon.registry.pruned",
+      level: "info",
+      message: `registry paths ${nextConfigPaths.length} -> ${this.registryPaths.length}`,
+    });
     const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
       skipInvalid: true,
       warn: (message) => {
@@ -2487,10 +2504,17 @@ export class SessionService {
     warnings: string[];
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
+    if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
+      throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
+    }
+    const alreadyRegistered = this.registryPaths.some(
+      (path) => canonicalConfigKey(path) === canonicalConfigKey(configPath),
+    );
     return this.previewRegistryPaths(
-      this.registryPaths.includes(configPath)
-        ? this.registryPaths
-        : [...this.registryPaths, configPath],
+      alreadyRegistered ? this.registryPaths : [...this.registryPaths, configPath],
     );
   }
 
@@ -2501,7 +2525,10 @@ export class SessionService {
     warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
+    const targetKey = canonicalConfigKey(configPath);
+    return this.previewRegistryPaths(
+      this.registryPaths.filter((path) => canonicalConfigKey(path) !== targetKey),
+    );
   }
 
   private previewRegistryPaths(nextRegistryPaths: string[]): {
@@ -2512,7 +2539,8 @@ export class SessionService {
     unconfiguredToRemove: string[];
   } {
     const warnings: string[] = [];
-    const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
+    const paths = activeConfigPaths(nextRegistryPaths, this.config.worktreeDir);
+    const merged = buildMergedConfig(this.bootstrapConfigPath, paths, {
       skipInvalid: true,
       warn: (message) => warnings.push(message),
     });
@@ -2560,6 +2588,26 @@ export class SessionService {
 
   getRegistryPaths(): string[] {
     return [...this.registryPaths];
+  }
+
+  // Called beside every removeWorktree() so the registry shrinks on the same
+  // event that deletes the worktree, rather than only on an explicit
+  // /projects/disconnect that may never run (session killed, worktree
+  // deleted, host rebooted mid-teardown). A duplicate-projectId worktree
+  // config never contributed a project (mergeProjects throws on it, and the
+  // daemon skips it via skipInvalid), so no reload is needed here — only the
+  // registry file and this.registryPaths are touched.
+  private unregisterWorktreeConfig(worktreePath: string): void {
+    if (!worktreePath) return;
+    for (const name of WORKTREE_CONFIG_FILE_NAMES) {
+      const candidate = join(worktreePath, name);
+      const candidateKey = canonicalConfigKey(candidate);
+      const isRegistered = this.registryPaths.some(
+        (path) => canonicalConfigKey(path) === candidateKey,
+      );
+      if (!isRegistered) continue;
+      this.registryPaths = removeConfigRegistryPath(this.config.dataDir, candidate);
+    }
   }
 
   listProjects(): ProjectListEntry[] {
@@ -5589,6 +5637,7 @@ export class SessionService {
         );
         if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
+          this.unregisterWorktreeConfig(workspacePath);
         }
 
         const message = error instanceof Error ? error.message : String(error);
@@ -5687,6 +5736,7 @@ export class SessionService {
     }
     if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
+      this.unregisterWorktreeConfig(workspacePath);
     }
   }
 
@@ -7784,6 +7834,7 @@ export class SessionService {
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
@@ -7890,6 +7941,7 @@ export class SessionService {
       const cleanup = await this.resolveCleanupContext(record);
       try {
         await removeWorktree(cleanup.repoPath, record.worktreePath);
+        this.unregisterWorktreeConfig(record.worktreePath);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.kill.worktree_remove_failed", {

@@ -8,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   utimesSync,
+  watch,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -1117,6 +1118,96 @@ describe("SessionService", () => {
     vi.restoreAllMocks();
   });
 
+  describe("config registry lifecycle", () => {
+    it("prunes a dead registry path on boot, persists once, and never parses it", async () => {
+      vi.useRealTimers();
+      const liveProjectDir = join(TEST_DATA_DIR, "live-project");
+      const livePath = join(liveProjectDir, "spur.yaml");
+      mkdirSync(liveProjectDir, { recursive: true });
+      writeFileSync(livePath, "stub: true\n", "utf8");
+      const missingPath = join(TEST_DATA_DIR, "missing-project", "spur.yaml");
+
+      readConfigRegistryFileMock.mockReset().mockReturnValue({
+        configPaths: [livePath, missingPath],
+        unconfiguredProjects: [],
+      });
+      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
+
+      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
+      const tmpRenamesSeen = new Set<string>();
+      const watcher = watch(TEST_DATA_DIR, (eventType, filename) => {
+        if (!filename || eventType !== "rename") return;
+        if (!filename.startsWith("config-registry.json.tmp.")) return;
+        tmpRenamesSeen.add(filename);
+      });
+
+      try {
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+        service.dispose();
+
+        const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+          configPaths: string[];
+        };
+        expect(persisted.configPaths).toEqual([livePath]);
+        expect(tmpRenamesSeen.size).toBe(1);
+
+        const prunedEvent = logSpurEventMock.mock.calls.find(
+          ([, entry]) => entry.event === "daemon.registry.pruned",
+        );
+        expect(prunedEvent?.[1]).toMatchObject({
+          level: "info",
+          message: "registry paths 3 -> 1",
+        });
+
+        expect(loadProjectConfigMock).not.toHaveBeenCalledWith(missingPath, expect.anything());
+      } finally {
+        watcher.close();
+      }
+    });
+
+    it("unregisters the worktree config path when a completed session's worktree is removed", async () => {
+      const worktreePath = "/tmp/spur-worktrees/api/api-1";
+      const worktreeConfigPath = join(worktreePath, "spur.yaml");
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      removeWorktreeMock.mockReset().mockResolvedValue(undefined);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      // Seeds this.registryPaths directly (bypassing the boundary guard) to
+      // simulate a legacy in-memory entry — the invariant under test is that
+      // a completed session's worktree config is dropped from wherever it
+      // came from, not how it got there.
+      service.applyConfig(baseConfig() as unknown as AppConfig, [
+        "/tmp/spur.yaml",
+        worktreeConfigPath,
+      ]);
+
+      await service.complete("api-1");
+
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", worktreePath);
+      expect(service.getRegistryPaths()).not.toContain(worktreeConfigPath);
+      service.dispose();
+    });
+  });
+
   it("spawns a session through one clear path and returns the enriched view", async () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
@@ -1195,7 +1286,7 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls
         .map(([, entry]) => entry.event)
-        .filter((e) => e !== "session.state.classified"),
+        .filter((e) => e !== "session.state.classified" && e !== "daemon.registry.pruned"),
     ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
