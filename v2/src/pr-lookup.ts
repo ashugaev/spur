@@ -1,5 +1,10 @@
 import { existsSync } from "node:fs";
-import { gh, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "./gh.js";
+import {
+  gh,
+  recordGraphqlBudgetFromEnvelope,
+  withGhPollBudget,
+  type GhPollBudgetState,
+} from "./gh.js";
 import type { PrLookupTerminalPr, PrRepoSlug } from "./pr-lookup-cache.js";
 import { readRemoteUrls } from "./workspace.js";
 
@@ -383,15 +388,57 @@ async function runChunk(
   slug: PrRepoSlug,
   cwd: string,
   branches: string[],
+  mode: "interactive" | "poll",
 ): Promise<Map<string, PrLookupOutcome>> {
-  const attempt = await runChunkOnce(slug, cwd, branches);
+  const first = await runChunkOnceWithAdmission(slug, cwd, branches, mode);
+  if (first.status === "blocked") {
+    return budgetSkippedOutcomes(branches, first.budget);
+  }
+  const attempt = first.value;
   if (!attempt.forkParent) {
     return attempt.results;
   }
   // The PRs live on the parent. Ask it right away instead of burning the chunk:
   // a fork-of-a-fork still comes back repo_unresolved, never absent.
-  const viaParent = await runChunkOnce(attempt.forkParent, cwd, branches);
-  return viaParent.results;
+  const parent = await runChunkOnceWithAdmission(attempt.forkParent, cwd, branches, mode);
+  return parent.status === "blocked"
+    ? budgetSkippedOutcomes(branches, parent.budget)
+    : parent.value.results;
+}
+
+type BlockedBudget = Extract<GhPollBudgetState, { blocked: true }>;
+
+async function runChunkOnceWithAdmission(
+  slug: PrRepoSlug,
+  cwd: string,
+  branches: string[],
+  mode: "interactive" | "poll",
+): Promise<
+  { status: "completed"; value: ChunkAttempt } | { status: "blocked"; budget: BlockedBudget }
+> {
+  if (mode === "interactive") {
+    return { status: "completed", value: await runChunkOnce(slug, cwd, branches) };
+  }
+  const admission = await withGhPollBudget(() => runChunkOnce(slug, cwd, branches));
+  return admission.status === "blocked"
+    ? { status: "blocked", budget: admission.budget }
+    : { status: "completed", value: admission.value };
+}
+
+function budgetSkippedOutcomes(
+  branches: string[],
+  budget: BlockedBudget,
+): Map<string, PrLookupOutcome> {
+  return new Map(
+    branches.map((branch) => [
+      branch,
+      {
+        status: "skipped",
+        reason: "budget",
+        message: `graphql budget paused (${budget.reason}${budget.resetAt ? `, resets ${budget.resetAt}` : ""})`,
+      } satisfies PrLookupOutcome,
+    ]),
+  );
 }
 
 function chunked<T>(values: T[], size: number): T[][] {
@@ -442,26 +489,7 @@ async function resolveLookups(
     const branches = [...new Set(group.indices.map((index) => requests[index]?.branch ?? ""))];
     for (const chunk of chunked(branches, PR_LOOKUP_BATCH_SIZE)) {
       const chunkBranches = new Set(chunk);
-      const admission =
-        mode === "poll"
-          ? await withGhPollBudget(() => runChunk(group.slug, pickGroupCwd(group), chunk))
-          : ({
-              status: "admitted",
-              value: await runChunk(group.slug, pickGroupCwd(group), chunk),
-            } as const);
-      const results =
-        admission.status === "blocked"
-          ? new Map<string, PrLookupOutcome>(
-              chunk.map((branch) => [
-                branch,
-                {
-                  status: "skipped",
-                  reason: "budget",
-                  message: `graphql budget paused (${admission.budget.reason}${admission.budget.resetAt ? `, resets ${admission.budget.resetAt}` : ""})`,
-                } satisfies PrLookupOutcome,
-              ]),
-            )
-          : admission.value;
+      const results = await runChunk(group.slug, pickGroupCwd(group), chunk, mode);
       for (const index of group.indices) {
         const request = requests[index];
         if (!request || !chunkBranches.has(request.branch)) {

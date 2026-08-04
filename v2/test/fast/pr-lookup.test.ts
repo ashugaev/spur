@@ -61,7 +61,12 @@ function prNode(number: number, state: "OPEN" | "CLOSED" | "MERGED"): unknown {
 
 function envelope(
   aliasNodes: Record<string, unknown[]>,
-  overrides: { remaining?: number; repo?: Record<string, unknown> | null; errors?: unknown } = {},
+  overrides: {
+    remaining?: number;
+    resetAt?: string;
+    repo?: Record<string, unknown> | null;
+    errors?: unknown;
+  } = {},
 ): string {
   const repo =
     overrides.repo === undefined
@@ -80,7 +85,7 @@ function envelope(
         limit: 5000,
         cost: 1,
         remaining: overrides.remaining ?? 4_800,
-        resetAt: "2026-08-04T06:00:00Z",
+        resetAt: overrides.resetAt ?? "2026-08-04T06:00:00Z",
       },
       r: repo,
     },
@@ -323,6 +328,29 @@ describe("pr lookup batching", () => {
     expect(ghMock).toHaveBeenCalledTimes(0);
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "budget" });
     expect(outcomes[1]).toMatchObject({ status: "skipped", reason: "budget" });
+  });
+
+  it("defers a fork parent retry when the fork response exhausts the poll reserve", async () => {
+    ghMock.mockResolvedValueOnce(
+      envelope(
+        { a0: [] },
+        {
+          remaining: GH_POLL_MIN_GRAPHQL_REMAINING - 1,
+          resetAt: "2099-08-04T06:00:00Z",
+          repo: {
+            isFork: true,
+            parent: { nameWithOwner: "upstream-org/spur" },
+            a0: { nodes: [] },
+          },
+        },
+      ),
+    );
+    const outcome = enqueuePrLookup({ slug: SLUG, branch: "feature/a", worktreePath: CWD });
+
+    await flushPrLookups();
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(await outcome).toMatchObject({ status: "skipped", reason: "budget" });
   });
 
   it("blocks the queued path but not the interactive path during a cooldown", async () => {
