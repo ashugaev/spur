@@ -996,13 +996,16 @@ describe("listSessions record cache", () => {
     );
 
     // 1st call reads the legacy shape, which readSessionFile rewrites in
-    // place (a new inode) — the pre/post stat mismatch means this call's
-    // result is never cached.
+    // place — a renameSync always yields a new inode, so this call's cache
+    // entry (keyed on the PRE-read, now-stale fingerprint) is invalidated
+    // the instant the next call's pre-read stat misses it.
     const first = listSessions(dataDir).find((s) => s.id === "api-a1b2");
     expect(first?.pr).toMatchObject({ number: 42, repo: "acme/api" });
 
-    // 2nd call reads the now-native shape with no further rewrite, so its
-    // pre/post stat matches and the result is cached this time.
+    // 2nd call's pre-read stat misses the stale cache entry, so it
+    // re-parses once — reading the now-native shape, with no further
+    // rewrite, so this time the fingerprint it caches matches going
+    // forward.
     const second = listSessions(dataDir).find((s) => s.id === "api-a1b2");
     expect(second).not.toBe(first);
 
@@ -1010,6 +1013,29 @@ describe("listSessions record cache", () => {
     // permanent re-parse loop.
     const third = listSessions(dataDir).find((s) => s.id === "api-a1b2");
     expect(third).toBe(second);
+  });
+
+  it("does not prune a sibling data dir whose sessions root is a raw string-prefix match", async () => {
+    const dataDir1 = await newDataDir();
+    // dataDir2's sessions root ("<rootDir1>-extra/sessions") shares
+    // dataDir1's sessions root as a raw string prefix with no separator
+    // immediately after -- the exact shape of a "sessions-old" vs
+    // "sessions" sibling collision.
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+
+    // Populating/pruning dataDir1's cache must never evict dataDir2's
+    // cache entries just because dataDir2's root string-starts-with
+    // dataDir1's root.
+    listSessions(dataDir1);
+
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir2Second).toBe(dataDir2First);
   });
 
   it("lists a session file that has no index entry", async () => {

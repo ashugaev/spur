@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
   type AvailableBacklogItem,
@@ -285,21 +285,19 @@ function readSessionFileCached(path: string): SessionRecord {
 
   const record = readSessionFile(path);
 
-  // Stat again: readSessionFile's legacy-PR self-heal rewrite (above) can
-  // change the inode mid-call. If the file moved under us, don't cache a
-  // record that no longer matches what's on disk now — the NEXT call will
-  // re-parse once and settle, rather than caching a stale pairing forever.
-  const postStat = statFingerprint(path);
-  if (postStat && sameFingerprint(postStat, preStat)) {
-    sessionFileCache.set(path, {
-      ino: postStat.ino,
-      mtimeMs: postStat.mtimeMs,
-      size: postStat.size,
-      record,
-    });
-  } else {
-    sessionFileCache.delete(path);
-  }
+  // Cache keyed on the PRE-read fingerprint. writeJsonFile (the only writer
+  // of session JSON) always writes to a tmp path and renameSync's it into
+  // place, which always yields a new inode — so if readSessionFile's
+  // legacy-PR self-heal rewrite (above) just fired, this entry's fingerprint
+  // is already stale the instant it's stored: the NEXT call's pre-read stat
+  // will miss it (new inode) and re-parse once, this time with no rewrite,
+  // and settle into a fingerprint that matches going forward.
+  sessionFileCache.set(path, {
+    ino: preStat.ino,
+    mtimeMs: preStat.mtimeMs,
+    size: preStat.size,
+    record,
+  });
   return record;
 }
 
@@ -706,9 +704,28 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 
+// Deletes cache entries under rootDir that weren't in this listing's visited
+// set — a real path-boundary check (trailing separator), not a raw string
+// prefix, so a sibling dir sharing rootDir as a string prefix (e.g.
+// "/data/sessions-old" vs "/data/sessions") is never mistaken for a child.
+function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedPath of sessionFileCache.keys()) {
+    if (cachedPath.startsWith(rootPrefix) && !visited.has(cachedPath)) {
+      sessionFileCache.delete(cachedPath);
+    }
+  }
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return [];
+  if (!existsSync(rootDir)) {
+    // No visited entries this call — every cached file under a now-missing
+    // data dir is stale, so prune them all instead of leaking them for the
+    // rest of the process lifetime.
+    pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    return [];
+  }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
@@ -726,11 +743,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
     }
   }
 
-  for (const cachedPath of sessionFileCache.keys()) {
-    if (cachedPath.startsWith(join(rootDir, "")) && !visited.has(cachedPath)) {
-      sessionFileCache.delete(cachedPath);
-    }
-  }
+  pruneStaleSessionFileCacheEntries(rootDir, visited);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
