@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { totalmem, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -93,7 +93,6 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
-  deriveMaxLiveSessions,
   deriveProjectIdFromDisplayName,
   expandHome,
   findProjectConfigPathInDirectory,
@@ -9110,6 +9109,11 @@ export class SessionService {
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
+    // Unlike handoff, respawn needs no replacingSessionId exclusion: the
+    // status guard above requires completed/killed/errored, none of which
+    // countLiveSessions treats as live, and the kill() below (source cleanup
+    // for a status other than "completed") only runs after this spawn
+    // already succeeded — so admission never counts the source twice.
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
@@ -9144,6 +9148,12 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
+    // Gate before any teardown below. The source session is still on-disk as
+    // running/spawning here, so a denial leaves it fully untouched — no kill,
+    // no status flip. The successor replaces the source rather than adding to
+    // the fleet, so exclude it from the live count: a handoff at exactly the
+    // cap is net-neutral (stop one, start one) and must be allowed.
+    this.assertAdmissible(session.project, "spawn", { replacingSessionId: session.id });
 
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
@@ -9877,7 +9887,13 @@ export class SessionService {
   // reconcileStoppedSessions already uses, unioned with sessions mid-restore
   // (on-disk status still stopped/errored, see restore()'s comment above
   // restoreWarmupUntil.set) so a restore in flight is counted exactly once.
-  private countLiveSessions(): {
+  // `excludeSessionId` drops one session from the live count before admission
+  // math runs. Used to make a "replace this session" admission decision
+  // (handoff) net-neutral: the source is still on-disk as running/spawning
+  // when the check runs (it must be, so a denial leaves it untouched), but
+  // it is about to be torn down and replaced, so it should not count against
+  // the very spawn that replaces it.
+  private countLiveSessions(excludeSessionId?: string): {
     total: number;
     byProject: Map<string, number>;
     ids: string[];
@@ -9887,12 +9903,14 @@ export class SessionService {
     const live: SessionRecord[] = [];
     const seen = new Set<string>();
     for (const session of all) {
+      if (session.id === excludeSessionId) continue;
       if (session.status === "running" || session.status === "spawning") {
         live.push(session);
         seen.add(session.id);
       }
     }
     for (const session of all) {
+      if (session.id === excludeSessionId) continue;
       if (seen.has(session.id)) continue;
       if (this.isInRestoreWarmup(session.id)) {
         live.push(session);
@@ -9920,7 +9938,11 @@ export class SessionService {
   // of it. `admission.enabled: false` is a full escape hatch: neither the
   // cap nor the memory guard can deny, though the guard still logs a
   // report-only warning when crossed so the condition stays visible.
-  private assertAdmissible(projectId: string, context: "spawn" | "restore"): void {
+  private assertAdmissible(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string },
+  ): void {
     const admission = this.config.admission;
     const memory = readHostMemory();
     let memoryCrossedDetail: string | undefined;
@@ -9956,13 +9978,12 @@ export class SessionService {
       });
       throw denial;
     }
-    const live = this.countLiveSessions();
-    const candidates = this.admissionCandidateList(live.records);
+    const live = this.countLiveSessions(opts?.replacingSessionId);
     const projectCap = this.config.projects[projectId]?.maxLiveSessions;
     const projectLive = live.byProject.get(projectId) ?? 0;
     if (projectCap !== undefined && projectLive >= projectCap) {
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${candidates}.`,
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -9973,7 +9994,7 @@ export class SessionService {
     }
     if (live.total >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${live.total} live now). Stop one of: ${candidates}.`,
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${live.total} live now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -9982,6 +10003,24 @@ export class SessionService {
       });
       throw denial;
     }
+  }
+
+  // Cheap admission snapshot for the daemon-startup log: cap and live count
+  // only. getHeadroom() also awaits getFleetSessionRssBytes() (a `ps` fork
+  // plus `tmux list-panes -a`) for its per-session RSS breakdown, which the
+  // boot log throws away — too costly to run inside the pre-`ready` window.
+  getAdmissionStartupSummary(): {
+    enabled: boolean;
+    cap: { global: number; source: "config" | "derived" };
+    liveCount: number;
+  } {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    return {
+      enabled: admission.enabled,
+      cap: { global: admission.maxLiveSessions, source: admission.maxLiveSessionsSource },
+      liveCount: live.total,
+    };
   }
 
   async getHeadroom(): Promise<HeadroomReport> {
@@ -10003,15 +10042,10 @@ export class SessionService {
       memory !== null &&
       (memory.availableBytes < admission.memoryGuard.minAvailableBytes ||
         memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes);
-    const derivedCap = deriveMaxLiveSessions(
-      totalmem(),
-      admission.perSessionBytes,
-      admission.reserveFraction,
-    );
     return {
       cap: {
         global: admission.maxLiveSessions,
-        source: admission.maxLiveSessions === derivedCap ? "derived" : "config",
+        source: admission.maxLiveSessionsSource,
         perSessionBytes: admission.perSessionBytes,
         reserveFraction: admission.reserveFraction,
       },

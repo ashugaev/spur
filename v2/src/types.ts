@@ -1,3 +1,5 @@
+import type { HostMemory } from "./host-memory.js";
+
 export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 3;
 
@@ -558,6 +560,10 @@ export interface ProjectConfig {
 export interface AdmissionConfig {
   enabled: boolean;
   maxLiveSessions: number;
+  // Whether maxLiveSessions came from an explicit config value or was
+  // derived from live host memory at config-parse time. Set once at the
+  // config boundary (parseAdmission) — never re-derived downstream.
+  maxLiveSessionsSource: "config" | "derived";
   perSessionBytes: number;
   reserveFraction: number;
   memoryGuard: {
@@ -586,7 +592,7 @@ export interface HeadroomReport {
     status: SessionStatus;
     rssBytes: number;
   }>;
-  memory: { totalBytes: number; availableBytes: number; swapFreeBytes: number } | null;
+  memory: HostMemory | null;
   guard: {
     enforce: boolean;
     minAvailableBytes: number;

@@ -247,8 +247,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session; used only to derive the default `maxLiveSessions`.
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions when deriving the default `maxLiveSessions`; the rest stays for the OS and everything else on the host.
 - `admission.memoryGuard.enforce`: optional boolean, default `false`. `false` logs `session.admission.memory_guard` and admits when a threshold is crossed; `true` refuses the spawn or restore instead.
-- `admission.memoryGuard.minAvailableBytes`: optional positive number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`.
-- `admission.memoryGuard.minFreeSwapBytes`: optional positive number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
+- `admission.memoryGuard.minAvailableBytes`: optional non-negative number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`; `0` effectively disables the available-memory half of the guard.
+- `admission.memoryGuard.minFreeSwapBytes`: optional non-negative number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
 
 ## Admission control
 
@@ -287,7 +287,7 @@ Unit templates live in `deploy/`. After editing, copy to `/etc/systemd/system/` 
 
 ## Restore after reboot
 
-`projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the daemon restores only reboot-interrupted sessions (panes gone) — never intentional `pause`/`kill`/`complete`, never `errored` sessions whose pane survived but whose agent died. Only `autoStart` sidecars return; manual ones are not tracked. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore shuts down gracefully.
+`projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the daemon restores only reboot-interrupted sessions (panes gone) — never intentional `pause`/`kill`/`complete`, never `errored` sessions whose pane survived but whose agent died. Only `autoStart` sidecars return; manual ones are not tracked. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore shuts down gracefully. Each restore also passes through the [admission gate](#admission-control): once the fleet hits the cap, remaining sessions are left stopped and each logs a `session.reboot.restore.failed` warning instead of restoring.
 
 ## spur init (npm host flags)
 

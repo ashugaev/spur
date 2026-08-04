@@ -1510,17 +1510,16 @@ export async function startServer(
   }
 
   try {
-    const headroom = await service.getHeadroom();
-    const { enabled } = service.config.admission;
-    const atOrOverCap = headroom.live.count >= headroom.cap.global;
+    const { enabled, cap, liveCount } = service.getAdmissionStartupSummary();
+    const atOrOverCap = liveCount >= cap.global;
     logEvent("daemon.admission.startup", {
       level: atOrOverCap ? "warn" : "info",
-      message: `Admission at boot: enabled=${enabled}, cap=${headroom.cap.global} (${headroom.cap.source}), live=${headroom.live.count}`,
+      message: `Admission at boot: enabled=${enabled}, cap=${cap.global} (${cap.source}), live=${liveCount}`,
       details: {
         enabled,
-        cap: headroom.cap.global,
-        capSource: headroom.cap.source,
-        live: headroom.live.count,
+        cap: cap.global,
+        capSource: cap.source,
+        live: liveCount,
       },
     });
   } catch (error) {
