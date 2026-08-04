@@ -23899,7 +23899,8 @@ describe("SessionService", () => {
       expect(existsSync(shepherdPath)).toBe(false);
       workspaceExistsMock.mockReset().mockReturnValue(false);
 
-      // A fresh SessionService over the same dataDir stands in for the daemon restart.
+      // Exercises the send-path heal (ensureSessionReadyForSend) against the
+      // real filesystem, with the workspace dir removed beforehand.
       const service = await createDisposedSessionService();
 
       const result = await service.send("shp-1", { message: "operator ping" });
@@ -23907,6 +23908,76 @@ describe("SessionService", () => {
       expect(result.status).toBe("running");
       expect(existsSync(shepherdPath)).toBe(true);
       expect(sessions.get("shp-1")?.dailyWake).toEqual(dailyWake);
+    });
+
+    it("re-creates a deleted shepherd workspace and recovers on restore after a reboot", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-workspace-restore-reboot-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const shepherdPath = `${dataDir}/shepherd`;
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: shepherdPath,
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      // Simulate the reboot wiping ~/.spur/shepherd: no real dir on disk, and
+      // the mocked workspace probe (driven by the real fs check) reports it
+      // missing too, so isRestorableSession would otherwise see this session
+      // as unrestorable were it not for the restore() heal.
+      rmSync(shepherdPath, { recursive: true, force: true });
+      expect(existsSync(shepherdPath)).toBe(false);
+      workspaceExistsMock.mockReset().mockImplementation(() => existsSync(shepherdPath));
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("shp-1");
+
+      expect(restored.status).toBe("running");
+      expect(existsSync(shepherdPath)).toBe(true);
+    });
+
+    it("rejects restore of a killed shepherd without re-creating its wiped workspace", async () => {
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-workspace-restore-killed-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const shepherdPath = `${dataDir}/shepherd`;
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: shepherdPath,
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "killed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      rmSync(shepherdPath, { recursive: true, force: true });
+      expect(existsSync(shepherdPath)).toBe(false);
+      workspaceExistsMock.mockReset().mockImplementation(() => existsSync(shepherdPath));
+
+      const { SessionService, SessionNotRestorableError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.restore("shp-1")).rejects.toThrow(SessionNotRestorableError);
+      expect(existsSync(shepherdPath)).toBe(false);
+      service.dispose();
     });
 
     it("recovers a stopped shepherd on send when its workspace already exists", async () => {
