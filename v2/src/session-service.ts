@@ -2599,6 +2599,15 @@ export class SessionService {
   // config never contributed a project (mergeProjects throws on it, and the
   // daemon skips it via skipInvalid), so no reload is needed here — only the
   // registry file and this.registryPaths are touched.
+  //
+  // Defense-in-depth, not dead code: `this.registryPaths` never contains an
+  // entry inside the CURRENT worktreeDir (the boot/preview prune in
+  // `activeConfigPaths` always drops those first), so the `isRegistered`
+  // guard below is only ever true for a worktree config that was registered
+  // under a worktreeDir the host has since reconfigured away from, or a
+  // pre-existing registry written before this prune shipped. Both are real,
+  // if narrow, production states — see
+  // "worktreeDir-migration leftover" in test/fast/session-service.test.ts.
   private unregisterWorktreeConfig(worktreePath: string): void {
     if (!worktreePath) return;
     for (const name of WORKTREE_CONFIG_FILE_NAMES) {
@@ -7943,7 +7952,6 @@ export class SessionService {
       const cleanup = await this.resolveCleanupContext(record);
       try {
         await removeWorktree(cleanup.repoPath, record.worktreePath);
-        this.unregisterWorktreeConfig(record.worktreePath);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.kill.worktree_remove_failed", {
@@ -7954,6 +7962,12 @@ export class SessionService {
           details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
         });
       }
+      // Runs even when the removal above only warned: this session reached a
+      // terminal state either way, and a warn-only removal failure still
+      // means Spur no longer manages this worktree going forward — a
+      // migration-leftover config entry pointing at it should not survive
+      // the session that owned it.
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
