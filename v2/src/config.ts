@@ -1819,13 +1819,22 @@ function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }
 
-// Pure guard, no writes: a daemon started from an instance config whose
-// resolved path is NOT the default instance config path must not claim the
-// prod slot (server.port 4310 or dataDir ~/.spur) — that slot belongs to
-// whatever daemon boots from the default config path (see
-// deploy/spur-daemon.service, which has no --config and Restart=always).
-// A default-path config on the prod slot always passes: refusing it would
-// crash-loop production.
+// Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
+// `startServer` caller) must neither bootstrap a prod-default config
+// template at an arbitrary path, nor bind or target the production slot
+// (server.port 4310 or dataDir ~/.spur) from a non-default config path —
+// that slot belongs only to whatever daemon boots from the default config
+// path (see deploy/spur-daemon.service, which has no --config and
+// Restart=always). Resolving and (read-only) parsing the config here, before
+// any bootstrap write or HTTP call, is what closes both holes at once:
+//   - a missing non-default path is refused instead of silently
+//     bootstrap-written with prod defaults (port 4310, dataDir ~/.spur);
+//   - an existing non-default path that (explicitly or by omission) still
+//     resolves to port 4310 or dataDir ~/.spur is refused before `stop`/
+//     `restart` can resolve a base URL from it and target production.
+// The default instance config path is always exempt, regardless of
+// existence or contents: refusing it would crash-loop production on first
+// boot or on a legitimate restart.
 //
 // Known limit: the default path is homedir()-relative, so a child process
 // with a temp HOME running `daemon start` with no --config gets a
@@ -1834,12 +1843,26 @@ function isDefaultInstanceConfigPath(configPath: string): boolean {
 // "fix" this by re-basing on os.userInfo().homedir() — if the unit's
 // Environment=HOME ever diverges from the passwd home, that flips this
 // guard fail-closed on the real prod daemon and crash-loops it instead.
-export function assertConfigMayBindProdSlot(
-  config: Pick<AppConfig, "configPath" | "dataDir"> & { server: { port: number } },
-): void {
-  if (isDefaultInstanceConfigPath(config.configPath)) {
+export function assertConfigMayUseProdSlot(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (isDefaultInstanceConfigPath(configPath)) {
     return;
   }
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `Instance config ${configPath} does not exist. ` +
+        `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+        `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+    );
+  }
+  const result = loadInstanceConfigReadOnly(input);
+  if (result.status !== "ok") {
+    // Unparseable (or, unreachably here, absent): a config that cannot be
+    // parsed cannot claim the prod slot either way. Let the real,
+    // non-read-only config load surface the parse error right after.
+    return;
+  }
+  const config = result.config;
   const prodDataDir = resolveFrom(dirname(DEFAULT_INSTANCE_CONFIG_PATH), DEFAULT_DATA_DIR);
   const claimsProdPort = config.server.port === DEFAULT_SERVER_PORT;
   const claimsProdDataDir = samePathOnDisk(config.dataDir, prodDataDir);
@@ -1847,28 +1870,10 @@ export function assertConfigMayBindProdSlot(
     return;
   }
   throw new Error(
-    `Instance config ${config.configPath} may not bind the production slot ` +
+    `Instance config ${configPath} may not bind the production slot ` +
       `(server.port ${config.server.port}, dataDir ${config.dataDir}). ` +
       `A non-default config path must not claim port ${DEFAULT_SERVER_PORT} or dataDir ${prodDataDir}. ` +
       `Set server.port and dataDir explicitly in this config, or use scripts/spur-isolated-daemon.sh.`,
-  );
-}
-
-// `daemon start`/`stop`/`restart` must not bootstrap a prod-default config
-// template at an arbitrary path (that is what stole port 4310 from
-// production in the incident this guards against — `stop`/`restart` resolve
-// a base URL from the bootstrapped config and can also SIGTERM whatever is
-// listening there). The default instance config path is exempt so a first
-// boot at the default location still bootstraps as before.
-export function assertInstanceConfigExists(input?: string): void {
-  const configPath = resolveInstanceConfigPath(input);
-  if (existsSync(configPath) || isDefaultInstanceConfigPath(configPath)) {
-    return;
-  }
-  throw new Error(
-    `Instance config ${configPath} does not exist. ` +
-      `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
-      `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
   );
 }
 

@@ -27,7 +27,7 @@ const ensureInstanceConfigMock = vi.fn(() => ({
   initialized: false,
 }));
 
-const assertInstanceConfigExistsMock = vi.fn();
+const assertConfigMayUseProdSlotMock = vi.fn();
 const restartDaemonIfRunningMock = vi.fn();
 const stopDaemonIfRunningMock = vi.fn();
 
@@ -52,7 +52,7 @@ vi.mock("../../src/client.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   defaultVoiceModelPath: vi.fn(),
-  assertInstanceConfigExists: assertInstanceConfigExistsMock,
+  assertConfigMayUseProdSlot: assertConfigMayUseProdSlotMock,
   createProjectConfigScaffold: vi.fn(),
   ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
@@ -93,8 +93,8 @@ describe("spur daemon CLI", () => {
     ensureInstanceConfigMock.mockClear();
     restartDaemonIfRunningMock.mockClear();
     stopDaemonIfRunningMock.mockClear();
-    assertInstanceConfigExistsMock.mockClear();
-    assertInstanceConfigExistsMock.mockImplementation(() => {});
+    assertConfigMayUseProdSlotMock.mockClear();
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -124,8 +124,17 @@ describe("spur daemon CLI", () => {
     );
   });
 
+  it("reaches stopDaemonIfRunning for a plain stop with no --config", async () => {
+    stopDaemonIfRunningMock.mockResolvedValueOnce({ stopped: true });
+
+    await parseCli(["daemon", "stop", "--json"]);
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith(undefined);
+    expect(stopDaemonIfRunningMock).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses to start when the --config path does not exist and is not the default", async () => {
-    assertInstanceConfigExistsMock.mockImplementation(() => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
       throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
     });
 
@@ -133,13 +142,13 @@ describe("spur daemon CLI", () => {
       parseCli(["daemon", "start", "--config", "/tmp/does-not-exist.yaml", "--json"]),
     ).rejects.toThrow("does not exist");
 
-    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
     expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
     expect(startServerMock).not.toHaveBeenCalled();
   });
 
   it("refuses to stop when the --config path does not exist and is not the default", async () => {
-    assertInstanceConfigExistsMock.mockImplementation(() => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
       throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
     });
 
@@ -147,13 +156,13 @@ describe("spur daemon CLI", () => {
       parseCli(["daemon", "stop", "--config", "/tmp/does-not-exist.yaml", "--json"]),
     ).rejects.toThrow("does not exist");
 
-    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
     expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
     expect(stopDaemonIfRunningMock).not.toHaveBeenCalled();
   });
 
   it("refuses to restart when the --config path does not exist and is not the default", async () => {
-    assertInstanceConfigExistsMock.mockImplementation(() => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
       throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
     });
 
@@ -161,9 +170,35 @@ describe("spur daemon CLI", () => {
       parseCli(["daemon", "restart", "--config", "/tmp/does-not-exist.yaml", "--json"]),
     ).rejects.toThrow("does not exist");
 
-    expect(assertInstanceConfigExistsMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
     expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
     expect(restartDaemonIfRunningMock).not.toHaveBeenCalled();
     expect(startServerMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop an existing non-default config that claims the prod slot", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/rogue.yaml may not bind the production slot.");
+    });
+
+    await expect(
+      parseCli(["daemon", "stop", "--config", "/tmp/rogue.yaml", "--json"]),
+    ).rejects.toThrow("may not bind the production slot");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/rogue.yaml");
+    expect(stopDaemonIfRunningMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart an existing non-default config that claims the prod slot", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/rogue.yaml may not bind the production slot.");
+    });
+
+    await expect(
+      parseCli(["daemon", "restart", "--config", "/tmp/rogue.yaml", "--json"]),
+    ).rejects.toThrow("may not bind the production slot");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/rogue.yaml");
+    expect(restartDaemonIfRunningMock).not.toHaveBeenCalled();
   });
 });

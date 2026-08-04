@@ -132,7 +132,7 @@ projects:
 
 - A daemon on the default port is someone's production instance unless proven otherwise. Never `spur daemon start|stop`, `kill`, or issue direct HTTP calls against a daemon you did not start.
 - Do not repoint `--config` at the instance config `~/.spur/config.yaml` to widen reach. Use the `spur` already on `PATH`.
-- A config outside the default instance config path (`~/.spur/config.yaml`) may not claim port `4310` or dataDir `~/.spur`; the daemon refuses to start rather than steal the production slot. `daemon start|stop|restart` each also refuse a non-existent `--config`/`SPUR_CONFIG` path unless it is that default.
+- A config outside the default instance config path (`~/.spur/config.yaml`) may not claim port `4310` or dataDir `~/.spur`, explicit or inherited by omission; `daemon start|stop|restart` all refuse rather than let a non-default config bind or target the production slot. Same three verbs also refuse a non-existent `--config`/`SPUR_CONFIG` path unless it is that default, without bootstrapping one.
 - Do not kill processes or ports you did not start.
 - Never run `spur gc --execute` against a data dir you do not own. Development and validation point `--config` at a temp data dir; a plain `spur gc` (dry run) is the only safe form elsewhere.
 - The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on). `--expose-web` binds `0.0.0.0` and is public.

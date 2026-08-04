@@ -24,6 +24,20 @@ import {
 import { findFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const configPath = join(root, "does-not-exist", "spur.yaml");
+
+    await expect(
+      startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      }),
+    ).rejects.toThrow("does not exist");
+
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
   it("serves runtime info and stops cleanly in-process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
