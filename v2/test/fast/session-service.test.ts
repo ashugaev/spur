@@ -17139,11 +17139,17 @@ describe("SessionService", () => {
 
     await service.startSidecar("api-1", "dev");
 
-    await vi.waitFor(() => {
-      expect(sessions.get("api-1")?.slots?.links).toEqual([
-        { label: "dev", url: "https://preview.example.com/3000" },
-      ]);
-    });
+    // The link is published off a fire-and-forget chain behind an HTTP probe
+    // that sleeps SIDECAR_PROBE_INTERVAL_MS (1s) per retry. waitFor's 1s
+    // default cannot absorb even one retry under load.
+    await vi.waitFor(
+      () => {
+        expect(sessions.get("api-1")?.slots?.links).toEqual([
+          { label: "dev", url: "https://preview.example.com/3000" },
+        ]);
+      },
+      { timeout: 5_000 },
+    );
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.link.published",
     );

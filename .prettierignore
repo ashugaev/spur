@@ -1,6 +1,9 @@
 node_modules
 .agents/
 .claude/
+.cursor/
+CLAUDE.md
+AGENTS.md
 dev/
 dist/
 node_modules/
