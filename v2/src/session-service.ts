@@ -175,6 +175,7 @@ import {
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
+  killTmuxSessionTree,
   listTmuxSessionNames,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
@@ -184,7 +185,13 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
-import { readHostMemory } from "./host-memory.js";
+import {
+  isSystemdOomdPresent,
+  readCgroupMemoryLimits,
+  readCgroupPressure,
+  readHostMemory,
+  type HostMemory,
+} from "./host-memory.js";
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
@@ -390,6 +397,7 @@ const STATE_HOLD_MS = 4_000;
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 const RESTORE_WARMUP_MS = 30_000;
+const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
@@ -1875,6 +1883,9 @@ export class SessionService {
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private sidecarReaperRunning = false;
+  private memoryShedRunning = false;
+  private memoryShedExhausted = false;
+  private memorySwapEpisodeActive = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
@@ -2006,6 +2017,250 @@ export class SessionService {
         level: "warn",
         message: `Sidecar reaper failed: ${message}`,
       });
+    }
+    try {
+      await this.runMemoryShed();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.memory.shed.failed", {
+        level: "warn",
+        message: `Memory shed failed: ${message}`,
+        details: { message },
+      });
+    }
+  }
+
+  private memoryPressureTrigger(memory: HostMemory): "available_floor" | "swap_saturation" | null {
+    const guard = this.config.admission.memoryGuard;
+    if (memory.availableBytes < guard.shedCriticalFloorBytes) return "available_floor";
+    if (this.memorySwapSaturated(memory)) return "swap_saturation";
+    return null;
+  }
+
+  private memorySwapSaturated(memory: HostMemory): boolean {
+    return (
+      memory.swapTotalBytes > 0 &&
+      (memory.swapTotalBytes - memory.swapFreeBytes) / memory.swapTotalBytes >=
+        this.config.admission.memoryGuard.shedSwapUsedFraction
+    );
+  }
+
+  private async memoryShedCandidates(): Promise<SessionRecord[]> {
+    const candidates: Array<{ session: SessionRecord; state: "rate_limited" | "waiting" }> = [];
+    for (const session of this.countLiveSessions().records) {
+      if (this.isInRestoreWarmup(session.id)) continue;
+      try {
+        const state = (await this.classifySessionRecord(session, { scanPane: false })).state;
+        if (state === "rate_limited" || state === "waiting") candidates.push({ session, state });
+      } catch {
+        // Fail closed: an unclassifiable session is treated as working.
+      }
+    }
+    return candidates
+      .sort((a, b) => {
+        if (a.state !== b.state) return a.state === "rate_limited" ? -1 : 1;
+        return a.session.updatedAt.localeCompare(b.session.updatedAt);
+      })
+      .map(({ session }) => session);
+  }
+
+  private async memoryShedEligibleRecord(sessionId: string): Promise<SessionRecord | null> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session || this.isInRestoreWarmup(session.id)) return null;
+    try {
+      const state = (await this.classifySessionRecord(session, { scanPane: false })).state;
+      return state === "rate_limited" || state === "waiting" ? session : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async memoryShedSidecarTarget(
+    candidateId: string,
+    sidecarName: string,
+  ): Promise<string | null> {
+    const candidate = await this.memoryShedEligibleRecord(candidateId);
+    if (!candidate) return null;
+    const project = this.resolveProjectForSession(candidate);
+    const sidecar = project?.sidecars[sidecarName];
+    if (!sidecar) return null;
+    const ownerId = this.sidecarOwnerIdForName(candidate, project, sidecarName);
+    if (!sidecar.mcp) {
+      const workspaceId = workspaceIdOf(candidate);
+      const liveMembers = listSessions(this.config.dataDir).filter(
+        (session) =>
+          session.project === candidate.project &&
+          workspaceIdOf(session) === workspaceId &&
+          (session.status === "running" ||
+            session.status === "spawning" ||
+            this.isInRestoreWarmup(session.id)),
+      );
+      for (const member of liveMembers) {
+        if (!(await this.memoryShedEligibleRecord(member.id))) return null;
+      }
+    }
+    return sidecarTmuxSession(ownerId, sidecarName);
+  }
+
+  private logMemoryShedResult(args: {
+    trigger: "available_floor" | "swap_saturation";
+    tier: "mcp_sidecar" | "user_sidecar" | "session";
+    stoppedTmux: string[];
+    stoppedSessions: string[];
+    availableBytesBefore: number;
+    availableBytesAfter: number;
+    exhausted?: boolean;
+    failure?: string;
+  }): void {
+    this.logEvent("daemon.memory.shed", {
+      level: "warn",
+      message: args.failure
+        ? `Memory shed stopped after a partial failure: ${args.failure}`
+        : `Memory shed ${args.exhausted ? "exhausted safe candidates" : "recovered host headroom"}`,
+      details: {
+        trigger: args.trigger,
+        tier: args.tier,
+        stoppedTmux: args.stoppedTmux,
+        stoppedSessions: args.stoppedSessions,
+        availableBytesBefore: args.availableBytesBefore,
+        availableBytesAfter: args.availableBytesAfter,
+        ...(args.exhausted ? { exhausted: true } : {}),
+        ...(args.failure ? { partial: true, failure: args.failure } : {}),
+      },
+    });
+  }
+
+  private async shedMemorySidecarTier(
+    candidates: SessionRecord[],
+    liveTmux: Set<string>,
+    attemptedTmux: Set<string>,
+    stoppedTmux: string[],
+    trigger: "available_floor" | "swap_saturation",
+    actionBudget: number,
+    mcp: boolean,
+  ): Promise<{ actionBudget: number; continueShed: boolean }> {
+    for (const candidate of candidates) {
+      const project = this.resolveProjectForSession(candidate);
+      for (const name of sessionSidecarNames(candidate, project)) {
+        if (Boolean(BUILTIN_SIDECARS[name]?.config.mcp) !== mcp) continue;
+        const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
+        if (!tmuxName || !liveTmux.has(tmuxName) || attemptedTmux.has(tmuxName)) continue;
+        attemptedTmux.add(tmuxName);
+        if (await killTmuxSessionTree(tmuxName)) stoppedTmux.push(tmuxName);
+        actionBudget -= 1;
+        if (actionBudget <= 0) return { actionBudget, continueShed: false };
+        const memory = readHostMemory();
+        if (!memory || this.memoryPressureTrigger(memory) !== trigger) {
+          return { actionBudget, continueShed: false };
+        }
+      }
+    }
+    return { actionBudget, continueShed: true };
+  }
+
+  private async runMemoryShed(): Promise<void> {
+    if (this.memoryShedRunning) return;
+    const guard = this.config.admission.memoryGuard;
+    if (!this.config.admission.enabled || !guard.shedEnabled) return;
+    const before = readHostMemory();
+    if (!before) return;
+    const lowAvailable = before.availableBytes < guard.shedCriticalFloorBytes;
+    const swapSaturated = this.memorySwapSaturated(before);
+    if (!swapSaturated) {
+      if (this.memorySwapEpisodeActive) this.memoryShedExhausted = false;
+      this.memorySwapEpisodeActive = false;
+    } else if (this.memorySwapEpisodeActive && !lowAvailable) {
+      return;
+    }
+    const trigger = this.memoryPressureTrigger(before);
+    if (!trigger) {
+      this.memoryShedExhausted = false;
+      return;
+    }
+    if (swapSaturated) {
+      this.memorySwapEpisodeActive = true;
+    }
+
+    this.memoryShedRunning = true;
+    const stoppedTmux: string[] = [];
+    const stoppedSessions: string[] = [];
+    const attemptedTmux = new Set<string>();
+    let tier: "mcp_sidecar" | "user_sidecar" | "session" = "mcp_sidecar";
+    let actionBudget = trigger === "swap_saturation" ? 1 : Number.POSITIVE_INFINITY;
+    try {
+      const candidates = await this.memoryShedCandidates();
+      const liveTmux = await listTmuxSessionNames();
+      shed: {
+        const mcpResult = await this.shedMemorySidecarTier(
+          candidates,
+          liveTmux,
+          attemptedTmux,
+          stoppedTmux,
+          trigger,
+          actionBudget,
+          true,
+        );
+        actionBudget = mcpResult.actionBudget;
+        if (!mcpResult.continueShed) break shed;
+        tier = "user_sidecar";
+        const userResult = await this.shedMemorySidecarTier(
+          candidates,
+          liveTmux,
+          attemptedTmux,
+          stoppedTmux,
+          trigger,
+          actionBudget,
+          false,
+        );
+        actionBudget = userResult.actionBudget;
+        if (!userResult.continueShed) break shed;
+        tier = "session";
+        for (const candidate of candidates) {
+          if (!(await this.memoryShedEligibleRecord(candidate.id))) continue;
+          await this.applyManualStatus(candidate.id, "stopped", {}, { skipEnrichment: true });
+          stoppedSessions.push(candidate.id);
+          actionBudget -= 1;
+          if (actionBudget <= 0) break shed;
+          const memory = readHostMemory();
+          if (!memory || this.memoryPressureTrigger(memory) !== trigger) break shed;
+        }
+      }
+
+      const after = readHostMemory();
+      const exhausted = after !== null && this.memoryPressureTrigger(after) !== null;
+      if (
+        stoppedTmux.length > 0 ||
+        stoppedSessions.length > 0 ||
+        (exhausted && !this.memoryShedExhausted)
+      ) {
+        this.logMemoryShedResult({
+          trigger,
+          tier,
+          stoppedTmux,
+          stoppedSessions,
+          availableBytesBefore: before.availableBytes,
+          availableBytesAfter: after?.availableBytes ?? before.availableBytes,
+          ...(exhausted ? { exhausted: true } : {}),
+        });
+      }
+      this.memoryShedExhausted = exhausted;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (stoppedTmux.length > 0 || stoppedSessions.length > 0) {
+        const after = readHostMemory();
+        this.logMemoryShedResult({
+          trigger,
+          tier,
+          stoppedTmux,
+          stoppedSessions,
+          availableBytesBefore: before.availableBytes,
+          availableBytesAfter: after?.availableBytes ?? before.availableBytes,
+          failure: message,
+        });
+      }
+      throw error;
+    } finally {
+      this.memoryShedRunning = false;
     }
   }
 
@@ -4981,14 +5236,36 @@ export class SessionService {
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
-    for (const { id, project } of drifted) {
+    for (const [index, { id, project }] of drifted.entries()) {
       const projectConfig = this.config.projects[project];
       if (projectConfig?.restoreAfterReboot !== true) continue;
+      const memory = readHostMemory();
+      if (
+        this.config.admission.enabled &&
+        this.config.admission.memoryGuard.enforceFloors &&
+        memory !== null &&
+        memory.availableBytes < this.config.admission.memoryGuard.restoreFloorBytes
+      ) {
+        this.logEvent("session.reboot.restore.aborted", {
+          level: "warn",
+          message: `Reboot restore stopped before ${id}: available memory is below the restore floor`,
+          details: {
+            reason: "memory_floor",
+            availableBytes: memory.availableBytes,
+            floorBytes: this.config.admission.memoryGuard.restoreFloorBytes,
+            remaining: drifted.length - index,
+          },
+        });
+        break;
+      }
       try {
         await this.restore(id);
         const record = readSession(this.config.dataDir, id);
         if (record) {
           await this.startAutoStartSidecars(record, projectConfig);
+        }
+        if (memory !== null) {
+          await sleep(RESTORE_SETTLE_MS);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -7957,9 +8234,21 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest,
+    options: { retainInList?: boolean; skipEnrichment: true },
+  ): Promise<void>;
+  private async applyManualStatus(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
+    request?: CompleteSessionRequest,
+    options?: { retainInList?: boolean; skipEnrichment?: false },
+  ): Promise<SessionView>;
+  private async applyManualStatus(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean },
-  ): Promise<SessionView> {
+    options?: { retainInList?: boolean; skipEnrichment?: boolean },
+  ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -7979,6 +8268,7 @@ export class SessionService {
       delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
+      if (options?.skipEnrichment) return;
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
@@ -7997,10 +8287,11 @@ export class SessionService {
         delete record.error;
         writeSession(this.config.dataDir, record);
         this.stateCache.delete(sessionId);
+        if (options?.skipEnrichment) return;
         await this.refreshDashboardCacheEntry(record);
         return this.enrich(record);
       }
-      return this.enrich(session);
+      return options?.skipEnrichment ? undefined : this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
@@ -8059,7 +8350,7 @@ export class SessionService {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
     }
-    await this.refreshDashboardCacheEntry(record);
+    if (!options?.skipEnrichment) await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
       sessionId,
@@ -8069,7 +8360,7 @@ export class SessionService {
         worktree: session.worktree,
       },
     });
-    return this.enrich(record);
+    return options?.skipEnrichment ? undefined : this.enrich(record);
   }
 
   private async ensureKillDirtyWorktreeAllowed(
@@ -10069,31 +10360,54 @@ export class SessionService {
   ): void {
     const admission = this.config.admission;
     const memory = readHostMemory();
-    let memoryCrossedDetail: string | undefined;
+    let legacyGuardDetail: string | undefined;
+    let floorGuardDetail: string | undefined;
     if (memory) {
       const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
       const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
       const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
       const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
       if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
-        memoryCrossedDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+        legacyGuardDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
       } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
-        memoryCrossedDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+        legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      }
+
+      const contextFloor =
+        context === "restore"
+          ? admission.memoryGuard.restoreFloorBytes
+          : admission.memoryGuard.admissionFloorBytes;
+      if (memory.availableBytes < contextFloor) {
+        floorGuardDetail = `available memory ${availableMiB}MB is below the ${(
+          contextFloor /
+          (1024 * 1024)
+        ).toFixed(0)}MB ${context} floor`;
+      } else {
+        const pressure = readCgroupPressure();
+        if (
+          pressure !== null &&
+          pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse
+        ) {
+          floorGuardDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
+        }
       }
     }
-    if (memoryCrossedDetail) {
+    if (legacyGuardDetail) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
         projectId,
-        message: `Memory guard crossed for ${context} in project "${projectId}": ${memoryCrossedDetail}`,
+        message: `Memory guard crossed for ${context} in project "${projectId}": ${legacyGuardDetail}`,
       });
     }
     if (!admission.enabled) {
       return;
     }
-    if (memoryCrossedDetail && admission.memoryGuard.enforce) {
+    const denialDetail =
+      (legacyGuardDetail && admission.memoryGuard.enforce ? legacyGuardDetail : undefined) ??
+      (floorGuardDetail && admission.memoryGuard.enforceFloors ? floorGuardDetail : undefined);
+    if (denialDetail) {
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": memory guard crossed — ${memoryCrossedDetail}`,
+        `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -10168,6 +10482,23 @@ export class SessionService {
     };
   }
 
+  getMemoryCeilingWarning(): {
+    cgroupPath: string;
+    memoryMaxUnlimited: true;
+    memoryHighUnlimited: boolean;
+    oomdPresent: false;
+  } | null {
+    const limits = readCgroupMemoryLimits();
+    const oomdPresent = isSystemdOomdPresent();
+    if (limits?.maxBytes !== null || oomdPresent) return null;
+    return {
+      cgroupPath: limits.path,
+      memoryMaxUnlimited: true,
+      memoryHighUnlimited: limits.highBytes === null,
+      oomdPresent: false,
+    };
+  }
+
   async getHeadroom(): Promise<HeadroomReport> {
     const admission = this.config.admission;
     const live = this.countLiveSessions();
@@ -10194,7 +10525,8 @@ export class SessionService {
     const guardCrossed =
       memory !== null &&
       (memory.availableBytes < admission.memoryGuard.minAvailableBytes ||
-        memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes);
+        memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes ||
+        memory.availableBytes < admission.memoryGuard.admissionFloorBytes);
     return {
       cap: {
         global: admission.maxLiveSessions,
@@ -10216,8 +10548,13 @@ export class SessionService {
       memory,
       guard: {
         enforce: admission.memoryGuard.enforce,
+        enforceFloors: admission.memoryGuard.enforceFloors,
         minAvailableBytes: admission.memoryGuard.minAvailableBytes,
         minFreeSwapBytes: admission.memoryGuard.minFreeSwapBytes,
+        admissionFloorBytes: admission.memoryGuard.admissionFloorBytes,
+        shedCriticalFloorBytes: admission.memoryGuard.shedCriticalFloorBytes,
+        restoreFloorBytes: admission.memoryGuard.restoreFloorBytes,
+        pressureSomeAvg10Refuse: admission.memoryGuard.pressureSomeAvg10Refuse,
         crossed: guardCrossed,
       },
     };

@@ -190,6 +190,14 @@ function asOptionalFraction(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asOptionalPercent(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error(`${label} must be a number from 0 to 100`);
+  }
+  return value;
+}
+
 // Used for values consumed as loop bounds / archive indices, where a fractional value
 // would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
 function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -1545,6 +1553,10 @@ const DEFAULT_ADMISSION_PER_SESSION_BYTES = 1_610_612_736;
 const DEFAULT_ADMISSION_RESERVE_FRACTION = 0.7;
 const DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES = 1_073_741_824;
 const DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES = 0;
+const DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE = 20;
+const DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION = 0.9;
+const ADMISSION_FLOOR_MIN_BYTES = 1_073_741_824;
+const SHED_CRITICAL_FLOOR_MIN_BYTES = 536_870_912;
 
 export function deriveMaxLiveSessions(
   totalBytes: number,
@@ -1552,6 +1564,14 @@ export function deriveMaxLiveSessions(
   reserveFraction: number,
 ): number {
   return Math.max(1, Math.floor((totalBytes * reserveFraction) / perSessionBytes));
+}
+
+export function deriveAdmissionFloorBytes(totalBytes: number): number {
+  return Math.max(ADMISSION_FLOOR_MIN_BYTES, Math.floor(totalBytes / 8));
+}
+
+export function deriveShedCriticalFloorBytes(totalBytes: number): number {
+  return Math.max(SHED_CRITICAL_FLOOR_MIN_BYTES, Math.floor(totalBytes / 16));
 }
 
 // Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
@@ -1563,7 +1583,10 @@ export function deriveMaxLiveSessions(
 function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   const perSessionBytes = DEFAULT_ADMISSION_PER_SESSION_BYTES;
   const reserveFraction = DEFAULT_ADMISSION_RESERVE_FRACTION;
-  const derivedDefault = deriveMaxLiveSessions(totalmem(), perSessionBytes, reserveFraction);
+  const totalBytes = totalmem();
+  const derivedDefault = deriveMaxLiveSessions(totalBytes, perSessionBytes, reserveFraction);
+  const admissionFloorBytes = deriveAdmissionFloorBytes(totalBytes);
+  const shedCriticalFloorBytes = deriveShedCriticalFloorBytes(totalBytes);
   if (mode !== "instance" || value === undefined) {
     return {
       enabled: true,
@@ -1573,8 +1596,15 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
       reserveFraction,
       memoryGuard: {
         enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
         minAvailableBytes: DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
         minFreeSwapBytes: DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+        admissionFloorBytes,
+        shedCriticalFloorBytes,
+        restoreFloorBytes: admissionFloorBytes + perSessionBytes,
+        pressureSomeAvg10Refuse: DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+        shedSwapUsedFraction: DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
       },
     };
   }
@@ -1590,17 +1620,38 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
     root["maxLiveSessions"],
     "admission.maxLiveSessions",
   );
+  const resolvedAdmissionFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["admissionFloorBytes"],
+      "admission.memoryGuard.admissionFloorBytes",
+    ) ?? admissionFloorBytes;
+  const resolvedShedCriticalFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["shedCriticalFloorBytes"],
+      "admission.memoryGuard.shedCriticalFloorBytes",
+    ) ?? shedCriticalFloorBytes;
+  if (resolvedShedCriticalFloorBytes >= resolvedAdmissionFloorBytes) {
+    throw new Error(
+      `admission.memoryGuard.shedCriticalFloorBytes (${resolvedShedCriticalFloorBytes}) must be less than admissionFloorBytes (${resolvedAdmissionFloorBytes})`,
+    );
+  }
   return {
     enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
     maxLiveSessions:
       configuredMaxLiveSessions ??
-      deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction),
+      deriveMaxLiveSessions(totalBytes, resolvedPerSessionBytes, resolvedReserveFraction),
     maxLiveSessionsSource: configuredMaxLiveSessions !== undefined ? "config" : "derived",
     perSessionBytes: resolvedPerSessionBytes,
     reserveFraction: resolvedReserveFraction,
     memoryGuard: {
       enforce:
         asOptionalBoolean(memoryGuardRaw["enforce"], "admission.memoryGuard.enforce") ?? false,
+      enforceFloors:
+        asOptionalBoolean(memoryGuardRaw["enforceFloors"], "admission.memoryGuard.enforceFloors") ??
+        true,
+      shedEnabled:
+        asOptionalBoolean(memoryGuardRaw["shedEnabled"], "admission.memoryGuard.shedEnabled") ??
+        true,
       minAvailableBytes:
         asNonNegativeNumber(
           memoryGuardRaw["minAvailableBytes"],
@@ -1611,6 +1662,19 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
           memoryGuardRaw["minFreeSwapBytes"],
           "admission.memoryGuard.minFreeSwapBytes",
         ) ?? DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+      admissionFloorBytes: resolvedAdmissionFloorBytes,
+      shedCriticalFloorBytes: resolvedShedCriticalFloorBytes,
+      restoreFloorBytes: resolvedAdmissionFloorBytes + resolvedPerSessionBytes,
+      pressureSomeAvg10Refuse:
+        asOptionalPercent(
+          memoryGuardRaw["pressureSomeAvg10Refuse"],
+          "admission.memoryGuard.pressureSomeAvg10Refuse",
+        ) ?? DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+      shedSwapUsedFraction:
+        asOptionalFraction(
+          memoryGuardRaw["shedSwapUsedFraction"],
+          "admission.memoryGuard.shedSwapUsedFraction",
+        ) ?? DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
     },
   };
 }

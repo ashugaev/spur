@@ -21,6 +21,15 @@ ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
+# Fleet cgroup guardrails. On a 62 GiB host, MemoryHigh starts reclaim near
+# 46.5 GiB and MemoryMax caps the fleet near 52.7 GiB, leaving about 15.5 GiB
+# and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure
+# may throttle admission/shedding work; the gap between High and Max preserves
+# room for that control path. Limit fleet swap to avoid global swap thrash.
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=2G
+
 # The daemon spawns tmux sessions that must outlive daemon restarts.
 # KillMode=process is the actual guarantee: a daemon restart stops only the
 # daemon node process, never the tmux sessions or agents running inside it.

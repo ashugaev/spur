@@ -40,6 +40,25 @@ describe("runtime-tmux", () => {
     vi.resetModules();
   });
 
+  it("does not confirm tree shutdown when the fresh fleet probe fails", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("kill-session")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw new Error("fleet probe failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { killTmuxSessionTree } = await import("../../src/runtime-tmux.js");
+
+    await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
+  });
+
   it("starts tmux sessions with the Spur-specific config", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => ({
       stdout: args.includes("new-session") ? "" : "ok",

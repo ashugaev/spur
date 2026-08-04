@@ -69,8 +69,10 @@ Systemd units are templates (`deploy/spur-daemon.service`, `deploy/spur-web.serv
 
 Load-bearing unit fields:
 
-- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive).
+- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive); `MemoryHigh=75%`, `MemoryMax=85%`, `MemorySwapMax=2G` bound the shared fleet cgroup.
 - Web: `WEB_HOST=127.0.0.1`, `PORT=3012` (one server for HTTP + `/ws`); `Requires=spur-daemon.service`.
+
+On a 62 GiB host, the memory limits start reclaim near 46.5 GiB and cap the fleet near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares the cgroup, so sustained pressure can throttle its memory guard; the 10-point gap preserves control-path room before the hard cap. `MemorySwapMax=0` is the stricter no-fleet-swap override. Repository template edits have no live effect until a later `pnpm main:deploy` applies them.
 
 First install:
 
