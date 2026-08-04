@@ -161,11 +161,12 @@ per-session toggle, no `spur playwright` command.
 
 Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
 with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
-config survive — the merge reads `~/.claude/settings.json`, `~/.claude.json` user-scope servers,
-`<worktree>/.mcp.json`, and `~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh
-worktree has no `projects["<worktree path>"]` entry yet, so local-scope servers approved against the
-main repo path are dropped for that session. A host `mcpServers.playwright` entry (from any of those
-sources) is silently replaced by Spur's own.
+config survive — the merge reads `~/.claude.json` user-scope servers, `<worktree>/.mcp.json`, and
+`~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh worktree has no
+`projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
+are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
+is silently replaced by Spur's own. `~/.claude/settings.json` is not a source: claude ignores an
+`mcpServers` block there, so merging it would start servers the session would otherwise not have.
 
 ### Suppressing a host MCP server
 
