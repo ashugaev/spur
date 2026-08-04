@@ -1,9 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { loadConfig, loadProjectConfig } from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
+
+// Candidate config file names inside a worktree directory. Mirrors config.ts's
+// (unexported) DEFAULT_PROJECT_CONFIG_FILES; duplicated rather than imported
+// because config.ts is mocked as an explicit object with no `...actual`
+// spread in test/fast/session-service.test.ts, so any new symbol
+// session-service.ts imports from config.js hard-fails that whole suite.
+export const WORKTREE_CONFIG_FILE_NAMES = ["spur.yaml", "spur.yml"] as const;
 
 export interface UnconfiguredProjectEntry {
   id: string;
@@ -117,6 +132,54 @@ function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
   };
 }
 
+// Comparison/dedupe key only — never stored. Falls back to the resolved
+// (non-realpath'd) path when the file does not exist, so a dead or
+// not-yet-created path still gets a stable key.
+export function canonicalConfigKey(configPath: string): string {
+  const resolved = resolve(configPath.trim());
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+// Separator-terminated containment: `<worktreeDir>-backup/spur.yaml` shares
+// the worktreeDir string prefix but is not inside it.
+export function isInsideWorktreeDir(configPath: string, worktreeDir: string): boolean {
+  const key = canonicalConfigKey(configPath);
+  const wt = canonicalConfigKey(worktreeDir);
+  return key === wt || key.startsWith(wt + sep);
+}
+
+// Pure, read-only filter: drops blank entries, entries that are not an
+// existing FILE (a nonexistent path or a directory, e.g. a bare project dir
+// `existsSync` would keep but `parseConfigFile` would only reject later),
+// and entries inside `worktreeDir`. Dedupes by `canonicalConfigKey`, keeping
+// the original string in first-seen order. Never touches the filesystem for
+// writes.
+export function activeConfigPaths(paths: string[], worktreeDir: string): string[] {
+  const seen = new Set<string>();
+  const active: string[] = [];
+  for (const raw of paths) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    let isFile = false;
+    try {
+      isFile = statSync(trimmed).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!isFile) continue;
+    if (isInsideWorktreeDir(trimmed, worktreeDir)) continue;
+    const key = canonicalConfigKey(trimmed);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    active.push(trimmed);
+  }
+  return active;
+}
+
 export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
   const path = registryPath(dataDir);
   if (!existsSync(path)) {
@@ -154,15 +217,6 @@ export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFil
   } satisfies ConfigRegistryFile);
 }
 
-export function readConfigRegistry(dataDir: string): string[] {
-  const configPaths = readConfigRegistryFile(dataDir).configPaths;
-  const filtered = configPaths.filter((configPath) => existsSync(configPath));
-  if (filtered.length !== configPaths.length) {
-    writeConfigRegistry(dataDir, filtered);
-  }
-  return filtered;
-}
-
 export function writeConfigRegistry(dataDir: string, configPaths: string[]): void {
   mutateConfigRegistry(dataDir, (current) => ({
     ...current,
@@ -192,9 +246,12 @@ export function upsertConfigRegistryPath(dataDir: string, configPath: string): s
 }
 
 export function removeConfigRegistryPath(dataDir: string, configPath: string): string[] {
+  const targetKey = canonicalConfigKey(configPath);
   const next = mutateConfigRegistry(dataDir, (current) => ({
     ...current,
-    configPaths: current.configPaths.filter((registeredPath) => registeredPath !== configPath),
+    configPaths: current.configPaths.filter(
+      (registeredPath) => canonicalConfigKey(registeredPath) !== targetKey,
+    ),
   }));
   return next.configPaths;
 }
