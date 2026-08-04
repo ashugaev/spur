@@ -176,6 +176,16 @@ describe("gh usage accounting", () => {
     expect(usageEvents("minute")[1]).toMatchObject({ calls: 1, graphqlCost: 2 });
   });
 
+  it("closes a pending usage window after a malformed GraphQL response", () => {
+    noteGhInvocation(["api", "graphql"], T0);
+    noteGhInvocation(["pr", "view", "42"], T0 + MINUTE + 1);
+    expect(usageEvents("minute")).toHaveLength(0);
+
+    recordGraphqlBudgetFromEnvelope(null, T0);
+
+    expect(usageEvents("minute")[0]).toMatchObject({ calls: 1, graphqlCost: 0 });
+  });
+
   it("emits the open windows when the budget pauses lookups", () => {
     noteGhInvocation(["api", "graphql"], T0);
     noteGraphqlCost(3, T0);

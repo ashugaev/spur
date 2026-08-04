@@ -716,7 +716,10 @@ async function requestGraphqlEnvelope(
       throw error;
     }
   }
-  if (!envelope) throw new Error("invalid GitHub GraphQL response");
+  if (!envelope) {
+    recordGraphqlBudgetFromEnvelope(null, requestedAtMs);
+    throw new Error("invalid GitHub GraphQL response");
+  }
   recordGraphqlBudgetFromEnvelope(envelope, requestedAtMs);
   return envelope;
 }
