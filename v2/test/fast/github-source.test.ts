@@ -13,6 +13,8 @@ const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
+const readGitHubReviewPaginationMock = vi.fn();
+const writeGitHubReviewPaginationMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
 const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
@@ -34,6 +36,7 @@ vi.mock("../../src/metadata.js", () => ({
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
@@ -42,6 +45,7 @@ vi.mock("../../src/metadata.js", () => ({
   recordWorkItem: recordWorkItemMock,
   removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
+  writeGitHubReviewPagination: writeGitHubReviewPaginationMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
@@ -193,6 +197,7 @@ describe("github source", () => {
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    readGitHubReviewPaginationMock.mockReturnValue(new Map());
     // Default: the session has already established its lifecycle baseline, so
     // lifecycle signals emit on transitions. The first-poll-suppression test
     // overrides this to an empty set.
@@ -2400,6 +2405,12 @@ describe("github source", () => {
 
       expect(ghMock).toHaveBeenCalledTimes(5);
       await waitForGhCallCount(10);
+
+      // Capacity drain ran inside the original slow window. It must not move
+      // that deadline forward or the last targets would extend every cycle.
+      vi.setSystemTime(new Date("2026-07-30T00:10:00.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(15);
 
       handle.stop();
     });

@@ -8,6 +8,7 @@ import {
   hasGitHubMergeConflictRestoreReplay,
   readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
+  recordCommentSeen,
   writeGitHubSourceSnapshot,
   writeSession,
 } from "../../src/metadata.js";
@@ -715,9 +716,40 @@ describe("GitHub review batching", () => {
     const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
 
     expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(50);
+    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(48);
     expect(first.get("api-50")).toEqual({ status: "skipped", reason: "capacity" });
     expect(second.get("api-50")?.status).toBe("ok");
+  });
+
+  it("caps unbound aliases below GitHub's 500,000-node query limit", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 10 }, (_unused, index) => ({
+      ...unboundSession(`api-${index}`),
+      branch: `feature/${index}`,
+      worktreePath: `/tmp/api-${index}`,
+    }));
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const branchVariables = args.filter((arg) => /^b\d+=/.test(arg));
+      const aliases = Object.fromEntries(
+        branchVariables.map((_branch, index) => [`a${index}`, { nodes: [] }]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(ghMock.mock.calls[0]?.join(" ").match(/b\d+=/g)).toHaveLength(9);
+    expect([...result.values()].filter((entry) => entry.status === "skipped")).toEqual([
+      { status: "skipped", reason: "capacity" },
+    ]);
   });
 
   it("requests the newest 100 signals and surfaces the newest item", async () => {
@@ -752,7 +784,7 @@ describe("GitHub review batching", () => {
 
     const call = ghMock.mock.calls[0]?.join(" ") ?? "";
     expect(call).toContain("comments(last:100)");
-    expect(call).toContain("reviewThreads(last:20)");
+    expect(call).toContain("reviewThreads(last:100)");
     const collected = result.get("api-1");
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
@@ -815,6 +847,236 @@ describe("GitHub review batching", () => {
     expect([...collected.collected.snapshot.keys()]).toEqual(
       expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
     );
+  });
+
+  it("paginates past 100 same-thread comments to the prior high-water mark", async () => {
+    const dataDir = await makeDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["review-comment:1"]);
+    const comment = (databaseId: number) => ({
+      databaseId,
+      body: `feedback ${databaseId}`,
+      path: "src/api.ts",
+      line: databaseId,
+      author: { login: "reviewer" },
+    });
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                number: 42,
+                title: "Burst feedback",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: Array.from({ length: 100 }, (_unused, index) => comment(index + 3)),
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-3" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: [comment(1), comment(2)],
+                pageInfo: { hasPreviousPage: false, startCursor: "cursor-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=cursor-3");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:2")).toBe(true);
+    expect(collected.collected.snapshot.has("review-comment:102")).toBe(true);
+    expect(collected.collected.snapshot.has("review-comment:1")).toBe(false);
+  });
+
+  it("persists and resumes a comment cursor after the cycle budget", async () => {
+    const dataDir = await makeDataDir();
+    const initial = () =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: {
+            a0: {
+              id: "PR_42",
+              number: 42,
+              title: "Long thread",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: [
+                  {
+                    id: "THREAD_LONG",
+                    comments: {
+                      nodes: [],
+                      pageInfo: { hasPreviousPage: true, startCursor: "cursor-0" },
+                    },
+                  },
+                ],
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      });
+    const page = (index: number, hasPreviousPage: boolean) =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+          t0: {
+            comments: {
+              nodes: [
+                {
+                  databaseId: 1_000 + index,
+                  body: `page ${index}`,
+                  author: { login: "reviewer" },
+                },
+              ],
+              pageInfo: { hasPreviousPage, startCursor: `cursor-${index}` },
+            },
+          },
+        },
+      });
+    ghMock.mockResolvedValueOnce(initial());
+    for (let index = 1; index <= 10; index += 1) {
+      ghMock.mockResolvedValueOnce(page(index, true));
+    }
+
+    await collectGitHubSignalsBatch([sourceSession("/tmp/api-1")], dataDir, "api", "pr-watch");
+
+    ghMock.mockResolvedValueOnce(initial()).mockResolvedValueOnce(page(11, false));
+    const resumed = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[12]?.join(" ")).toContain("before0=cursor-10");
+    const collected = resumed.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:1011")).toBe(true);
+  });
+
+  it("paginates to an active review thread outside the newest 100 threads", async () => {
+    const dataDir = await makeDataDir();
+    const threads = Array.from({ length: 100 }, (_unused, index) => ({
+      id: `THREAD_${index + 2}`,
+      comments: {
+        nodes: [],
+        pageInfo: { hasPreviousPage: false, startCursor: `comment-${index + 2}` },
+      },
+    }));
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Many threads",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: threads,
+                  pageInfo: { hasPreviousPage: true, startCursor: "thread-2" },
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 2, remaining: 4_798, resetAt: "2026-08-04T18:00:00.000Z" },
+            p0: {
+              reviewThreads: {
+                nodes: [
+                  {
+                    id: "THREAD_1",
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 999,
+                          body: "active oldest thread",
+                          author: { login: "reviewer" },
+                        },
+                      ],
+                      pageInfo: { hasPreviousPage: false, startCursor: "comment-999" },
+                    },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false, startCursor: "thread-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[0]?.join(" ")).toContain("reviewThreads(last:100)");
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=thread-2");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:999")).toBe(true);
   });
 });
 

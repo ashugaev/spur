@@ -1930,7 +1930,7 @@ export class SessionService {
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
-  private readonly prLookupResolutions = new Map<string, Promise<PrLookupOutcome | null>>();
+  private readonly prLookupResolutions = new Map<string, Promise<PrLookupOutcome>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
@@ -3460,16 +3460,14 @@ export class SessionService {
 
   /**
    * Runs one session's queued lookup and keeps the persisted negative cache in
-   * step. Returns null when there is no answer to act on, i.e. the lookup was
-   * skipped (budget, unresolved repo, error, cancelled). A skip must never
-   * advance the cache or count as "no PR" — a false negative written during a
-   * rate-limit window would outlive the window.
+   * step. A skipped outcome remains distinct from "no PR" so it cannot advance
+   * the cache; transport errors also let configured non-GitHub providers run.
    */
   private async resolveQueuedPrLookup(
     slug: PrRepoSlug,
     branch: string,
     worktreePath: string,
-  ): Promise<PrLookupOutcome | null> {
+  ): Promise<PrLookupOutcome> {
     const key = JSON.stringify([slug.host, slug.owner, slug.name, branch]);
     const active = this.prLookupResolutions.get(key);
     if (active) {
@@ -3488,7 +3486,7 @@ export class SessionService {
     slug: PrRepoSlug,
     branch: string,
     worktreePath: string,
-  ): Promise<PrLookupOutcome | null> {
+  ): Promise<PrLookupOutcome> {
     const outcome = await enqueuePrLookup({ slug, branch, worktreePath });
     const dataDir = this.config.dataDir;
     switch (outcome.status) {
@@ -3502,7 +3500,7 @@ export class SessionService {
         markPrLookupTerminal(dataDir, slug, branch, outcome.pr);
         return outcome;
       case "skipped":
-        return null;
+        return outcome;
     }
   }
 
@@ -3513,10 +3511,14 @@ export class SessionService {
   ): Promise<void> {
     // No GitHub remote: nothing to look up and nothing to cache, but the
     // non-github review providers still get their turn below.
-    const outcome: PrLookupOutcome | null = slug
+    const outcome: PrLookupOutcome = slug
       ? await this.resolveQueuedPrLookup(slug, discoveryBranch, session.worktreePath)
       : { status: "absent" };
-    if (!outcome) {
+    // Budget/cancellation means no provider was attempted. A transport error
+    // from a two-segment remote is different: arbitrary GitHub Enterprise
+    // hostnames are valid, but the same syntax is also used by Gitea and other
+    // forges. Let configured non-GitHub providers inspect that uncertain remote.
+    if (outcome.status === "skipped" && outcome.reason !== "error") {
       return;
     }
     const binding = outcome.status === "found" ? prLookupBindingOf(outcome.pr) : null;

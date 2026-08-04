@@ -407,7 +407,7 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
+  it("falls back to GitLab after an arbitrary-host GitHub transport failure", async () => {
     const { buildMergedConfig } = await import("../../src/registry.js");
     const baseProject = baseConfig().projects.api;
     if (!baseProject) {
@@ -442,7 +442,10 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    mockGraphql();
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([["origin", "git@gitea.corp.internal:org/repo.git"]]),
+    );
+    ghMock.mockRejectedValue(new Error("gh: authentication failed for gitea.corp.internal"));
     glabMock.mockResolvedValue(
       JSON.stringify([
         {

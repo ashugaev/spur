@@ -1,5 +1,9 @@
 import { gh, noteGraphqlCost, pollBudgetState, recordGraphqlBudget } from "../gh.js";
-import { readCommentSeenRegistry } from "../metadata.js";
+import {
+  readCommentSeenRegistry,
+  readGitHubReviewPagination,
+  writeGitHubReviewPagination,
+} from "../metadata.js";
 import { gqlErrorsByAlias, resolvePrLookupRepo } from "../pr-lookup.js";
 import {
   clearPrLookupEntry,
@@ -51,6 +55,25 @@ const TERMINAL_GITHUB_CI_STATES = new Set([
 // actionable.
 const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
 const GITHUB_REVIEW_BATCH_MAX_TARGETS = 50;
+const GITHUB_GRAPHQL_NODE_LIMIT = 500_000;
+const GITHUB_REVIEW_THREAD_COUNT = 100;
+const GITHUB_CONNECTION_PAGE_SIZE = 100;
+const GITHUB_BOUND_PR_NODE_BUDGET =
+  1 +
+  GITHUB_CONNECTION_PAGE_SIZE +
+  GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
+  GITHUB_CONNECTION_PAGE_SIZE * 2;
+const GITHUB_UNBOUND_PR_CANDIDATES = 5;
+const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
+  GITHUB_UNBOUND_PR_CANDIDATES * (1 + GITHUB_BOUND_PR_NODE_BUDGET);
+const GITHUB_REVIEW_PAGINATION_ALIASES_PER_REQUEST = 100;
+const GITHUB_REVIEW_PAGINATION_REQUEST_BUDGET = 10;
+const GITHUB_REVIEW_PAGINATION_NODE_BUDGET =
+  GITHUB_REVIEW_PAGINATION_ALIASES_PER_REQUEST *
+  GITHUB_CONNECTION_PAGE_SIZE *
+  GITHUB_REVIEW_PAGINATION_REQUEST_BUDGET;
+const GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET =
+  GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE);
 const reviewBatchCursor = new Map<string, number>();
 
 export function _resetGitHubReviewBatchForTests(): void {
@@ -246,16 +269,23 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
   );
 }
 
-// At the 50-target batch cap, 20 threads × 100 comments bounds nested review
-// comment nodes at 100,000 while retaining the newest same-thread activity.
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `number title url reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
   }}}}}}
-  reviewThreads(last:20){nodes{isResolved comments(last:100){nodes{databaseId body path line author{login}}}}}
+  reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}}}
   comments(last:100){nodes{databaseId body author{login}}}`;
+
+function reviewBatchTargetLimit(bound: boolean): number {
+  const nodesPerTarget = bound ? GITHUB_BOUND_PR_NODE_BUDGET : GITHUB_UNBOUND_TARGET_NODE_BUDGET;
+  return Math.min(
+    GITHUB_REVIEW_BATCH_MAX_TARGETS,
+    Math.floor(GITHUB_GRAPHQL_NODE_LIMIT / nodesPerTarget),
+  );
+}
 
 function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
   query: string;
@@ -681,6 +711,221 @@ function recordBatchBudget(data: Record<string, unknown>): void {
   recordGraphqlBudget(remaining, Number.isFinite(parsedReset) ? parsedReset : null);
 }
 
+interface ReviewThreadPage {
+  thread: Record<string, unknown>;
+  id: string;
+  before: string;
+}
+
+interface PullRequestThreadPage {
+  pullRequest: Record<string, unknown>;
+  id: string;
+  before: string;
+}
+
+function pullRequestThreadPageToFetch(
+  pullRequest: Record<string, unknown>,
+  resumeBefore?: string,
+): PullRequestThreadPage | null {
+  const id = readString(pullRequest.id);
+  const threads = isRecord(pullRequest.reviewThreads) ? pullRequest.reviewThreads : null;
+  const pageInfo = threads && isRecord(threads.pageInfo) ? threads.pageInfo : null;
+  const before = resumeBefore ?? (pageInfo ? readString(pageInfo.startCursor) : null);
+  if (!id || !threads || pageInfo?.hasPreviousPage !== true || !before) return null;
+  return { pullRequest, id, before };
+}
+
+async function paginateReviewThreads(
+  targets: GitHubBatchTarget[],
+  aliases: GitHubBatchAlias[],
+  repository: Record<string, unknown>,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Promise<void> {
+  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
+  const resumedPullRequests = new Set(
+    [...cursors.keys()].filter((key) => key.startsWith("pull-request:")),
+  );
+  const pending = aliases.flatMap(({ alias, target }) => {
+    const selected = selectSummaryAndNode(repository[alias], target.number !== null);
+    if (!selected) return [];
+    const id = readString(selected.node.id);
+    const cursorKey = id ? `pull-request:${id}` : "";
+    const page = pullRequestThreadPageToFetch(
+      selected.node,
+      cursorKey ? cursors.get(cursorKey) : undefined,
+    );
+    return page ? [page] : [];
+  });
+  pending.sort(
+    (left, right) =>
+      Number(resumedPullRequests.has(`pull-request:${right.id}`)) -
+      Number(resumedPullRequests.has(`pull-request:${left.id}`)),
+  );
+  for (const page of pending) cursors.set(`pull-request:${page.id}`, page.before);
+  let requests = 0;
+  let nodes = 0;
+  const aliasesPerRequest = Math.floor(
+    GITHUB_GRAPHQL_NODE_LIMIT / GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET,
+  );
+  while (pending.length > 0) {
+    if (
+      pollBudgetState().blocked ||
+      requests >= GITHUB_REVIEW_PAGINATION_REQUEST_BUDGET ||
+      nodes + GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET > GITHUB_REVIEW_PAGINATION_NODE_BUDGET
+    ) {
+      break;
+    }
+    const remainingPages = Math.floor(
+      (GITHUB_REVIEW_PAGINATION_NODE_BUDGET - nodes) / GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET,
+    );
+    const pages = pending.splice(0, Math.min(pending.length, aliasesPerRequest, remainingPages));
+    const declarations: string[] = [];
+    const fields: string[] = [];
+    const args = ["api", "--hostname", targets[0]?.slug.host ?? "", "graphql"];
+    for (const [index, page] of pages.entries()) {
+      declarations.push(`$id${index}:ID!`, `$before${index}:String!`);
+      fields.push(
+        `p${index}:node(id:$id${index}){... on PullRequest{reviewThreads(last:100,before:$before${index}){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}`,
+      );
+      args.push("-f", `id${index}=${page.id}`, "-f", `before${index}=${page.before}`);
+    }
+    const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
+    args.splice(4, 0, "-f", `query=${query}`);
+    const envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
+    const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+    if (!data) throw new Error("invalid GitHub review thread pagination response");
+    recordBatchBudget(data);
+    requests += 1;
+    nodes += pages.length * GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET;
+    for (const [index, page] of pages.entries()) {
+      const value = data[`p${index}`];
+      const threads = isRecord(value) && isRecord(value.reviewThreads) ? value.reviewThreads : null;
+      const currentThreads = isRecord(page.pullRequest.reviewThreads)
+        ? page.pullRequest.reviewThreads
+        : null;
+      if (!threads || !currentThreads) throw new Error("invalid GitHub review thread page");
+      currentThreads.nodes = [...connectionNodes(threads), ...connectionNodes(currentThreads)];
+      currentThreads.pageInfo = threads.pageInfo;
+      const nextPage = pullRequestThreadPageToFetch({ id: page.id, reviewThreads: threads });
+      const key = `pull-request:${page.id}`;
+      if (nextPage) {
+        const next = { ...nextPage, pullRequest: page.pullRequest };
+        cursors.set(key, next.before);
+        pending.push(next);
+      } else {
+        cursors.delete(key);
+      }
+    }
+  }
+  writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
+}
+
+function threadPageToFetch(
+  thread: Record<string, unknown>,
+  seen: ReadonlySet<string>,
+  resumeBefore?: string,
+): ReviewThreadPage | null {
+  const id = readString(thread.id);
+  const comments = isRecord(thread.comments) ? thread.comments : null;
+  const pageInfo = comments && isRecord(comments.pageInfo) ? comments.pageInfo : null;
+  const before = resumeBefore ?? (pageInfo ? readString(pageInfo.startCursor) : null);
+  if (!id || !comments || pageInfo?.hasPreviousPage !== true || !before) return null;
+  const reachedSeenComment = connectionNodes(comments).some((raw) => {
+    if (!isRecord(raw)) return false;
+    const databaseId = readNumber(raw.databaseId);
+    return databaseId !== null && seen.has(reviewCommentSeenKey(databaseId));
+  });
+  return reachedSeenComment && resumeBefore === undefined ? null : { thread, id, before };
+}
+
+async function paginateReviewThreadComments(
+  targets: GitHubBatchTarget[],
+  aliases: GitHubBatchAlias[],
+  repository: Record<string, unknown>,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Promise<void> {
+  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
+  const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
+  const resumedThreads = new Set(
+    [...cursors.keys()].filter((key) => !key.startsWith("pull-request:")),
+  );
+  const pending = aliases.flatMap(({ alias, target }) => {
+    const selected = selectSummaryAndNode(repository[alias], target.number !== null);
+    if (!selected) return [];
+    return connectionNodes(selected.node.reviewThreads).flatMap((raw): ReviewThreadPage[] => {
+      if (!isRecord(raw)) return [];
+      const id = readString(raw.id);
+      const page = threadPageToFetch(raw, seen, id ? cursors.get(id) : undefined);
+      return page ? [page] : [];
+    });
+  });
+  pending.sort(
+    (left, right) => Number(resumedThreads.has(right.id)) - Number(resumedThreads.has(left.id)),
+  );
+  for (const page of pending) cursors.set(page.id, page.before);
+  let requests = 0;
+  let nodes = 0;
+  while (pending.length > 0) {
+    if (
+      pollBudgetState().blocked ||
+      requests >= GITHUB_REVIEW_PAGINATION_REQUEST_BUDGET ||
+      nodes + GITHUB_CONNECTION_PAGE_SIZE > GITHUB_REVIEW_PAGINATION_NODE_BUDGET
+    ) {
+      break;
+    }
+    const remainingNodePages = Math.floor(
+      (GITHUB_REVIEW_PAGINATION_NODE_BUDGET - nodes) / GITHUB_CONNECTION_PAGE_SIZE,
+    );
+    const pageCount = Math.min(
+      pending.length,
+      GITHUB_REVIEW_PAGINATION_ALIASES_PER_REQUEST,
+      remainingNodePages,
+    );
+    const pages = pending.splice(0, pageCount);
+    const declarations: string[] = [];
+    const fields: string[] = [];
+    const args = ["api", "--hostname", targets[0]?.slug.host ?? "", "graphql"];
+    for (const [index, page] of pages.entries()) {
+      declarations.push(`$id${index}:ID!`, `$before${index}:String!`);
+      fields.push(
+        `t${index}:node(id:$id${index}){... on PullRequestReviewThread{comments(last:100,before:$before${index}){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}}}`,
+      );
+      args.push("-f", `id${index}=${page.id}`, "-f", `before${index}=${page.before}`);
+    }
+    const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
+    args.splice(4, 0, "-f", `query=${query}`);
+    const envelope = readGraphqlEnvelope(await gh(targets[0]?.session.worktreePath ?? "", ...args));
+    const data = envelope && isRecord(envelope.data) ? envelope.data : null;
+    if (!data) throw new Error("invalid GitHub review comment pagination response");
+    recordBatchBudget(data);
+    requests += 1;
+    nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
+    for (const [index, page] of pages.entries()) {
+      const value = data[`t${index}`];
+      const comments = isRecord(value) && isRecord(value.comments) ? value.comments : null;
+      const currentComments = isRecord(page.thread.comments) ? page.thread.comments : null;
+      if (!comments || !currentComments) {
+        throw new Error("invalid GitHub review comment page");
+      }
+      currentComments.nodes = [...connectionNodes(comments), ...connectionNodes(currentComments)];
+      currentComments.pageInfo = comments.pageInfo;
+      const nextPage = threadPageToFetch({ id: page.id, comments }, seen);
+      const next = nextPage ? { ...nextPage, thread: page.thread } : null;
+      if (next) {
+        cursors.set(next.id, next.before);
+        pending.push(next);
+      } else {
+        cursors.delete(page.id);
+      }
+    }
+  }
+  writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
+}
+
 async function runReviewRepoBatch(
   targets: GitHubBatchTarget[],
   dataDir: string,
@@ -698,6 +943,14 @@ async function runReviewRepoBatch(
       ]),
     ).values(),
   ];
+  const bound = uniqueTargets[0]?.number !== null;
+  if (uniqueTargets.some((target) => (target.number !== null) !== bound)) {
+    throw new Error("GitHub review batch mixed bound and unbound targets");
+  }
+  const targetLimit = reviewBatchTargetLimit(bound);
+  if (uniqueTargets.length > targetLimit) {
+    throw new Error(`GitHub review batch exceeds ${targetLimit}-target node budget`);
+  }
   const { query, aliases } = buildGitHubReviewBatchQuery(uniqueTargets);
   const args = [
     "api",
@@ -742,6 +995,13 @@ async function runReviewRepoBatch(
     envelope?.errors,
     new Set(aliases.map((entry) => entry.alias)),
   );
+  try {
+    await paginateReviewThreads(targets, aliases, data.r, dataDir, projectId, sourceId);
+    await paginateReviewThreadComments(targets, aliases, data.r, dataDir, projectId, sourceId);
+  } catch (error) {
+    for (const target of targets) results.set(target.session.id, { status: "error", error });
+    return results;
+  }
   for (const { alias, target } of aliases) {
     const matchingTargets = targets.filter(
       (candidate) => candidate.number === target.number && candidate.branch === target.branch,
@@ -827,26 +1087,40 @@ export async function collectGitHubSignalsBatch(
       grouped.push(target);
       targetsByKey.set(key, grouped);
     }
-    const groupedTargets = [...targetsByKey.values()];
-    const start = (reviewBatchCursor.get(repoKey) ?? 0) % groupedTargets.length;
-    const selectedGroups = Array.from(
-      { length: Math.min(GITHUB_REVIEW_BATCH_MAX_TARGETS, groupedTargets.length) },
-      (_, offset) => groupedTargets[(start + offset) % groupedTargets.length] ?? [],
-    );
-    const selected = selectedGroups.flat();
-    const selectedIds = new Set(selected.map((target) => target.session.id));
-    for (const target of targets) {
-      if (!selectedIds.has(target.session.id)) {
-        results.set(target.session.id, { status: "skipped", reason: "capacity" });
+    for (const bound of [true, false]) {
+      const groupedTargets = [...targetsByKey.values()].filter(
+        (group) => (group[0]?.number !== null) === bound,
+      );
+      if (groupedTargets.length === 0) continue;
+      if (pollBudgetState().blocked) {
+        for (const group of groupedTargets) {
+          for (const target of group) {
+            results.set(target.session.id, { status: "skipped", reason: "budget" });
+          }
+        }
+        continue;
       }
-    }
-    reviewBatchCursor.set(
-      repoKey,
-      (start + GITHUB_REVIEW_BATCH_MAX_TARGETS) % groupedTargets.length,
-    );
-    const batch = await runReviewRepoBatch(selected, dataDir, projectId, sourceId);
-    for (const [sessionId, result] of batch) {
-      results.set(sessionId, result);
+      const cursorKey = `${repoKey}:${bound ? "bound" : "unbound"}`;
+      const start = (reviewBatchCursor.get(cursorKey) ?? 0) % groupedTargets.length;
+      const limit = reviewBatchTargetLimit(bound);
+      const selectedGroups = Array.from(
+        { length: Math.min(limit, groupedTargets.length) },
+        (_, offset) => groupedTargets[(start + offset) % groupedTargets.length] ?? [],
+      );
+      const selected = selectedGroups.flat();
+      const selectedIds = new Set(selected.map((target) => target.session.id));
+      for (const group of groupedTargets) {
+        for (const target of group) {
+          if (!selectedIds.has(target.session.id)) {
+            results.set(target.session.id, { status: "skipped", reason: "capacity" });
+          }
+        }
+      }
+      reviewBatchCursor.set(cursorKey, (start + limit) % groupedTargets.length);
+      const batch = await runReviewRepoBatch(selected, dataDir, projectId, sourceId);
+      for (const [sessionId, result] of batch) {
+        results.set(sessionId, result);
+      }
     }
   }
   return results;

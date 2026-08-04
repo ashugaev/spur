@@ -215,10 +215,9 @@ describe("session-pr", () => {
   });
 
   it("falls back to gh pr list when the remote yields no usable owner/name", async () => {
-    // A GitHub Enterprise host Spur cannot recognize by name, or an ssh alias:
-    // gh resolves the host itself, so ask it per branch instead of reporting
-    // "no PR" and letting teardown delete the branch under an open PR.
-    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@code.mycorp.com:acme/api.git"]]));
+    // A one-segment ssh alias has no owner/repo pair for GraphQL. gh resolves
+    // the working-copy remote itself, so retain the fail-closed fallback.
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@github-work:api.git"]]));
     ghMock.mockResolvedValue(
       JSON.stringify([
         { number: 42, title: "Fix checkout", url: "https://github.com/acme/api/pull/42" },

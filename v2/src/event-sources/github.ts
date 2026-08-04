@@ -609,6 +609,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     // adaptive deadline must not move — otherwise it silently consumes the
     // slow window during an outage instead of resuming promptly once it lifts.
     const skippedByCooldown = shouldSkipGitHubCalls();
+    const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
     try {
       await runGhPollCycle(
         { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
@@ -622,7 +623,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         },
       );
     } finally {
-      if (adaptive && !skippedByCooldown) {
+      if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
         nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
       }
       pollingCycle = false;
