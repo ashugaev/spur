@@ -2990,18 +2990,64 @@ export class SessionService {
         this.lastObservedRunStates.set(sessionId, runState);
       }
       const liveIds = new Set(sessions.map((session) => session.id));
-      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.codexMcpDialogOverrides.delete(sessionId);
-        }
-      }
-      for (const sessionId of this.claudeCompactingOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.claudeCompactingOverrides.delete(sessionId);
-        }
-      }
+      this.pruneSessionScopedState(liveIds);
     } finally {
       this.attentionMonitorRunning = false;
+    }
+  }
+
+  // Single sweep for every session-scoped map that has no delete site of its
+  // own. Runs against the non-terminal id set pollAttentionStates already
+  // computes, so its key set is bounded by "currently live sessions" instead
+  // of "every session ever classified". Deliberately does not touch
+  // dashboardCache (retained for the full dashboard list, see
+  // runDashboardCacheTick) or stateCache (its 15 delete sites are deliberate
+  // mid-lifecycle reclassification triggers, not termination cleanup).
+  private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.codexMcpDialogOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeCompactingOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.sessionProjectCache.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.sessionProjectCache.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.cursorJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.stateHistory.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.stateHistory.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.prCheckTrackers.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.prCheckTrackers.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.usageMenuConfirmedAt.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.usageMenuConfirmedAt.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeRotationEpisode.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeRotationEpisode.delete(sessionId);
+      }
     }
   }
 
@@ -3104,16 +3150,14 @@ export class SessionService {
           this.dashboardCache.delete(id);
         }
       }
-      for (const id of this.sessionProjectCache.keys()) {
-        if (!includedIds.has(id)) {
-          this.sessionProjectCache.delete(id);
-        }
-      }
       for (const id of this.dashboardEnrichedRecords.keys()) {
         if (!includedIds.has(id)) {
           this.dashboardEnrichedRecords.delete(id);
         }
       }
+      // sessionProjectCache is pruned by pruneSessionScopedState (the
+      // non-terminal sweep in pollAttentionStates), not here: one prune path
+      // per map.
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.failed", {
