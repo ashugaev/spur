@@ -91,13 +91,18 @@ projects:
         event: github:merge_conflict
         send:
           prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
+      gh-merged:
+        source: gh
+        event: github:merged
+        send:
+          prompt: "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore."
       gh-pr-review-spawn:
         source: gh-pr-review
         event: github:work_item.new
         spawnDeskGroup: true
         spawn:
           restrictWrites: true
-          allowedTriggers: []
+          allowedTriggers: ["gh-merged"]
           blocks:
             - agent: claude
               model: sonnet
