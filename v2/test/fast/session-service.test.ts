@@ -6895,6 +6895,20 @@ describe("SessionService", () => {
       expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
     });
 
+    it("reports live sessions stalest first for operator stop candidates", async () => {
+      listSessionsMock.mockReturnValue([
+        sessionRecord({ id: "api-new", updatedAt: "2026-03-18T09:30:00.000Z" }),
+        sessionRecord({ id: "api-old", updatedAt: "2026-03-18T09:00:00.000Z" }),
+      ]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const report = await service.getHeadroom();
+
+      expect(report.sessions.map((session) => session.id)).toEqual(["api-old", "api-new"]);
+    });
+
     it("spawns normally under the cap", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 2 }));
@@ -7005,15 +7019,27 @@ describe("SessionService", () => {
           },
         },
       });
-      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", project: "api" })]);
+      listSessionsMock.mockReturnValue([
+        sessionRecord({
+          id: "web-old",
+          project: "web",
+          updatedAt: "2026-03-18T08:00:00.000Z",
+        }),
+        sessionRecord({
+          id: "api-1",
+          project: "api",
+          updatedAt: "2026-03-18T09:00:00.000Z",
+        }),
+      ]);
       reserveNextSessionIdMock.mockResolvedValue("web-1");
 
       const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      const denied = service.spawn({ project: "api", prompt: "hello" });
+      await expect(denied).rejects.toThrow(SessionAdmissionDeniedError);
+      await expect(denied).rejects.toThrow("api-1 (api)");
+      await expect(denied).rejects.not.toThrow("web-old");
       const webResult = await service.spawn({ project: "web", prompt: "hello" });
       expect(webResult.id).toBe("web-1");
     });
@@ -18887,6 +18913,45 @@ describe("SessionService", () => {
 
       expect(result.id).toBe("api-2");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    });
+
+    it("reserves the replacement slot while handoff prepares its successor", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        admission: { ...config.admission, maxLiveSessions: 1 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      let releaseCapture: ((value: string) => void) | undefined;
+      captureTmuxPaneMock.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseCapture = resolve;
+          }),
+      );
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const handoff = service.handoff("api-1", { agent: "cursor" });
+      await vi.waitFor(() => expect(captureTmuxPaneMock).toHaveBeenCalled());
+      await expect(service.spawn({ project: "api", prompt: "race" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+
+      releaseCapture?.("");
+      await expect(handoff).resolves.toMatchObject({ id: "api-2" });
     });
 
     it("does not forward pipeline steps when the source pipeline already finished", async () => {

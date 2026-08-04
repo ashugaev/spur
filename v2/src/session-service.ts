@@ -1892,6 +1892,10 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // A handoff owns one future live-session slot from its successful preflight
+  // check until its successor spawn settles. Other admissions count the slot;
+  // the successor identifies the reservation so it does not count itself.
+  private readonly admissionReservations = new Map<string, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -5151,7 +5155,10 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  private resolveSpawnTarget(request: SpawnSessionRequest): {
+  private resolveSpawnTarget(
+    request: SpawnSessionRequest,
+    options?: { replacingSessionId?: string; admissionReservationId?: string },
+  ): {
     project: ProjectConfig;
     prompt: string;
     steps?: string[];
@@ -5160,7 +5167,7 @@ export class SessionService {
     allowedTriggers?: string[];
     selfDestruct?: SelfDestructConfig;
   } {
-    this.assertAdmissible(request.project, "spawn");
+    this.assertAdmissible(request.project, "spawn", options);
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -5215,7 +5222,11 @@ export class SessionService {
 
   async spawn(
     request: SpawnSessionRequest,
-    options?: { promptKind?: UserInputKind },
+    options?: {
+      promptKind?: UserInputKind;
+      replacingSessionId?: string;
+      admissionReservationId?: string;
+    },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -5247,7 +5258,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -9154,130 +9165,136 @@ export class SessionService {
     // the fleet, so exclude it from the live count: a handoff at exactly the
     // cap is net-neutral (stop one, start one) and must be allowed.
     this.assertAdmissible(session.project, "spawn", { replacingSessionId: session.id });
-
-    const agent = parseAgentName(request.agent);
-    const notes = request.notes?.trim();
-    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-    const clonedAttachments = this.cloneStartupAttachments(
-      workspaceIdOf(session),
-      session.startupAttachmentIds ?? [],
-    );
-    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
-    const mergedAttachments = [
-      ...clonedAttachments,
-      ...(handoffScreenshot ? [handoffScreenshot] : []),
-    ];
-    let remainingPipelineSteps: string[] | undefined;
-    if (session.pipeline?.status === "running") {
-      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
-      if (steps.length > 0) {
-        remainingPipelineSteps = steps;
-      }
-    }
-    const model = resolveCarriedSpawnModel(session, agent, request.model);
-
-    let sourceForSpawn = session;
-    if (session.status === "running" || session.status === "spawning") {
-      const stopped: SessionRecord = {
-        ...this.sessionWithReleasedSidecarPorts(session),
-        status: "stopped",
-        stopReason: "manual_pause",
-        updatedAt: nowIso(),
-        retainInList: true,
-      };
-      writeSession(this.config.dataDir, stopped);
-      this.stateCache.delete(sessionId);
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(stopped);
-      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
-    }
-
-    const prompt = renderHandoffPrompt({
-      sourceSessionId: session.id,
-      sourceAgent: session.agent,
-      branch: session.branch,
-      worktreePath: session.worktreePath,
-      originalPrompt: originalTask,
-      ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: sourceForSpawn.slots?.links ?? [],
-      ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
-      ...(session.pr ? { pr: session.pr } : {}),
-      ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
-      ...(notes ? { notes } : {}),
-      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
-    });
-
-    this.logEvent("session.handoff.started", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Handing off ${sessionId} to ${agent}`,
-      details: {
-        sourceAgent: session.agent,
-        targetAgent: agent,
-        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
-      },
-    });
-
-    let spawned = await this.spawn(
-      resolveHandoffSpawnRequest(sourceForSpawn, {
-        prompt,
-        agent,
-        ...(model !== undefined ? { model } : {}),
-        originalTaskPrompt: originalTask,
-        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
-        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
-      }),
-    );
-
-    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
-    if (spawnedRecord) {
-      writeSession(this.config.dataDir, {
-        ...spawnedRecord,
-        ...(session.pr ? { pr: session.pr } : {}),
-        originalTaskPrompt: originalTask,
-        updatedAt: nowIso(),
-      });
-    }
-
-    if (session.slots?.title || session.slots?.tags?.length) {
-      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
-      if (session.slots.title || carryTags.length > 0) {
-        try {
-          spawned = await this.updateSlots(spawned.id, {
-            ...(session.slots.title ? { title: session.slots.title } : {}),
-            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.handoff.carry_slots_failed", {
-            level: "warn",
-            sessionId,
-            projectId: session.project,
-            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
-          });
-        }
-      }
-    }
+    this.admissionReservations.set(session.id, session.project);
 
     try {
-      await this.complete(
-        session.id,
-        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+      const agent = parseAgentName(request.agent);
+      const notes = request.notes?.trim();
+      const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
+      const clonedAttachments = this.cloneStartupAttachments(
+        workspaceIdOf(session),
+        session.startupAttachmentIds ?? [],
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.handoff.source_complete_failed", {
-        level: "warn",
+      const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+      const mergedAttachments = [
+        ...clonedAttachments,
+        ...(handoffScreenshot ? [handoffScreenshot] : []),
+      ];
+      let remainingPipelineSteps: string[] | undefined;
+      if (session.pipeline?.status === "running") {
+        const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+        if (steps.length > 0) {
+          remainingPipelineSteps = steps;
+        }
+      }
+      const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+      let sourceForSpawn = session;
+      if (session.status === "running" || session.status === "spawning") {
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          retainInList: true,
+        };
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(sessionId);
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(stopped);
+        sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+      }
+
+      const prompt = renderHandoffPrompt({
+        sourceSessionId: session.id,
+        sourceAgent: session.agent,
+        branch: session.branch,
+        worktreePath: session.worktreePath,
+        originalPrompt: originalTask,
+        ...(session.slots?.title ? { title: session.slots.title } : {}),
+        links: sourceForSpawn.slots?.links ?? [],
+        ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
+        ...(session.pr ? { pr: session.pr } : {}),
+        ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
+        ...(notes ? { notes } : {}),
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      });
+
+      this.logEvent("session.handoff.started", {
+        level: "info",
         sessionId,
         projectId: session.project,
-        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        message: `Handing off ${sessionId} to ${agent}`,
+        details: {
+          sourceAgent: session.agent,
+          targetAgent: agent,
+          ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        },
       });
-    }
 
-    return spawned;
+      let spawned = await this.spawn(
+        resolveHandoffSpawnRequest(sourceForSpawn, {
+          prompt,
+          agent,
+          ...(model !== undefined ? { model } : {}),
+          originalTaskPrompt: originalTask,
+          ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+          ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+        }),
+        { replacingSessionId: session.id, admissionReservationId: session.id },
+      );
+
+      const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+      if (spawnedRecord) {
+        writeSession(this.config.dataDir, {
+          ...spawnedRecord,
+          ...(session.pr ? { pr: session.pr } : {}),
+          originalTaskPrompt: originalTask,
+          updatedAt: nowIso(),
+        });
+      }
+
+      if (session.slots?.title || session.slots?.tags?.length) {
+        const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+        if (session.slots.title || carryTags.length > 0) {
+          try {
+            spawned = await this.updateSlots(spawned.id, {
+              ...(session.slots.title ? { title: session.slots.title } : {}),
+              ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.handoff.carry_slots_failed", {
+              level: "warn",
+              sessionId,
+              projectId: session.project,
+              message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+            });
+          }
+        }
+      }
+
+      try {
+        await this.complete(
+          session.id,
+          { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+          { retainInList: true },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.handoff.source_complete_failed", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        });
+      }
+
+      return spawned;
+    } finally {
+      this.admissionReservations.delete(session.id);
+    }
   }
 
   private resumeSessionDelivery(): void {
@@ -9940,7 +9957,7 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string },
+    opts?: { replacingSessionId?: string; admissionReservationId?: string },
   ): void {
     const admission = this.config.admission;
     const memory = readHostMemory();
@@ -9978,11 +9995,19 @@ export class SessionService {
       throw denial;
     }
     const live = this.countLiveSessions(opts?.replacingSessionId);
+    let reservedTotal = 0;
+    let projectReserved = 0;
+    for (const [reservationId, reservedProjectId] of this.admissionReservations) {
+      if (reservationId === opts?.admissionReservationId) continue;
+      reservedTotal += 1;
+      if (reservedProjectId === projectId) projectReserved += 1;
+    }
     const projectCap = this.config.projects[projectId]?.maxLiveSessions;
-    const projectLive = live.byProject.get(projectId) ?? 0;
+    const projectLive = (live.byProject.get(projectId) ?? 0) + projectReserved;
     if (projectCap !== undefined && projectLive >= projectCap) {
+      const projectCandidates = live.records.filter((session) => session.project === projectId);
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${projectLive} live now). Stop one of: ${this.admissionCandidateList(projectCandidates)}.`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -9991,9 +10016,10 @@ export class SessionService {
       });
       throw denial;
     }
-    if (live.total >= admission.maxLiveSessions) {
+    const totalLive = live.total + reservedTotal;
+    if (totalLive >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
-        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${live.total} live now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${totalLive} live or reserved now). Stop one of: ${this.admissionCandidateList(live.records)}.`,
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -10051,12 +10077,14 @@ export class SessionService {
       projectCaps,
       live: { count: live.total, byProject },
       projectedRoom: Math.max(0, admission.maxLiveSessions - live.total),
-      sessions: live.records.map((session) => ({
-        id: session.id,
-        project: session.project,
-        status: session.status,
-        rssBytes: rssBySessionId.get(session.id) ?? 0,
-      })),
+      sessions: [...live.records]
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+        .map((session) => ({
+          id: session.id,
+          project: session.project,
+          status: session.status,
+          rssBytes: rssBySessionId.get(session.id) ?? 0,
+        })),
       memory,
       guard: {
         enforce: admission.memoryGuard.enforce,
