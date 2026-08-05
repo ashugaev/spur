@@ -22,7 +22,8 @@ CONFIG FOOTGUNS
 
   Full field reference and example: `docs/configuration.md`. Not in that doc:
 
-  Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files parse, then discard them.
+  Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
+  Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
   Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, and protect the instance path. One canonical problem path emits one warning per daemon lifetime.
   A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
@@ -44,6 +45,6 @@ IN THIS REPO
 
 UPDATING THIS SKILL
 
-  Update on any change to CLI commands/flags, daemon HTTP routes, config keys/defaults, source/event names, in-session tool/env contracts, or agent-facing safety rules. Update `docs/commands.md` and `docs/configuration.md` in the same change, and mirror this file to `.agents/`.
+  Update on any change to CLI commands/flags, daemon HTTP routes, config keys/defaults, source/event names, in-session tool/env contracts, or agent-facing safety rules. Update `docs/commands.md` and `docs/configuration.md` in the same change, and mirror `.agents/skills/spur/SKILL.md` and `.claude/skills/spur/SKILL.md`.
   Skip: internal refactors, file moves, tests, UI styling. Sections through SAFETY stay repo-independent; repo-relative paths live only in IN THIS REPO.
   Verify each stated default against source at edit time and name the file checked: daemon/config defaults `v2/src/config.ts`, web UI port default `v2/src/ports.ts`, source types/event names `v2/src/config.ts` and `v2/src/types.ts`, agent launch flags `v2/src/agents/`, project-config merge `v2/src/registry.ts`.

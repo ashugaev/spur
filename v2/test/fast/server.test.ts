@@ -82,6 +82,9 @@ describe("startServer", () => {
       "daemon.stopping",
       "daemon.stopped",
     ]);
+    expect(events.find((entry) => entry.event === "daemon.admission.startup")).toMatchObject({
+      details: { cap: 100, capSource: "default", live: 0 },
+    });
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 
@@ -146,8 +149,7 @@ describe("startServer", () => {
           crossed: boolean;
         };
       };
-      expect(body.cap.global).toBeGreaterThan(0);
-      expect(["config", "derived"]).toContain(body.cap.source);
+      expect(body.cap).toMatchObject({ global: 100, source: "default" });
       expect(body.live).toEqual({ count: 1, byProject: { demo: 1 } });
       expect(body.projectedRoom).toBe(body.cap.global - 1);
       expect(body.sessions).toEqual([

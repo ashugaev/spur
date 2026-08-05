@@ -7172,6 +7172,36 @@ describe("SessionService", () => {
       expect(writeSessionMock).toHaveBeenCalled();
     });
 
+    it("admits the 100th session, refuses the 101st, and leaves an over-cap fleet untouched", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        withAdmission({ maxLiveSessions: 100, maxLiveSessionsSource: "default" }),
+      );
+      const liveSessions = Array.from({ length: 101 }, (_, index) =>
+        sessionRecord({ id: `api-${index + 1}` }),
+      );
+      listSessionsMock.mockReturnValue(liveSessions.slice(0, 99));
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "100th" })).resolves.toMatchObject({
+        id: "api-1",
+      });
+
+      listSessionsMock.mockReturnValue(liveSessions.slice(0, 100));
+      await expect(service.spawn({ project: "api", prompt: "101st" })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+
+      listSessionsMock.mockReturnValue(liveSessions);
+      const report = await service.getHeadroom();
+      expect(report.cap).toMatchObject({ global: 100, source: "default" });
+      expect(report.live.count).toBe(101);
+      expect(report.projectedRoom).toBe(0);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
     it.each([
       ["foreground", "global"],
       ["foreground", "project"],
