@@ -2240,6 +2240,71 @@ describe("Dashboard", () => {
     });
   });
 
+  it("does not carry a removed project's dirty draft into the fallback project", async () => {
+    let projects = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+      { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+    ];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ ...sessionsPayload(), projects }), { status: 200 });
+      }
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "sp",
+      prompt: "Saved Spur draft",
+      agent: "claude",
+      model: null,
+      branch: "feature/sp-draft",
+      branchIsExplicit: true,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+    await screen.findByRole("link", { name: "Fix auth" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "API-only edits" },
+    });
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+    });
+
+    projects = [{ id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" }];
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
+    });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Saved Spur draft");
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/sp-draft");
+    expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).not.toContain("API-only edits");
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+  });
+
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [

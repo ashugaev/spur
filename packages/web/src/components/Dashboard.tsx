@@ -1551,7 +1551,8 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      if (spawnOpen && !spawnDraftDirtyRef.current) {
+      const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
+      if (spawnOpen && !carriesUnscopedEdits) {
         restoreSpawnDraft(nextProjectId);
       } else {
         setSpawnProjectId(nextProjectId);
