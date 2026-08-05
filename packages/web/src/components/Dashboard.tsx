@@ -2544,7 +2544,11 @@ export function Dashboard() {
                   spawnBranchExplicitRef.current = next.trim().length > 0;
                   setSpawnBranch(next);
                 },
-                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
+                onBlur: () => {
+                  const normalizedBranch = normalizeBranchName(spawnBranch);
+                  spawnBranchExplicitRef.current = normalizedBranch.length > 0;
+                  setSpawnBranch(normalizedBranch);
+                },
               },
               workspaceMode: {
                 value: spawnWorkspaceMode,
