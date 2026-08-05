@@ -518,13 +518,13 @@ type MemoryShedExhaustedEdge =
   | "cgroup-high:sidecar"
   | "cgroup-max:emergency"
   | "swap:sidecar";
+type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 
 interface MemoryShedEpisode {
-  ramLatched: boolean;
   ramContinuousSinceMs: number | null;
   cgroupHighLatched: boolean;
   cgroupMaxLatched: boolean;
-  swapState: "unarmed" | "armed" | "active" | "spent";
+  swapState: "armed" | "active" | "spent";
   exhaustedEdges: Set<MemoryShedExhaustedEdge>;
 }
 
@@ -540,13 +540,16 @@ interface MemoryPressureState {
 
 function createMemoryShedEpisode(): MemoryShedEpisode {
   return {
-    ramLatched: false,
     ramContinuousSinceMs: null,
     cgroupHighLatched: false,
     cgroupMaxLatched: false,
-    swapState: "unarmed",
+    swapState: "spent",
     exhaustedEdges: new Set(),
   };
+}
+
+function memoryShedEmergencyBytes(guard: MemoryGuardConfig): number {
+  return Math.min(MEMORY_SHED_EMERGENCY_CAP_BYTES, Math.floor(guard.shedCriticalFloorBytes / 2));
 }
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
@@ -2156,24 +2159,19 @@ export class SessionService {
     const cgroup = readCgroupMemorySnapshot();
     const guard = this.config.admission.memoryGuard;
     const episode = this.memoryShedEpisode;
-    const emergencyBytes = Math.min(
-      MEMORY_SHED_EMERGENCY_CAP_BYTES,
-      Math.floor(guard.shedCriticalFloorBytes / 2),
-    );
+    const emergencyBytes = memoryShedEmergencyBytes(guard);
 
     let ramActive = false;
     let ramEmergency = false;
     if (!host) {
       episode.ramContinuousSinceMs = null;
     } else if (host.availableBytes >= guard.admissionFloorBytes) {
-      episode.ramLatched = false;
       episode.ramContinuousSinceMs = null;
       episode.exhaustedEdges.delete("ram:sidecar");
       episode.exhaustedEdges.delete("ram:session");
     } else if (host.availableBytes < guard.shedCriticalFloorBytes) {
       ramActive = true;
       ramEmergency = host.availableBytes <= emergencyBytes;
-      episode.ramLatched = true;
       episode.ramContinuousSinceMs ??= nowMs;
     } else {
       episode.ramContinuousSinceMs = null;
@@ -2461,11 +2459,7 @@ export class SessionService {
         const currentPressure = afterPressure ?? pressure;
         const hostStillAuthorizes =
           currentPressure.host !== null &&
-          (currentPressure.host.availableBytes <=
-            Math.min(
-              MEMORY_SHED_EMERGENCY_CAP_BYTES,
-              Math.floor(guard.shedCriticalFloorBytes / 2),
-            ) ||
+          (currentPressure.host.availableBytes <= memoryShedEmergencyBytes(guard) ||
             (currentPressure.host.availableBytes < guard.shedCriticalFloorBytes &&
               currentPressure.continuousRamPressureMs !== null &&
               currentPressure.continuousRamPressureMs >= MEMORY_SHED_SESSION_GRACE_MS));
