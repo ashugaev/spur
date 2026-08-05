@@ -2159,6 +2159,47 @@ describe("Dashboard", () => {
     expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
   });
 
+  it("debounces spawn draft writes and flushes pending edits on close", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    vi.useFakeTimers();
+
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "First edit" } });
+    fireEvent.change(prompt, { target: { value: "Latest edit" } });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(499);
+    });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Latest edit");
+
+    fireEvent.change(prompt, { target: { value: "Close now" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+  });
+
   it("keeps a restored explicit branch when preflight suggests another branch", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
