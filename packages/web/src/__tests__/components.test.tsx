@@ -17,6 +17,7 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import { spawnDraftStorageKey } from "@/lib/spawn-draft";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -1970,6 +1971,87 @@ describe("Dashboard", () => {
     expect(spawnProjectSelect.value).toBe("api");
   });
 
+  it("restores the complete non-sensitive spawn draft after close and remount", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude" || url === "/api/models?agent=codex") {
+        return new Response(
+          JSON.stringify({
+            models: [{ id: "gpt-5.6-codex", label: "GPT-5.6 Codex", isDefault: false }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const firstRender = render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+      target: { value: "codex" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /GPT-5.6 Codex/ }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Keep this draft" },
+    });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/keep-draft" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "worktree" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Base branch"), {
+      target: { value: "release" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+      target: { value: "After review" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
+    fireEvent.change(screen.getByLabelText("step 1"), { target: { value: "Run tests" } });
+
+    await waitFor(() => {
+      const stored = window.localStorage.getItem(spawnDraftStorageKey("api"));
+      expect(stored).toContain("Keep this draft");
+      expect(stored).not.toContain("attachments");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("codex");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent(
+        "GPT-5.6 Codex",
+      );
+    });
+
+    firstRender.unmount();
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/keep-draft");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
+    expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
+    expect(screen.getByRole("checkbox", { name: "Plan" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).toBeChecked();
+    expect(screen.getByLabelText("Self-destruct conditions")).toHaveValue("After review");
+    expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
+  });
+
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
@@ -2034,6 +2116,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
+      expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).toBeNull();
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
@@ -2210,6 +2293,9 @@ describe("Dashboard", () => {
       expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
       expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
       expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Keep this prompt",
+      );
     });
   });
 

@@ -47,6 +47,12 @@ import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import {
+  clearSpawnDraft,
+  readSpawnDraft,
+  writeSpawnDraft,
+  type SpawnDraft,
+} from "@/lib/spawn-draft";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
@@ -1507,6 +1513,25 @@ export function Dashboard() {
     return configuredProjectOptions[0]?.id ?? "";
   };
 
+  const restoreSpawnDraft = (nextProjectId: string) => {
+    const draft = readSpawnDraft(nextProjectId);
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt(draft?.prompt ?? "");
+    setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnModel(draft?.model ?? null);
+    setSpawnBranch(draft?.branch ?? "");
+    setSpawnPlanMode(draft?.planMode ?? false);
+    setSpawnSelfDestruct(draft?.selfDestruct ?? false);
+    setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
+    setSpawnSteps(
+      draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? [],
+    );
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
+    setSpawnDefaultBranch(draft?.defaultBranch ?? "");
+    setSpawnTrackerUrl(draft?.trackerUrl ?? null);
+    setSpawnAttachments([]);
+  };
+
   useEffect(() => {
     if (spawnPinnedProjectId) {
       if (spawnProjectId !== spawnPinnedProjectId) {
@@ -1528,7 +1553,7 @@ export function Dashboard() {
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(normalizedProjectId);
+    restoreSpawnDraft(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1536,6 +1561,39 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  useEffect(() => {
+    if (!spawnOpen || !spawnProjectId) return;
+    const draft: SpawnDraft = {
+      projectId: spawnProjectId,
+      prompt: spawnPrompt,
+      agent: spawnAgent,
+      model: spawnModel,
+      branch: spawnBranch,
+      workspaceMode: spawnWorkspaceMode,
+      defaultBranch: spawnDefaultBranch,
+      planMode: spawnPlanMode,
+      selfDestruct: spawnSelfDestruct,
+      selfDestructConditions: spawnSelfDestructConditions,
+      steps: spawnSteps.map((step) => step.value),
+      trackerUrl: spawnTrackerUrl,
+    };
+    writeSpawnDraft(draft);
+  }, [
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnModel,
+    spawnOpen,
+    spawnPlanMode,
+    spawnProjectId,
+    spawnPrompt,
+    spawnSelfDestruct,
+    spawnSelfDestructConditions,
+    spawnSteps,
+    spawnTrackerUrl,
+    spawnWorkspaceMode,
+  ]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -1701,6 +1759,7 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      clearSpawnDraft(nextProjectId);
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -2080,31 +2139,20 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    restoreSpawnDraft(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnModel(null);
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    restoreSpawnDraft(SHEPHERD_PROJECT_ID);
     setSpawnOpen(true);
   };
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(item.projectId);
+    restoreSpawnDraft(item.projectId);
     setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
-    setSpawnAttachments([]);
     setSpawnTrackerUrl(item.url);
     setSpawnOpen(true);
   };
