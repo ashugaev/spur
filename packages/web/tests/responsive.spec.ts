@@ -37,6 +37,27 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("spawn draft survives mobile close and full reload", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByPlaceholder("Prompt...").fill("Keep mobile draft");
+    await page.getByLabel("branch name").fill("feature/mobile-draft");
+    await page.getByLabel("Plan").check();
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.reload();
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await expect(page.getByLabel("Plan")).toBeChecked();
+  });
+
   // Design acceptance criteria 1-3: the header collapses to a single row at
   // every width, the spawn FAB is reachable, and nothing overflows.
   test("header controls share one y-band, the FAB is visible, and there is no horizontal scroll", async ({
