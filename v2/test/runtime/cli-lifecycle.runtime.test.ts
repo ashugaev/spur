@@ -1144,6 +1144,8 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: codex
+admission:
+  enabled: false
 projects:
   web:
     path: ${extraRepo.repoDir}
