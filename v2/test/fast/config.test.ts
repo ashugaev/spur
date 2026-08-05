@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
@@ -53,6 +53,7 @@ async function createConfigSearchMissDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   process.chdir(initialCwd);
   if (initialSpurConfig === undefined) {
     delete process.env["SPUR_CONFIG"];
@@ -1093,6 +1094,7 @@ projects:
   });
 
   it("parses telegram sources with env token and matching trigger events", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
     const configPath = await writeConfig(`
 projects:
   backend:
