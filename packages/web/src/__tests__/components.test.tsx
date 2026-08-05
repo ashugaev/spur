@@ -2186,6 +2186,60 @@ describe("Dashboard", () => {
     );
   });
 
+  it("keeps prompt edits made before projects finish loading", async () => {
+    let resolveSessions: ((response: Response) => void) | undefined;
+    const sessionsResponse = new Promise<Response>((resolve) => {
+      resolveSessions = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") return sessionsResponse;
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "api",
+      prompt: "Stored prompt",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Typed while loading" },
+    });
+    resolveSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+    });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Typed while loading",
+    );
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Typed while loading",
+      );
+    });
+  });
+
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
