@@ -132,12 +132,24 @@ test.describe("D6e: Backend-connection gate", () => {
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockRecoveringTerminal(page);
+    const state: RuntimeState = { alive: true, version: "1.4.2", healthyServed: 0 };
+    let failedSessionsRequests = 0;
     let sessions = [
       makeWorkingSession({ id: "recovery-session", prompt: "Recovery state initial" }),
     ];
     await mockSessions(page, () => sessions);
-
-    const state: RuntimeState = { alive: true, version: "1.4.2", healthyServed: 0 };
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
+      if (state.alive) {
+        await route.fallback();
+        return;
+      }
+      failedSessionsRequests += 1;
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Backend unavailable" }),
+      });
+    });
     await routeRuntimeInfo(page, () => state);
 
     await page.goto("/");
@@ -160,6 +172,7 @@ test.describe("D6e: Backend-connection gate", () => {
     await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 35_000 });
     await expect(page.getByText("Reconnecting to Spur…")).toBeVisible();
     await expect(filter).toHaveValue("Recovery state");
+    await expect.poll(() => failedSessionsRequests).toBeGreaterThan(0);
 
     // The background app tree is marked inert while the overlay blocks it.
     await expect(page.locator("[inert]")).toHaveCount(1);
