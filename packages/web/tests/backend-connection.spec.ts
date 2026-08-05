@@ -85,13 +85,12 @@ async function setTerminalAlive(page: Page, alive: boolean) {
 }
 
 async function terminalSocketCount(page: Page) {
-  return page.evaluate(
-    () =>
-      (
-        window as unknown as {
-          __recoveryTerminal: { socketCount(): number };
-        }
-      ).__recoveryTerminal.socketCount(),
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        __recoveryTerminal: { socketCount(): number };
+      }
+    ).__recoveryTerminal.socketCount(),
   );
 }
 
@@ -155,9 +154,7 @@ test.describe("D6e: Backend-connection gate", () => {
     await page.goto("/");
     const filter = page.getByRole("textbox", { name: "Filter sessions" });
     await filter.fill("Recovery state");
-    await page
-      .getByRole("button", { name: "Open web terminal for recovery-session" })
-      .click();
+    await page.getByRole("button", { name: "Open web terminal for recovery-session" }).click();
     await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
       "data-ws-status",
       "connected",
@@ -187,9 +184,7 @@ test.describe("D6e: Backend-connection gate", () => {
       });
     });
 
-    sessions = [
-      makeWorkingSession({ id: "recovery-session", prompt: "Recovery state refreshed" }),
-    ];
+    sessions = [makeWorkingSession({ id: "recovery-session", prompt: "Recovery state refreshed" })];
     await setTerminalAlive(page, true);
     state.alive = true;
     state.version = "1.5.0";
