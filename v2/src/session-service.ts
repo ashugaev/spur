@@ -258,10 +258,12 @@ import {
 import {
   addUnconfiguredProject,
   buildMergedConfig,
+  ConfigRegistryScanner,
   mutateConfigRegistry,
   readConfigRegistryFile,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
+  type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
@@ -1841,6 +1843,9 @@ export class SessionService {
   readonly startedAt: string;
   config: AppConfig;
   private registryPaths: string[];
+  // Shared by boot and later rescans. Keeps path-local loads hot and bounds
+  // registry warnings to one per canonical path for this daemon process.
+  private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
@@ -1856,6 +1861,12 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  // Dedupes session.state.classified: emit once per classify call only when
+  // the raw classified state actually changed since the last classify call
+  // for that session (not the message, so a detail-only churn like
+  // records=50 -> records=17 stays silent). Swept alongside the other
+  // classification-scoped maps in pollAttentionStates.
+  private readonly lastClassifiedLogStates = new Map<string, SessionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -1939,18 +1950,14 @@ export class SessionService {
       bootstrap.config.dataDir,
       bootstrap.config.configPath,
     );
-    const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
-      skipInvalid: true,
-      warn: (message) => {
-        logSpurEvent(bootstrap.config.dataDir, {
-          event: "daemon.registry.warning",
-          level: "warn",
-          message,
-        });
-      },
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: this.registryPaths,
+      protectedPaths: [bootstrap.config.configPath],
     });
+    this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
-    this.applyConfig(merged.config, merged.configPaths);
+    this.applyConfig(scan.config, scan.configPaths);
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
     this.startSidecarReaper();
@@ -2792,13 +2799,13 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
-      this.registryPaths.includes(configPath)
+      this.registryPaths.includes(canonicalPath)
         ? this.registryPaths
-        : [...this.registryPaths, configPath],
+        : [...this.registryPaths, canonicalPath],
     );
   }
 
@@ -2806,41 +2813,50 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
+    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== canonicalPath));
   }
 
   private previewRegistryPaths(nextRegistryPaths: string[]): {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    const warnings: string[] = [];
-    const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
-      skipInvalid: true,
-      warn: (message) => warnings.push(message),
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: nextRegistryPaths,
+      protectedPaths: [this.bootstrapConfigPath],
     });
+    this.emitRegistryScan(this.config.dataDir, scan);
     const currentSignature = JSON.stringify(this.config.projects);
-    const nextSignature = JSON.stringify(merged.config.projects);
+    const nextSignature = JSON.stringify(scan.config.projects);
     const unconfiguredIds = new Set(this.listUnconfiguredProjects().map((entry) => entry.id));
-    const unconfiguredToRemove = Object.keys(merged.config.projects).filter((id) =>
+    const unconfiguredToRemove = Object.keys(scan.config.projects).filter((id) =>
       unconfiguredIds.has(id),
     );
     return {
-      config: merged.config,
-      registryPaths: merged.configPaths,
-      warnings,
+      config: scan.config,
+      registryPaths: scan.configPaths,
       changed:
         currentSignature !== nextSignature ||
-        merged.configPaths.length !== this.registryPaths.length ||
-        merged.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
+        scan.configPaths.length !== this.registryPaths.length ||
+        scan.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
         unconfiguredToRemove.length > 0,
       unconfiguredToRemove,
     };
+  }
+
+  private emitRegistryScan(dataDir: string, scan: RegistryScanResult): void {
+    for (const diagnostic of scan.newDiagnostics) {
+      logSpurEvent(dataDir, {
+        event: "daemon.registry.warning",
+        level: "warn",
+        message: diagnostic.message,
+      });
+    }
   }
 
   applyConfig(
@@ -2848,11 +2864,13 @@ export class SessionService {
     registryPaths: string[],
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
+    const nextRegistryPaths = [...new Set(registryPaths)];
+    this.registryScanner.invalidateRemovedPaths(this.registryPaths, nextRegistryPaths);
     this.config = config;
     // Local project configs are parsed with the daemon config as defaults, so
     // every cached resolution is stale the moment the daemon config changes.
     this.sessionProjectCache.clear();
-    this.registryPaths = [...new Set(registryPaths)];
+    this.registryPaths = nextRegistryPaths;
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
@@ -3298,6 +3316,11 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.lastClassifiedLogStates.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastClassifiedLogStates.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -11045,6 +11068,11 @@ export class SessionService {
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
+    // Holds the message for the single deduped session.state.classified emit
+    // at the end of this function; undefined means never log (unchanged from
+    // today for non-running/dead-pane sessions). A later branch's assignment
+    // overrides an earlier one exactly as it overrides `state`.
+    let classifiedDetail: string | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -11109,30 +11137,15 @@ export class SessionService {
           state = statusResult.state;
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (claude status=${statusResult.status})`,
-          });
+          classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no claude status/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);
@@ -11143,35 +11156,15 @@ export class SessionService {
         liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`,
-          });
+          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
-          });
+          classifiedDetail = `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`;
         } else if (codexState.hookState) {
           const hookState = codexState.hookState;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
-          });
+          classifiedDetail = `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`;
         } else {
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no hook/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no hook/jsonl)`;
         }
       } else {
         const jsonlResult = await readCursorJsonlState(
@@ -11186,20 +11179,10 @@ export class SessionService {
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no cursor jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       }
 
@@ -11242,12 +11225,7 @@ export class SessionService {
             session.id,
             Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: working (claude compacting)",
-          });
+          classifiedDetail = "State: working (claude compacting)";
         } else {
           this.claudeCompactingOverrides.delete(session.id);
         }
@@ -11261,6 +11239,7 @@ export class SessionService {
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "working";
+          classifiedDetail = "State: working (claude compacting)";
         }
       } else if (scanPane && strategy === "hook") {
         // Codex-specific: a hard rate-limit banner always wins. Otherwise,
@@ -11279,12 +11258,7 @@ export class SessionService {
             session.id,
             Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: needs_input (codex MCP permission dialog)",
-          });
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
         }
@@ -11304,6 +11278,7 @@ export class SessionService {
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "needs_input";
           rateLimit = null;
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
@@ -11314,23 +11289,27 @@ export class SessionService {
       }
       if (rateLimit?.limited) {
         state = "rate_limited";
-        this.logEvent("session.state.classified", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `State: rate_limited (${rateLimit.reason})`,
-        });
+        classifiedDetail = `State: rate_limited (${rateLimit.reason})`;
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
         historySourcePath = serverErrorJsonlPath;
+        classifiedDetail = "State: error (claude server error)";
+      }
+    }
+
+    if (classifiedDetail === undefined) {
+      this.lastClassifiedLogStates.delete(session.id);
+    } else {
+      if (this.lastClassifiedLogStates.get(session.id) !== state) {
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
           projectId: session.project,
-          message: "State: error (claude server error)",
+          message: classifiedDetail,
         });
       }
+      this.lastClassifiedLogStates.set(session.id, state);
     }
 
     return {
