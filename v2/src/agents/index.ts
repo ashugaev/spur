@@ -35,7 +35,7 @@ import {
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
-import type { AgentName, TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import type { AgentName, ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -46,6 +46,7 @@ interface AgentPlanOptions {
   claudeConfigDir?: string;
   codexHomePath?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -121,6 +122,7 @@ interface AgentAdapter {
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
+    modelsCacheHome?: string;
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -156,6 +158,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   model?: string;
   claudeConfigDir?: string;
   sessionId?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
@@ -165,6 +168,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
     ...(options?.model ? { model: options.model } : {}),
     ...(options?.claudeConfigDir ? { claudeConfigDir: options.claudeConfigDir } : {}),
     ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -174,6 +178,7 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   startupImagePaths?: string[];
   restrictWrites?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
@@ -181,6 +186,7 @@ function codexPlanOptions(options?: AgentPlanOptions): {
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -340,10 +346,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       ctx.codexSessionsDir
         ? readCodexTranscriptEntries(ctx.codexSessionsDir)
         : Promise.resolve(null),
-    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites }) => ({
+    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites, modelsCacheHome }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(modelsCacheHome ? { modelsCacheHome } : {}),
       }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
@@ -506,6 +513,7 @@ export async function setupAgentHooks(args: {
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;
+  modelsCacheHome?: string;
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;

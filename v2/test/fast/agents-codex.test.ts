@@ -142,6 +142,11 @@ describe("buildCodexPlan", () => {
     );
   });
 
+  it("sets configured reasoning effort", () => {
+    const plan = buildCodexPlan("prompt", { reasoningEffort: "medium" });
+    expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="medium"'`);
+  });
+
   it("passes startup images on the launch command and skips tmux prompt delivery", () => {
     const plan = buildCodexPlan("describe this", {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
@@ -153,8 +158,8 @@ describe("buildCodexPlan", () => {
   });
 
   it("appends --model when provided", () => {
-    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
-    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+    const plan = buildCodexPlan("prompt", { model: "codex-model-id" });
+    expect(plan.launchCommand).toContain("--model 'codex-model-id'");
   });
 
   it("omits --model when absent", () => {
@@ -214,6 +219,11 @@ describe("buildCodexResumePlan", () => {
       codexArgs: ["-c", 'service_tier="fast"', "--enable", "fast_mode"],
     });
     expect(plan.launchCommand).toContain(`'-c' 'service_tier="fast"' '--enable' 'fast_mode'`);
+  });
+
+  it("sets configured reasoning effort on resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", { reasoningEffort: "high" });
+    expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="high"'`);
   });
 
   it("does not include initialMessage", () => {
@@ -468,7 +478,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   });
 
   it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
-    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
+    const config = '[tui.model_availability_nux]\n"codex-model-id" = 3\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
@@ -483,7 +493,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n',
     );
   });
 
@@ -509,6 +519,15 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+
+  it("copies the configured models cache into the isolated home", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" });
+    expect(mockCp).toHaveBeenCalledWith(
+      "/persistent/codex/models_cache.json",
+      "/session/tool/codex-home/models_cache.json",
+      { force: true },
+    );
   });
 
   it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {

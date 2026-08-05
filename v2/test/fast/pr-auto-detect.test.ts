@@ -210,6 +210,7 @@ function baseConfig(): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     voice: {
       provider: "whisper_cpp",
       language: "en",

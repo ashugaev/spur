@@ -547,6 +547,7 @@ export interface ProjectConfig {
   restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
+  reasoningEffort?: AgentReasoningEffortConfig;
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
@@ -559,6 +560,9 @@ export interface ProjectConfig {
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
 }
+
+export type ProviderReasoningEffort = "low" | "medium" | "high";
+export type AgentReasoningEffortConfig = Partial<Record<"claude" | "codex", ProviderReasoningEffort>>;
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
@@ -635,6 +639,9 @@ export interface AppConfig {
   };
   ui: {
     port: number;
+  };
+  models: {
+    codexHome: string;
   };
   voice:
     | {
@@ -776,6 +783,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -926,6 +934,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -1053,11 +1062,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   notes?: string;
 }
 

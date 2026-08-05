@@ -610,6 +610,7 @@ function baseConfig() {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     rateLimitReactivation: { afterHours: 0 },
     authRotation: {
       autoRotateOnRateLimit: false,
@@ -2912,13 +2913,13 @@ describe("SessionService", () => {
     expect(result.planMode).toBe(true);
   });
 
-  it("passes project codex args into codex launch planning", async () => {
+  it("uses request reasoning effort over the project value", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
         api: {
           ...baseConfig().projects.api,
-          codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+          reasoningEffort: { codex: "high" },
         },
       },
     });
@@ -2935,10 +2936,11 @@ describe("SessionService", () => {
       project: "api",
       agent: "codex",
       prompt: "hello",
+      reasoningEffort: "low",
     });
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
-      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+      reasoningEffort: "low",
     });
   });
 

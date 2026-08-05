@@ -1022,7 +1022,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           agent: "cursor",
-          model: "gpt-5.3-codex",
+          model: "codex-model-id",
           notes: "Continue UI polish",
         }),
       }),
@@ -1037,7 +1037,7 @@ describe("Spur web API routes", () => {
     expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
       {
         agent: "cursor",
-        model: "gpt-5.3-codex",
+        model: "codex-model-id",
         notes: "Continue UI polish",
       },
     );

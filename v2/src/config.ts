@@ -11,6 +11,7 @@ import {
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
   type AdmissionConfig,
+  type AgentReasoningEffortConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
@@ -86,6 +87,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
+  codexHome: string;
   voiceProvider:
     | "whisper_cpp"
     | "faster_whisper"
@@ -269,6 +271,25 @@ function parseDefaultModels(
     models[key] = asString(entry, `${label}.defaultModels.${key}`);
   }
   return models;
+}
+
+function parseProjectReasoningEffort(
+  projectId: string,
+  value: unknown,
+): AgentReasoningEffortConfig | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
+  const effort: AgentReasoningEffortConfig = {};
+  for (const [agent, entry] of Object.entries(raw)) {
+    if (agent !== "claude" && agent !== "codex") {
+      throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
+    }
+    if (entry !== "low" && entry !== "medium" && entry !== "high") {
+      throw new Error(`projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`);
+    }
+    effort[agent] = entry;
+  }
+  return effort;
 }
 
 function parseTriggerSpawnBlock(
@@ -477,6 +498,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    codexHome: join(homedir(), ".codex"),
     voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
     voiceLanguage: DEFAULT_VOICE_LANGUAGE,
@@ -1330,6 +1352,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
+  if (codexArgs?.some((arg) => arg.includes("model_reasoning_effort"))) {
+    throw new Error(`${label}.codexArgs must not set model_reasoning_effort; use reasoningEffort`);
+  }
+  const reasoningEffort = parseProjectReasoningEffort(projectId, raw["reasoningEffort"]);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
@@ -1434,6 +1460,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
@@ -1719,6 +1746,7 @@ function parseConfigFile(
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const userActionLog = root["userActionLog"]
@@ -1805,6 +1833,16 @@ function parseConfigFile(
         mode === "instance"
           ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
           : resolvedDefaults.uiPort,
+    },
+    models: {
+      codexHome:
+        mode === "instance"
+          ? resolveFrom(
+              configDir,
+              asOptionalString(models["codexHome"], "models.codexHome") ??
+                resolvedDefaults.codexHome,
+            )
+          : resolvedDefaults.codexHome,
     },
     voice: (() => {
       if (mode === "project") {
@@ -2067,6 +2105,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          codexHome: defaults.models.codexHome,
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
