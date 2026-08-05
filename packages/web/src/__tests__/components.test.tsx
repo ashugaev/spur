@@ -2186,6 +2186,43 @@ describe("Dashboard", () => {
     );
   });
 
+  it("allows preflight to fill a branch after normalization clears explicit input", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight") {
+        return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Generate a branch" },
+    });
+    const branchInput = screen.getByLabelText("branch name");
+    fireEvent.change(branchInput, { target: { value: "!!!" } });
+    fireEvent.blur(branchInput);
+
+    expect(branchInput).toHaveValue("");
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/preflight", expect.anything());
+        expect(branchInput).toHaveValue("feature/auto-branch");
+      },
+      { timeout: 1_500 },
+    );
+  });
+
   it("keeps prompt edits made before projects finish loading", async () => {
     let resolveSessions: ((response: Response) => void) | undefined;
     const sessionsResponse = new Promise<Response>((resolve) => {
