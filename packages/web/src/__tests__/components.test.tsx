@@ -2159,7 +2159,7 @@ describe("Dashboard", () => {
     expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
   });
 
-  it("debounces spawn draft writes and flushes pending edits on close", async () => {
+  it("debounces spawn draft writes and flushes pending edits on every close path", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -2198,6 +2198,16 @@ describe("Dashboard", () => {
     fireEvent.change(prompt, { target: { value: "Close now" } });
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    const reopenedPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(reopenedPrompt, { target: { value: "Escape now" } });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Escape now");
+    expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Escape now");
   });
 
   it("keeps a restored explicit branch when preflight suggests another branch", async () => {

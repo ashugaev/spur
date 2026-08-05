@@ -1180,18 +1180,6 @@ export function Dashboard() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!spawnOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSpawnOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [spawnOpen]);
-
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -1616,6 +1604,23 @@ export function Dashboard() {
     const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
     return () => clearTimeout(timer);
   }, [spawnDraft, spawnOpen]);
+
+  const closeSpawnModal = useCallback(() => {
+    if (spawnDraft) writeSpawnDraft(spawnDraft);
+    setSpawnOpen(false);
+  }, [spawnDraft]);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSpawnModal();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [closeSpawnModal, spawnOpen]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -2647,10 +2652,7 @@ export function Dashboard() {
               setSpawnAgent(next);
               setSpawnModel(null);
             }}
-            onClose={() => {
-              if (spawnDraft) writeSpawnDraft(spawnDraft);
-              setSpawnOpen(false);
-            }}
+            onClose={closeSpawnModal}
             onPromptChange={(next) => {
               spawnDraftDirtyRef.current = true;
               setSpawnPrompt(next);
