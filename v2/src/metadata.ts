@@ -75,6 +75,10 @@ function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceI
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
 
+function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-review-pagination", projectId, `${sourceId}.json`);
+}
+
 function lifecycleBaselineRegistryFilePath(
   dataDir: string,
   projectId: string,
@@ -1142,6 +1146,43 @@ export function readCommentSeenRegistry(
   sourceId: string,
 ): Set<string> {
   return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function readGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, string> {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function writeGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  cursors: ReadonlyMap<string, string>,
+): void {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (cursors.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...cursors].sort(([left], [right]) => left.localeCompare(right))),
+  );
 }
 
 export function recordCommentSeen(

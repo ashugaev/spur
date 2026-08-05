@@ -3,6 +3,7 @@ import type * as ghModule from "../../src/gh.js";
 import type { ReviewSignal, ReviewSnapshot, SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
+const ghTransportMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
@@ -12,16 +13,19 @@ const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
+const readGitHubReviewPaginationMock = vi.fn();
+const writeGitHubReviewPaginationMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
 const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
+const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
-  gh: ghMock,
+  gh: ghTransportMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -32,6 +36,7 @@ vi.mock("../../src/metadata.js", () => ({
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
@@ -40,10 +45,15 @@ vi.mock("../../src/metadata.js", () => ({
   recordWorkItem: recordWorkItemMock,
   removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
+  writeGitHubReviewPagination: writeGitHubReviewPaginationMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
+}));
+vi.mock("../../src/user-action-log.js", () => ({
+  hasRecentSessionUserAction: hasRecentSessionUserActionMock,
 }));
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
@@ -51,6 +61,8 @@ vi.mock("node:fs", () => ({
 
 const { githubSourceModule, tokenizeSearchQuery } =
   await import("../../src/event-sources/github.js");
+const { GH_POLL_MIN_GRAPHQL_REMAINING, _resetGhUsageForTests, recordGraphqlBudget } =
+  await import("../../src/gh.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -98,6 +110,74 @@ function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): 
   return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
 }
 
+function parseMockJson(raw: unknown, fallback: unknown): unknown {
+  if (typeof raw !== "string") return fallback;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return fallback;
+  }
+}
+
+function graphqlAuthor(user: unknown): { login: unknown } | null {
+  return typeof user === "object" && user !== null && "login" in user
+    ? { login: user.login }
+    : null;
+}
+
+async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
+  if (args[0] !== "api" || !args.includes("graphql")) {
+    return ghMock(cwd, ...args) as Promise<string>;
+  }
+  const prRaw = await ghMock(cwd, "pr", "view");
+  const parsedPr = parseMockJson(prRaw, null);
+  const pr = Array.isArray(parsedPr) ? parsedPr[0] : parsedPr;
+  if (typeof pr !== "object" || pr === null) return JSON.stringify({ data: { r: { a0: null } } });
+  const record = pr as Record<string, unknown>;
+  const checks = parseMockJson(await ghMock(cwd, "pr", "checks"), []);
+  const reviewComments = parseMockJson(await ghMock(cwd, "api", "pulls/comments"), []);
+  const issueComments = parseMockJson(await ghMock(cwd, "api", "issues/comments"), []);
+  const terminal = record.state === "MERGED" || record.state === "CLOSED";
+  const reviews = terminal ? [] : parseMockJson(await ghMock(cwd, "api", "pulls/reviews"), []);
+  const rollup = Array.isArray(record.statusCheckRollup) ? record.statusCheckRollup : checks;
+  const mapAuthor = (value: unknown): Record<string, unknown> => {
+    const item = value as Record<string, unknown>;
+    return { ...item, databaseId: item.id, author: graphqlAuthor(item.user) };
+  };
+  const node = {
+    ...record,
+    commits: {
+      nodes: [
+        {
+          commit: {
+            statusCheckRollup: {
+              contexts: { nodes: Array.isArray(rollup) ? rollup : [] },
+            },
+          },
+        },
+      ],
+    },
+    reviewThreads: {
+      nodes: [
+        {
+          isResolved: false,
+          comments: {
+            nodes: Array.isArray(reviewComments) ? reviewComments.map(mapAuthor) : [],
+          },
+        },
+      ],
+    },
+    comments: { nodes: Array.isArray(issueComments) ? issueComments.map(mapAuthor) : [] },
+    reviews: { nodes: Array.isArray(reviews) ? reviews.map(mapAuthor) : [] },
+  };
+  const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+      r: { a0: branchQuery ? { nodes: [node] } : node },
+    },
+  });
+}
 function trackSeenComments(initial: readonly string[] = []): Set<string> {
   const seen = new Set<string>(initial);
   readCommentSeenRegistryMock.mockImplementation(() => new Set(seen));
@@ -112,9 +192,12 @@ function trackSeenComments(initial: readonly string[] = []): Set<string> {
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetGhUsageForTests();
+    ghTransportMock.mockImplementation(legacyGhAdapter);
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    readGitHubReviewPaginationMock.mockReturnValue(new Map());
     // Default: the session has already established its lifecycle baseline, so
     // lifecycle signals emit on transitions. The first-poll-suppression test
     // overrides this to an empty set.
@@ -122,9 +205,11 @@ describe("github source", () => {
     // Default: sessions have a valid git worktree so polling proceeds. The
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
+    hasRecentSessionUserActionMock.mockReturnValue(false);
   });
 
   afterEach(() => {
+    _resetGhUsageForTests();
     vi.useRealTimers();
   });
 
@@ -280,10 +365,13 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("skips a session whose worktree is not a git repository and warns exactly once", async () => {
+  it("does not spawn a git worktree probe on the review-poll hot path", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([makeSession()]);
     isGitWorktreeMock.mockResolvedValue(false);
+    mockLifecyclePoll(prView());
+    mockLifecyclePoll(prView());
+    mockLifecyclePoll(prView());
     const logger = { info: vi.fn(), warn: vi.fn() };
 
     const handle = await githubSourceModule.start({
@@ -296,7 +384,6 @@ describe("github source", () => {
       logger,
     });
 
-    // The proactive validity gate short-circuits before any shell-out, on every poll.
     handle.runOnStart?.();
     await flushPollCycle();
     handle.runOnStart?.();
@@ -304,22 +391,16 @@ describe("github source", () => {
     handle.runOnStart?.();
     await flushPollCycle();
 
-    expect(ghMock).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("worktree missing or not a git repository"),
-    );
+    expect(ghMock).toHaveBeenCalledTimes(15);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
     const deadWorktreeEvents = logSpurEventMock.mock.calls.filter(
       (call) =>
         typeof call[1] === "object" &&
         call[1] !== null &&
         (call[1] as { event?: string }).event === "source.poll.dead_worktree",
     );
-    expect(deadWorktreeEvents).toHaveLength(1);
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
-      expect.objectContaining({ event: "source.poll.dead_worktree", sessionId: "api-a1b2" }),
-    );
+    expect(deadWorktreeEvents).toHaveLength(0);
     handle.stop();
   });
 
@@ -353,10 +434,9 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("resumes polling once a dead worktree is repaired (self-healing, no one-way latch)", async () => {
+  it("uses structured session state instead of the git worktree probe", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    // tick1: worktree gone -> skip; tick2 onward: repaired -> poll resumes.
     isGitWorktreeMock.mockResolvedValueOnce(false).mockResolvedValue(true);
     mockLifecyclePoll(prView());
     const logger = { info: vi.fn(), warn: vi.fn() };
@@ -371,25 +451,17 @@ describe("github source", () => {
       logger,
     });
 
-    // tick1: dead worktree, no shell-out.
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(ghMock).not.toHaveBeenCalled();
-
-    // tick2: repaired, polling resumes.
     handle.runOnStart?.();
     await flushPollCycle();
     expect(ghMock).toHaveBeenCalled();
-
-    // The warning only fired during the dead phase and never again after healing.
-    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
     handle.stop();
   });
 
-  it("re-warns after a healed worktree dies again, logging once per dead phase", async () => {
+  it("does not emit dead-worktree events from review polling", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    // dead, dead (still same phase -> warn once), healed, dead again (new phase -> warn twice).
     isGitWorktreeMock
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
@@ -408,19 +480,14 @@ describe("github source", () => {
       logger,
     });
 
-    // Two dead ticks: warn logged once for the phase.
     handle.runOnStart?.();
     await flushPollCycle();
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-
-    // Heal, then die again: a fresh dead phase warns a second time.
-    handle.runOnStart?.();
-    await flushPollCycle();
-    handle.runOnStart?.();
-    await flushPollCycle();
-    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(isGitWorktreeMock).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "source.poll.dead_worktree" }),
+    );
     handle.stop();
   });
 
@@ -1152,6 +1219,93 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("collapses two tracked PRs in one repo to one GraphQL invocation", async () => {
+    const second = makeSession({
+      id: "api-c3d4",
+      workspaceId: "api-c3d4",
+      worktreePath: "/tmp/spur-worktrees/api-c3d4",
+      pr: {
+        number: 43,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/43",
+      },
+    });
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession(), second]);
+    const node = (number: number) => ({
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/acme/api/pull/${number}`,
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isDraft: false,
+      state: "OPEN",
+      commits: { nodes: [] },
+      reviewThreads: { nodes: [] },
+      reviews: { nodes: [] },
+      comments: { nodes: [] },
+    });
+    ghTransportMock.mockReset().mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+          r: { a0: node(42), a1: node(43) },
+        },
+      }),
+    );
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    expect(ghTransportMock.mock.calls[0]).toEqual(
+      expect.arrayContaining(["api", "graphql", "-F", "n0=42", "-F", "n1=43"]),
+    );
+    expect(ghTransportMock.mock.calls[0]).not.toContain("view");
+    expect(ghTransportMock.mock.calls[0]).not.toContain("checks");
+    expect(writeReviewSourceSnapshotMock).toHaveBeenCalledTimes(2);
+    handle.stop();
+  });
+
+  it("preserves an unbound snapshot when the pull-request connection is malformed", async () => {
+    const existing = storedSnapshot([
+      { key: "changes_requested", kind: "changes_requested", text: "Changes requested." },
+    ]);
+    const { pr: _pr, ...unbound } = makeSession();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([[unbound.id, existing]]));
+    listSessionsMock.mockReturnValue([unbound]);
+    ghTransportMock.mockReset().mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-06-19T11:00:00.000Z" },
+          r: { a0: null },
+        },
+      }),
+    );
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("spends no review-poll call and preserves snapshots below the GraphQL reserve", async () => {
+    const existing = storedSnapshot([
+      { key: "changes_requested", kind: "changes_requested", text: "Changes requested." },
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existing]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    recordGraphqlBudget(GH_POLL_MIN_GRAPHQL_REMAINING - 1, Date.now() + 60_000, Date.now());
+
+    const handle = await startLifecycle(vi.fn());
+
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("emits github:merged when the PR state is MERGED and not github:closed", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
@@ -1224,6 +1378,7 @@ describe("github source", () => {
     const handle = await startLifecycle(emit);
 
     expect(ghMock).not.toHaveBeenCalled();
+    expect(ghTransportMock).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     handle.stop();
   });
@@ -1249,6 +1404,7 @@ describe("github source", () => {
     const handle = await startLifecycle(emit);
 
     expect(ghMock).not.toHaveBeenCalled();
+    expect(ghTransportMock).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     handle.stop();
   });
@@ -2011,6 +2167,515 @@ describe("github source", () => {
     });
 
     handle.stop();
+  });
+
+  describe("adaptive poll", () => {
+    // These tests drive the REAL production gate: the `startInterval` tick at
+    // github.ts's `if (!shouldPollThisTick()) return;`. That interval is created via
+    // `node:timers`' own `setInterval`, which vitest's fake timers do not intercept
+    // (verified empirically: neither a full `vi.useFakeTimers()` nor an explicit
+    // `toFake: ["setInterval", "clearInterval"]` list makes a directly-imported
+    // `node:timers` callback fire under `vi.advanceTimersByTimeAsync`). So `intervalMs`
+    // here is a small REAL duration and ticks are awaited with real waits, while `Date`
+    // stays faked and frozen (only moved via explicit `vi.setSystemTime`) so the
+    // adaptive-window math above the tick is fully deterministic. `runOnStart: false`
+    // is used so the harness's own ungated startup poll (`await pollCycle(false)` in
+    // `start()`) seeds `attemptedSessionIds`/snapshots once, and every poll after that
+    // is driven exclusively through the real gated interval callback.
+    const REAL_INTERVAL_MS = 20;
+
+    function queuePollResponse(checksState: string): void {
+      ghMock.mockResolvedValueOnce(
+        prView({ statusCheckRollup: [{ name: "check", state: checksState }] }),
+      );
+      ghMock.mockResolvedValueOnce(JSON.stringify([{ name: "check", state: checksState }]));
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+      ghMock.mockResolvedValueOnce("[]");
+    }
+
+    async function waitForGhCallCount(target: number, timeoutMs = 4000): Promise<void> {
+      const stepMs = 10;
+      let waited = 0;
+      while (ghMock.mock.calls.length < target) {
+        if (waited >= timeoutMs) {
+          throw new Error(
+            `timed out waiting for ghMock call count >= ${target}, saw ${ghMock.mock.calls.length}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+        waited += stepMs;
+      }
+    }
+
+    async function waitForTransportCallCount(target: number, timeoutMs = 4000): Promise<void> {
+      const stepMs = 10;
+      let waited = 0;
+      while (ghTransportMock.mock.calls.length < target) {
+        if (waited >= timeoutMs) {
+          throw new Error(
+            `timed out waiting for gh transport call count >= ${target}, saw ${ghTransportMock.mock.calls.length}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+        waited += stepMs;
+      }
+    }
+
+    async function assertGhCallCountStable(
+      count: number,
+      durationMs = REAL_INTERVAL_MS * 8,
+    ): Promise<void> {
+      await new Promise((resolve) => setTimeout(resolve, durationMs));
+      expect(ghMock).toHaveBeenCalledTimes(count);
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-07-30T00:00:00.000Z"));
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+    });
+
+    it("polls every interval tick when adaptivePoll is not configured", async () => {
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      // Seeded by the ungated startup poll in start().
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Both subsequent cycles run only through the real gated interval tick.
+      await waitForGhCallCount(10);
+      await waitForGhCallCount(15);
+
+      handle.stop();
+    });
+
+    it("polls an in-window tick when the last cycle saw a non-terminal CI check", async () => {
+      queuePollResponse("IN_PROGRESS");
+      queuePollResponse("IN_PROGRESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Well inside the slow window (Date never advanced), but the last cycle's CI
+      // was non-terminal, so the real gated tick polls anyway.
+      await waitForGhCallCount(10);
+
+      handle.stop();
+    });
+
+    it("goes quiet in-window once CI settles with no pending session, then polls again past the slow window", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Still inside the slow window: settled CI, session already attempted, no
+      // activity — real ticks keep firing but must stay suppressed.
+      await assertGhCallCountStable(5);
+
+      // Past the slow window: the deadline alone re-arms the real gated tick.
+      queuePollResponse("SUCCESS");
+      vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
+      await waitForGhCallCount(10);
+
+      handle.stop();
+    });
+
+    it("polls in-window on recent session activity, then quiets again once activity ages out", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      hasRecentSessionUserActionMock.mockReturnValue(true);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(10);
+
+      hasRecentSessionUserActionMock.mockReturnValue(false);
+      await assertGhCallCountStable(10);
+
+      handle.stop();
+    });
+
+    it("forces a poll for a brand-new session mid-window even when the tracked session is quiet", async () => {
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // A brand-new session appears mid-window: never attempted, forces a real poll.
+      const newSession = makeSession({
+        id: "api-c3d4",
+        pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+      });
+      listSessionsMock.mockReturnValue([makeSession(), newSession]);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(10);
+
+      handle.stop();
+    });
+
+    it("keeps a capacity-skipped session unattempted for the next in-window tick", async () => {
+      listSessionsMock.mockReturnValue(
+        Array.from({ length: 51 }, (_unused, index) =>
+          makeSession({
+            id: `api-${index}`,
+            worktreePath: `/tmp/api-${index}`,
+            pr: {
+              number: index + 1,
+              repo: "acme/api",
+              url: `https://github.com/acme/api/pull/${index + 1}`,
+            },
+          }),
+        ),
+      );
+      queuePollResponse("SUCCESS");
+      queuePollResponse("SUCCESS");
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+      await waitForGhCallCount(10);
+
+      // Capacity drain ran inside the original slow window. It must not move
+      // that deadline forward or the last targets would extend every cycle.
+      vi.setSystemTime(new Date("2026-07-30T00:10:00.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(15);
+
+      handle.stop();
+    });
+
+    it("keeps the CI-active hysteresis flag intact when a poll cycle is suppressed by a rate-limit cooldown", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const rateLimitError = Object.assign(new Error("GraphQL: API rate limit already exceeded"), {
+        stderr: JSON.stringify({
+          errors: [{ message: "API rate limit already exceeded" }],
+          data: { rateLimit: { resetAt: "2026-07-30T00:05:00.000Z" } },
+        }),
+      });
+      ghMock.mockRejectedValueOnce(rateLimitError);
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Next real tick bypasses the deadline gate on lastCycleCiActive, but the poll
+      // itself hits a rate limit on the very first gh call and enters cooldown before
+      // ever reassigning lastCycleCiActive.
+      await waitForGhCallCount(6);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("GitHub rate limit hit"));
+
+      // While the cooldown holds, shouldSkipGitHubCalls suppresses every further tick.
+      await assertGhCallCountStable(6);
+
+      // Lift the cooldown but stay well short of the slow-window deadline (set from
+      // the first cycle at T0+600_000ms = 00:10:00). If the suppressed cycle had
+      // wrongly reset lastCycleCiActive to false, the deadline gate alone would keep
+      // suppressing here and this would time out.
+      vi.setSystemTime(new Date("2026-07-30T00:05:01.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
+
+      handle.stop();
+    });
+
+    it("preserves the CI-active hysteresis flag when a session poll errors instead of observing settled CI", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Next real tick bypasses the deadline gate on lastCycleCiActive, but the poll
+      // itself hits a transient, non-rate-limit error on its very first gh call — the
+      // cycle never gets to observe whether CI actually settled.
+      ghMock.mockRejectedValueOnce(new Error("gh offline"));
+      await waitForGhCallCount(6);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // A buggy implementation would have reset lastCycleCiActive to false here (no
+      // session in this cycle reported ciActive), so the deadline gate alone would
+      // suppress every further tick. The flag must instead survive the errored cycle,
+      // keeping ticks forced well inside the slow window (deadline stays at 00:10:00).
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
+
+      handle.stop();
+    });
+
+    it("preserves the CI-active hysteresis flag when the batched request fails", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      ghTransportMock.mockRejectedValueOnce(new Error("gh: connection reset by peer"));
+      await waitForTransportCallCount(2);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // A buggy implementation would count the failed checks fetch as a clean
+      // observation (no exception propagated) and reset lastCycleCiActive to false,
+      // so the deadline gate alone would suppress every further tick. The flag must
+      // instead survive, keeping ticks forced well inside the slow window (deadline
+      // stays at 00:10:00).
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(10);
+
+      handle.stop();
+    });
+
+    it("stops letting a persistently erroring session latch the CI-active hysteresis flag after a bounded number of consecutive failures", async () => {
+      // Seed lastCycleCiActive = true via the ungated startup poll.
+      queuePollResponse("IN_PROGRESS");
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // The same session errors on every subsequent cycle (e.g. a persistent
+      // 404/permission issue) — never producing a clean observation. The first
+      // CI_HYSTERESIS_ERROR_TOLERANCE (3) consecutive failures still preserve the
+      // flag, each one bypassing the deadline gate for the next tick in turn.
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(6);
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(7);
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(8);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
+
+      // The 4th consecutive failure for this session exceeds the tolerance: it no
+      // longer counts toward the hysteresis flag, so with no other session reporting
+      // active CI this cycle, lastCycleCiActive finally drops to false.
+      ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
+      await waitForGhCallCount(9);
+
+      // A buggy (unbounded) implementation would still have lastCycleCiActive=true
+      // here, so the deadline gate would keep forcing ticks — and each one would
+      // issue another (rejected) gh call, growing the call count. The fix must
+      // instead let the deadline gate suppress further ticks well inside the slow
+      // window (deadline stays at 00:10:00), so the call count stays flat.
+      await assertGhCallCountStable(9);
+
+      handle.stop();
+    });
+
+    it("does not advance the adaptive deadline for a poll cycle suppressed entirely by an active rate-limit cooldown", async () => {
+      // Baseline: startup poll succeeds, legitimately arming the deadline at
+      // T0 + slowIntervalMs = 00:10:00.
+      queuePollResponse("SUCCESS");
+      const rateLimitError = Object.assign(new Error("GraphQL: API rate limit already exceeded"), {
+        stderr: JSON.stringify({
+          errors: [{ message: "API rate limit already exceeded" }],
+          data: { rateLimit: { resetAt: "2026-07-30T00:03:00.000Z" } },
+        }),
+      });
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+      });
+
+      expect(ghMock).toHaveBeenCalledTimes(5);
+
+      // Force the next real tick to attempt a poll mid-window via recent
+      // session activity, and let that attempt hit the rate limit. This is
+      // the cycle that FIRST enters cooldown: `skippedByCooldown` is false
+      // when captured (no cooldown existed yet), so it legitimately re-arms
+      // the deadline — unchanged here since Date hasn't moved.
+      hasRecentSessionUserActionMock.mockReturnValue(true);
+      ghMock.mockRejectedValueOnce(rateLimitError);
+      await waitForGhCallCount(6);
+
+      // Move Date forward, still inside the cooldown window (lifts at
+      // 00:03:00). The forced tick still fires, but this time
+      // `shouldSkipGitHubCalls()` is already true when the cycle captures
+      // `skippedByCooldown`, so the whole cycle is suppressed before any gh
+      // call is made.
+      vi.setSystemTime(new Date("2026-07-30T00:02:00.000Z"));
+      await new Promise((resolve) => setTimeout(resolve, REAL_INTERVAL_MS * 4));
+      expect(ghMock).toHaveBeenCalledTimes(6);
+
+      // Stop forcing attempts and let the cooldown lift. Land on a Date that
+      // is past the ORIGINAL deadline (00:10:00) but well short of where a
+      // buggy implementation would have pushed the deadline to from the
+      // suppressed cycle above (00:02:00 + 600_000 = 00:12:00). Only the
+      // correct "deadline never moved" behavior lets this real tick poll.
+      hasRecentSessionUserActionMock.mockReturnValue(false);
+      vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(11);
+
+      handle.stop();
+    });
   });
 });
 

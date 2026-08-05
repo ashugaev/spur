@@ -13,5 +13,13 @@ export interface ReviewProvider {
     dataDir: string,
     projectId: string,
     sourceId: string,
-  ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null>;
+  ): Promise<{
+    data: ReviewEventData;
+    snapshot: Map<string, ReviewSignal>;
+    ciActive?: boolean;
+    // True when the provider's own CI-check fetch failed (as opposed to genuinely
+    // observing zero active checks). Callers that track CI-active hysteresis across
+    // cycles must not count this session as a "clean" observation when true.
+    ciCheckFetchFailed?: boolean;
+  } | null>;
 }

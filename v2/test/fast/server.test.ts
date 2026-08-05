@@ -68,7 +68,13 @@ describe("startServer", () => {
       await server.stop();
     }
 
-    expect(readEventLog(dataDir).map((entry) => entry.event)).toEqual([
+    const events = readEventLog(dataDir);
+    expect(events[0]).toMatchObject({
+      event: "gh.poll_cycle",
+      details: { cycle: "attention", calls: 0 },
+    });
+    expect(events.map((entry) => entry.event)).toEqual([
+      "gh.poll_cycle",
       "daemon.startup.reconciled",
       "daemon.admission.startup",
       "daemon.started",
