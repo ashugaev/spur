@@ -94,6 +94,7 @@ const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -1576,9 +1577,9 @@ export function Dashboard() {
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
 
-  useEffect(() => {
-    if (!spawnOpen || !spawnProjectId) return;
-    const draft: SpawnDraft = {
+  const spawnDraft = useMemo<SpawnDraft | null>(() => {
+    if (!spawnProjectId) return null;
+    return {
       projectId: spawnProjectId,
       prompt: spawnPrompt,
       agent: spawnAgent,
@@ -1593,7 +1594,6 @@ export function Dashboard() {
       steps: spawnSteps.map((step) => step.value),
       trackerUrl: spawnTrackerUrl,
     };
-    writeSpawnDraft(draft);
   }, [
     spawnAgent,
     spawnBranch,
@@ -1609,6 +1609,12 @@ export function Dashboard() {
     spawnTrackerUrl,
     spawnWorkspaceMode,
   ]);
+
+  useEffect(() => {
+    if (!spawnOpen || !spawnDraft) return;
+    const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [spawnDraft, spawnOpen]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -2640,7 +2646,10 @@ export function Dashboard() {
               setSpawnAgent(next);
               setSpawnModel(null);
             }}
-            onClose={() => setSpawnOpen(false)}
+            onClose={() => {
+              if (spawnDraft) writeSpawnDraft(spawnDraft);
+              setSpawnOpen(false);
+            }}
             onPromptChange={(next) => {
               spawnDraftDirtyRef.current = true;
               setSpawnPrompt(next);
