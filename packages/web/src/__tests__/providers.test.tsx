@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Providers from "@/app/providers";
 import { FAILURE_THRESHOLD, retryIntervalMs } from "@/lib/backend-connection-context";
@@ -11,6 +12,15 @@ function StartSwitchTrigger({ version }: { version: string }) {
   return (
     <button type="button" onClick={() => startSwitch(version)}>
       trigger-start-switch
+    </button>
+  );
+}
+
+function StatefulControl() {
+  const [count, setCount] = useState(0);
+  return (
+    <button type="button" onClick={() => setCount((current) => current + 1)}>
+      local-state-{count}
     </button>
   );
 }
@@ -57,6 +67,21 @@ describe("Providers", () => {
     fireEvent.click(screen.getByText("trigger-start-switch"));
 
     expect(screen.getByText("app-control").closest("[inert]")).not.toBeNull();
+  });
+
+  it("keeps app component state when a blocking overlay makes the tree inert", () => {
+    render(
+      <Providers>
+        <StatefulControl />
+        <StartSwitchTrigger version="1.5.0" />
+      </Providers>,
+    );
+
+    fireEvent.click(screen.getByText("local-state-0"));
+    fireEvent.click(screen.getByText("trigger-start-switch"));
+
+    expect(screen.getByText("local-state-1")).toBeInTheDocument();
+    expect(screen.getByText("local-state-1").closest("[inert]")).not.toBeNull();
   });
 
   it("marks the background app tree inert once the backend-connection gate disconnects", async () => {
