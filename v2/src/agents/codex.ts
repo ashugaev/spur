@@ -16,7 +16,7 @@ import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -415,6 +415,15 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexReasoningEffort(
+  command: string,
+  reasoningEffort: ProviderReasoningEffort | undefined,
+): string {
+  return reasoningEffort
+    ? `${command} -c ${shellEscape(`model_reasoning_effort="${reasoningEffort}"`)}`
+    : command;
+}
+
 function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
   if (!imagePaths || imagePaths.length === 0) {
     return command;
@@ -441,6 +450,7 @@ export function buildCodexPlan(
   options?: {
     codexHomePath?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
     startupImagePaths?: string[];
     restrictWrites?: boolean;
     model?: string;
@@ -449,9 +459,12 @@ export function buildCodexPlan(
   const command = withCodexHome(
     appendCodexImages(
       appendCodexModel(
-        appendCodexArgs(
-          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
-          options?.codexArgs,
+        appendCodexReasoningEffort(
+          appendCodexArgs(
+            `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+            options?.codexArgs,
+          ),
+          options?.reasoningEffort,
         ),
         options?.model,
       ),
@@ -476,13 +489,21 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      appendCodexArgs(
-        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
-        options?.codexArgs,
+      appendCodexReasoningEffort(
+        appendCodexArgs(
+          `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
+          options?.codexArgs,
+        ),
+        options?.reasoningEffort,
       ),
       options?.codexHomePath,
     ),
@@ -493,7 +514,12 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -617,7 +643,11 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[] },
+  options?: {
+    restrictWrites?: boolean;
+    mcpBindings?: SidecarMcpBinding[];
+    modelsCacheHome?: string;
+  },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -632,6 +662,11 @@ export async function ensureCodexHooksConfig(
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
+  if (options?.modelsCacheHome) {
+    await cp(join(options.modelsCacheHome, "models_cache.json"), join(codexDir, "models_cache.json"), {
+      force: true,
+    }).catch(() => undefined);
+  }
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });

@@ -43,6 +43,8 @@ tmux:
   socketName: spur-4310
 ui:
   port: 5555
+models:
+  codexHome: ~/.codex
 
 projects:
   backend-api:
@@ -52,8 +54,11 @@ projects:
     worktree: true
     defaultAgent: codex # agent chosen when a spawn omits --agent
     defaultModels: # per-agent default model, applied when that agent is chosen without an explicit model
-      codex: gpt-5.5
-      cursor: composer-2.5
+      codex: codex-model-id
+      cursor: cursor-model-id
+    reasoningEffort:
+      claude: medium
+      codex: medium
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -189,6 +194,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
+- `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
@@ -203,6 +209,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
+- `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`; each resolves to `medium` when omitted. A request value overrides this value. Applies to fresh launch, resume, restore, and `send` relaunch. Cursor rejects request values and ignores this field.
+- `projects.<id>.codexArgs`: optional raw Codex arguments. Must not set `model_reasoning_effort`; use `reasoningEffort` so typed request values retain precedence.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.

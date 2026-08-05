@@ -739,7 +739,9 @@ export async function startServer(
           sendError(response, 400, `Unsupported agent: ${rawAgent}`);
           return;
         }
-        sendJson(response, 200, { models: await listAgentModels(agent) });
+        sendJson(response, 200, {
+          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+        });
         return;
       }
 

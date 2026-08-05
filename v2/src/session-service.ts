@@ -289,6 +289,7 @@ import {
   SESSION_STATES,
   type AdmissionCapSource,
   type AgentName,
+  type ProviderReasoningEffort,
   type AgentSuggestionsResponse,
   type AppConfig,
   type AvailableBacklogItem,
@@ -939,6 +940,20 @@ function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): 
   return session.restrictWrites === true;
 }
 
+function resolveRequestReasoningEffort(
+  agent: AgentName,
+  value: unknown,
+): ProviderReasoningEffort | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "low" && value !== "medium" && value !== "high") {
+    throw new Error("reasoningEffort must be low, medium, or high");
+  }
+  if (agent === "cursor") {
+    throw new Error("reasoningEffort is only supported for claude and codex");
+  }
+  return value;
+}
+
 async function setupSessionAgentHooks(args: {
   agent: AgentName;
   dataDir: string;
@@ -946,6 +961,7 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
+  modelsCacheHome: string;
   mcpBindings?: SidecarMcpBinding[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
@@ -962,6 +978,7 @@ async function setupSessionAgentHooks(args: {
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
+    ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -992,6 +1009,7 @@ function withAgentModeOptions(
     codexHomePath?: string;
     cursorConfigDir?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
   },
   modes: { planMode: boolean; restrictWrites: boolean },
 ): {
@@ -999,6 +1017,7 @@ function withAgentModeOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
 } {
@@ -1014,12 +1033,14 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
 }
 
 function withProjectAgentOptions(
-  project: Pick<ProjectConfig, "codexArgs">,
+  agent: AgentName,
+  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
+    reasoningEffort?: ProviderReasoningEffort;
   },
 ): {
   claudeSettingsPath?: string;
@@ -1027,8 +1048,16 @@ function withProjectAgentOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
 } {
-  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
+  const reasoningEffort =
+    options.reasoningEffort ??
+    (agent === "claude" || agent === "codex" ? (project.reasoningEffort?.[agent] ?? "medium") : undefined);
+  return {
+    ...options,
+    ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  };
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -1683,6 +1712,7 @@ export function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
@@ -1695,6 +1725,7 @@ export function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(options?.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -1730,6 +1761,7 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
@@ -1740,6 +1772,7 @@ function resolveHandoffSpawnRequest(
     prompt: options.prompt,
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -6040,6 +6073,7 @@ export class SessionService {
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let resolvedModel: string | undefined;
+    let reasoningEffort: ProviderReasoningEffort | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
@@ -6072,6 +6106,7 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      reasoningEffort = resolveRequestReasoningEffort(agent, request.reasoningEffort);
       resolvedModel = await resolveAgentLaunchModel(
         agent,
         resolveSpawnModel({
@@ -6223,6 +6258,7 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -6349,6 +6385,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
@@ -6357,9 +6394,10 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
         }),
         { planMode, restrictWrites },
       );
@@ -6900,6 +6938,7 @@ export class SessionService {
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
+    let reasoningEffort: ProviderReasoningEffort | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -6923,6 +6962,7 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      reasoningEffort = resolveRequestReasoningEffort(agent, request.reasoningEffort);
       resolvedModel = await resolveAgentLaunchModel(
         agent,
         resolveSpawnModel({
@@ -6965,6 +7005,7 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -7320,16 +7361,25 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
-          planMode,
-          restrictWrites,
-        }),
+        ...withAgentModeOptions(
+          withProjectAgentOptions(agent, project, {
+            ...hookSetup,
+            ...(prepared.placeholder.reasoningEffort !== undefined
+              ? { reasoningEffort: prepared.placeholder.reasoningEffort }
+              : {}),
+          }),
+          {
+            planMode,
+            restrictWrites,
+          },
+        ),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -9081,6 +9131,7 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
+      modelsCacheHome: this.config.models.codexHome,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
@@ -9089,9 +9140,10 @@ export class SessionService {
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(session.agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
+          ...(session.reasoningEffort !== undefined ? { reasoningEffort: session.reasoningEffort } : {}),
         }),
         { planMode, restrictWrites },
       ),
@@ -9320,6 +9372,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
@@ -9332,9 +9385,10 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(restoreProjectConfig, {
+          withProjectAgentOptions(current.agent, restoreProjectConfig, {
             ...hookSetup,
             ...(sessionAgentConfig.planOptions ?? {}),
+            ...(current.reasoningEffort !== undefined ? { reasoningEffort: current.reasoningEffort } : {}),
           }),
           { planMode, restrictWrites },
         ),
@@ -10003,6 +10057,7 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
       }),
       request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
@@ -10109,6 +10164,7 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
+          ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),

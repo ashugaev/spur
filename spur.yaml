@@ -9,7 +9,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      cursor: composer-2.5
+      cursor: cursor-default
     symlinks:
       - .env
       - node_modules
@@ -24,11 +24,8 @@ projects:
         - label: Web IDE
           kind: link
           value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
-    codexArgs:
-      - -c
-      - 'model_reasoning_effort="high"'
-      - -c
-      - 'service_tier="default"'
+    reasoningEffort:
+      codex: high
     preflight: {}
     sidecars:
       isolated-daemon:
@@ -111,7 +108,7 @@ projects:
               overrides:
                 worktree: true
             - agent: cursor
-              model: composer-2.5
+              model: cursor-default
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
                 Apply the `review` tag to this session.

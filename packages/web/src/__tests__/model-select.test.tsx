@@ -9,7 +9,7 @@ const CLAUDE_MODELS: AgentModel[] = [
   { id: "haiku", label: "Haiku" },
 ];
 
-const CODEX_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5" }];
+const CODEX_MODELS: AgentModel[] = [{ id: "codex-model-id", label: "Codex model" }];
 
 function mockModelsFetch(byAgent: Record<string, AgentModel[]>) {
   return vi.fn((input: RequestInfo | URL) => {

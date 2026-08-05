@@ -71,9 +71,9 @@ describe("TerminalModal", () => {
   });
 
   it("passes the session model through to DirectTerminal", () => {
-    const session = { ...makeSession(), model: "claude-opus-4-8" };
+    const session = { ...makeSession(), model: "claude-model-id" };
     render(<TerminalModal session={session} onClose={() => undefined} />);
-    expect(screen.getByTestId("direct-terminal")).toHaveAttribute("data-model", "claude-opus-4-8");
+    expect(screen.getByTestId("direct-terminal")).toHaveAttribute("data-model", "claude-model-id");
   });
 
   it("omits the model attribute when the session has no model", () => {

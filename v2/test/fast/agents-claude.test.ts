@@ -85,6 +85,11 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--dangerously-skip-permissions");
   });
 
+  it("includes configured reasoning effort", () => {
+    const plan = buildClaudePlan("prompt", { reasoningEffort: "medium" });
+    expect(plan.launchCommand).toContain("--effort medium");
+  });
+
   it("uses SPUR_CLAUDE_BIN override", () => {
     process.env["SPUR_CLAUDE_BIN"] = "/opt/claude-bin";
     const plan = buildClaudePlan("prompt");
