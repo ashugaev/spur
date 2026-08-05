@@ -18,8 +18,9 @@ export interface CgroupMemoryPressure {
   fullAvg10: number;
 }
 
-export interface CgroupMemoryLimits {
+export interface CgroupMemorySnapshot {
   path: string;
+  currentBytes: number;
   highBytes: number | null;
   maxBytes: number | null;
 }
@@ -91,22 +92,33 @@ export function readCgroupPressure(): CgroupMemoryPressure | null {
   }
 }
 
-function parseCgroupLimit(value: string): number | null | undefined {
+function parseCgroupBytes(value: string, allowMax: boolean): number | null | undefined {
   const trimmed = value.trim();
-  if (trimmed === "max") return null;
+  if (allowMax && trimmed === "max") return null;
   if (!/^\d+$/.test(trimmed)) return undefined;
   const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-export function readCgroupMemoryLimits(): CgroupMemoryLimits | null {
+export function readCgroupMemorySnapshot(): CgroupMemorySnapshot | null {
   const cgroup = resolveCgroupMemoryPath();
   if (!cgroup) return null;
   try {
-    const highBytes = parseCgroupLimit(readFileSync(`${cgroup.directory}/memory.high`, "utf-8"));
-    const maxBytes = parseCgroupLimit(readFileSync(`${cgroup.directory}/memory.max`, "utf-8"));
+    const currentBytes = parseCgroupBytes(
+      readFileSync(`${cgroup.directory}/memory.current`, "utf-8"),
+      false,
+    );
+    const highBytes = parseCgroupBytes(
+      readFileSync(`${cgroup.directory}/memory.high`, "utf-8"),
+      true,
+    );
+    const maxBytes = parseCgroupBytes(
+      readFileSync(`${cgroup.directory}/memory.max`, "utf-8"),
+      true,
+    );
+    if (currentBytes === undefined || currentBytes === null) return null;
     if (highBytes === undefined || maxBytes === undefined) return null;
-    return { path: cgroup.path, highBytes, maxBytes };
+    return { path: cgroup.path, currentBytes, highBytes, maxBytes };
   } catch {
     return null;
   }

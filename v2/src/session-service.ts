@@ -187,7 +187,7 @@ import {
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
-  readCgroupMemoryLimits,
+  readCgroupMemorySnapshot,
   readCgroupPressure,
   readHostMemory,
   type HostMemory,
@@ -10521,7 +10521,7 @@ export class SessionService {
     memoryHighUnlimited: boolean;
     oomdPresent: false;
   } | null {
-    const limits = readCgroupMemoryLimits();
+    const limits = readCgroupMemorySnapshot();
     const oomdPresent = isSystemdOomdPresent();
     if (limits?.maxBytes !== null || oomdPresent) return null;
     return {

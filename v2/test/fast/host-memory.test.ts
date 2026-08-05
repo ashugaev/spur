@@ -90,35 +90,84 @@ describe("cgroup v2 memory", () => {
     expect(readCgroupPressure()).toEqual({ someAvg10: 20.5, someAvg60: 3.25, fullAvg10: 0.75 });
   });
 
-  it("maps max limits to null", async () => {
+  it("reads current and maps max limits to null", async () => {
     readFileSyncMock.mockImplementation((path: string) => {
       if (path === "/proc/self/cgroup") return "0::/user.slice/test.service\n";
       if (path.endsWith("memory.max")) return "max\n";
+      if (path.endsWith("memory.current")) return "654321\n";
       return "123456\n";
     });
-    const { readCgroupMemoryLimits } = await import("../../src/host-memory.js");
-    expect(readCgroupMemoryLimits()).toEqual({
+    const { readCgroupMemorySnapshot } = await import("../../src/host-memory.js");
+    expect(readCgroupMemorySnapshot()).toEqual({
       path: "/user.slice/test.service",
+      currentBytes: 654321,
       highBytes: 123456,
       maxBytes: null,
     });
   });
+
+  it("preserves finite high and max ordering", async () => {
+    readFileSyncMock.mockImplementation((path: string) => {
+      if (path === "/proc/self/cgroup") return "0::/test\n";
+      if (path.endsWith("memory.current")) return "300\n";
+      if (path.endsWith("memory.high")) return "500\n";
+      return "400\n";
+    });
+    const { readCgroupMemorySnapshot } = await import("../../src/host-memory.js");
+    expect(readCgroupMemorySnapshot()).toEqual({
+      path: "/test",
+      currentBytes: 300,
+      highBytes: 500,
+      maxBytes: 400,
+    });
+  });
+
+  it.each(["", "-1", "1.5", "max", "9007199254740992"])(
+    "fails open on invalid memory.current %j",
+    async (current) => {
+      readFileSyncMock.mockImplementation((path: string) => {
+        if (path === "/proc/self/cgroup") return "0::/test\n";
+        if (path.endsWith("memory.current")) return current;
+        return "max\n";
+      });
+      const { readCgroupMemorySnapshot } = await import("../../src/host-memory.js");
+      expect(readCgroupMemorySnapshot()).toBeNull();
+    },
+  );
+
+  it.each(["", "-1", "1.5", "9007199254740992"])(
+    "fails open on invalid limit %j",
+    async (limit) => {
+      readFileSyncMock.mockImplementation((path: string) => {
+        if (path === "/proc/self/cgroup") return "0::/test\n";
+        if (path.endsWith("memory.current")) return "1\n";
+        if (path.endsWith("memory.high")) return limit;
+        return "max\n";
+      });
+      const { readCgroupMemorySnapshot } = await import("../../src/host-memory.js");
+      expect(readCgroupMemorySnapshot()).toBeNull();
+    },
+  );
 
   it("fails open when a cgroup control file cannot be read", async () => {
     readFileSyncMock.mockImplementation((path: string) => {
       if (path === "/proc/self/cgroup") return "0::/user.slice/test.service\n";
       throw new Error("cgroup read failed");
     });
-    const { readCgroupMemoryLimits, readCgroupPressure } = await import("../../src/host-memory.js");
+    const { readCgroupMemorySnapshot, readCgroupPressure } = await import(
+      "../../src/host-memory.js"
+    );
 
-    expect(readCgroupMemoryLimits()).toBeNull();
+    expect(readCgroupMemorySnapshot()).toBeNull();
     expect(readCgroupPressure()).toBeNull();
   });
 
   it("fails open on cgroup v1", async () => {
     readFileSyncMock.mockReturnValue("12:memory:/test\n");
-    const { readCgroupMemoryLimits, readCgroupPressure } = await import("../../src/host-memory.js");
-    expect(readCgroupMemoryLimits()).toBeNull();
+    const { readCgroupMemorySnapshot, readCgroupPressure } = await import(
+      "../../src/host-memory.js"
+    );
+    expect(readCgroupMemorySnapshot()).toBeNull();
     expect(readCgroupPressure()).toBeNull();
   });
 

@@ -118,7 +118,7 @@ const readHostMemoryMock = vi.fn<
   } | null
 >();
 const readCgroupPressureMock = vi.fn();
-const readCgroupMemoryLimitsMock = vi.fn();
+const readCgroupMemorySnapshotMock = vi.fn();
 const isSystemdOomdPresentMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
@@ -498,7 +498,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
 
 vi.mock("../../src/host-memory.js", () => ({
   isSystemdOomdPresent: isSystemdOomdPresentMock,
-  readCgroupMemoryLimits: readCgroupMemoryLimitsMock,
+  readCgroupMemorySnapshot: readCgroupMemorySnapshotMock,
   readCgroupPressure: readCgroupPressureMock,
   readHostMemory: readHostMemoryMock,
 }));
@@ -1113,7 +1113,7 @@ describe("SessionService", () => {
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);
-    readCgroupMemoryLimitsMock.mockReset().mockReturnValue(null);
+    readCgroupMemorySnapshotMock.mockReset().mockReturnValue(null);
     isSystemdOomdPresentMock.mockReset().mockReturnValue(false);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
@@ -7643,8 +7643,9 @@ describe("SessionService", () => {
     });
 
     it("reports an unlimited fleet cgroup only when systemd-oomd is absent", async () => {
-      readCgroupMemoryLimitsMock.mockReturnValue({
+      readCgroupMemorySnapshotMock.mockReturnValue({
         path: "/system.slice/spur-daemon.service",
+        currentBytes: 40_000_000_000,
         highBytes: null,
         maxBytes: null,
       });
@@ -7660,8 +7661,9 @@ describe("SessionService", () => {
       isSystemdOomdPresentMock.mockReturnValue(true);
       expect(service.getMemoryCeilingWarning()).toBeNull();
       isSystemdOomdPresentMock.mockReturnValue(false);
-      readCgroupMemoryLimitsMock.mockReturnValue({
+      readCgroupMemorySnapshotMock.mockReturnValue({
         path: "/system.slice/spur-daemon.service",
+        currentBytes: 40_000_000_000,
         highBytes: 48_000_000_000,
         maxBytes: 56_000_000_000,
       });
