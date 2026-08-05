@@ -10107,11 +10107,13 @@ describe("SessionService", () => {
 
   it("reuses a 1,000-session full list batch for desk members", async () => {
     const sessions = createSessionStore();
+    const expectedIds = ["api-1"];
     sessions.set("api-1", sessionRecord({ id: "api-1" }));
-    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1" }));
-    for (let index = 3; index <= 1_000; index += 1) {
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1", status: "completed" }));
+    for (let index = 3; index <= 1_001; index += 1) {
       const id = `api-${index}`;
       sessions.set(id, sessionRecord({ id }));
+      expectedIds.push(id);
     }
     tmuxSessionExistsMock.mockResolvedValue(true);
 
@@ -10125,7 +10127,7 @@ describe("SessionService", () => {
 
     expect(listSessionsMock).toHaveBeenCalledOnce();
     expect(listed).toHaveLength(1_000);
-    expect(listed.slice(0, 3).map((session) => session.id)).toEqual(["api-1", "api-2", "api-3"]);
+    expect(listed.map((session) => session.id)).toEqual(expectedIds);
     expect(listed.find((session) => session.id === "api-1")?.deskGroupMembers).toEqual([
       {
         id: "api-1",
@@ -10137,9 +10139,9 @@ describe("SessionService", () => {
       {
         id: "api-2",
         agent: "claude",
-        status: "running",
-        state: "working",
-        runtimeAlive: true,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
       },
     ]);
   });

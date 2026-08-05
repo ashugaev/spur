@@ -4722,7 +4722,8 @@ export class SessionService {
         return view.status !== "killed" || view.retainInList === true;
       });
     }
-    const sessions = listSessions(this.config.dataDir).filter((session) => {
+    const allSessions = listSessions(this.config.dataDir);
+    const sessions = allSessions.filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
@@ -4732,7 +4733,7 @@ export class SessionService {
     // per-session inside enrich (N listAccounts reads + N×M existsSync).
     const claudeAccounts = this.computeClaudeAccountsView();
     const views = await Promise.all(
-      sessions.map((session) => this.enrich(session, claudeAccounts, sessions)),
+      sessions.map((session) => this.enrich(session, claudeAccounts, allSessions)),
     );
     return views;
   }
