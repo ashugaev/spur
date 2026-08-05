@@ -1051,6 +1051,7 @@ export function Dashboard() {
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
+  const spawnDraftDirtyRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
@@ -1069,8 +1070,10 @@ export function Dashboard() {
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
-    onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      spawnDraftDirtyRef.current = true;
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
@@ -1530,6 +1533,7 @@ export function Dashboard() {
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
+    spawnDraftDirtyRef.current = false;
     return draft;
   };
 
@@ -1547,7 +1551,7 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      if (spawnOpen) {
+      if (spawnOpen && !spawnDraftDirtyRef.current) {
         restoreSpawnDraft(nextProjectId);
       } else {
         setSpawnProjectId(nextProjectId);
@@ -1654,11 +1658,17 @@ export function Dashboard() {
   );
 
   const addStep = () => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
-  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
-  const updateStep = (id: number, value: string) =>
+  const removeStep = (id: number) => {
+    spawnDraftDirtyRef.current = true;
+    setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
+  };
+  const updateStep = (id: number, value: string) => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+  };
 
   useEffect(() => {
     const project = spawnProjectId.trim();
@@ -2170,6 +2180,7 @@ export function Dashboard() {
 
   const addSpawnFiles = useCallback(
     (files: FileList | File[] | null) => {
+      spawnDraftDirtyRef.current = true;
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
@@ -2501,7 +2512,13 @@ export function Dashboard() {
             attachments={spawnAttachments}
             canClose
             clearLabel="Clear spawn prompt"
-            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
+            history={{
+              entries: spawnHistory.entries,
+              onSelect: (next) => {
+                spawnDraftDirtyRef.current = true;
+                setSpawnPrompt(next);
+              },
+            }}
             mode={{
               kind: "spawn",
               project: {
@@ -2512,18 +2529,43 @@ export function Dashboard() {
                   label: projectOptionLabel(project),
                 })),
               },
-              model: { value: spawnModel, onChange: setSpawnModel },
+              model: {
+                value: spawnModel,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnModel(next);
+                },
+              },
               branch: {
                 value: spawnBranch,
                 onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
                   spawnBranchExplicitRef.current = next.trim().length > 0;
                   setSpawnBranch(next);
                 },
                 onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
               },
-              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
-              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
-              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
+              workspaceMode: {
+                value: spawnWorkspaceMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnWorkspaceMode(next);
+                },
+              },
+              planMode: {
+                value: spawnPlanMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnPlanMode(next);
+                },
+              },
+              selfDestruct: {
+                value: spawnSelfDestruct,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnSelfDestruct(next);
+                },
+              },
               steps: {
                 items: spawnSteps,
                 onUpdate: updateStep,
@@ -2559,7 +2601,10 @@ export function Dashboard() {
                 <textarea
                   aria-label="Self-destruct conditions"
                   className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                  onChange={(event) => {
+                    spawnDraftDirtyRef.current = true;
+                    setSpawnSelfDestructConditions(event.target.value);
+                  }}
                   placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
                   value={spawnSelfDestructConditions}
                 />
@@ -2568,7 +2613,10 @@ export function Dashboard() {
                 spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    onChange={(event) => {
+                      spawnDraftDirtyRef.current = true;
+                      setSpawnDefaultBranch(event.target.value);
+                    }}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
@@ -2576,16 +2624,21 @@ export function Dashboard() {
             }}
             onAddFiles={addSpawnFiles}
             onAgentChange={(next) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAgent(next);
               setSpawnModel(null);
             }}
             onClose={() => setSpawnOpen(false)}
-            onPromptChange={setSpawnPrompt}
-            onRemoveAttachment={(index) =>
+            onPromptChange={(next) => {
+              spawnDraftDirtyRef.current = true;
+              setSpawnPrompt(next);
+            }}
+            onRemoveAttachment={(index) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAttachments((current) =>
                 current.filter((_, currentIndex) => currentIndex !== index),
-              )
-            }
+              );
+            }}
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
             promptAriaLabel="Prompt..."
