@@ -10,6 +10,7 @@ export interface SpawnDraft {
   agent: AgentName;
   model: string | null;
   branch: string;
+  branchIsExplicit: boolean;
   workspaceMode: "default" | "worktree" | "shared";
   defaultBranch: string;
   planMode: boolean;
@@ -61,6 +62,7 @@ function isStoredSpawnDraft(value: unknown, projectId: string, now: number): val
     isAgentName(draft.agent) &&
     (draft.model === null || typeof draft.model === "string") &&
     typeof draft.branch === "string" &&
+    typeof draft.branchIsExplicit === "boolean" &&
     isWorkspaceMode(draft.workspaceMode) &&
     typeof draft.defaultBranch === "string" &&
     typeof draft.planMode === "boolean" &&

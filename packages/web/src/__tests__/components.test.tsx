@@ -17,7 +17,7 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
-import { spawnDraftStorageKey } from "@/lib/spawn-draft";
+import { spawnDraftStorageKey, writeSpawnDraft } from "@/lib/spawn-draft";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -2050,6 +2050,65 @@ describe("Dashboard", () => {
     expect(screen.getByRole("checkbox", { name: "Self-destruct" })).toBeChecked();
     expect(screen.getByLabelText("Self-destruct conditions")).toHaveValue("After review");
     expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
+  });
+
+  it("keeps a restored explicit branch when preflight suggests another branch", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight") {
+        return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "api",
+      prompt: "Keep the chosen branch",
+      agent: "claude",
+      model: null,
+      branch: "feature/explicit-branch",
+      branchIsExplicit: true,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/preflight", expect.anything());
+      },
+      { timeout: 1_500 },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/explicit-branch");
+
+    fireEvent.change(screen.getByLabelText("branch name"), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Generate a new branch" },
+    });
+    await waitFor(
+      () => {
+        expect(screen.getByLabelText("branch name")).toHaveValue("feature/auto-branch");
+      },
+      { timeout: 1_500 },
+    );
   });
 
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {

@@ -15,6 +15,7 @@ const draft: SpawnDraft = {
   agent: "codex",
   model: "gpt-5.6-codex",
   branch: "feature/spawn-draft",
+  branchIsExplicit: true,
   workspaceMode: "worktree",
   defaultBranch: "main",
   planMode: true,
