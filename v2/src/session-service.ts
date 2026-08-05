@@ -2230,15 +2230,18 @@ export class SessionService {
       ramActive && episode.ramContinuousSinceMs !== null
         ? Math.max(0, nowMs - episode.ramContinuousSinceMs)
         : null;
+    const cgroupHighActive = cgroup !== null && episode.cgroupHighLatched;
+    const cgroupMaxActive = cgroup !== null && episode.cgroupMaxLatched;
+    const swapActive = host !== null && episode.swapState === "active";
     const activeTriggers: MemoryShedTrigger[] = [];
     if (ramActive) activeTriggers.push("available_floor");
-    if (episode.cgroupMaxLatched) activeTriggers.push("cgroup_max_headroom");
-    if (episode.cgroupHighLatched) activeTriggers.push("cgroup_high");
-    if (episode.swapState === "active") activeTriggers.push("swap_saturation");
+    if (cgroupMaxActive) activeTriggers.push("cgroup_max_headroom");
+    if (cgroupHighActive) activeTriggers.push("cgroup_high");
+    if (swapActive) activeTriggers.push("swap_saturation");
 
     const emergencyReasons: MemoryPressureState["emergencyReasons"] = [];
     if (ramEmergency) emergencyReasons.push("host_available");
-    if (episode.cgroupMaxLatched) emergencyReasons.push("cgroup_max_headroom");
+    if (cgroupMaxActive) emergencyReasons.push("cgroup_max_headroom");
     if (
       cgroup !== null &&
       cgroup.highBytes !== null &&
@@ -2251,14 +2254,14 @@ export class SessionService {
     }
 
     let stage: MemoryShedStage = "none";
-    if (ramEmergency || episode.cgroupMaxLatched) stage = "emergency";
+    if (ramEmergency || cgroupMaxActive) stage = "emergency";
     else if (
       ramActive &&
       continuousRamPressureMs !== null &&
       continuousRamPressureMs >= MEMORY_SHED_SESSION_GRACE_MS
     ) {
       stage = "session";
-    } else if (ramActive || episode.cgroupHighLatched || episode.swapState === "active") {
+    } else if (ramActive || cgroupHighActive || swapActive) {
       stage = "sidecar";
     }
 
