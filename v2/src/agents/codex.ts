@@ -819,10 +819,7 @@ interface CodexRolloutFileFingerprint {
 }
 
 export interface CodexRolloutReaderState {
-  files: Map<
-    string,
-    CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }
-  >;
+  files: Map<string, CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }>;
 }
 
 function readRolloutString(value: unknown): string | undefined {
