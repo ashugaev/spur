@@ -352,6 +352,43 @@ describe("BackendConnectionProvider", () => {
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
+  it("stays connected against a healthy backend that answers slower than a LAN round trip", async () => {
+    // A weak mobile link answers the zero-I/O probe in seconds, not
+    // milliseconds. Any answer inside the budget still proves the backend is
+    // alive, so a consistently slow-but-healthy daemon must never raise the
+    // overlay — a budget below this latency is what produced the false
+    // alarms. Pinned as a literal, not derived from PROBE_TIMEOUT_MS, so
+    // shrinking the budget fails here instead of silently rescaling.
+    const SLOW_BUT_HEALTHY_MS = 6_000;
+    expect(PROBE_TIMEOUT_MS).toBeGreaterThan(SLOW_BUT_HEALTHY_MS);
+
+    vi.useFakeTimers();
+    // Races the response against the probe's own abort deadline. Fake timers
+    // don't drive AbortSignal.timeout, so the abort has to be modelled here
+    // for the budget to have any effect on the outcome.
+    vi.spyOn(global, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve, reject) => {
+          setTimeout(
+            () => resolve(new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 })),
+            SLOW_BUT_HEALTHY_MS,
+          );
+          setTimeout(
+            () => reject(new DOMException("The operation was aborted.", "TimeoutError")),
+            PROBE_TIMEOUT_MS,
+          );
+        }),
+    );
+
+    const { result } = renderProvider();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(result.current.phase).toBe("connected");
+  });
+
   it("requires the full grace window of continuous failure before disconnecting", async () => {
     vi.useFakeTimers();
     vi.spyOn(global, "fetch").mockImplementation(
@@ -366,33 +403,36 @@ describe("BackendConnectionProvider", () => {
 
     const { result } = renderProvider();
 
+    // Every probe burns its full timeout before aborting, so the window is
+    // PROBE_TIMEOUT_MS per probe plus the backoff gaps between them. Derived
+    // from the constants rather than hardcoded, so retuning the tolerance
+    // can't leave this test asserting a stale timeline.
+    const gaps = Array.from({ length: FAILURE_THRESHOLD - 1 }, (_, i) => retryIntervalMs(i + 1));
+    const windowMs = FAILURE_THRESHOLD * PROBE_TIMEOUT_MS + gaps.reduce((sum, gap) => sum + gap, 0);
+
     const t0 = Date.now();
-    // p1 aborts at t=3_000; step through each probe individually so React
-    // commits effect cleanups between timer firings.
+    // Step through each probe individually so React commits effect cleanups
+    // between timer firings.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS);
     });
-    // p2 fires at t=7_000, aborts at t=10_000
+    for (let failure = 1; failure < FAILURE_THRESHOLD - 1; failure++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(failure) + PROBE_TIMEOUT_MS);
+      });
+    }
+    // The last probe has fired but not yet aborted: stop 1s short of it.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(retryIntervalMs(1) + PROBE_TIMEOUT_MS);
-    });
-    // p3 fires at t=18_000, aborts at t=21_000
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(retryIntervalMs(2) + PROBE_TIMEOUT_MS);
-    });
-    // p4 fires at t=29_000; not yet aborted — advance to t=31_000
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(retryIntervalMs(3) + 2_000);
+      await vi.advanceTimersByTimeAsync(gaps[gaps.length - 1] + PROBE_TIMEOUT_MS - 1_000);
     });
     expect(result.current.phase).toBe("connected");
-    expect(Date.now() - t0).toBe(31_000);
+    expect(Date.now() - t0).toBe(windowMs - 1_000);
 
-    // p4 aborts at t=32_000 — advance past it
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1_000);
     });
     expect(result.current.phase).toBe("disconnected");
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(32_000);
+    expect(Date.now() - t0).toBe(windowMs);
   });
 
   it("requires the full confirmation window before disconnecting on instant failures", async () => {
