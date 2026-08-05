@@ -1532,6 +1532,7 @@ export function Dashboard() {
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
+    return draft;
   };
 
   useEffect(() => {
@@ -2157,9 +2158,11 @@ export function Dashboard() {
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    restoreSpawnDraft(item.projectId);
-    setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
-    setSpawnTrackerUrl(item.url);
+    const draft = restoreSpawnDraft(item.projectId);
+    if (draft?.trackerUrl !== item.url) {
+      setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
+      setSpawnTrackerUrl(item.url);
+    }
     setSpawnOpen(true);
   };
 
