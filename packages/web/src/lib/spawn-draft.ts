@@ -42,13 +42,15 @@ function isAgentName(value: unknown): value is AgentName {
   return typeof value === "string" && AGENT_OPTIONS.some((agent) => agent === value);
 }
 
-function isWorkspaceMode(
-  value: unknown,
-): value is "default" | "worktree" | "shared" {
+function isWorkspaceMode(value: unknown): value is "default" | "worktree" | "shared" {
   return value === "default" || value === "worktree" || value === "shared";
 }
 
-function isStoredSpawnDraft(value: unknown, projectId: string, now: number): value is StoredSpawnDraft {
+function isStoredSpawnDraft(
+  value: unknown,
+  projectId: string,
+  now: number,
+): value is StoredSpawnDraft {
   if (!value || typeof value !== "object") return false;
   const draft = value as Record<string, unknown>;
   return (
