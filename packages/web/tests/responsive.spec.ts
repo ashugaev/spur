@@ -39,20 +39,35 @@ test.describe("R1: Mobile viewport", () => {
 
   test("spawn draft survives mobile close and full reload", async ({ page }) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let settledPreflights = 0;
+    await page.route("**/api/preflight", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/auto-branch" }),
+      });
+      settledPreflights += 1;
+    });
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     await page.getByPlaceholder("Prompt...").fill("Keep mobile draft");
     await page.getByLabel("branch name").fill("feature/mobile-draft");
     await page.getByLabel("Plan").check();
+    await expect.poll(() => settledPreflights).toBe(1);
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
     await page.getByRole("button", { name: "Close" }).click();
 
     await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(1);
     await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
     await page.getByRole("button", { name: "Close" }).click();
 
     await page.reload();
     await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(2);
     await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
     await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
     await expect(page.getByLabel("Plan")).toBeChecked();
