@@ -5572,6 +5572,8 @@ projects:
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -5648,6 +5650,8 @@ tail -f /dev/null
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   api:
     path: ${context.repoDir}
