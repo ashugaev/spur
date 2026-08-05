@@ -2036,12 +2036,18 @@ describe("Dashboard", () => {
   });
 
   it("restores the complete non-sensitive spawn draft after close and remount", async () => {
+    let holdSessionsResponse = false;
+    let resolveHeldSessions: ((response: Response) => void) | undefined;
+    const heldSessionsResponse = new Promise<Response>((resolve) => {
+      resolveHeldSessions = resolve;
+    });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions" && holdSessionsResponse) return heldSessionsResponse;
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       if (url === "/api/models?agent=claude" || url === "/api/models?agent=codex") {
@@ -2102,11 +2108,16 @@ describe("Dashboard", () => {
     });
 
     firstRender.unmount();
+    holdSessionsResponse = true;
     render(<Dashboard />);
     await screen.findByRole("button", { name: "Spawn Session" });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    resolveHeldSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
 
-    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    });
     expect(screen.getByLabelText("branch name")).toHaveValue("feature/keep-draft");
     expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
