@@ -1517,8 +1517,7 @@ export function Dashboard() {
     return configuredProjectOptions[0]?.id ?? "";
   };
 
-  const restoreSpawnDraft = (nextProjectId: string) => {
-    const draft = readSpawnDraft(nextProjectId);
+  const applySpawnDraft = (nextProjectId: string, draft: SpawnDraft | null) => {
     setSpawnProjectId(nextProjectId);
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
@@ -1534,6 +1533,11 @@ export function Dashboard() {
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
     spawnDraftDirtyRef.current = false;
+  };
+
+  const restoreSpawnDraft = (nextProjectId: string) => {
+    const draft = readSpawnDraft(nextProjectId);
+    applySpawnDraft(nextProjectId, draft);
     return draft;
   };
 
@@ -2165,14 +2169,17 @@ export function Dashboard() {
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    restoreSpawnDraft(SHEPHERD_PROJECT_ID);
+    applySpawnDraft(SHEPHERD_PROJECT_ID, null);
     setSpawnOpen(true);
   };
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    const draft = restoreSpawnDraft(item.projectId);
-    if (draft?.trackerUrl !== item.url) {
+    const draft = readSpawnDraft(item.projectId);
+    if (draft?.trackerUrl === item.url) {
+      applySpawnDraft(item.projectId, draft);
+    } else {
+      applySpawnDraft(item.projectId, null);
       setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
       setSpawnTrackerUrl(item.url);
     }

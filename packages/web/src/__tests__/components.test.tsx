@@ -389,6 +389,13 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Edited checkout instructions" },
     });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/checkout" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "worktree" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     await waitFor(() => {
       expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
         "Edited checkout instructions",
@@ -400,12 +407,18 @@ describe("Dashboard", () => {
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
       "Edited checkout instructions",
     );
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/checkout");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
+    expect(screen.getByLabelText("step 1")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
     fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
       "Work on WEB-18: Fix billing\n\nhttps://jira.example.com/browse/WEB-18",
     );
+    expect(screen.getByLabelText("branch name")).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
   it("hides a backlog row while an active session references its tracker link", async () => {
@@ -1279,6 +1292,21 @@ describe("Dashboard", () => {
   });
 
   it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    writeSpawnDraft({
+      projectId: "spur-shepherd",
+      prompt: "Stale Shepherd prompt",
+      agent: "codex",
+      model: "gpt-5.6-codex",
+      branch: "feature/stale-shepherd",
+      branchIsExplicit: true,
+      workspaceMode: "worktree",
+      defaultBranch: "main",
+      planMode: true,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: ["Stale step"],
+      trackerUrl: null,
+    });
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -1318,6 +1346,10 @@ describe("Dashboard", () => {
     const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
     expect(spawnProjectSelect).toHaveValue("spur-shepherd");
     expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    expect(screen.getByLabelText("branch name")).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
 
