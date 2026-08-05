@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { findFreePort } from "../helpers/common.js";
 
@@ -180,11 +181,11 @@ function startTraceWsClient(port: number, trace: DeploySwitchRuntimeTrace): { st
     attempt += 1;
     traceEvent(trace, { kind: "ws.connect", attempt });
     socket = new WebSocket(`ws://127.0.0.1:${port}/ws?session=trace`);
-    socket.addEventListener("open", () => {
+    socket.on("open", () => {
       trace.ws.opens += 1;
       traceEvent(trace, { kind: "ws.open", attempt });
     });
-    socket.addEventListener("close", () => {
+    socket.on("close", () => {
       if (!mounted) return;
       trace.ws.closes += 1;
       traceEvent(trace, { kind: "ws.close", attempt });
@@ -194,7 +195,7 @@ function startTraceWsClient(port: number, trace: DeploySwitchRuntimeTrace): { st
       }, RECONNECT_DELAY_MS);
       traceEvent(trace, { kind: "ws.reconnect.scheduled", attempt });
     });
-    socket.addEventListener("error", () => {
+    socket.on("error", () => {
       traceEvent(trace, { kind: "ws.error", attempt });
     });
   };
@@ -243,6 +244,7 @@ async function pollApi(
 async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeploySwitchRuntimeTrace> {
   const { startServer } = await import("../../src/server.js");
   const originalFetch = globalThis.fetch;
+  const targetVersion = mode === "restart" ? "0.1.0" : CURRENT_VERSION;
   const daemonPort = await findFreePort();
   const wsPort = await findFreePort();
   const configPath = await setupConfig(daemonPort);
@@ -299,7 +301,7 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
     const response = await originalFetch(`${baseUrl}/deploy/switch`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: CURRENT_VERSION }),
+      body: JSON.stringify({ version: targetVersion }),
     });
     trace.deployStatus = response.status;
     traceEvent(trace, { kind: "deploy.response", status: response.status });
@@ -344,7 +346,7 @@ describe("POST /deploy/switch runtime liveness", () => {
     delete process.env["SPUR_DEPLOY_SWITCH_RUNTIME_EXPECT"];
   });
 
-  it("keeps API and WebSocket liveness on a current-version switch", async () => {
+  it("keeps API and WebSocket liveness across deploy switch modes", async () => {
     const mode =
       process.env["SPUR_DEPLOY_SWITCH_RUNTIME_EXPECT"] === "restart" ? "restart" : "no-restart";
     const trace = await runTrace(mode);
