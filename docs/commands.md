@@ -203,7 +203,7 @@ is silently replaced by Spur's own.
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon. Daemon boot reloads registered configs, rehydrates session state, resumes pipelines, and restarts sources/triggers. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
 
 ## Validate
 

@@ -171,6 +171,18 @@ vi.mock("../../src/registry.js", () => ({
     mutate({ configPaths: [], unconfiguredProjects: [] }),
   ),
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
+  // Keep existing per-test buildMergedConfigMock setups driving the merged config.
+  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
+    invalidateRemovedPaths: vi.fn(),
+    scan: () => {
+      const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
+      return {
+        config: merged.config,
+        configPaths: merged.configPaths,
+        newDiagnostics: [],
+      };
+    },
+  })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,

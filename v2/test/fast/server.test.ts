@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -2689,6 +2689,96 @@ describe("startServer", () => {
     }
   });
 
+  it("disconnects a symlink alias and reconnects its fresh retarget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const oldDir = join(root, "old");
+    const freshDir = join(root, "fresh");
+    const aliasDir = join(root, "alias");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(oldDir, { recursive: true });
+    await mkdir(freshDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const oldConfigPath = join(oldDir, "spur.yaml");
+    const freshConfigPath = join(freshDir, "spur.yaml");
+    await writeFile(
+      oldConfigPath,
+      ["projects:", "  old:", `    path: ${oldDir}`, "    sessionPrefix: old", ""].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      freshConfigPath,
+      ["projects:", "  fresh:", `    path: ${freshDir}`, "    sessionPrefix: fresh", ""].join("\n"),
+      "utf8",
+    );
+    fs.symlinkSync(oldDir, aliasDir, "dir");
+    const aliasConfigPath = join(aliasDir, "spur.yaml");
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const connectOld = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(connectOld.status).toBe(200);
+
+      const disconnect = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(disconnect.status).toBe(200);
+
+      await rm(aliasDir);
+      fs.symlinkSync(freshDir, aliasDir, "dir");
+
+      const reconnect = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(reconnect.status).toBe(200);
+      const payload = (await reconnect.json()) as { projects: Array<{ id: string }> };
+      expect(payload.projects.some((project) => project.id === "fresh")).toBe(true);
+      expect(payload.projects.some((project) => project.id === "old")).toBe(false);
+
+      expect(readConfigRegistryFile(dataDir).configPaths).toEqual([
+        fs.realpathSync(bootstrapConfigPath),
+        fs.realpathSync(aliasConfigPath),
+      ]);
+      expect(fs.realpathSync(aliasConfigPath)).toBe(fs.realpathSync(freshConfigPath));
+      expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(
+        fs.realpathSync(oldConfigPath),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("DELETE /projects/:id disconnects a configured project without touching its spur.yaml", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -2854,6 +2944,94 @@ describe("startServer", () => {
       expect(tmpRenamesSeen.size).toBe(1);
     } finally {
       dirWatcher.close();
+      await server.stop();
+    }
+  });
+
+  it("prunes an orphan registry path at boot and logs a duplicate-project warning once across repeated connects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Orphan: file and parent directory are gone before daemon boot.
+    const orphanDir = join(root, "orphan-dir");
+    const orphanConfigPath = join(orphanDir, "spur.yaml");
+    await mkdir(orphanDir, { recursive: true });
+    await writeFile(orphanConfigPath, "projects:\n  ghost:\n    path: /tmp/ghost\n", "utf8");
+    await rm(orphanDir, { recursive: true, force: true });
+    const missingParentAlivePath = join(root, "temporarily-missing.yaml");
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [orphanConfigPath, missingParentAlivePath],
+      unconfiguredProjects: [],
+    });
+
+    // Duplicate: this config conflicts with the bootstrap "demo" project id.
+    const duplicateProjectDir = join(root, "dup-project");
+    const duplicateConfigPath = join(duplicateProjectDir, "spur.yaml");
+    await mkdir(duplicateProjectDir, { recursive: true });
+    await writeFile(
+      duplicateConfigPath,
+      [
+        "projects:",
+        "  demo:",
+        `    path: ${duplicateProjectDir}`,
+        "    sessionPrefix: demo-dup",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(orphanConfigPath);
+      expect(bootRegistry.configPaths).toContain(missingParentAlivePath);
+      expect(readEventLog(dataDir).some((entry) => entry.event.endsWith(".pruned"))).toBe(false);
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ configPath: duplicateConfigPath }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      const registryWarnings = readEventLog(dataDir).filter(
+        (entry) => entry.event === "daemon.registry.warning",
+      );
+      expect(registryWarnings).toHaveLength(2);
+
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(orphanConfigPath);
+      expect(finalRegistry.configPaths).toContain(missingParentAlivePath);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(duplicateConfigPath));
+    } finally {
       await server.stop();
     }
   });

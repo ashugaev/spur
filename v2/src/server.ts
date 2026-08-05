@@ -477,12 +477,8 @@ export async function startServer(
     requestConfigPath: string,
     action: "connect" | "disconnect",
   ): Promise<void> => {
-    for (const message of preview.warnings) {
-      logEvent("daemon.registry.warning", {
-        level: "warn",
-        message,
-      });
-    }
+    // SessionService emits registry warnings while building the preview, so
+    // diagnostics still land when no reload is needed.
     if (!preview.changed) {
       return;
     }
