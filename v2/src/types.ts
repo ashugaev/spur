@@ -560,17 +560,17 @@ export interface ProjectConfig {
   maxLiveSessions?: number;
 }
 
+export type AdmissionCapSource = "default" | "config" | "derived";
+
 // Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
-// `admission` block parses without error but is discarded, same footgun as
+// `admission` block is ignored before semantic parsing, same footgun as
 // rateLimitReactivation/authRotation/tags. All fields are resolved
 // (defaults already applied) so callers never re-derive them.
 export interface AdmissionConfig {
   enabled: boolean;
   maxLiveSessions: number;
-  // Whether maxLiveSessions came from an explicit config value or was
-  // derived from live host memory at config-parse time. Set once at the
-  // config boundary (parseAdmission) — never re-derived downstream.
-  maxLiveSessionsSource: "config" | "derived";
+  // Set once at the config boundary (parseAdmission), never re-derived downstream.
+  maxLiveSessionsSource: AdmissionCapSource;
   perSessionBytes: number;
   reserveFraction: number;
   memoryGuard: {
@@ -583,7 +583,7 @@ export interface AdmissionConfig {
 export interface HeadroomReport {
   cap: {
     global: number;
-    source: "config" | "derived";
+    source: AdmissionCapSource;
     perSessionBytes: number;
     reserveFraction: number;
   };

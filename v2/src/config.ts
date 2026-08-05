@@ -9,6 +9,7 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  type AdmissionCapSource,
   type AdmissionConfig,
   type AgentName,
   type AppConfig,
@@ -1561,13 +1562,9 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
   };
 }
 
-// Measured on openclaw-dev 2026-08-03 (118 live sessions, 62 GiB): a
-// fully-loaded session (agent ~1000MB + playwright MCP ~170MB + isolated
-// daemon ~70MB) is ~1.21 GiB, so 1.5 GiB brackets the worst case. Non-session
-// host footprint measured at 62 - 43.9 = 18.1 GiB, so reserveFraction 0.70
-// (reserving 18.6 GiB) tracks that without inflating perSessionBytes to
-// absorb it — the two knobs stay semantically distinct (per-session cost vs.
-// host overhead).
+// Estimated from an agent, Playwright MCP sidecar, and isolated daemon:
+// 1.5 GiB per session leaves room above the 1.21 GiB design estimate.
+const DEFAULT_ADMISSION_MAX_LIVE_SESSIONS = 100;
 const DEFAULT_ADMISSION_PER_SESSION_BYTES = 1_610_612_736;
 const DEFAULT_ADMISSION_RESERVE_FRACTION = 0.7;
 const DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES = 1_073_741_824;
@@ -1582,20 +1579,16 @@ export function deriveMaxLiveSessions(
 }
 
 // Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
-// per-project `admission` block parses (parseProject tolerates unknown keys)
-// but is never read — only projects.<id>.maxLiveSessions works per-project.
-// Project mode still needs a resolved cap (countLiveSessions/getHeadroom read
-// unconditionally), so it derives the same default from the live host rather
-// than hardcoding a fallback number that would drift from the derivation.
+// per-project `admission` block is ignored before semantic parsing. Only
+// projects.<id>.maxLiveSessions works per-project.
 function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   const perSessionBytes = DEFAULT_ADMISSION_PER_SESSION_BYTES;
   const reserveFraction = DEFAULT_ADMISSION_RESERVE_FRACTION;
-  const derivedDefault = deriveMaxLiveSessions(totalmem(), perSessionBytes, reserveFraction);
   if (mode !== "instance" || value === undefined) {
     return {
       enabled: true,
-      maxLiveSessions: derivedDefault,
-      maxLiveSessionsSource: "derived",
+      maxLiveSessions: DEFAULT_ADMISSION_MAX_LIVE_SESSIONS,
+      maxLiveSessionsSource: "default",
       perSessionBytes,
       reserveFraction,
       memoryGuard: {
@@ -1617,12 +1610,19 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
     root["maxLiveSessions"],
     "admission.maxLiveSessions",
   );
+  const hasSizingInput =
+    root["perSessionBytes"] !== undefined || root["reserveFraction"] !== undefined;
+  const maxLiveSessionsSource: AdmissionCapSource =
+    configuredMaxLiveSessions !== undefined ? "config" : hasSizingInput ? "derived" : "default";
+  const maxLiveSessions =
+    configuredMaxLiveSessions ??
+    (hasSizingInput
+      ? deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction)
+      : DEFAULT_ADMISSION_MAX_LIVE_SESSIONS);
   return {
     enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
-    maxLiveSessions:
-      configuredMaxLiveSessions ??
-      deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction),
-    maxLiveSessionsSource: configuredMaxLiveSessions !== undefined ? "config" : "derived",
+    maxLiveSessions,
+    maxLiveSessionsSource,
     perSessionBytes: resolvedPerSessionBytes,
     reserveFraction: resolvedReserveFraction,
     memoryGuard: {
