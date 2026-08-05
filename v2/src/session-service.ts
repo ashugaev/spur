@@ -4722,7 +4722,8 @@ export class SessionService {
         return view.status !== "killed" || view.retainInList === true;
       });
     }
-    const sessions = listSessions(this.config.dataDir).filter((session) => {
+    const allSessions = listSessions(this.config.dataDir);
+    const sessions = allSessions.filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
@@ -4732,7 +4733,7 @@ export class SessionService {
     // per-session inside enrich (N listAccounts reads + N×M existsSync).
     const claudeAccounts = this.computeClaudeAccountsView();
     const views = await Promise.all(
-      sessions.map((session) => this.enrich(session, claudeAccounts)),
+      sessions.map((session) => this.enrich(session, claudeAccounts, allSessions)),
     );
     return views;
   }
@@ -6178,9 +6179,12 @@ export class SessionService {
     };
   }
 
-  private listDeskSessions(session: SessionRecord): SessionRecord[] {
+  private listDeskSessions(
+    session: SessionRecord,
+    sessionBatch = listSessions(this.config.dataDir),
+  ): SessionRecord[] {
     const anchor = workspaceIdOf(session);
-    return listSessions(this.config.dataDir)
+    return sessionBatch
       .filter(
         (member) =>
           member.project === session.project &&
@@ -6193,9 +6197,10 @@ export class SessionService {
   private async buildDeskGroupMembers(
     session: SessionRecord,
     current: { state: SessionState; runtimeAlive: boolean },
+    sessionBatch?: SessionRecord[],
   ): Promise<SessionDeskMember[]> {
     const members: SessionDeskMember[] = [];
-    for (const member of this.listDeskSessions(session)) {
+    for (const member of this.listDeskSessions(session, sessionBatch)) {
       if (member.id === session.id) {
         members.push({
           id: session.id,
@@ -11211,6 +11216,7 @@ export class SessionService {
   private async enrich(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
@@ -11255,10 +11261,14 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(
       resolveWorkspaceState(this.config.dataDir, anchorRecord),
     );
-    const deskGroupMembers = await this.buildDeskGroupMembers(session, {
-      state,
-      runtimeAlive: classified.runtime.runtimeAlive,
-    });
+    const deskGroupMembers = await this.buildDeskGroupMembers(
+      session,
+      {
+        state,
+        runtimeAlive: classified.runtime.runtimeAlive,
+      },
+      sessionBatch,
+    );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 

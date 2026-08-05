@@ -10105,6 +10105,65 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("reuses a 1,000-session full list batch for desk members", async () => {
+    const sessions = createSessionStore();
+    const expectedIds = ["api-1"];
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1", status: "completed" }));
+    for (let index = 3; index <= 1_001; index += 1) {
+      const id = `api-${index}`;
+      sessions.set(id, sessionRecord({ id }));
+      expectedIds.push(id);
+    }
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
+    listSessionsMock.mockClear();
+
+    const listed = await service.list();
+
+    expect(listSessionsMock).toHaveBeenCalledOnce();
+    expect(listed).toHaveLength(1_000);
+    expect(listed.map((session) => session.id)).toEqual(expectedIds);
+    expect(listed.find((session) => session.id === "api-1")?.deskGroupMembers).toEqual([
+      {
+        id: "api-1",
+        agent: "claude",
+        status: "running",
+        state: "working",
+        runtimeAlive: true,
+      },
+      {
+        id: "api-2",
+        agent: "claude",
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+      },
+    ]);
+  });
+
+  it("loads desk members on demand for a session detail", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
+    listSessionsMock.mockClear();
+
+    const result = await service.get("api-1");
+
+    expect(listSessionsMock).toHaveBeenCalledOnce();
+    expect(result.deskGroupMembers?.map((member) => member.id)).toEqual(["api-1", "api-2"]);
+  });
+
   it("shows every desk member the anchor's title, links, tags, and pr slot in enrich and enrichDashboard", async () => {
     const sessions = createSessionStore();
     sessions.set(
