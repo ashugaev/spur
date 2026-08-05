@@ -195,9 +195,7 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as WorkspaceMode)
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
             <option value="default">Default</option>
