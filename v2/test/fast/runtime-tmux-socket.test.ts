@@ -1,5 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { setActiveTmuxSocketName, withTmuxSocket } from "../helpers/runtime.js";
+import {
+  createRuntimeTestContext,
+  setActiveTmuxSocketName,
+  withTmuxSocket,
+} from "../helpers/runtime.js";
 
 // Regression guard for issue #350: the runtime test harness must never fall
 // through to the host's default tmux server. withTmuxSocket throws unless an
@@ -32,5 +37,21 @@ describe("withTmuxSocket", () => {
     expect(withTmuxSocket(["kill-server"])).toEqual(["-L", "x", "kill-server"]);
     setActiveTmuxSocketName(null);
     expect(() => withTmuxSocket(["kill-server"])).toThrow(/no isolated tmux socket active/);
+  });
+});
+
+describe("runtime config", () => {
+  it("disables host-derived memory floors", async () => {
+    const context = await createRuntimeTestContext(0, { useFakeTools: false });
+    try {
+      const configPath = await context.writeConfig("test.yaml", "projects: {}\n");
+      expect(await readFile(configPath, "utf8")).toBe(`admission:
+  memoryGuard:
+    enforceFloors: false
+projects: {}
+`);
+    } finally {
+      await context.cleanup();
+    }
   });
 });

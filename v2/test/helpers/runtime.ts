@@ -1051,7 +1051,14 @@ export async function createRuntimeTestContext(
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
-    await writeFile(configPath, content, "utf8");
+    await writeFile(
+      configPath,
+      `admission:
+  memoryGuard:
+    enforceFloors: false
+${content}`,
+      "utf8",
+    );
     return configPath;
   };
 
