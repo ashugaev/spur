@@ -13,17 +13,19 @@ export const RECONNECT_INTERVAL_MS = 2_000;
 const RECONNECT_MAX_INTERVAL_MS = 8_000;
 const RETRY_BASE_INTERVAL_MS = 4_000;
 // Require this many consecutive failures before flipping to "disconnected".
-// Combined with retryIntervalMs this buys a 20-32s confirmation window:
-// 20s when probes fail instantly, 32s when each probe burns its full timeout.
+// Combined with retryIntervalMs this buys a 20-52s confirmation window:
+// 20s when probes fail instantly, 52s when each probe burns its full timeout.
 export const FAILURE_THRESHOLD = 4;
-// Must stay comfortably below RETRY_BASE_INTERVAL_MS: a black-holed
-// connection (sleep/wake, VPN drop that neither errors nor resolves) would
-// otherwise never resolve and never count as a failure, leaving the gate
-// stuck showing a healthy app against a dead backend. While disconnected
-// a 3s probe under a 2s tick causes the in-flight guard to skip a tick
-// (~4s effective cadence); instant failures and a recovered backend still
-// get the full 2s cadence.
-export const PROBE_TIMEOUT_MS = 3_000;
+// Budget for one probe of a zero-I/O endpoint. Sized for a weak mobile link
+// (high RTT, head-of-line blocking behind other in-flight requests) rather
+// than for a LAN: a probe that answers in 6s still proves the backend is
+// alive, and cutting it off at 3s was the main source of false-alarm
+// overlays. It only stretches the confirmation window when probes actually
+// hang — a genuinely dead daemon still fails instantly and trips the gate
+// in 20s. Longer than the tick cadence in both phases, so the in-flight
+// guard skips ticks and the effective cadence is the probe itself;
+// instant failures and a recovered backend still get the full tick cadence.
+export const PROBE_TIMEOUT_MS = 8_000;
 
 // Precondition: consecutiveFailures is in 1..FAILURE_THRESHOLD-1.
 export function retryIntervalMs(consecutiveFailures: number): number {
