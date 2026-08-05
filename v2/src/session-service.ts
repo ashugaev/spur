@@ -56,7 +56,6 @@ import {
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   codexHookHomePath,
-  createCodexRolloutReaderState,
   findLatestCodexSessionFile,
   readCodexRolloutState,
   type CodexRolloutReaderState,
@@ -10616,8 +10615,7 @@ export class SessionService {
     model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutReader =
-      this.codexRolloutReaders.get(sessionId) ?? createCodexRolloutReaderState();
+    const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
     this.codexRolloutReaders.set(sessionId, rolloutReader);
     const rolloutRead = await readCodexRolloutState(
       this.codexSessionsDir(sessionId),

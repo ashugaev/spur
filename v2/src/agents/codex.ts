@@ -825,10 +825,6 @@ export interface CodexRolloutReaderState {
   >;
 }
 
-export function createCodexRolloutReaderState(): CodexRolloutReaderState {
-  return { files: new Map() };
-}
-
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -978,8 +974,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    // Rollout files are re-scanned on every dashboard poll, so each line is
-    // parsed once here and shared by all three extractors below.
+    // Parse each changed rollout line once and share it across the extractors.
     let parsed: unknown;
     try {
       parsed = JSON.parse(lines[index] ?? "");

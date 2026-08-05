@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  createCodexRolloutReaderState,
   readCodexRolloutState,
   readCodexTranscriptEntries,
+  type CodexRolloutReaderState,
 } from "../../src/agents/codex.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -83,7 +83,7 @@ describe("readCodexRolloutState", () => {
     const fileName = "rollout-reader-cache.jsonl";
     const sessionsDir = await makeSessionsDir(firstRecord, fileName);
     const filePath = join(sessionsDir, "2026", "04", "19", fileName);
-    const reader = createCodexRolloutReaderState();
+    const reader: CodexRolloutReaderState = { files: new Map() };
 
     const first = await readCodexRolloutState(sessionsDir, reader);
     const firstCachedFile = reader.files.get(filePath);

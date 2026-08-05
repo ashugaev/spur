@@ -438,7 +438,6 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 
 vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
-  createCodexRolloutReaderState: () => ({ files: new Map() }),
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
