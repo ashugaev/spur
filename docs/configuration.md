@@ -252,7 +252,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions when deriving the default `maxLiveSessions`; the rest stays for the OS and everything else on the host.
 - `admission.memoryGuard.enforce`: optional boolean, default `false`. Controls only legacy `minAvailableBytes` / `minFreeSwapBytes`: `false` logs `session.admission.memory_guard` and admits; `true` refuses the spawn or restore.
 - `admission.memoryGuard.enforceFloors`: optional boolean, default `true`. Refuses spawn below `admissionFloorBytes`, restore below `restoreFloorBytes`, or either operation above the PSI threshold.
-- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables critical-memory shedding on the existing 60-second cleanup tick.
+- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables the 1-second critical-memory sampler and staged shedding.
 - `admission.memoryGuard.minAvailableBytes`: optional non-negative number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`; `0` effectively disables the available-memory half of the guard.
 - `admission.memoryGuard.minFreeSwapBytes`: optional non-negative number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
 - `admission.memoryGuard.admissionFloorBytes`: optional non-negative number. Default `max(1073741824, floor(MemTotal / 8))`.
@@ -272,7 +272,11 @@ The default `admission.maxLiveSessions` is derived at config load as `max(1, flo
 
 Memory floors use remaining `MemAvailable`. Restore floor is derived as `admissionFloorBytes + perSessionBytes`, preserving `shedCriticalFloorBytes < admissionFloorBytes < restoreFloorBytes`. On the 67,418,697,728-byte reference host, these resolve to 4,213,668,608, 8,427,337,216, and 10,037,949,952 bytes. Missing `/proc` or cgroup v2 PSI data fails open.
 
-Below the critical floor or at 90% swap use, Spur sheds only sessions classified `rate_limited` or `waiting`. Order: built-in MCP sidecars, project sidecars such as dev servers, then longest-idle sessions. `working`, `needs_input`, restore-warmup, and unclassifiable sessions stay untouched. Shed sessions become restorable manual pauses. Events: `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.shed`, `daemon.memory.shed.failed`, and startup warning `daemon.memory.unbounded`.
+The 1-second sampler reads host `MemAvailable` plus daemon-cgroup `memory.current`, `memory.high`, and `memory.max`. Host memory remains authoritative when source-install auto scopes sit outside the daemon cgroup. Missing or malformed samples fail open for that signal.
+
+Below the critical floor, each tick stops at most one safe sidecar. Session shedding starts after 12 seconds of continuous low host RAM. Host RAM at half the critical floor, capped at 2 GiB, or finite cgroup-max headroom at that threshold bypasses the grace period: the tick tries one sidecar, re-samples pressure, then pauses at most one session if pressure still authorizes it. `memory.high` alone permits sidecar shedding, never session shedding. Session order remains `rate_limited` before `waiting`, oldest `updatedAt` first. Sidecar order remains all built-in MCP sidecars before project sidecars. `working`, `needs_input`, restore-warmup, unclassifiable sessions, and protected shared sidecars stay untouched. Paused sessions remain restorable.
+
+RAM pressure closes at the admission floor. Cgroup-high pressure closes below its threshold by the smaller of 10% or the emergency threshold. Finite-max pressure closes above twice the emergency headroom. Swap-only shedding starts disarmed after daemon startup, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt before another recovery. Recovery and healthy ticks emit no memory event. Actions, partial failures, and edge-triggered exhaustion retain `daemon.memory.shed` / `daemon.memory.shed.failed`; other memory events remain `session.admission.denied`, `session.admission.memory_guard`, and startup warning `daemon.memory.unbounded`.
 
 ## Events
 
