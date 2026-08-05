@@ -492,6 +492,8 @@ export interface SpawnOverrides {
   defaultBranch?: string;
 }
 
+export type WorkspaceMode = "default" | "worktree" | "shared";
+
 export function toDashboardSession(
   session: SpurSessionView,
   projectName = session.project,
