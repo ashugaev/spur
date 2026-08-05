@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -3713,6 +3714,8 @@ projects:
 admission:
   enabled: false
   maxLiveSessions: 5
+  perSessionBytes: 1
+  reserveFraction: 0.5
   memoryGuard:
     enforce: true
     minAvailableBytes: 1000
@@ -3728,22 +3731,63 @@ projects:
       enabled: false,
       maxLiveSessions: 5,
       maxLiveSessionsSource: "config",
-      perSessionBytes: 1_610_612_736,
-      reserveFraction: 0.7,
+      perSessionBytes: 1,
+      reserveFraction: 0.5,
       memoryGuard: {
         enforce: true,
         enforceFloors: true,
         shedEnabled: true,
         minAvailableBytes: 1000,
         minFreeSwapBytes: 500,
-        admissionFloorBytes: 8_427_336_704,
-        shedCriticalFloorBytes: 4_213_668_352,
-        restoreFloorBytes: 10_037_949_440,
+        admissionFloorBytes: deriveAdmissionFloorBytes(totalmem()),
+        shedCriticalFloorBytes: deriveShedCriticalFloorBytes(totalmem()),
+        restoreFloorBytes: deriveAdmissionFloorBytes(totalmem()) + 1,
         pressureSomeAvg10Refuse: 20,
         shedSwapUsedFraction: 0.9,
       },
     });
   });
+
+  it.each([
+    ["absent", ""],
+    ["enabled only", "admission:\n  enabled: false"],
+    ["memory guard only", "admission:\n  memoryGuard:\n    enforce: true"],
+  ])("uses cap 100 from the default for %s admission sizing", async (_label, admission) => {
+    const configPath = await writeConfig(`
+${admission}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.maxLiveSessions).toBe(100);
+    expect(config.admission.maxLiveSessionsSource).toBe("default");
+  });
+
+  it.each([
+    ["perSessionBytes", "  perSessionBytes: 1073741824", 1_073_741_824, 0.7],
+    ["reserveFraction", "  reserveFraction: 0.5", 1_610_612_736, 0.5],
+  ] as const)(
+    "derives the cap when only %s is configured",
+    async (_field, sizing, bytes, fraction) => {
+      const configPath = await writeConfig(`
+admission:
+${sizing}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.admission.maxLiveSessions).toBe(
+        deriveMaxLiveSessions(totalmem(), bytes, fraction),
+      );
+      expect(config.admission.maxLiveSessionsSource).toBe("derived");
+    },
+  );
 
   it("accepts admission.memoryGuard.minFreeSwapBytes and minAvailableBytes of 0", async () => {
     const configPath = await writeConfig(`
@@ -3851,11 +3895,11 @@ projects:
     );
   });
 
-  it("discards an admission block in a project spur.yaml without error", async () => {
+  it("ignores a project admission block before semantic parsing", async () => {
     const configPath = await writeConfig(`
 admission:
-  enabled: false
-  maxLiveSessions: 1
+  enabled: not-a-boolean
+  maxLiveSessions: 0
 projects:
   backend:
     path: $REPO_PATH
@@ -3864,7 +3908,8 @@ projects:
     const config = loadProjectConfig(configPath);
 
     expect(config.admission.enabled).toBe(true);
-    expect(config.admission.maxLiveSessions).not.toBe(1);
+    expect(config.admission.maxLiveSessions).toBe(100);
+    expect(config.admission.maxLiveSessionsSource).toBe("default");
   });
 
   it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {

@@ -286,6 +286,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  type AdmissionCapSource,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
@@ -10854,7 +10855,7 @@ export class SessionService {
   // boot log throws away — too costly to run inside the pre-`ready` window.
   getAdmissionStartupSummary(): {
     enabled: boolean;
-    cap: { global: number; source: "config" | "derived" };
+    cap: { global: number; source: AdmissionCapSource };
     liveCount: number;
   } {
     const admission = this.config.admission;
