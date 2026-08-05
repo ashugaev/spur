@@ -43,10 +43,7 @@ describe("spawn draft storage", () => {
   it.each([
     ["malformed", "not-json"],
     ["old schema", JSON.stringify({ ...draft, version: 0, savedAt: NOW })],
-    [
-      "stale",
-      JSON.stringify({ ...draft, version: 1, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 }),
-    ],
+    ["stale", JSON.stringify({ ...draft, version: 1, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
     window.localStorage.setItem(key, value);

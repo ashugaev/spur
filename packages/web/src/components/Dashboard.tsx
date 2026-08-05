@@ -1525,9 +1525,7 @@ export function Dashboard() {
     setSpawnPlanMode(draft?.planMode ?? false);
     setSpawnSelfDestruct(draft?.selfDestruct ?? false);
     setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
-    setSpawnSteps(
-      draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? [],
-    );
+    setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
