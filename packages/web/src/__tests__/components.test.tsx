@@ -344,6 +344,70 @@ describe("Dashboard", () => {
     });
   });
 
+  it("restores edits for the same backlog item and seeds a different item", async () => {
+    const backlog = [
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      },
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix billing",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:01:00.000Z",
+        position: 1,
+      },
+    ];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("link", { name: /WEB-17/ });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Edited checkout instructions" },
+    });
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Edited checkout instructions",
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Edited checkout instructions",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Work on WEB-18: Fix billing\n\nhttps://jira.example.com/browse/WEB-18",
+    );
+  });
+
   it("hides a backlog row while an active session references its tracker link", async () => {
     const backlogItem = {
       provider: "jira",
