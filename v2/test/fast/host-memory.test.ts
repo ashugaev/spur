@@ -154,9 +154,8 @@ describe("cgroup v2 memory", () => {
       if (path === "/proc/self/cgroup") return "0::/user.slice/test.service\n";
       throw new Error("cgroup read failed");
     });
-    const { readCgroupMemorySnapshot, readCgroupPressure } = await import(
-      "../../src/host-memory.js"
-    );
+    const { readCgroupMemorySnapshot, readCgroupPressure } =
+      await import("../../src/host-memory.js");
 
     expect(readCgroupMemorySnapshot()).toBeNull();
     expect(readCgroupPressure()).toBeNull();
@@ -164,9 +163,8 @@ describe("cgroup v2 memory", () => {
 
   it("fails open on cgroup v1", async () => {
     readFileSyncMock.mockReturnValue("12:memory:/test\n");
-    const { readCgroupMemorySnapshot, readCgroupPressure } = await import(
-      "../../src/host-memory.js"
-    );
+    const { readCgroupMemorySnapshot, readCgroupPressure } =
+      await import("../../src/host-memory.js");
     expect(readCgroupMemorySnapshot()).toBeNull();
     expect(readCgroupPressure()).toBeNull();
   });
