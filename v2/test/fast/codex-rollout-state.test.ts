@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRolloutState, readCodexTranscriptEntries } from "../../src/agents/codex.js";
+import {
+  createCodexRolloutReaderState,
+  readCodexRolloutState,
+  readCodexTranscriptEntries,
+} from "../../src/agents/codex.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -70,6 +74,41 @@ async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<strin
 }
 
 describe("readCodexRolloutState", () => {
+  it("reuses parsed unchanged rollout files and refreshes a changed file", async () => {
+    const firstRecord = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-1" },
+    });
+    const fileName = "rollout-reader-cache.jsonl";
+    const sessionsDir = await makeSessionsDir(firstRecord, fileName);
+    const filePath = join(sessionsDir, "2026", "04", "19", fileName);
+    const reader = createCodexRolloutReaderState();
+
+    const first = await readCodexRolloutState(sessionsDir, reader);
+    const firstCachedFile = reader.files.get(filePath);
+    const second = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(first.rollout?.state).toBe("working");
+    expect(second).toEqual(first);
+    expect(reader.files.get(filePath)).toBe(firstCachedFile);
+
+    await writeFile(
+      filePath,
+      `${firstRecord}\n${JSON.stringify({
+        timestamp: "2026-05-10T10:01:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-1" },
+      })}`,
+      "utf8",
+    );
+
+    const changed = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(changed.rollout?.state).toBe("waiting");
+    expect(reader.files.get(filePath)).not.toBe(firstCachedFile);
+  });
+
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-working-current.jsonl");

@@ -56,8 +56,10 @@ import {
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   codexHookHomePath,
+  createCodexRolloutReaderState,
   findLatestCodexSessionFile,
   readCodexRolloutState,
+  type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
@@ -2012,6 +2014,7 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
+  private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
   private stateSubscriptionIndexReady = false;
@@ -3588,6 +3591,11 @@ export class SessionService {
     for (const sessionId of this.cursorJsonlReaders.keys()) {
       if (!liveIds.has(sessionId)) {
         this.cursorJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.codexRolloutReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.codexRolloutReaders.delete(sessionId);
       }
     }
     for (const sessionId of this.prCheckTrackers.keys()) {
@@ -10608,7 +10616,13 @@ export class SessionService {
     model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    const rolloutReader =
+      this.codexRolloutReaders.get(sessionId) ?? createCodexRolloutReaderState();
+    this.codexRolloutReaders.set(sessionId, rolloutReader);
+    const rolloutRead = await readCodexRolloutState(
+      this.codexSessionsDir(sessionId),
+      rolloutReader,
+    );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
