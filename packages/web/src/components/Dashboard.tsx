@@ -78,6 +78,7 @@ import {
   type SpurSessionsResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
+  type WorkspaceMode,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useBackendConnection } from "@/lib/backend-connection-context";
@@ -526,7 +527,7 @@ function readLocationSearch(): string {
 }
 
 function buildSpawnOverrides(
-  workspaceMode: "default" | "worktree" | "shared",
+  workspaceMode: WorkspaceMode,
   defaultBranch: string,
 ): SpawnOverrides | undefined {
   if (workspaceMode === "worktree") {
@@ -1058,9 +1059,7 @@ export function Dashboard() {
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
-    "default",
-  );
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("default");
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);

@@ -1,4 +1,5 @@
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import type { WorkspaceMode } from "@/lib/types";
 
 const SPAWN_DRAFT_VERSION = 1;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -11,7 +12,7 @@ export interface SpawnDraft {
   model: string | null;
   branch: string;
   branchIsExplicit: boolean;
-  workspaceMode: "default" | "worktree" | "shared";
+  workspaceMode: WorkspaceMode;
   defaultBranch: string;
   planMode: boolean;
   selfDestruct: boolean;
@@ -42,7 +43,7 @@ function isAgentName(value: unknown): value is AgentName {
   return typeof value === "string" && AGENT_OPTIONS.some((agent) => agent === value);
 }
 
-function isWorkspaceMode(value: unknown): value is "default" | "worktree" | "shared" {
+function isWorkspaceMode(value: unknown): value is WorkspaceMode {
   return value === "default" || value === "worktree" || value === "shared";
 }
 
