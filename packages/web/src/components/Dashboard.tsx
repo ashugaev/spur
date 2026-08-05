@@ -1598,6 +1598,8 @@ export function Dashboard() {
     spawnTrackerUrl,
     spawnWorkspaceMode,
   ]);
+  const spawnDraftRef = useRef(spawnDraft);
+  spawnDraftRef.current = spawnDraft;
 
   useEffect(() => {
     if (!spawnOpen || !spawnDraft) return;
@@ -1606,9 +1608,9 @@ export function Dashboard() {
   }, [spawnDraft, spawnOpen]);
 
   const closeSpawnModal = useCallback(() => {
-    if (spawnDraft) writeSpawnDraft(spawnDraft);
+    if (spawnDraftRef.current) writeSpawnDraft(spawnDraftRef.current);
     setSpawnOpen(false);
-  }, [spawnDraft]);
+  }, []);
 
   useEffect(() => {
     if (!spawnOpen) return;

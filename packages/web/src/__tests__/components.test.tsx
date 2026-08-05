@@ -2160,6 +2160,7 @@ describe("Dashboard", () => {
   });
 
   it("debounces spawn draft writes and flushes pending edits on every close path", async () => {
+    const windowRemoveListenerSpy = vi.spyOn(window, "removeEventListener");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -2196,13 +2197,23 @@ describe("Dashboard", () => {
     expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Latest edit");
 
     fireEvent.change(prompt, { target: { value: "Close now" } });
+    const removeCallCount = windowRemoveListenerSpy.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+    const preEditEscapeHandlers = windowRemoveListenerSpy.mock.calls
+      .slice(removeCallCount)
+      .filter(([type]) => type === "keydown")
+      .map(([, listener]) => listener as (event: KeyboardEvent) => void);
+    expect(preEditEscapeHandlers.length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const reopenedPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
     fireEvent.change(reopenedPrompt, { target: { value: "Escape now" } });
-    fireEvent.keyDown(window, { key: "Escape" });
+    act(() => {
+      for (const handler of preEditEscapeHandlers) {
+        handler(new KeyboardEvent("keydown", { key: "Escape" }));
+      }
+    });
     expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Escape now");
     expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
 
