@@ -1567,7 +1567,9 @@ export function Dashboard() {
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    restoreSpawnDraft(normalizedProjectId);
+    if (normalizedProjectId !== spawnProjectId) {
+      restoreSpawnDraft(normalizedProjectId);
+    }
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
