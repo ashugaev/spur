@@ -1547,9 +1547,13 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      setSpawnProjectId(nextProjectId);
+      if (spawnOpen) {
+        restoreSpawnDraft(nextProjectId);
+      } else {
+        setSpawnProjectId(nextProjectId);
+      }
     }
-  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnOpen, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
