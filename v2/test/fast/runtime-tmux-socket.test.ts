@@ -46,6 +46,7 @@ describe("runtime config", () => {
     try {
       const configPath = await context.writeConfig("test.yaml", "projects: {}\n");
       expect(await readFile(configPath, "utf8")).toBe(`admission:
+  enabled: false
   memoryGuard:
     enforceFloors: false
 projects: {}
