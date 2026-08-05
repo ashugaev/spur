@@ -58,8 +58,6 @@ function automationConfig(
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}

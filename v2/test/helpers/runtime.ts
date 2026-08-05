@@ -1054,6 +1054,7 @@ export async function createRuntimeTestContext(
     await writeFile(
       configPath,
       `admission:
+  enabled: false
   memoryGuard:
     enforceFloors: false
 ${content}`,

@@ -153,8 +153,6 @@ function baseConfig(
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -377,8 +375,6 @@ async function writeReservedPortSidecarConfig(
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -1146,8 +1142,6 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: codex
-admission:
-  enabled: false
 projects:
   web:
     path: ${extraRepo.repoDir}
@@ -3112,8 +3106,6 @@ sleep 30
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -5568,8 +5560,6 @@ projects:
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -5646,8 +5636,6 @@ tail -f /dev/null
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-admission:
-  enabled: false
 projects:
   api:
     path: ${context.repoDir}
