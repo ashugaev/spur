@@ -105,4 +105,37 @@ describe("Providers", () => {
 
     expect(screen.getByText("app-control").closest("[inert]")).not.toBeNull();
   });
+
+  it("keeps app component state when the backend-connection gate disconnects", async () => {
+    // Sibling of the version-switch case above, driven through the real
+    // liveness gate instead: this is the path from the original report,
+    // where the reconnect overlay closed an open spawn modal and discarded
+    // the typed prompt. Both paths feed the same `blocking` flag, so the
+    // value here is covering the whole probe-failure -> overlay sequence.
+    vi.spyOn(global, "fetch").mockImplementation(async () => new Response(null, { status: 502 }));
+
+    vi.useFakeTimers();
+    render(
+      <Providers>
+        <StatefulControl />
+      </Providers>,
+    );
+
+    fireEvent.click(screen.getByText("local-state-0"));
+
+    // Probes fail instantly here, so the grace window is the backoff gaps
+    // alone — PROBE_TIMEOUT_MS never enters the timeline.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
+      });
+    }
+
+    const stateful = screen.getByText("local-state-1");
+    expect(stateful).toBeInTheDocument();
+    expect(stateful.closest("[inert]")).not.toBeNull();
+  });
 });
