@@ -1050,6 +1050,7 @@ export function Dashboard() {
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const spawnBranchExplicitRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
@@ -1520,6 +1521,7 @@ export function Dashboard() {
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
     setSpawnBranch(draft?.branch ?? "");
+    spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
     setSpawnPlanMode(draft?.planMode ?? false);
     setSpawnSelfDestruct(draft?.selfDestruct ?? false);
     setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
@@ -1570,6 +1572,7 @@ export function Dashboard() {
       agent: spawnAgent,
       model: spawnModel,
       branch: spawnBranch,
+      branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
       defaultBranch: spawnDefaultBranch,
       planMode: spawnPlanMode,
@@ -1672,7 +1675,9 @@ export function Dashboard() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
+            setSpawnBranch(result.branch);
+          }
         })
         .catch(() => {});
     }, 500);
@@ -1773,6 +1778,7 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnModel(null);
       setSpawnBranch("");
+      spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
@@ -2504,7 +2510,10 @@ export function Dashboard() {
               model: { value: spawnModel, onChange: setSpawnModel },
               branch: {
                 value: spawnBranch,
-                onChange: setSpawnBranch,
+                onChange: (next) => {
+                  spawnBranchExplicitRef.current = next.trim().length > 0;
+                  setSpawnBranch(next);
+                },
                 onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
               },
               workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
