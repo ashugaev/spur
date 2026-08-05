@@ -244,7 +244,7 @@ describe("BackendConnectionProvider", () => {
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
-  it("reloads exactly once when the backend recovers to a different version (restart/update)", async () => {
+  it("does not reload when the backend recovers to a different version", async () => {
     let ok = true;
     let version = "1.4.2";
     mockFetchResults(
@@ -273,15 +273,15 @@ describe("BackendConnectionProvider", () => {
       await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
     });
     expect(result.current.phase).toBe("connected");
-    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(window.location.reload).not.toHaveBeenCalled();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS * 5);
     });
-    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(window.location.reload).not.toHaveBeenCalled();
   });
 
-  it("reloads once on recovery when there was no prior healthy baseline (cold start against a dead daemon)", async () => {
+  it("does not reload on recovery from a cold start against a dead daemon", async () => {
     let ok = false;
     mockFetchResults(
       () => ok,
@@ -303,7 +303,7 @@ describe("BackendConnectionProvider", () => {
     });
 
     expect(result.current.phase).toBe("connected");
-    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(window.location.reload).not.toHaveBeenCalled();
   });
 
   it("increments attempts while disconnected", async () => {
