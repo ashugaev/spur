@@ -153,6 +153,8 @@ function baseConfig(
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   api:
     path: ${context.repoDir}
@@ -1438,6 +1440,8 @@ projects:
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   web:
     path: ${context.repoDir}
@@ -3104,6 +3108,8 @@ sleep 30
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   api:
     path: ${context.repoDir}
