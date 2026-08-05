@@ -68,7 +68,9 @@ describe("startServer", () => {
       await server.stop();
     }
 
-    const events = readEventLog(dataDir);
+    const events = readEventLog(dataDir).filter(
+      (entry) => entry.event !== "daemon.memory.unbounded",
+    );
     expect(events[0]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
@@ -86,6 +88,63 @@ describe("startServer", () => {
       details: { cap: 100, capSource: "default", live: 0 },
     });
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("reports an unbounded fleet cgroup once during startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-memory-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+    vi.spyOn(SessionService.prototype, "getMemoryCeilingWarning").mockReturnValue({
+      cgroupPath: "/system.slice/spur-daemon.service",
+      memoryMaxUnlimited: true,
+      memoryHighUnlimited: true,
+      oomdPresent: false,
+    });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const events = readEventLog(dataDir).filter(
+        (entry) => entry.event === "daemon.memory.unbounded",
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        level: "warn",
+        details: {
+          cgroupPath: "/system.slice/spur-daemon.service",
+          memoryMaxUnlimited: true,
+          oomdPresent: false,
+        },
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        "Spur fleet cgroup /system.slice/spur-daemon.service has unlimited memory.max and systemd-oomd is absent\n",
+      );
+    } finally {
+      await server.stop();
+      vi.restoreAllMocks();
+    }
   });
 
   it("GET /headroom returns cap, projectCaps, live, projectedRoom, per-session rss, memory, and guard", async () => {

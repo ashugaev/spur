@@ -575,8 +575,15 @@ export interface AdmissionConfig {
   reserveFraction: number;
   memoryGuard: {
     enforce: boolean;
+    enforceFloors: boolean;
+    shedEnabled: boolean;
     minAvailableBytes: number;
     minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    shedSwapUsedFraction: number;
   };
 }
 
@@ -602,8 +609,13 @@ export interface HeadroomReport {
   memory: HostMemory | null;
   guard: {
     enforce: boolean;
+    enforceFloors: boolean;
     minAvailableBytes: number;
     minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
     crossed: boolean;
   };
 }

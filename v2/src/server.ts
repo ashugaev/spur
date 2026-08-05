@@ -1528,6 +1528,17 @@ export async function startServer(
     });
   }
 
+  const memoryCeilingWarning = service.getMemoryCeilingWarning();
+  if (memoryCeilingWarning) {
+    const message = `Spur fleet cgroup ${memoryCeilingWarning.cgroupPath} has unlimited memory.max and systemd-oomd is absent`;
+    logEvent("daemon.memory.unbounded", {
+      level: "warn",
+      message,
+      details: memoryCeilingWarning,
+    });
+    process.stderr.write(`${message}\n`);
+  }
+
   ready = true;
   logEvent("daemon.started", {
     level: "info",

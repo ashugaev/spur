@@ -249,13 +249,19 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
-- `admission.enabled`: optional boolean, default `true`. `false` disables cap and enforced memory-guard refusals for spawn and restore; the memory guard still evaluates and logs report-only. Instance config only — project config ignores `admission` before semantic parsing.
+- `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, and critical shedding; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
 - `admission.maxLiveSessions`: optional positive integer, default `100`. Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot. An explicit value wins over memory-sizing fields.
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
-- `admission.memoryGuard.enforce`: optional boolean, default `false`. `false` logs `session.admission.memory_guard` and admits when a threshold is crossed; `true` refuses the spawn or restore instead.
+- `admission.memoryGuard.enforce`: optional boolean, default `false`. Controls only legacy `minAvailableBytes` / `minFreeSwapBytes`: `false` logs `session.admission.memory_guard` and admits; `true` refuses the spawn or restore.
+- `admission.memoryGuard.enforceFloors`: optional boolean, default `true`. Refuses spawn below `admissionFloorBytes`, restore below `restoreFloorBytes`, or either operation above the PSI threshold.
+- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables the 1-second critical-memory sampler and staged shedding.
 - `admission.memoryGuard.minAvailableBytes`: optional non-negative number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`; `0` effectively disables the available-memory half of the guard.
 - `admission.memoryGuard.minFreeSwapBytes`: optional non-negative number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
+- `admission.memoryGuard.admissionFloorBytes`: optional non-negative number. Default `max(1073741824, floor(MemTotal / 8))`.
+- `admission.memoryGuard.shedCriticalFloorBytes`: optional non-negative number. Default `max(536870912, floor(MemTotal / 16))`; must be lower than `admissionFloorBytes`.
+- `admission.memoryGuard.pressureSomeAvg10Refuse`: optional percentage from `0` through `100`, default `20`. Refuses admission when cgroup v2 memory PSI `some avg10` exceeds it.
+- `admission.memoryGuard.shedSwapUsedFraction`: optional number in `(0, 1]`, default `0.9`. Starts critical shedding when host swap use reaches this fraction.
 
 ## Admission control
 
@@ -266,6 +272,14 @@ Cap limits concurrent live sessions at spawn and restore. One slot covers agent 
 Cap source reports `default` for untouched sizing, `config` for explicit `maxLiveSessions`, and `derived` when either sizing field is explicit without a maximum. Derived mode uses `max(1, floor(totalHostMemoryBytes * reserveFraction / perSessionBytes))`; the omitted sizing field keeps its default. Restart daemon to re-derive after host-memory changes. Daemon startup logs `daemon.admission.startup` with `cap`, `capSource`, and live count. The 1.5 GiB default leaves room above the 1.21 GiB design estimate for one agent plus MCP sidecars.
 
 `rssBytes` sums process RSS attached to the session's agent, MCP, service, and sidecar tmux panes. Missing pane/process measurements report `0`. RSS is reporting-only; admission uses live-session slots and guard thresholds.
+
+Memory floors use remaining `MemAvailable`. Restore floor is derived as `admissionFloorBytes + perSessionBytes`, preserving `shedCriticalFloorBytes < admissionFloorBytes < restoreFloorBytes`. On the 67,418,697,728-byte reference host, these resolve to 4,213,668,608, 8,427,337,216, and 10,037,949,952 bytes. Missing `/proc` or cgroup v2 PSI data fails open.
+
+The 1-second sampler reads host `MemAvailable` plus daemon-cgroup `memory.current`, `memory.high`, and `memory.max`. Host memory remains authoritative when source-install auto scopes sit outside the daemon cgroup. Missing or malformed samples fail open for that signal.
+
+Below the critical floor, each tick stops at most one safe sidecar. Session shedding starts after 12 seconds of continuous low host RAM. Host RAM at half the critical floor, capped at 2 GiB, or finite cgroup-max headroom at that threshold bypasses the grace period: the tick tries one sidecar, re-samples pressure, then pauses at most one session if pressure still authorizes it. `memory.high` alone permits sidecar shedding, never session shedding. Session order remains `rate_limited` before `waiting`, oldest `updatedAt` first. Sidecar order remains all built-in MCP sidecars before project sidecars. `working`, `needs_input`, restore-warmup, unclassifiable sessions, and protected shared sidecars stay untouched. Paused sessions remain restorable.
+
+RAM pressure closes at the admission floor. Cgroup-high pressure closes below its threshold by the smaller of 10% or the emergency threshold. Finite-max pressure closes above twice the emergency headroom. Swap-only shedding starts disarmed after daemon startup, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt before another recovery. Recovery and healthy ticks emit no memory event. Actions, partial failures, and edge-triggered exhaustion retain `daemon.memory.shed` / `daemon.memory.shed.failed`; other memory events remain `session.admission.denied`, `session.admission.memory_guard`, and startup warning `daemon.memory.unbounded`.
 
 ## Events
 
@@ -292,11 +306,11 @@ Tmux agent sessions survive daemon restarts. The systemd unit uses `KillMode=pro
 
 State that does not survive a restart: trigger pending batches and retry counters (re-populated on next poll), the state-classification cache (rebuilt within seconds), and the state-history ring buffer (starts empty).
 
-Unit templates live in `deploy/`. After editing, copy to `/etc/systemd/system/` and run `systemctl daemon-reload`.
+Unit files in this repository are templates only. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade). System-unit operators adapt and reload them in their own maintenance window.
 
 ## Restore after reboot
 
-`projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the daemon restores only reboot-interrupted sessions (panes gone) — never intentional `pause`/`kill`/`complete`, never `errored` sessions whose pane survived but whose agent died. Only `autoStart` sidecars return; manual ones are not tracked. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore shuts down gracefully. Each restore also passes through the [admission gate](#admission-control): once the fleet hits the cap, remaining sessions are left stopped and each logs a `session.reboot.restore.failed` warning instead of restoring.
+`projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the daemon restores only reboot-interrupted sessions (panes gone) — never intentional `pause`/`kill`/`complete`, never `errored` sessions whose pane survived but whose agent died. Only `autoStart` sidecars return; manual ones are not tracked. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore shuts down gracefully. Each restore passes through the [admission gate](#admission-control): cap refusal leaves that session stopped and logs `session.reboot.restore.failed`; restore-floor refusal stops the remaining batch and logs `session.reboot.restore.aborted`.
 
 ## spur init (npm host flags)
 

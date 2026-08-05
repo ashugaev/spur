@@ -110,6 +110,7 @@ export interface GcPlan {
 
 export interface PlanSessionGcInput {
   sessions: readonly SessionRecord[];
+  protectedSessionIds?: ReadonlySet<string>;
   worktreeDir: string;
   now: Date;
   olderThanDays: number;
@@ -220,6 +221,7 @@ function firstMember(members: readonly SessionRecord[], context: string): Sessio
 
 function classifyGroup(
   members: SessionRecord[],
+  protectedSessionIds: ReadonlySet<string>,
   worktreeDir: string,
   olderThanDays: number,
   statuses: readonly SessionGcStatus[],
@@ -242,6 +244,9 @@ function classifyGroup(
 
   const blockReasons: string[] = [];
   const statusSet = new Set<string>(statuses);
+  if (members.some((member) => protectedSessionIds.has(member.id))) {
+    blockReasons.push("live_session");
+  }
   if (members.some((member) => !statusSet.has(member.status))) {
     blockReasons.push("not_eligible_status");
   }
@@ -289,6 +294,7 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
     const members = raw.members;
     const classification = classifyGroup(
       members,
+      input.protectedSessionIds ?? new Set(),
       input.worktreeDir,
       input.olderThanDays,
       input.statuses,
@@ -341,6 +347,10 @@ export interface GcOpenPrIndex {
 export interface SessionGcExecutorDeps {
   cwd: string;
   readGroupMembers: (sessionIds: readonly string[]) => (SessionRecord | null)[];
+  // Execution-time service state can make a planning-time terminal record
+  // live (restore/recovery warmup). This synchronous check sits directly at
+  // each destructive boundary so no awaited probe can stale its answer.
+  checkGroupLiveness: (sessionIds: readonly string[]) => "inactive" | "live" | "unknown";
   // Uncommitted/unpushed checks only — the PR probe is `openPrIndex` below.
   // Returns block reasons (empty when guards pass); any probe throw inside
   // must be translated to ["probe_failed"], never rethrown.
@@ -420,6 +430,20 @@ function isCwdInsideOrEqual(cwd: string, worktreePath: string): boolean {
   }
   const rel = relative(worktreePath, cwd);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function currentLivenessBlockReason(
+  deps: SessionGcExecutorDeps,
+  sessionIds: readonly string[],
+): string | undefined {
+  try {
+    const liveness = deps.checkGroupLiveness(sessionIds);
+    if (liveness === "live") return "live_session";
+    if (liveness === "unknown") return "liveness_check_failed";
+    return undefined;
+  } catch {
+    return "liveness_check_failed";
+  }
 }
 
 export async function executeSessionGc(
@@ -504,17 +528,29 @@ export async function executeSessionGc(
           // worktree removal failed leaves a worktree no record-driven sweep
           // can ever see again.
           if (action === "reclaim" && !options.dryRun) {
-            await deps.removeWorktree(group, freshMembers);
-            await deps.pruneRepo(group, freshMembers);
-            removed = true;
-            worktreesRemoved += 1;
+            const livenessBlock = currentLivenessBlockReason(deps, group.sessionIds);
+            if (livenessBlock) {
+              action = "blocked";
+              blockReasons = [livenessBlock];
+            } else {
+              await deps.removeWorktree(group, freshMembers);
+              await deps.pruneRepo(group, freshMembers);
+              removed = true;
+              worktreesRemoved += 1;
+            }
           }
-          if (!options.dryRun) {
-            const result = deps.archiveGroup(
-              freshMembers.map((member) => ({ id: member.id, project: member.project })),
-            );
-            archived = result.archivedIds.length > 0;
-            recordsArchived += result.archivedIds.length;
+          if (action !== "blocked" && !options.dryRun) {
+            const livenessBlock = currentLivenessBlockReason(deps, group.sessionIds);
+            if (livenessBlock) {
+              action = "blocked";
+              blockReasons = [livenessBlock];
+            } else {
+              const result = deps.archiveGroup(
+                freshMembers.map((member) => ({ id: member.id, project: member.project })),
+              );
+              archived = result.archivedIds.length > 0;
+              recordsArchived += result.archivedIds.length;
+            }
           }
         }
       }
@@ -590,7 +626,11 @@ async function measureWorktreeSize(worktreePath: string): Promise<number | null>
   }
 }
 
-export function createGcDeps(config: AppConfig): SessionGcExecutorDeps {
+export function createGcDeps(
+  config: AppConfig,
+  isLiveSession: (session: SessionRecord) => boolean = (session) =>
+    session.status === "running" || session.status === "spawning",
+): SessionGcExecutorDeps {
   // One `gh pr list` per repo per run, cached for the whole run. A PR opened
   // after a repo's first probe is invisible to later groups of that same run;
   // the window is one run and the next run re-lists. Kept per-run on purpose:
@@ -610,6 +650,18 @@ export function createGcDeps(config: AppConfig): SessionGcExecutorDeps {
   return {
     cwd: process.cwd(),
     readGroupMembers: (sessionIds) => sessionIds.map((id) => readSession(config.dataDir, id)),
+    checkGroupLiveness: (sessionIds) => {
+      try {
+        for (const sessionId of sessionIds) {
+          const session = readSession(config.dataDir, sessionId);
+          if (!session) return "unknown";
+          if (isLiveSession(session)) return "live";
+        }
+        return "inactive";
+      } catch {
+        return "unknown";
+      }
+    },
     probeGuards: async (group, freshMembers) => {
       if (!group.worktreePath || !existsSync(group.worktreePath)) {
         return [];

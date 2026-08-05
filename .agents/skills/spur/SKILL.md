@@ -40,6 +40,7 @@ SAFETY
 IN THIS REPO
 
   Install from source: `docs/install-from-source.md`. HTTPS on a tailnet host, required for voice: `docs/https-tailscale.md`. Claude account rotation: `references/claude-auth-rotation.md`.
+  Admission and memory policy: `docs/configuration.md#admission-control`.
   Validation: `pnpm --dir v2 test` (fast, each Spur code change), `pnpm --dir v2 test:runtime` (CLI, daemon start, transport, lifecycle, worktree, tmux), `pnpm --dir v2 test:smoke` (real agent launch or prompt delivery). `pnpm --dir v2 build` after changing Spur code.
   Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
 

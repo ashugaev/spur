@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  deriveAdmissionFloorBytes,
   deriveMaxLiveSessions,
+  deriveShedCriticalFloorBytes,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
@@ -3731,7 +3733,18 @@ projects:
       maxLiveSessionsSource: "config",
       perSessionBytes: 1,
       reserveFraction: 0.5,
-      memoryGuard: { enforce: true, minAvailableBytes: 1000, minFreeSwapBytes: 500 },
+      memoryGuard: {
+        enforce: true,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1000,
+        minFreeSwapBytes: 500,
+        admissionFloorBytes: deriveAdmissionFloorBytes(totalmem()),
+        shedCriticalFloorBytes: deriveShedCriticalFloorBytes(totalmem()),
+        restoreFloorBytes: deriveAdmissionFloorBytes(totalmem()) + 1,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
     });
   });
 
@@ -3851,6 +3864,37 @@ projects:
     );
   });
 
+  it("rejects inverted memory shed and admission floors", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    admissionFloorBytes: 1000
+    shedCriticalFloorBytes: 1000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "shedCriticalFloorBytes (1000) must be less than admissionFloorBytes (1000)",
+    );
+  });
+
+  it("rejects PSI percentages outside 0 through 100", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    pressureSomeAvg10Refuse: 101
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.pressureSomeAvg10Refuse must be a number from 0 to 100",
+    );
+  });
+
   it("ignores a project admission block before semantic parsing", async () => {
     const configPath = await writeConfig(`
 admission:
@@ -3964,6 +4008,27 @@ projects:
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     });
+  });
+});
+
+describe("derive memory floors", () => {
+  it("derives ordered defaults for the measured 62.789 GiB host", () => {
+    const totalBytes = 67_418_697_728;
+    const admission = deriveAdmissionFloorBytes(totalBytes);
+    const critical = deriveShedCriticalFloorBytes(totalBytes);
+
+    expect(admission).toBe(8_427_337_216);
+    expect(critical).toBe(4_213_668_608);
+    expect(critical).toBeLessThan(admission);
+    expect(admission).toBeLessThan(admission + 1_610_612_736);
+  });
+
+  it("keeps floors ordered on a 1 GiB host", () => {
+    const admission = deriveAdmissionFloorBytes(1024 ** 3);
+    const critical = deriveShedCriticalFloorBytes(1024 ** 3);
+    expect(critical).toBe(512 * 1024 ** 2);
+    expect(admission).toBe(1024 ** 3);
+    expect(critical).toBeLessThan(admission);
   });
 });
 

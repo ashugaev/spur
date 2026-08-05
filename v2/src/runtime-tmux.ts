@@ -10,6 +10,7 @@ import { agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
+import { killProcessTree } from "./process-tree.js";
 import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
@@ -93,6 +94,7 @@ function memoizedProbe<T>(
 interface FleetSessionSnapshot {
   names: Set<string>;
   activity: Map<string, Date | null>;
+  readable: boolean;
 }
 
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
@@ -125,6 +127,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
   return memoizedProbe(fleetSessionCache, FLEET_SESSION_CACHE_KEY, async () => {
     const names = new Set<string>();
     const activity = new Map<string, Date | null>();
+    let readable = true;
     try {
       const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
@@ -146,8 +149,9 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     } catch {
       // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
+      readable = false;
     }
-    return { names, activity };
+    return { names, activity, readable };
   });
 }
 
@@ -877,6 +881,15 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
   } finally {
     invalidateFleetProbeCaches();
   }
+}
+
+export async function killTmuxSessionTree(sessionName: string): Promise<boolean> {
+  const panePid = await getTmuxPanePid(sessionName);
+  if (panePid !== null) await killProcessTree(panePid);
+  await killTmuxSession(sessionName);
+  fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  const snapshot = await getFleetSessionSnapshot();
+  return snapshot.readable && !snapshot.names.has(sessionName);
 }
 
 export function sidecarTmuxSession(sessionId: string, sidecarName: string): string {
