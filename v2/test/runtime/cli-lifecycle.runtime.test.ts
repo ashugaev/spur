@@ -450,6 +450,32 @@ async function findConsecutiveFreePorts(): Promise<{ start: number; end: number 
   throw new Error("Failed to find consecutive free TCP ports for runtime test");
 }
 
+async function listenOnAllInterfaces(
+  server: ReturnType<typeof createServer>,
+  port: number,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 async function runRestoreScenario(args: {
   agent?: "claude" | "codex" | "cursor";
   configName: string;
@@ -5356,37 +5382,39 @@ projects:
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
     const reservedRange = await findConsecutiveFreePorts();
-    const context = await createRuntimeTestContext(port);
-    const sessionPrefix = `rt-sidecar-os-bound-${port}`;
-    activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
-    const configPath = await writeReservedPortSidecarConfig(context, {
-      configName: "sidecar-os-bound-port.yaml",
-      sessionPrefix,
-      serverPort: port,
-      rangeStart: reservedRange.start,
-      rangeEnd: reservedRange.end,
-    });
-    const daemon = await context.startDaemon(configPath);
-    currentActiveContext().daemonPid = daemon.info.pid;
     const occupiedServer = createServer((_request, response) => {
       response.writeHead(204);
       response.end();
     });
+    const freePortGuard = createServer();
+    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
+    try {
+      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
+    } catch (error) {
+      await closeServer(occupiedServer);
+      throw error;
+    }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.once("error", reject);
-        occupiedServer.listen(reservedRange.start, "0.0.0.0", () => {
-          occupiedServer.off("error", reject);
-          resolve();
-        });
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-sidecar-os-bound-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
       });
+      const configPath = await writeReservedPortSidecarConfig(context, {
+        configName: "sidecar-os-bound-port.yaml",
+        sessionPrefix,
+        serverPort: port,
+        rangeStart: reservedRange.start,
+        rangeEnd: reservedRange.end,
+      });
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+      await closeServer(freePortGuard);
 
       const first = JSON.parse(
         (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
@@ -5429,15 +5457,7 @@ projects:
         },
       );
 
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      await closeServer(occupiedServer);
       await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
       await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
         method: "POST",
@@ -5448,17 +5468,8 @@ projects:
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {
-      if (occupiedServer.listening) {
-        await new Promise<void>((resolve, reject) => {
-          occupiedServer.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          });
-        });
-      }
+      await closeServer(freePortGuard);
+      await closeServer(occupiedServer);
     }
   });
 

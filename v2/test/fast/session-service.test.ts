@@ -136,6 +136,7 @@ const hasUncommittedChangesMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
 const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
+const readRemoteUrlsMock = vi.fn();
 const removeWorktreeMock = vi.fn();
 const pruneRepoWorktreesMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
@@ -581,6 +582,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
   workspaceExists: workspaceExistsMock,
@@ -588,6 +590,16 @@ vi.mock("../../src/workspace.js", () => ({
   worktreePathFor: (worktreeBaseDir: string, projectId: string, sessionId: string) =>
     `${worktreeBaseDir}/${projectId}/${sessionId}`,
 }));
+
+/** Batched PR-discovery response with every asked-for branch resolving to no PR. */
+function emptyPrLookupEnvelope(): string {
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-03-18T11:00:00.000Z" },
+      r: { isFork: false, parent: null, a0: { nodes: [] } },
+    },
+  });
+}
 
 function baseConfig() {
   return {
@@ -1131,6 +1143,9 @@ describe("SessionService", () => {
     hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
     isGitWorktreeMock.mockReset().mockResolvedValue(true);
     readCurrentBranchMock.mockReset().mockResolvedValue("main");
+    readRemoteUrlsMock
+      .mockReset()
+      .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     resolveRepoPathFromWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
@@ -1141,7 +1156,10 @@ describe("SessionService", () => {
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
-    ghMock.mockReset().mockResolvedValue("");
+    // Default: a well-formed batched-lookup response that says "no PR for this
+    // branch". An unparseable answer is no longer read as "no PR" — it is a
+    // failed lookup, which blocks teardown on purpose.
+    ghMock.mockReset().mockResolvedValue(emptyPrLookupEnvelope());
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     deleteSessionArtifactsExceptMock.mockReset();
@@ -12727,6 +12745,81 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
   });
 
+  // Regression: the open-PR fail-safe only works if an undiscoverable PR is
+  // distinguishable from "no PR". A session with no binding yet is the only
+  // shape that reaches discovery — one with `session.pr` set short-circuits it.
+  it("refuses teardown when discovery for an unbound session is rate limited", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    ghMock.mockRejectedValue(new Error("gh: API rate limit exceeded for user ID 1"));
+
+    const { GithubPrCheckUnavailableError, SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await service.complete("api-1");
+      throw new Error("expected complete to surface a PR check failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GithubPrCheckUnavailableError);
+      expect(error).toMatchObject({
+        statusCode: 409,
+        payload: {
+          code: "github_pr_check_unavailable",
+          sessionId: "api-1",
+          rateLimited: true,
+          pr: null,
+        },
+      });
+    }
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses teardown when discovery for an unbound session answers HTTP 502", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    ghMock.mockRejectedValue(new Error("gh: HTTP 502: Bad gateway"));
+
+    const { GithubPrCheckUnavailableError, SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await service.complete("api-1");
+      throw new Error("expected complete to surface a PR check failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GithubPrCheckUnavailableError);
+      expect(error).toMatchObject({
+        payload: { code: "github_pr_check_unavailable", rateLimited: false, pr: null },
+      });
+    }
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
   it("wraps a gh failure as GithubPrCheckUnavailableError when killing", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -21760,6 +21853,39 @@ describe("SessionService", () => {
 
       const afterRecovery = await service.list({ view: "dashboard" });
       expect(afterRecovery.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
+    });
+
+    it("retries the same idle slice after enrichment fails", async () => {
+      seedDashboardSessions(0, 10);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard", includeCompleted: true });
+
+      const selected: string[] = [];
+      let failSelectedSlice = true;
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        async (session: SessionRecord) => {
+          selected.push(session.id);
+          if (failSelectedSlice && session.id === "done-2") {
+            throw new Error("idle enrichment failed");
+          }
+          return { id: session.id };
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
+
+      selected.length = 0;
+      failSelectedSlice = false;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
+
+      selected.length = 0;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(selected).toEqual(["done-5", "done-6", "done-7", "done-8"]);
       service.dispose();
     });
 

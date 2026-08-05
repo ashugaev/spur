@@ -1,8 +1,11 @@
-import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_process";
+import {
+  execFile,
+  type ExecFileOptions,
+  type ExecFileOptionsWithStringEncoding,
+} from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
@@ -11,7 +14,6 @@ import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
-const execFileAsync = promisify(execFile);
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
@@ -42,11 +44,20 @@ async function runPreflightExec(
   label: string,
   command: string,
   args: string[],
-  options: Parameters<typeof execFileAsync>[2],
+  options: ExecFileOptions,
 ): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(command, args, options);
-    return typeof stdout === "string" ? stdout : stdout.toString("utf8");
+    return await new Promise<string>((resolve, reject) => {
+      const child = execFile(command, args, options, (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+          return;
+        }
+        resolve(typeof stdout === "string" ? stdout : stdout.toString("utf8"));
+      });
+      child.stdin?.end();
+    });
   } catch (error) {
     if (!(error instanceof Error)) {
       throw new Error(`${label} preflight failed: ${String(error)}`, { cause: error });

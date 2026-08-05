@@ -236,7 +236,14 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   draft?: boolean;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export interface GitHubAdaptivePollConfig {
+  slowIntervalMs: number;
+  activeGraceMs: number;
+}
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
+  adaptivePoll?: GitHubAdaptivePollConfig;
+};
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 

@@ -91,7 +91,13 @@ Hides `completed` and `killed` by default. Derives live `state` and `lastActivit
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` worktree session, `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
 
-Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery).
+Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
+
+- `gh.poll_cycle`: one completed poll cycle; includes `calls` and `graphqlCost`.
+- `gh.usage`: minute/hour `gh` invocation and GraphQL-cost windows.
+- `gh.poll_budget_paused`: polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known.
+
+GitHub source cadence, including `adaptivePoll`, lives in [Configuration](configuration.md#field-reference).
 
 ## spur-slots
 

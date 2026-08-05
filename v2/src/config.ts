@@ -15,6 +15,7 @@ import {
   type BacklogConfig,
   type CronSourceConfig,
   type GitHubCiSourceConfig,
+  type GitHubAdaptivePollConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
   type JiraSourceConfig,
@@ -627,6 +628,26 @@ function parseCronSource(
   };
 }
 
+function parseGitHubAdaptivePoll(
+  value: unknown,
+  sourceLabel: string,
+  intervalMs: number,
+): GitHubAdaptivePollConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `${sourceLabel}.adaptivePoll`;
+  const raw = asObject(value, label);
+  const slowIntervalMs =
+    asOptionalNumber(raw["slowIntervalMs"], `${label}.slowIntervalMs`) ?? intervalMs * 5;
+  if (slowIntervalMs <= intervalMs) {
+    throw new Error(`${label}.slowIntervalMs must be greater than ${sourceLabel}.intervalMs`);
+  }
+  const activeGraceMs = asOptionalNumber(raw["activeGraceMs"], `${label}.activeGraceMs`) ?? 600_000;
+  return { slowIntervalMs, activeGraceMs };
+}
+
 function parseReviewSource<TProvider extends ReviewProviderId>(
   provider: TProvider,
   projectId: string,
@@ -636,13 +657,19 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
   const draft = asOptionalBoolean(raw["draft"], `${label}.draft`);
+  const intervalMs = asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000;
+  const adaptivePoll =
+    provider === "github"
+      ? parseGitHubAdaptivePoll(raw["adaptivePoll"], label, intervalMs)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
-    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    intervalMs,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
     ...(draft !== undefined ? { draft } : {}),
+    ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 

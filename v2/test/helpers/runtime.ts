@@ -622,6 +622,68 @@ function argValue(args, prefix) {
   return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 }
 
+function connection(nodes) {
+  return { nodes, pageInfo: { hasPreviousPage: false, startCursor: null } };
+}
+
+function prFromNumber(state, prNumber) {
+  return (
+    state.prsByNumber?.[String(prNumber)] ||
+    Object.values(state.prsByBranch || {}).find(
+      (value) => String(value?.number || "") === String(prNumber),
+    )
+  );
+}
+
+function pullRequestNode(state, pr) {
+  if (!pr) return null;
+  const prNumber = String(pr.number || "");
+  const checks = (state.checksByPr?.[prNumber] || []).map((check) => ({
+    name: check.name,
+    conclusion: check.state,
+    status: check.state === "PENDING" ? "IN_PROGRESS" : "COMPLETED",
+  }));
+  const issueComments = (state.commentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    author: comment.user || null,
+  }));
+  const reviews = (state.reviewsByPr?.[prNumber] || []).map((review, index) => ({
+    databaseId: index + 1,
+    state: review.state || null,
+    body: "",
+    author: review.user || null,
+  }));
+  const reviewComments = (state.reviewCommentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    path: comment.path || null,
+    line: comment.line || null,
+    author: comment.user || null,
+  }));
+  const reviewThreads = state.reviewThreadsByPr?.[prNumber] ||
+    (reviewComments.length > 0
+      ? [{ id: "THREAD_" + prNumber, isResolved: false, comments: connection(reviewComments) }]
+      : []);
+  return {
+    id: "PR_" + prNumber,
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    reviewDecision: pr.reviewDecision || null,
+    mergeable: pr.mergeable || "MERGEABLE",
+    mergeStateStatus: pr.mergeStateStatus || "CLEAN",
+    isDraft: false,
+    state: pr.state || "OPEN",
+    commits: {
+      nodes: [{ commit: { statusCheckRollup: { contexts: connection(checks) } } }],
+    },
+    reviewThreads: connection(reviewThreads),
+    reviews: connection(reviews),
+    comments: connection(issueComments),
+  };
+}
+
 const state = readState();
 const args = process.argv.slice(2);
 
@@ -656,7 +718,37 @@ if (args[0] === "pr" && args[1] === "view") {
   process.exit(0);
 }
 
-if (args[0] === "api" && args[1] === "graphql") {
+if (args[0] === "api" && args.includes("graphql")) {
+  const query = argValue(args, "query=") || "";
+  const repository = {
+    nameWithOwner: (argValue(args, "owner=") || "acme") + "/" + (argValue(args, "name=") || "api"),
+    isFork: false,
+    parent: null,
+  };
+  for (const arg of args) {
+    const numberMatch = arg.match(/^n(\\d+)=(\\d+)$/);
+    if (numberMatch) {
+      repository["a" + numberMatch[1]] = pullRequestNode(
+        state,
+        prFromNumber(state, numberMatch[2]),
+      );
+      continue;
+    }
+    const branchMatch = arg.match(/^b(\\d+)=(.*)$/s);
+    if (branchMatch) {
+      const node = pullRequestNode(state, state.prsByBranch?.[branchMatch[2]]);
+      repository["a" + branchMatch[1]] = connection(node ? [node] : []);
+    }
+  }
+  if (/r\\s*:\\s*repository/.test(query)) {
+    print({
+      data: {
+        rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00.000Z" },
+        r: repository,
+      },
+    });
+    process.exit(0);
+  }
   const prNumber = argValue(args, "number=");
   print({
     data: {
@@ -891,6 +983,9 @@ export async function createGitRepo(): Promise<{ repoDir: string; originDir: str
   await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
   await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: repoDir });
+  await execFileAsync("git", ["remote", "add", "upstream", "https://github.com/acme/api.git"], {
+    cwd: repoDir,
+  });
   await writeFile(join(repoDir, "README.md"), "# Spur Runtime Test\n", "utf8");
   await writeFile(join(repoDir, ".env"), "TEST_ENV=1\n", "utf8");
   await execFileAsync("git", ["add", "."], { cwd: repoDir });
