@@ -575,8 +575,6 @@ async function runRestoreScenario(args: {
     });
 
     await sendKeysToTmux(controllerSessionName, "r");
-    await sleep(1_000);
-    await sendKeysToTmux(controllerSessionName, "q");
   }
 
   const restored = await pollUntil(
@@ -589,6 +587,9 @@ async function runRestoreScenario(args: {
       accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
     },
   );
+  if (!args.agent) {
+    await sendKeysToTmux(`${sessionPrefix}-ui`, "q");
+  }
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
