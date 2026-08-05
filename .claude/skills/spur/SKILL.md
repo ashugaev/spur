@@ -16,6 +16,7 @@ INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
+  Deploy switch restart behavior: `docs/commands.md#daemon-http-api`.
   Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH`: holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 
 CONFIG FOOTGUNS

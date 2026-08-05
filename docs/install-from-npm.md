@@ -102,7 +102,7 @@ spur spawn <project-id> --branch <branch> "smoke test" --json
 spur update
 ```
 
-`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). `install-and-restart.sh` and `POST /deploy/switch` restart only — they don't refresh units.
+`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [commands.md](commands.md#daemon-http-api): default `install-and-restart.sh` installs the package and runs `spur reinit`; non-default `SYSTEMCTL` (for example `SYSTEMCTL="sudo systemctl"`) falls back to `$SYSTEMCTL restart spur-daemon.service spur-web.service`.
 
 ## Security
 

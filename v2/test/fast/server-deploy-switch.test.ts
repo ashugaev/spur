@@ -35,6 +35,7 @@ interface SpawnCall {
 
 const spawnCalls: SpawnCall[] = [];
 let unrefCount = 0;
+let currentVersion = "0.1.0";
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
@@ -58,6 +59,10 @@ vi.mock("node:child_process", async () => {
     },
   };
 });
+
+vi.mock("../../src/version.js", () => ({
+  getVersion: () => currentVersion,
+}));
 
 async function setupConfig(port: number): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "spur-deploy-switch-"));
@@ -106,6 +111,7 @@ describe("POST /deploy/switch", () => {
     fetchSpy = vi.fn();
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
     delete process.env["SPUR_DEPLOY_SWITCH_FORCE"];
+    currentVersion = "0.1.0";
   });
 
   afterEach(() => {
@@ -239,6 +245,33 @@ describe("POST /deploy/switch", () => {
       expect(call.args[0]).toMatch(/scripts\/install-and-restart\.sh$/);
       expect(call.args[1]).toBe("0.2.0");
       expect(unrefCount).toBe(1);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("returns 202 without spawning the helper when the version is already current", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    currentVersion = "0.2.0";
+    fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(202);
+      const body: unknown = await response.json();
+      expect(isDeploySwitchSuccess(body)).toBe(true);
+      if (!isDeploySwitchSuccess(body)) throw new Error("unreachable");
+      expect(body.version).toBe("0.2.0");
+      expect(spawnCalls).toEqual([]);
+      expect(unrefCount).toBe(0);
     } finally {
       await server.stop();
     }

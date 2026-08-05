@@ -8,6 +8,10 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
+## Daemon HTTP API
+
+The web UI proxies runtime version selection through `POST /deploy/switch`. The daemon validates the requested published version. If it matches the daemon's reported version, the request returns `202` with `{ "accepted": true, "version": "<version>" }` and skips `install-and-restart.sh`. A different valid release starts the detached helper. Default user scope installs the package, runs `spur reinit`, reinstalls user units, restarts services, and health-checks them. Non-default `SYSTEMCTL` (for example `SYSTEMCTL="sudo systemctl"`) installs the package, then runs `$SYSTEMCTL restart spur-daemon.service spur-web.service`.
+
 ## doctor
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
