@@ -27,9 +27,8 @@ describe("sweepLeakedPlaywright ps snapshot sharing", () => {
   });
 
   it("forks ps exactly once for the whole sweep, no matter how many leaked roots are found", async () => {
-    const { resolvePlaywrightMcpBin, sweepLeakedPlaywright } = await import(
-      "../../../src/sidecars/playwright.js"
-    );
+    const { resolvePlaywrightMcpBin, sweepLeakedPlaywright } =
+      await import("../../../src/sidecars/playwright.js");
     const bin = resolvePlaywrightMcpBin();
     const row = (pid: number, port: number) =>
       `${pid} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port ${port}`;
