@@ -4125,8 +4125,12 @@ export class SessionService {
     });
     if (claim.status === "cached") return claim.outcome;
     if (claim.status === "joined") return claim.outcome;
-    const outcome = await enqueuePrLookup({ slug, branch, worktreePath });
-    claim.settle(outcome);
+    let outcome: PrLookupOutcome = { status: "skipped", reason: "error" };
+    try {
+      outcome = await enqueuePrLookup({ slug, branch, worktreePath });
+    } finally {
+      claim.settle(outcome);
+    }
     return outcome;
   }
 
