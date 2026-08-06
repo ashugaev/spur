@@ -1874,7 +1874,7 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(placeholder.reasoningEffort).toBeUndefined();
+    expect(placeholder.reasoningEffort).toBe("high");
     await vi.waitFor(() => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "codex",

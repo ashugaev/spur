@@ -10087,12 +10087,15 @@ export class SessionService {
     // for a status other than "completed") only runs after this spawn
     // already succeeded — so admission never counts the source twice.
     const targetAgent = request.agent ? parseAgentName(request.agent) : session.agent;
-    const carriedReasoningEffort = resolveCarriedReasoningEffort(
-      session,
-      targetAgent,
-      request.reasoningEffort,
-      this.getProject(session.project),
-    );
+    const carriedReasoningEffort = bootstrap
+      ? (request.reasoningEffort ??
+        (targetAgent === "claude" || targetAgent === "codex" ? session.reasoningEffort : undefined))
+      : resolveCarriedReasoningEffort(
+          session,
+          targetAgent,
+          request.reasoningEffort,
+          this.getProject(session.project),
+        );
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
