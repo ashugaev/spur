@@ -2412,6 +2412,12 @@ export class SessionService {
           const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
           if (!tmuxName || !liveTmux.has(tmuxName)) continue;
           const stopped = await killTmuxSessionTree(tmuxName);
+          // Drop the owner's sidecarProcs entry the same way every other
+          // sidecar kill site does — otherwise its dead pane's pgid stays
+          // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
+          // sidecar restarts, masking the orphan from the sweep and doctor.
+          const ownerId = this.sidecarOwnerIdForName(candidate, project, name);
+          this.clearSidecarProcEntry(ownerId, name);
           return {
             attempted: true,
             stoppedTmux: stopped ? tmuxName : null,

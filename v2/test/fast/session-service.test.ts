@@ -8062,7 +8062,17 @@ describe("SessionService", () => {
         },
       });
       const sessions = createSessionStore();
-      sessions.set("api-1", sessionRecord({ id: "api-1", sidecarNames: ["playwright", "dev"] }));
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          sidecarNames: ["playwright", "dev"],
+          sidecarProcs: {
+            playwright: { pid: 111, pgid: 111, starttime: 1 },
+            dev: { pid: 222, pgid: 222, starttime: 2 },
+          },
+        }),
+      );
       listTmuxSessionNamesMock
         .mockResolvedValueOnce(new Set(["api-1--playwright", "api-1--dev"]))
         .mockResolvedValueOnce(new Set(["api-1--dev"]))
@@ -8084,8 +8094,18 @@ describe("SessionService", () => {
       const dashboardSpy = vi.spyOn(service, "refreshDashboardCacheEntry");
 
       await service.runMemoryShed();
+      // FIX 3 (spur-6128): the memory-shed kill site must clear the owner's
+      // sidecarProcs entry the same way every other sidecar kill does, so
+      // the dead pane's pgid can never mask a real orphan from the sweep.
+      expect(sessions.get("api-1")?.sidecarProcs?.["playwright"]).toBeUndefined();
+      expect(sessions.get("api-1")?.sidecarProcs?.["dev"]).toEqual({
+        pid: 222,
+        pgid: 222,
+        starttime: 2,
+      });
       vi.setSystemTime(Date.now() + 1_000);
       await service.runMemoryShed();
+      expect(sessions.get("api-1")?.sidecarProcs?.["dev"]).toBeUndefined();
       vi.setSystemTime(Date.now() + 11_000);
       await service.runMemoryShed();
 
