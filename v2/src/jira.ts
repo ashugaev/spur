@@ -1,6 +1,3 @@
-import { get as httpGet } from "node:http";
-import { get as httpsGet } from "node:https";
-
 export interface JiraIssue {
   id: string;
   key: string;
@@ -17,35 +14,25 @@ export interface FetchJiraIssuesOptions {
 }
 
 const JIRA_SEARCH_MAX_RESULTS = 100;
+// The default poll interval (config.ts's jira backlog intervalMs) is 60s, so
+// this only needs to comfortably beat the poll cadence, not be tight — a
+// maxResults=100 search can legitimately take longer than 5s on a loaded
+// instance, which previously failed every poll and left the backlog stale.
+const FETCH_TIMEOUT_MS = 30_000;
 
-function requestBody(
+async function requestBody(
   url: URL,
   email: string,
   token: string,
 ): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const get = url.protocol === "http:" ? httpGet : httpsGet;
-    const request = get(
-      url,
-      {
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${email}:${token}`, "utf8").toString("base64")}`,
-          Accept: "application/json",
-        },
-      },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          resolve({
-            status: response.statusCode ?? 0,
-            body: Buffer.concat(chunks).toString("utf8"),
-          });
-        });
-      },
-    );
-    request.on("error", reject);
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${email}:${token}`, "utf8").toString("base64")}`,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
+  return { status: response.status, body: await response.text() };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -23,7 +23,7 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath } from "./gh.js";
+import { initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -35,6 +35,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  SessionAdmissionDeniedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
@@ -401,16 +402,18 @@ export async function startServer(
     );
   }
   assertConfigMayUseProdSlot(configPath);
-  const service = new SessionService(configPath);
+  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
+  let ready = false;
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
     setEventLogConfig(cfg.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
     setUserActionLogConfig(cfg.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
+    setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
+  service.startBackgroundLoops();
   const bus = new EventBus();
-  let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
   let backlogs: { stop(): void } | null = null;
@@ -476,12 +479,8 @@ export async function startServer(
     requestConfigPath: string,
     action: "connect" | "disconnect",
   ): Promise<void> => {
-    for (const message of preview.warnings) {
-      logEvent("daemon.registry.warning", {
-        level: "warn",
-        message,
-      });
-    }
+    // SessionService emits registry warnings while building the preview, so
+    // diagnostics still land when no reload is needed.
     if (!preview.changed) {
       return;
     }
@@ -603,6 +602,11 @@ export async function startServer(
 
       if (method === "GET" && path === "/info") {
         sendJson(response, 200, service.info());
+        return;
+      }
+
+      if (method === "GET" && path === "/headroom") {
+        sendJson(response, 200, await service.getHeadroom());
         return;
       }
 
@@ -1390,6 +1394,7 @@ export async function startServer(
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError
       ) {
@@ -1502,6 +1507,38 @@ export async function startServer(
       level: "warn",
       message: `Reconcile at boot failed: ${message}`,
     });
+  }
+
+  try {
+    const { enabled, cap, liveCount } = service.getAdmissionStartupSummary();
+    const atOrOverCap = liveCount >= cap.global;
+    logEvent("daemon.admission.startup", {
+      level: atOrOverCap ? "warn" : "info",
+      message: `Admission at boot: enabled=${enabled}, cap=${cap.global} (${cap.source}), live=${liveCount}`,
+      details: {
+        enabled,
+        cap: cap.global,
+        capSource: cap.source,
+        live: liveCount,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.admission.startup", {
+      level: "warn",
+      message: `Admission headroom check at boot failed: ${message}`,
+    });
+  }
+
+  const memoryCeilingWarning = service.getMemoryCeilingWarning();
+  if (memoryCeilingWarning) {
+    const message = `Spur fleet cgroup ${memoryCeilingWarning.cgroupPath} has unlimited memory.max and systemd-oomd is absent`;
+    logEvent("daemon.memory.unbounded", {
+      level: "warn",
+      message,
+      details: memoryCeilingWarning,
+    });
+    process.stderr.write(`${message}\n`);
   }
 
   ready = true;

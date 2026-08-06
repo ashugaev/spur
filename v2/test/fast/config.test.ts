@@ -1,10 +1,14 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  deriveAdmissionFloorBytes,
+  deriveMaxLiveSessions,
+  deriveShedCriticalFloorBytes,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
@@ -49,6 +53,7 @@ async function createConfigSearchMissDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   process.chdir(initialCwd);
   if (initialSpurConfig === undefined) {
     delete process.env["SPUR_CONFIG"];
@@ -1089,6 +1094,7 @@ projects:
   });
 
   it("parses telegram sources with env token and matching trigger events", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1663,6 +1669,106 @@ projects:
       type: "github",
       emitExisting: true,
     });
+  });
+
+  it("omits adaptivePoll entirely from a github source that doesn't configure it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect(Object.keys(parsed ?? {})).not.toContain("adaptivePoll");
+    expect("adaptivePoll" in (parsed ?? {})).toBe(false);
+  });
+
+  it("derives adaptivePoll defaults from an empty block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 30000
+        adaptivePoll: {}
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      intervalMs: 30_000,
+      adaptivePoll: {
+        slowIntervalMs: 150_000,
+        activeGraceMs: 600_000,
+      },
+    });
+  });
+
+  it("passes through explicit adaptivePoll overrides", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 30000
+        adaptivePoll:
+          slowIntervalMs: 900000
+          activeGraceMs: 120000
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      adaptivePoll: {
+        slowIntervalMs: 900_000,
+        activeGraceMs: 120_000,
+      },
+    });
+  });
+
+  it("rejects an adaptivePoll.slowIntervalMs not greater than intervalMs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        intervalMs: 60000
+        adaptivePoll:
+          slowIntervalMs: 60000
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.pr-watch.adaptivePoll.slowIntervalMs must be greater than projects.backend.sources.pr-watch.intervalMs",
+    );
+  });
+
+  it("ignores a stray adaptivePoll block on a gitlab source without throwing", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+        adaptivePoll:
+          slowIntervalMs: 900000
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["mr-watch"];
+    expect(parsed).toBeDefined();
+    expect("adaptivePoll" in (parsed ?? {})).toBe(false);
   });
 
   it("parses a sentry source with a resolved token and defaults", async () => {
@@ -2373,7 +2479,7 @@ projects:
       docsBlock?.selfDestruct?.enabled,
     ]).toEqual(["claude", "sonnet", true, true]);
     expect(docsBlock?.selfDestruct?.conditions).toBe(
-      "the docs review has been posted, or the PR changes no docs and no user-facing surface.",
+      "docs review posted, or PR changes no docs and no user-facing surface.",
     );
     expect([
       trigger.spawn.restrictWrites,
@@ -2384,11 +2490,11 @@ projects:
       [
         "Run /code-review {{url}} --comment.",
         "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."',
       ].join("\n"),
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
-      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+      "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
     );
   });
 
@@ -3604,6 +3710,231 @@ projects:
       maxRotationsPerEpisode: 2,
     });
   });
+
+  it("parses admission.maxLiveSessions and memoryGuard in instance mode", async () => {
+    const configPath = await writeConfig(`
+admission:
+  enabled: false
+  maxLiveSessions: 5
+  perSessionBytes: 1
+  reserveFraction: 0.5
+  memoryGuard:
+    enforce: true
+    minAvailableBytes: 1000
+    minFreeSwapBytes: 500
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission).toEqual({
+      enabled: false,
+      maxLiveSessions: 5,
+      maxLiveSessionsSource: "config",
+      perSessionBytes: 1,
+      reserveFraction: 0.5,
+      memoryGuard: {
+        enforce: true,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1000,
+        minFreeSwapBytes: 500,
+        admissionFloorBytes: deriveAdmissionFloorBytes(totalmem()),
+        shedCriticalFloorBytes: deriveShedCriticalFloorBytes(totalmem()),
+        restoreFloorBytes: deriveAdmissionFloorBytes(totalmem()) + 1,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
+    });
+  });
+
+  it.each([
+    ["absent", ""],
+    ["enabled only", "admission:\n  enabled: false"],
+    ["memory guard only", "admission:\n  memoryGuard:\n    enforce: true"],
+  ])("uses cap 100 from the default for %s admission sizing", async (_label, admission) => {
+    const configPath = await writeConfig(`
+${admission}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.maxLiveSessions).toBe(100);
+    expect(config.admission.maxLiveSessionsSource).toBe("default");
+  });
+
+  it.each([
+    ["perSessionBytes", "  perSessionBytes: 1073741824", 1_073_741_824, 0.7],
+    ["reserveFraction", "  reserveFraction: 0.5", 1_610_612_736, 0.5],
+  ] as const)(
+    "derives the cap when only %s is configured",
+    async (_field, sizing, bytes, fraction) => {
+      const configPath = await writeConfig(`
+admission:
+${sizing}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.admission.maxLiveSessions).toBe(
+        deriveMaxLiveSessions(totalmem(), bytes, fraction),
+      );
+      expect(config.admission.maxLiveSessionsSource).toBe("derived");
+    },
+  );
+
+  it("accepts admission.memoryGuard.minFreeSwapBytes and minAvailableBytes of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: 0
+    minFreeSwapBytes: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.memoryGuard.minAvailableBytes).toBe(0);
+    expect(config.admission.memoryGuard.minFreeSwapBytes).toBe(0);
+  });
+
+  it("rejects a negative admission.memoryGuard.minFreeSwapBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minFreeSwapBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minFreeSwapBytes must be a non-negative number",
+    );
+  });
+
+  it("rejects a negative admission.memoryGuard.minAvailableBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    minAvailableBytes: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.minAvailableBytes must be a non-negative number",
+    );
+  });
+
+  it("rejects admission.reserveFraction above 1", async () => {
+    const configPath = await writeConfig(`
+admission:
+  reserveFraction: 1.5
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.reserveFraction must be a positive number no greater than 1",
+    );
+  });
+
+  it("rejects admission.maxLiveSessions of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  maxLiveSessions: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.maxLiveSessions must be a positive integer",
+    );
+  });
+
+  it("rejects inverted memory shed and admission floors", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    admissionFloorBytes: 1000
+    shedCriticalFloorBytes: 1000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "shedCriticalFloorBytes (1000) must be less than admissionFloorBytes (1000)",
+    );
+  });
+
+  it("rejects PSI percentages outside 0 through 100", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    pressureSomeAvg10Refuse: 101
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.pressureSomeAvg10Refuse must be a number from 0 to 100",
+    );
+  });
+
+  it("ignores a project admission block before semantic parsing", async () => {
+    const configPath = await writeConfig(`
+admission:
+  enabled: not-a-boolean
+  maxLiveSessions: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.admission.enabled).toBe(true);
+    expect(config.admission.maxLiveSessions).toBe(100);
+    expect(config.admission.maxLiveSessionsSource).toBe("default");
+  });
+
+  it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    maxLiveSessions: 3
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+    expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+  });
+});
+
+describe("deriveMaxLiveSessions", () => {
+  it("derives 28 from 62 GiB at the default perSessionBytes/reserveFraction", () => {
+    expect(deriveMaxLiveSessions(62 * 1024 ** 3, 1_610_612_736, 0.7)).toBe(28);
+  });
+
+  it("floors to 1 rather than 0 on a small host", () => {
+    expect(deriveMaxLiveSessions(1024 ** 3, 1_610_612_736, 0.7)).toBe(1);
+  });
 });
 
 describe("sessionGc", () => {
@@ -3679,6 +4010,27 @@ projects:
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     });
+  });
+});
+
+describe("derive memory floors", () => {
+  it("derives ordered defaults for the measured 62.789 GiB host", () => {
+    const totalBytes = 67_418_697_728;
+    const admission = deriveAdmissionFloorBytes(totalBytes);
+    const critical = deriveShedCriticalFloorBytes(totalBytes);
+
+    expect(admission).toBe(8_427_337_216);
+    expect(critical).toBe(4_213_668_608);
+    expect(critical).toBeLessThan(admission);
+    expect(admission).toBeLessThan(admission + 1_610_612_736);
+  });
+
+  it("keeps floors ordered on a 1 GiB host", () => {
+    const admission = deriveAdmissionFloorBytes(1024 ** 3);
+    const critical = deriveShedCriticalFloorBytes(1024 ** 3);
+    expect(critical).toBe(512 * 1024 ** 2);
+    expect(admission).toBe(1024 ** 3);
+    expect(critical).toBeLessThan(admission);
   });
 });
 

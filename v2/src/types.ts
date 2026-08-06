@@ -1,3 +1,5 @@
+import type { HostMemory } from "./host-memory.js";
+
 export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 3;
 
@@ -234,7 +236,14 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   draft?: boolean;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export interface GitHubAdaptivePollConfig {
+  slowIntervalMs: number;
+  activeGraceMs: number;
+}
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
+  adaptivePoll?: GitHubAdaptivePollConfig;
+};
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
@@ -437,6 +446,28 @@ export interface ReviewSignal {
   text: string;
 }
 
+// The PR/MR the snapshot's signals were collected from. `null` covers legacy
+// on-disk snapshots (bare array, no PR identity) so callers cannot mistake
+// "unknown" for a real number via `=== undefined`.
+export interface ReviewSnapshot {
+  prNumber: number | null;
+  signals: Map<string, ReviewSignal>;
+}
+
+// The baseline to diff the next poll's signals against: the stored snapshot's
+// signals when it was collected from the same PR/MR, otherwise `undefined` so
+// the caller takes the existing first-observation path. A rebind (or a legacy
+// snapshot with no recorded PR) must never diff against a different PR's
+// signals — `changes_requested`, `ready_for_review`, `approved:<login>`, etc.
+// are not PR-unique text, so a stale match would silently suppress the new
+// PR's identical-text signal.
+export function reviewSnapshotBaseline(
+  stored: ReviewSnapshot | undefined,
+  prNumber: number,
+): Map<string, ReviewSignal> | undefined {
+  return stored && stored.prNumber === prNumber ? stored.signals : undefined;
+}
+
 export interface ReviewEventData {
   sessionId: string;
   prNumber: number;
@@ -526,6 +557,67 @@ export interface ProjectConfig {
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
+  maxLiveSessions?: number;
+}
+
+export type AdmissionCapSource = "default" | "config" | "derived";
+
+// Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
+// `admission` block is ignored before semantic parsing, same footgun as
+// rateLimitReactivation/authRotation/tags. All fields are resolved
+// (defaults already applied) so callers never re-derive them.
+export interface AdmissionConfig {
+  enabled: boolean;
+  maxLiveSessions: number;
+  // Set once at the config boundary (parseAdmission), never re-derived downstream.
+  maxLiveSessionsSource: AdmissionCapSource;
+  perSessionBytes: number;
+  reserveFraction: number;
+  memoryGuard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    shedEnabled: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    shedSwapUsedFraction: number;
+  };
+}
+
+export interface HeadroomReport {
+  cap: {
+    global: number;
+    source: AdmissionCapSource;
+    perSessionBytes: number;
+    reserveFraction: number;
+  };
+  projectCaps: Record<string, number>;
+  live: {
+    count: number;
+    byProject: Record<string, number>;
+  };
+  projectedRoom: number;
+  sessions: Array<{
+    id: string;
+    project: string;
+    status: SessionStatus;
+    rssBytes: number;
+  }>;
+  memory: HostMemory | null;
+  guard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    crossed: boolean;
+  };
 }
 
 export interface AppConfig {
@@ -596,6 +688,7 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }

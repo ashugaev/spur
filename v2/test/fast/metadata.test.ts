@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -922,5 +922,158 @@ describe("listSessions concurrency", () => {
     writeFileSync(join(dir, "api-1.json"), "{not json", "utf-8");
 
     expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
+  });
+});
+
+describe("listSessions record cache", () => {
+  function fixtureSession(id: string): SessionRecord {
+    return {
+      id,
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: id,
+      worktree: true,
+      worktreePath: `/tmp/spur-worktrees/api/${id}`,
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("keeps record identity for unchanged session files", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    writeSession(dataDir, fixtureSession("api-2"));
+
+    const first = listSessions(dataDir);
+    const second = listSessions(dataDir);
+    expect(second.find((s) => s.id === "api-1")).toBe(first.find((s) => s.id === "api-1"));
+    expect(second.find((s) => s.id === "api-2")).toBe(first.find((s) => s.id === "api-2"));
+
+    // After a write to only one record, that record is a new object and the
+    // untouched one is still the same object reference.
+    writeSession(dataDir, { ...fixtureSession("api-1"), status: "completed" });
+    const third = listSessions(dataDir);
+    const thirdApi1 = third.find((s) => s.id === "api-1");
+    const thirdApi2 = third.find((s) => s.id === "api-2");
+    expect(thirdApi1).not.toBe(second.find((s) => s.id === "api-1"));
+    expect(thirdApi1?.status).toBe("completed");
+    expect(thirdApi2).toBe(second.find((s) => s.id === "api-2"));
+  });
+
+  it("settles after the legacy pr-slot rewrite", async () => {
+    const dataDir = await createTempDir("spur-metadata-cache-");
+    tempDirs.push(dataDir);
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-a1b2.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify(
+        {
+          id: "api-a1b2",
+          project: "api",
+          agent: "claude",
+          prompt: "fix the bug",
+          branch: "feature/native-pr-binding",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api-a1b2",
+          tmuxSession: "api-a1b2",
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-04-26T09:00:00.000Z",
+          updatedAt: "2026-04-26T09:00:00.000Z",
+          slots: {
+            links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    // 1st call reads the legacy shape, which readSessionFile rewrites in
+    // place — a renameSync always yields a new inode, so this call's cache
+    // entry (keyed on the PRE-read, now-stale fingerprint) is invalidated
+    // the instant the next call's pre-read stat misses it.
+    const first = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(first?.pr).toMatchObject({ number: 42, repo: "acme/api" });
+
+    // 2nd call's pre-read stat misses the stale cache entry, so it
+    // re-parses once — reading the now-native shape, with no further
+    // rewrite, so this time the fingerprint it caches matches going
+    // forward.
+    const second = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(second).not.toBe(first);
+
+    // 3rd call is a pure cache hit: same object as the 2nd call, proving no
+    // permanent re-parse loop.
+    const third = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(third).toBe(second);
+  });
+
+  it("does not prune a sibling data dir whose sessions root is a raw string-prefix match", async () => {
+    const dataDir1 = await newDataDir();
+    // dataDir2's sessions root ("<rootDir1>-extra/sessions") shares
+    // dataDir1's sessions root as a raw string prefix with no separator
+    // immediately after -- the exact shape of a "sessions-old" vs
+    // "sessions" sibling collision.
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+
+    // Populating/pruning dataDir1's cache must never evict dataDir2's
+    // cache entries just because dataDir2's root string-starts-with
+    // dataDir1's root.
+    listSessions(dataDir1);
+
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("prunes only the missing sessions root before it is restored", async () => {
+    const dataDir1 = await newDataDir();
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir1First = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+    const sessionsRoot = join(dataDir1, "sessions");
+    const parkedRoot = join(dataDir1, "sessions-parked");
+
+    // Moving the root away and back preserves the file's fingerprint. A
+    // stale cache entry would therefore return the exact same object after
+    // restoration unless the missing-root listing prunes it.
+    renameSync(sessionsRoot, parkedRoot);
+    expect(listSessions(dataDir1)).toEqual([]);
+    renameSync(parkedRoot, sessionsRoot);
+
+    const dataDir1Second = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir1Second).not.toBe(dataDir1First);
+    expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("lists a session file that has no index entry", async () => {
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "api-1.json"),
+      `${JSON.stringify(fixtureSession("api-1"), null, 2)}\n`,
+    );
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
   });
 });
