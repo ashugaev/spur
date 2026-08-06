@@ -250,7 +250,10 @@ describe("sweepLeakedPlaywright", () => {
     const renderer = spawnIdle();
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
-      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+      // listProcesses passes an options object, so the callback is the last
+      // argument, not the third.
+      execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
+        const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
           stdout: [
             `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
@@ -287,7 +290,8 @@ describe("sweepLeakedPlaywright", () => {
     const server = spawnIdle();
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
-      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+      execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
+        const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
           stdout: `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
         });
