@@ -149,9 +149,6 @@ describe("isLeakedManagedPlaywright", () => {
   const leaked: ProcessInfo = {
     pid: 1000,
     ppid: 1,
-    pgid: 1000,
-    rssKb: 51200,
-    etimes: 3600,
     args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8750`,
   };
 

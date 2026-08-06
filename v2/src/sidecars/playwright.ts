@@ -1,23 +1,12 @@
-import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
-import {
-  collectTree,
-  killTree,
-  PS_MAX_BUFFER_BYTES,
-  snapshotProcesses,
-  type ProcessInfo,
-  type ProcSnapshot,
-} from "./reap.js";
-
-const execFileAsync = promisify(execFile);
+import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
 
 // Re-exported for callers/tests that import the shared process-info shape
-// through this module; the one process-tree path lives in ./reap.js.
+// through this module.
 export type { ProcessInfo };
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
@@ -180,63 +169,16 @@ export function isLeakedManagedPlaywright(
   return !ownedPorts.has(port);
 }
 
-const KILL_TREE_GRACE_MS = 1000;
-
-/**
- * SIGTERM the process and all descendants (catches chromium children) from a
- * single shared snapshot, wait a grace period, then SIGKILL survivors.
- * `killTree` (../sidecars/reap.js) already swallows ESRCH for already-dead
- * pids, so the second pass is unconditional.
- */
-async function killProcessTree(pid: number, snapshot: ProcSnapshot): Promise<void> {
-  const tree = collectTree(pid, snapshot);
-  killTree(tree, "SIGTERM");
-  await sleep(KILL_TREE_GRACE_MS);
-  killTree(tree, "SIGKILL");
-}
-
-const PLAYWRIGHT_PS_ARGS = ["-eo", "pid=,ppid=,args="];
-const PLAYWRIGHT_PS_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(.*)$/;
-
-/**
- * Portable fallback snapshot for this sweep only. reap.ts's own
- * `snapshotProcesses` requires GNU `ps`'s `etimes` keyword, which BSD `ps`
- * (macOS) doesn't have and exits nonzero on — that's fine for reap.ts's own
- * orphan-tree reap (already Linux-only via /proc), but this sweep never
- * touches /proc or process groups (`killTree` signals pids one at a time),
- * so it only ever needs pid/ppid/args and can fall back to a minimal,
- * portable `ps` call instead of reporting nothing every tick.
- */
-async function snapshotPortable(): Promise<ProcSnapshot> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync("ps", PLAYWRIGHT_PS_ARGS, {
-      timeout: 5_000,
-      maxBuffer: PS_MAX_BUFFER_BYTES,
-    }));
-  } catch {
-    return { ok: false, byPid: new Map(), byPgid: new Map() };
-  }
-  const byPid = new Map<number, ProcessInfo>();
-  for (const line of stdout.split("\n")) {
-    const match = PLAYWRIGHT_PS_ROW_RE.exec(line);
-    if (!match) {
-      continue;
-    }
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    byPid.set(pid, { pid, ppid, pgid: pid, rssKb: 0, etimes: 0, args: match[3] ?? "" });
-  }
-  if (byPid.size === 0) {
-    return { ok: false, byPid: new Map(), byPgid: new Map() };
-  }
-  return { ok: true, byPid, byPgid: new Map() };
-}
-
 /**
  * Find leaked managed playwright servers (orphaned, our bin, port not owned by
- * a live session) and kill their process trees. Returns the count of leaked
- * roots killed.
+ * a live session) and kill their process trees. Takes ONE shared `ps`
+ * snapshot for the whole sweep and passes it into every `killProcessTree`
+ * call (`../process-tree.js`) via its `list` override, instead of forking a
+ * fresh `ps` per leaked root. `killProcessTree` re-reads each target's
+ * `/proc/<pid>/stat` starttime right before SIGKILL and only signals pids
+ * whose starttime is unchanged, so a pid reused for something else after
+ * SIGTERM is never signaled a second time.
+ * Returns the count of leaked roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
   // Nothing this daemon started can be running if the package cannot be
@@ -249,18 +191,10 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
-  let snapshot = await snapshotProcesses();
-  if (!snapshot.ok) {
-    snapshot = await snapshotPortable();
-  }
-  if (!snapshot.ok) {
-    return 0;
-  }
-  const leaked = [...snapshot.byPid.values()].filter((proc) =>
-    isLeakedManagedPlaywright(proc, ownedPorts),
-  );
+  const processes = await listProcesses();
+  const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
-    await killProcessTree(proc.pid, snapshot);
+    await killProcessTree(proc.pid, { list: async () => processes });
   }
   return leaked.length;
 }
