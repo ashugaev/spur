@@ -119,13 +119,16 @@ projects:
   backend:
     path: $REPO_PATH
 `);
-    const projectPath = await writeNamedConfig("project.yaml", `
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
 models:
   - ignored
 projects:
   backend:
     path: $REPO_PATH
-`);
+`,
+    );
 
     const instance = loadConfig(instancePath);
     const project = loadProjectConfig(projectPath, instance);
@@ -1278,10 +1281,7 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.codexArgs).toEqual([
-      "-c",
-      'service_tier="fast"',
-    ]);
+    expect(config.projects["backend"]?.codexArgs).toEqual(["-c", 'service_tier="fast"']);
   });
 
   it("rejects reasoning effort in raw Codex args", async () => {

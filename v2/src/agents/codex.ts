@@ -663,9 +663,13 @@ export async function ensureCodexHooksConfig(
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
   if (options?.modelsCacheHome) {
-    await cp(join(options.modelsCacheHome, "models_cache.json"), join(codexDir, "models_cache.json"), {
-      force: true,
-    }).catch(() => undefined);
+    await cp(
+      join(options.modelsCacheHome, "models_cache.json"),
+      join(codexDir, "models_cache.json"),
+      {
+        force: true,
+      },
+    ).catch(() => undefined);
   }
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
