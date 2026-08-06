@@ -530,6 +530,21 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     );
   });
 
+  it("ignores a missing configured models cache", async () => {
+    mockCp.mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ENOENT" }));
+    await expect(
+      ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" }),
+    ).resolves.toBe("/session/tool/codex-home");
+  });
+
+  it("propagates non-ENOENT models cache errors", async () => {
+    const error = Object.assign(new Error("denied"), { code: "EACCES" });
+    mockCp.mockRejectedValueOnce(error);
+    await expect(
+      ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" }),
+    ).rejects.toBe(error);
+  });
+
   it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
     await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
 

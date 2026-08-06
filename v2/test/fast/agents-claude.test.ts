@@ -265,6 +265,11 @@ describe("buildClaudeResumePlan", () => {
     expect(plan.launchCommand).toContain("--permission-mode plan");
   });
 
+  it("includes --effort when reasoningEffort is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", { reasoningEffort: "high" });
+    expect(plan.launchCommand).toContain("--effort high");
+  });
+
   it("does not include initialMessage", () => {
     const plan = buildClaudeResumePlan("session-123");
     expect(plan).not.toHaveProperty("initialMessage");
