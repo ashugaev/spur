@@ -1453,6 +1453,8 @@ export async function collectGitHubSignalsBatch(
           results.set(sessionId, result);
         }
       } finally {
+        // Releases only what runReviewRepoBatch left unsettled — a throw mid-batch. settle ignores
+        // repeat calls, so every success and budget path above keeps its real outcome.
         for (const target of selected) {
           settleTargetLookup(target, { status: "skipped", reason: "error" });
         }
