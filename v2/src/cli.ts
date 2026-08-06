@@ -403,7 +403,7 @@ function prepareInstanceConfig(program: Command): { configPath: string; initiali
   return ensured;
 }
 
-async function maybeAutoConnectProject(
+export async function maybeAutoConnectProject(
   cliEntrypoint: string,
   configPath: string,
   explicitProjectConfigPath?: string,
