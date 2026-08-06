@@ -71,6 +71,8 @@ import {
   isInsideWorktreeDir,
   readConfigRegistryFile,
 } from "./registry.js";
+import { listSessions } from "./metadata.js";
+import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
@@ -87,6 +89,7 @@ import {
   type SessionMemoryListResponse,
   type SessionMemoryRecord,
   type SessionMemoryRecordResponse,
+  type SessionGcStatus,
   type SessionState,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
@@ -107,7 +110,12 @@ import {
   type HandoffSessionRequest,
 } from "./types.js";
 import { getVersion } from "./version.js";
-import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import {
+  checkProjectWorkspace,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
+  workspaceExists,
+} from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -858,6 +866,100 @@ function renderDoctorResult(result: DoctorResult): string {
   return lines.join("\n");
 }
 
+// Bounds one interactive `spur gc` run; the daemon sweep has its own
+// sessionGc.maxGroupsPerSweep instead.
+const DEFAULT_GC_CLI_LIMIT = 100;
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null) {
+    return "-";
+  }
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const unit = BYTE_UNITS[unitIndex] ?? "B";
+  return unitIndex === 0 ? `${bytes} ${unit}` : `${value.toFixed(1)} ${unit}`;
+}
+
+export function renderSessionGcResult(report: GcReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.sessions} record(s) in ${report.scanned.groups} group(s); planned ${report.groups.length} (limit ${report.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+    ),
+    "",
+  ];
+  if (report.groups.length === 0) {
+    lines.push(dimText("Nothing to collect."));
+    return lines.join("\n");
+  }
+  for (const group of report.groups) {
+    const records = `${group.sessionIds.length} record${group.sessionIds.length === 1 ? "" : "s"}`;
+    const detail = group.error
+      ? `error: ${group.error}`
+      : group.action === "blocked"
+        ? group.blockReasons.join(",")
+        : group.worktreePath || "(no worktree)";
+    lines.push(
+      `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
+    );
+    lines.push(dimText(`           ${group.sessionIds.join(" ")}`));
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${formatBytes(report.totals.freedBytes)} freed, ${report.totals.errors} error(s).`,
+  );
+  const restoreLoss = report.groups.flatMap((group) => group.restoreLossSessionIds);
+  if (restoreLoss.length > 0) {
+    lines.push(
+      dimText(
+        `${restoreLoss.length} stopped session(s) lose \`spur restore\` once collected: ${restoreLoss.join(" ")}`,
+      ),
+    );
+  }
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    throw new Error("--statuses must list at least one of completed,killed,stopped");
+  }
+  const statuses: SessionGcStatus[] = [];
+  for (const part of parts) {
+    if (part !== "completed" && part !== "killed" && part !== "stopped") {
+      throw new Error(`--statuses only accepts completed,killed,stopped (got ${part})`);
+    }
+    statuses.push(part);
+  }
+  return [...new Set(statuses)];
+}
+
+function parseNonNegativeIntegerOption(value: string, flag: string): number {
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(value.trim(), 10);
+}
+
+function parsePositiveIntegerOption(value: string, flag: string): number {
+  const parsed = parseNonNegativeIntegerOption(value, flag);
+  if (parsed === 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  return parsed;
+}
+
 function collectOptionValue(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
@@ -989,6 +1091,14 @@ function helpNotes(command: Command): string[] {
       "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
       "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
+    ];
+  }
+  if (command.name() === "gc") {
+    return [
+      "Dry run by default: prints every group with its age, size, and the action it would take. Nothing is touched without `--execute`.",
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
+      "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
+      "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -1863,6 +1973,64 @@ export function createProgram(cliEntrypoint: string): Command {
               : "Host and project checks complete.",
         render: renderDoctorResult,
         exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("gc")
+    .description(
+      "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
+    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum groups to act on in one run")
+    .option("--no-sizes", "Skip `du` size measurement (no freed-byte reporting)")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const olderThanDays =
+        options.olderThan === undefined
+          ? config.sessionGc.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const statuses =
+        options.statuses === undefined
+          ? config.sessionGc.statuses
+          : parseSessionGcStatusesOption(String(options.statuses));
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      const sizes = options.sizes !== false;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning session gc" : "running session gc",
+        action: async () => {
+          const plan = planSessionGc({
+            sessions: listSessions(config.dataDir),
+            worktreeDir: config.worktreeDir,
+            now: new Date(),
+            olderThanDays,
+            statuses,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            pathExists: (path) => workspaceExists(path),
+          });
+          return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
+        },
+        render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });
 
