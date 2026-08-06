@@ -35,7 +35,12 @@ import {
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
-import type { AgentName, ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import type {
+  AgentName,
+  ProviderReasoningEffort,
+  TranscriptEntry,
+  SidecarMcpBinding,
+} from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -346,7 +351,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       ctx.codexSessionsDir
         ? readCodexTranscriptEntries(ctx.codexSessionsDir)
         : Promise.resolve(null),
-    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites, modelsCacheHome }) => ({
+    setup: async ({
+      sessionToolDir,
+      worktreePath,
+      mcpBindings,
+      restrictWrites,
+      modelsCacheHome,
+    }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),

@@ -1052,7 +1052,9 @@ function withProjectAgentOptions(
 } {
   const reasoningEffort =
     options.reasoningEffort ??
-    (agent === "claude" || agent === "codex" ? (project.reasoningEffort?.[agent] ?? "medium") : undefined);
+    (agent === "claude" || agent === "codex"
+      ? (project.reasoningEffort?.[agent] ?? "medium")
+      : undefined);
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
@@ -9143,7 +9145,9 @@ export class SessionService {
         withProjectAgentOptions(session.agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
-          ...(session.reasoningEffort !== undefined ? { reasoningEffort: session.reasoningEffort } : {}),
+          ...(session.reasoningEffort !== undefined
+            ? { reasoningEffort: session.reasoningEffort }
+            : {}),
         }),
         { planMode, restrictWrites },
       ),
@@ -9388,7 +9392,9 @@ export class SessionService {
           withProjectAgentOptions(current.agent, restoreProjectConfig, {
             ...hookSetup,
             ...(sessionAgentConfig.planOptions ?? {}),
-            ...(current.reasoningEffort !== undefined ? { reasoningEffort: current.reasoningEffort } : {}),
+            ...(current.reasoningEffort !== undefined
+              ? { reasoningEffort: current.reasoningEffort }
+              : {}),
           }),
           { planMode, restrictWrites },
         ),
@@ -10057,7 +10063,9 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
       }),
       request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
@@ -10164,7 +10172,9 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
-          ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+          ...(request.reasoningEffort !== undefined
+            ? { reasoningEffort: request.reasoningEffort }
+            : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),

@@ -562,7 +562,9 @@ export interface ProjectConfig {
 }
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
-export type AgentReasoningEffortConfig = Partial<Record<"claude" | "codex", ProviderReasoningEffort>>;
+export type AgentReasoningEffortConfig = Partial<
+  Record<"claude" | "codex", ProviderReasoningEffort>
+>;
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 

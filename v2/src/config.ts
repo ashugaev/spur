@@ -285,7 +285,9 @@ function parseProjectReasoningEffort(
       throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
     }
     if (entry !== "low" && entry !== "medium" && entry !== "high") {
-      throw new Error(`projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`);
+      throw new Error(
+        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
+      );
     }
     effort[agent] = entry;
   }
