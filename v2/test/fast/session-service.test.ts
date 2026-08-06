@@ -25195,6 +25195,7 @@ describe("SessionService", () => {
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
+      pollAttentionStates(baseline: boolean): Promise<void>;
     };
 
     async function drainBaselineTicks(internals: SessionScopedStateInternals): Promise<void> {
@@ -25207,6 +25208,24 @@ describe("SessionService", () => {
         await Promise.resolve();
       }
     }
+
+    it("reuses the attention sweep session batch while enriching every live session", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", worktree: false }));
+      sessions.set("api-2", runningSession({ id: "api-2", worktree: false }));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+      listSessionsMock.mockClear();
+
+      await internals.pollAttentionStates(false);
+
+      expect(listSessionsMock).toHaveBeenCalledOnce();
+      service.dispose();
+    });
 
     it("collapses attention-scoped maps to only non-terminal ids once sessions go terminal", async () => {
       mockClaudeJsonlState("waiting");

@@ -3522,7 +3522,7 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of sessions) {
         try {
-          const view = await this.enrich(session, claudeAccounts);
+          const view = await this.enrich(session, claudeAccounts, sessions);
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
