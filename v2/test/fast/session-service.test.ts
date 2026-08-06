@@ -9006,6 +9006,10 @@ describe("SessionService", () => {
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
       ) as unknown as MemoryShedService;
+      // The constructor itself always logs one "daemon.registry.pruned" event;
+      // clear it so the calls counted below are only the memory-shed ones
+      // under test, not an incidental count of construction-time logging.
+      logSpurEventMock.mockClear();
 
       readHostMemoryMock.mockReturnValue({
         ...swapOnly,
