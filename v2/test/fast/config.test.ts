@@ -2516,7 +2516,7 @@ projects:
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "cursor-default", true, true]);
+    ]).toEqual(["cursor", "auto", true, true]);
     expect([
       uiBlock?.agent,
       uiBlock?.model,
@@ -2537,6 +2537,9 @@ projects:
       trigger.spawn.autoComplete,
       trigger.spawn.allowedTriggers,
     ]).toEqual([true, undefined, []]);
+    expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
+    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ codex: "high" });
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}} --comment.",

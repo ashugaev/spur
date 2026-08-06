@@ -52,6 +52,22 @@ function resolveVoiceModelPath(
   return { ...voice, modelPath: resolve(userConfigDir, modelPath) };
 }
 
+function resolveModelsCodexHome(
+  models: Record<string, unknown>,
+  userConfigDir: string,
+): Record<string, unknown> {
+  const codexHome = models.codexHome;
+  if (
+    typeof codexHome !== "string" ||
+    codexHome.length === 0 ||
+    codexHome.startsWith("~/") ||
+    isAbsolute(codexHome)
+  ) {
+    return models;
+  }
+  return { ...models, codexHome: resolve(userConfigDir, codexHome) };
+}
+
 export function buildIsolatedInstanceConfig(args: {
   baseYaml: string;
   userYaml: string | null;
@@ -71,6 +87,10 @@ export function buildIsolatedInstanceConfig(args: {
   const voice = userDoc.voice;
   if (voice !== undefined) {
     merged.voice = isMapping(voice) ? resolveVoiceModelPath(voice, args.userConfigDir) : voice;
+  }
+  const models = userDoc.models;
+  if (models !== undefined) {
+    merged.models = isMapping(models) ? resolveModelsCodexHome(models, args.userConfigDir) : models;
   }
   return stringifyYaml(merged);
 }

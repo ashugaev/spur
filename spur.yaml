@@ -9,7 +9,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      cursor: cursor-default
+      cursor: auto
     symlinks:
       - .env
       - node_modules
@@ -26,6 +26,9 @@ projects:
           value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
     reasoningEffort:
       codex: high
+    codexArgs:
+      - -c
+      - 'service_tier="default"'
     preflight: {}
     sidecars:
       isolated-daemon:
@@ -108,7 +111,7 @@ projects:
               overrides:
                 worktree: true
             - agent: cursor
-              model: cursor-default
+              model: auto
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
                 Apply the `review` tag to this session.

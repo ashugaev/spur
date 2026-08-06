@@ -124,6 +124,20 @@ describe("isolated instance config", () => {
     expect(parsed.voice).toEqual({ modelPath: "/opt/models/ggml-base.bin" });
   });
 
+  it("propagates models.codexHome and resolves it against userConfigDir", () => {
+    const userYaml = `models:
+  codexHome: cache/codex
+`;
+    const output = buildIsolatedInstanceConfig({
+      baseYaml,
+      userYaml,
+      userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
+    });
+    const parsed = parsedMap(output);
+    expect(parsed.models).toEqual({ codexHome: "/home/user/.spur/cache/codex" });
+  });
+
   it("drops user-provided server/dataDir/worktreeDir/tmux", () => {
     const userYaml = `server:
   port: 9999
