@@ -26269,6 +26269,11 @@ describe("SessionService", () => {
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
+      enrich(
+        session: SessionRecord,
+        claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+        sessionBatch?: SessionRecord[],
+      ): Promise<SessionView>;
       pollAttentionStates(baseline: boolean): Promise<void>;
     };
 
@@ -26288,16 +26293,56 @@ describe("SessionService", () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ id: "api-1", worktree: false }));
       sessions.set("api-2", runningSession({ id: "api-2", worktree: false }));
+      sessions.set(
+        "api-3",
+        runningSession({
+          id: "api-3",
+          worktree: false,
+          workspaceId: "api-1",
+          status: "completed",
+        }),
+      );
+      sessions.set(
+        "api-4",
+        runningSession({ id: "api-4", worktree: false, workspaceId: "api-1", status: "killed" }),
+      );
+      tmuxSessionExistsMock.mockImplementation((tmuxSession: string) =>
+        Promise.resolve(tmuxSession === "api-1" || tmuxSession === "api-2"),
+      );
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = service as unknown as SessionScopedStateInternals;
       await drainBaselineTicks(internals);
+      const capturedViews: SessionView[] = [];
+      const enrich = internals.enrich.bind(internals);
+      vi.spyOn(internals, "enrich").mockImplementation(async (...args) => {
+        const view = await enrich(...args);
+        capturedViews.push(view);
+        return view;
+      });
       listSessionsMock.mockClear();
 
       await internals.pollAttentionStates(false);
 
       expect(listSessionsMock).toHaveBeenCalledOnce();
+      expect(capturedViews.map((view) => view.id)).toEqual(["api-1", "api-2"]);
+      expect(capturedViews[0]?.deskGroupMembers).toEqual([
+        {
+          id: "api-1",
+          agent: "claude",
+          status: "running",
+          state: "waiting",
+          runtimeAlive: true,
+        },
+        {
+          id: "api-3",
+          agent: "claude",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+        },
+      ]);
       service.dispose();
     });
 
