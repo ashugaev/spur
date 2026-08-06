@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
+import type * as prLookupModule from "../../src/pr-lookup.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -930,5 +931,53 @@ describe("PR auto-detect", () => {
     expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
+  });
+
+  it("releases the sweep's poll claim when enqueuePrLookup rejects", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    // Real `enqueuePrLookup` never rejects (its own doc comment says so):
+    // every gh failure it sees is caught and settled as a `skipped` outcome.
+    // Proving `resolveQueuedPrLookup`'s finally releases the claim on a
+    // rejection needs a synthetic one, scoped to this test only with
+    // `vi.doMock` (not the file-wide `vi.mock`) so the other 18 tests in this
+    // file keep importing a genuinely fresh, unmocked `pr-lookup.js` module
+    // per `vi.resetModules()` cycle.
+    vi.doMock("../../src/pr-lookup.js", async (importOriginal) => {
+      const original = await importOriginal<typeof prLookupModule>();
+      return { ...original, enqueuePrLookup: () => Promise.reject(new Error("gh unavailable")) };
+    });
+
+    try {
+      const { SessionService } = await loadModule();
+      const { claimPollPrLookup } = await import("../../src/pr-lookup.js");
+      const service = new SessionService();
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      // The rejection is not swallowed: the sweep logs it instead of hanging.
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({ event: "session.pr_auto_detect.failed" }),
+      );
+      // And the claim taken before the rejecting await is released, not
+      // leaked: a later claimant owns the key instead of joining a claim
+      // nobody settles.
+      const claim = claimPollPrLookup({
+        dataDir: DATA_DIR,
+        slug: PR_SLUG,
+        branch: session.branch,
+        capMs: 5 * 60_000,
+      });
+      expect(claim.status).toBe("owner");
+
+      service.dispose();
+    } finally {
+      // Unregister unconditionally: an assertion failure above must not leave
+      // a rejecting `enqueuePrLookup` mock for a test appended after this one.
+      vi.doUnmock("../../src/pr-lookup.js");
+    }
   });
 });
