@@ -19,9 +19,11 @@ import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   imageFilesFromDataTransfer,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { TerminalStatusDot } from "@/components/TerminalStatusDot";
@@ -310,14 +312,23 @@ export function DirectTerminal({
   const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
-  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setVoiceAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addVoiceImageFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const sendSessionMessage = useCallback(
     async (
@@ -326,6 +337,7 @@ export function DirectTerminal({
       options: { queue: boolean; interrupt?: boolean },
     ) => {
       const encodedAttachments = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
       const body: Record<string, unknown> = {
@@ -362,12 +374,21 @@ export function DirectTerminal({
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
-          setVoiceAttachments((current) => [...current, ...attachments]);
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) {
+            showErrorToast(rejectedMessage);
+            return;
+          }
           voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
         })
         .catch(() => {});
     },
-    [agentInputEnabled, voice],
+    [agentInputEnabled, showErrorToast, voice],
   );
 
   const handleTerminalPaste = useCallback(

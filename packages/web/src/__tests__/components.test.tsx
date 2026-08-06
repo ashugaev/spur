@@ -17,6 +17,7 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import { spawnDraftStorageKey, writeSpawnDraft } from "@/lib/spawn-draft";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -341,6 +342,83 @@ describe("Dashboard", () => {
         }),
       );
     });
+  });
+
+  it("restores edits for the same backlog item and seeds a different item", async () => {
+    const backlog = [
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      },
+      {
+        provider: "jira" as const,
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix billing",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:01:00.000Z",
+        position: 1,
+      },
+    ];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("link", { name: /WEB-17/ });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Edited checkout instructions" },
+    });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/checkout" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "worktree" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Edited checkout instructions",
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Edited checkout instructions",
+    );
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/checkout");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
+    expect(screen.getByLabelText("step 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[1]);
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Work on WEB-18: Fix billing\n\nhttps://jira.example.com/browse/WEB-18",
+    );
+    expect(screen.getByLabelText("branch name")).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
   it("hides a backlog row while an active session references its tracker link", async () => {
@@ -1214,6 +1292,21 @@ describe("Dashboard", () => {
   });
 
   it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    writeSpawnDraft({
+      projectId: "spur-shepherd",
+      prompt: "Stale Shepherd prompt",
+      agent: "codex",
+      model: "gpt-5.6-codex",
+      branch: "feature/stale-shepherd",
+      branchIsExplicit: true,
+      workspaceMode: "worktree",
+      defaultBranch: "main",
+      planMode: true,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: ["Stale step"],
+      trackerUrl: null,
+    });
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -1253,6 +1346,10 @@ describe("Dashboard", () => {
     const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
     expect(spawnProjectSelect).toHaveValue("spur-shepherd");
     expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    expect(screen.getByLabelText("branch name")).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
 
@@ -1970,6 +2067,375 @@ describe("Dashboard", () => {
     expect(spawnProjectSelect.value).toBe("api");
   });
 
+  it("restores the complete non-sensitive spawn draft after close and remount", async () => {
+    let holdSessionsResponse = false;
+    let resolveHeldSessions: ((response: Response) => void) | undefined;
+    const heldSessionsResponse = new Promise<Response>((resolve) => {
+      resolveHeldSessions = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions" && holdSessionsResponse) return heldSessionsResponse;
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude" || url === "/api/models?agent=codex") {
+        return new Response(
+          JSON.stringify({
+            models: [{ id: "gpt-5.6-codex", label: "GPT-5.6 Codex", isDefault: false }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const firstRender = render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+      target: { value: "codex" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /GPT-5.6 Codex/ }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Keep this draft" },
+    });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/keep-draft" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "worktree" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Base branch"), {
+      target: { value: "release" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+      target: { value: "After review" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
+    fireEvent.change(screen.getByLabelText("step 1"), { target: { value: "Run tests" } });
+
+    await waitFor(() => {
+      const stored = window.localStorage.getItem(spawnDraftStorageKey("api"));
+      expect(stored).toContain("Keep this draft");
+      expect(stored).not.toContain("attachments");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("codex");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent(
+        "GPT-5.6 Codex",
+      );
+    });
+
+    firstRender.unmount();
+    holdSessionsResponse = true;
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    resolveHeldSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+    });
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/keep-draft");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
+    expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
+    expect(screen.getByRole("checkbox", { name: "Plan" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).toBeChecked();
+    expect(screen.getByLabelText("Self-destruct conditions")).toHaveValue("After review");
+    expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
+  });
+
+  it("debounces spawn draft writes and flushes pending edits on every close path", async () => {
+    const windowRemoveListenerSpy = vi.spyOn(window, "removeEventListener");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    vi.useFakeTimers();
+
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "First edit" } });
+    fireEvent.change(prompt, { target: { value: "Latest edit" } });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(499);
+    });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Latest edit");
+
+    fireEvent.change(prompt, { target: { value: "Close now" } });
+    const removeCallCount = windowRemoveListenerSpy.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+    const preEditEscapeHandlers = windowRemoveListenerSpy.mock.calls
+      .slice(removeCallCount)
+      .filter(([type]) => type === "keydown")
+      .map(([, listener]) => listener as (event: KeyboardEvent) => void);
+    expect(preEditEscapeHandlers.length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    const reopenedPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(reopenedPrompt, { target: { value: "Escape now" } });
+    act(() => {
+      for (const handler of preEditEscapeHandlers) {
+        handler(new KeyboardEvent("keydown", { key: "Escape" }));
+      }
+    });
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Escape now");
+    expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Escape now");
+  });
+
+  it("keeps a restored explicit branch when preflight suggests another branch", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight") {
+        return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "api",
+      prompt: "Keep the chosen branch",
+      agent: "claude",
+      model: null,
+      branch: "feature/explicit-branch",
+      branchIsExplicit: true,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/preflight", expect.anything());
+      },
+      { timeout: 1_500 },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/explicit-branch");
+
+    fireEvent.change(screen.getByLabelText("branch name"), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Generate a new branch" },
+    });
+    await waitFor(
+      () => {
+        expect(screen.getByLabelText("branch name")).toHaveValue("feature/auto-branch");
+      },
+      { timeout: 1_500 },
+    );
+  });
+
+  it("allows preflight to fill a branch after normalization clears explicit input", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight") {
+        return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Generate a branch" },
+    });
+    const branchInput = screen.getByLabelText("branch name");
+    fireEvent.change(branchInput, { target: { value: "!!!" } });
+    fireEvent.blur(branchInput);
+
+    expect(branchInput).toHaveValue("");
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/preflight", expect.anything());
+        expect(branchInput).toHaveValue("feature/auto-branch");
+      },
+      { timeout: 1_500 },
+    );
+  });
+
+  it("keeps prompt edits made before projects finish loading", async () => {
+    let resolveSessions: ((response: Response) => void) | undefined;
+    const sessionsResponse = new Promise<Response>((resolve) => {
+      resolveSessions = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") return sessionsResponse;
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "api",
+      prompt: "Stored prompt",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Typed while loading" },
+    });
+    resolveSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+    });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue(
+      "Typed while loading",
+    );
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Typed while loading",
+      );
+    });
+  });
+
+  it("does not carry a removed project's dirty draft into the fallback project", async () => {
+    let projects = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+      { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+    ];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ ...sessionsPayload(), projects }), { status: 200 });
+      }
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    writeSpawnDraft({
+      projectId: "sp",
+      prompt: "Saved Spur draft",
+      agent: "claude",
+      model: null,
+      branch: "feature/sp-draft",
+      branchIsExplicit: true,
+      workspaceMode: "default",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+    });
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+    await screen.findByRole("link", { name: "Fix auth" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "API-only edits" },
+    });
+    await waitFor(() => {
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+    });
+
+    projects = [{ id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" }];
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
+    });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Saved Spur draft");
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/sp-draft");
+    expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).not.toContain("API-only edits");
+    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+  });
+
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
@@ -2034,6 +2500,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
+      expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).toBeNull();
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
@@ -2210,6 +2677,9 @@ describe("Dashboard", () => {
       expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
       expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
       expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
+      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+        "Keep this prompt",
+      );
     });
   });
 
@@ -2728,7 +3198,7 @@ describe("StatusBar", () => {
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.mouseEnter(githubStatus);
 
-    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(await screen.findByText("GitHub")).toBeInTheDocument();
     expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
@@ -2744,7 +3214,7 @@ describe("StatusBar", () => {
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
     fireEvent.mouseEnter(gitlabStatus);
 
-    expect(screen.getByText("GitLab")).toBeInTheDocument();
+    expect(await screen.findByText("GitLab")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
@@ -2806,7 +3276,7 @@ describe("StatusBar", () => {
 
     const githubStatus = screen.getByLabelText("GitHub connection checking");
     fireEvent.mouseEnter(githubStatus);
-    expect(screen.getByText("Checking")).toBeInTheDocument();
+    expect(await screen.findByText("Checking")).toBeInTheDocument();
   });
 
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {

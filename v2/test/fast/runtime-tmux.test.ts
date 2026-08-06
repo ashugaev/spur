@@ -2,7 +2,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options?: { timeout?: number; maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
 const execFileMock: ((...args: unknown[]) => void) & {
@@ -34,6 +38,25 @@ describe("runtime-tmux", () => {
       process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = originalSystemdScope;
     }
     vi.resetModules();
+  });
+
+  it("does not confirm tree shutdown when the fresh fleet probe fails", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("kill-session")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw new Error("fleet probe failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { killTmuxSessionTree } = await import("../../src/runtime-tmux.js");
+
+    await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
   });
 
   it("starts tmux sessions with the Spur-specific config", async () => {
@@ -577,5 +600,31 @@ describe("runtime-tmux", () => {
       ([, args]) => args[0] === "list-panes",
     );
     expect(listPanesCalls).toHaveLength(2);
+  });
+
+  it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: "api-1 1700000000", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "1234 pts/0 node agent", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    await isProcessRunningInTmux("api-1", ["node"]);
+
+    const psCall = execFileAsyncMock.mock.calls.find(([file]) => file === "ps");
+    if (!psCall) {
+      throw new Error("Expected a ps invocation");
+    }
+    const [, , options] = psCall;
+    expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
+    expect(options?.timeout).toBe(5_000);
   });
 });

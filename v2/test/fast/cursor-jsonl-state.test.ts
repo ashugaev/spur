@@ -252,6 +252,52 @@ describe("classifyCursorJsonlState", () => {
   });
 });
 
+describe("parseCursorJsonlRecord text retention", () => {
+  it("does not populate text on an ordinary assistant record with a message body", () => {
+    const line = JSON.stringify({
+      role: "assistant",
+      message: { content: [{ type: "text", text: "Here is a long assistant reply body." }] },
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record).toBeDefined();
+    expect(record?.role).toBe("assistant");
+    expect(record?.text).toBeUndefined();
+  });
+
+  it("still populates text on a turn_ended terminal-error record", () => {
+    const line = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "Rate limited: out of usage",
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record?.terminalError).toBe(true);
+    expect(record?.text).toBe("Rate limited: out of usage");
+  });
+
+  it("still surfaces the terminal error text via latestCursorTerminalError-equivalent classification", () => {
+    const ordinary = parseCursorJsonlRecord(
+      JSON.stringify({
+        role: "assistant",
+        message: { content: [{ type: "text", text: "no error here" }] },
+      }),
+      NOW,
+    );
+    const errorLine = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "Rate limited: out of usage",
+    });
+    const error = parseCursorJsonlRecord(errorLine, NOW);
+    expect(ordinary).toBeDefined();
+    expect(error).toBeDefined();
+    if (!ordinary || !error) return;
+    // classifyCursorJsonlState never reads `text`; the ordinary record's
+    // missing text field must not change the classified state.
+    expect(classifyCursorJsonlState([ordinary, error], NOW)).toBe("needs_input");
+  });
+});
+
 describe("Cursor JSONL fixtures", () => {
   it.each([
     ["working-tool-use.jsonl", "working"],

@@ -325,6 +325,14 @@ describe("extractLinkId", () => {
     expect(extractLinkId(link)).toBe("#123");
   });
 
+  it("extracts PR number from legacy github_pr pull URL", () => {
+    const link: SpurSessionLink = {
+      label: "github_pr",
+      url: "https://github.com/org/repo/pull/123",
+    };
+    expect(extractLinkId(link)).toBe("#123");
+  });
+
   it("returns 'PR' when URL has no pull number", () => {
     const link: SpurSessionLink = { label: "github-pr", url: "https://github.com/org/repo" };
     expect(extractLinkId(link)).toBe("PR");
@@ -341,6 +349,14 @@ describe("extractLinkId", () => {
   it("extracts tracker ID from /browse/ URL", () => {
     const link: SpurSessionLink = {
       label: "tracker",
+      url: "https://jira.example.com/browse/PROJ-42",
+    };
+    expect(extractLinkId(link)).toBe("PROJ-42");
+  });
+
+  it("extracts tracker ID from jira label URLs", () => {
+    const link: SpurSessionLink = {
+      label: "jira",
       url: "https://jira.example.com/browse/PROJ-42",
     };
     expect(extractLinkId(link)).toBe("PROJ-42");

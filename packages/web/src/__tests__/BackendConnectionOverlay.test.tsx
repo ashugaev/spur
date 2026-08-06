@@ -69,6 +69,7 @@ describe("BackendConnectionOverlay", () => {
     expect(overlay).toHaveAttribute("role", "alertdialog");
     expect(overlay).toHaveAttribute("aria-modal", "true");
     expect(screen.getByText("Reconnecting to Spur…")).toBeInTheDocument();
+    expect(screen.getByText(/This page will reconnect once it.s back/)).toBeInTheDocument();
 
     const reloadButton = screen.getByRole("button", { name: "Reload now" });
     reloadButton.click();

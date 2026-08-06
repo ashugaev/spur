@@ -76,7 +76,7 @@ class ReviewSendBatch implements SendBatch {
           );
 
     for (const key of [...this.signals.keys()]) {
-      if (snapshot?.has(key)) continue;
+      if (snapshot?.signals.has(key)) continue;
       this.signals.delete(key);
     }
   }

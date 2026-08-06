@@ -812,6 +812,16 @@ interface CodexRolloutCandidate {
   mtimeMs: number;
 }
 
+interface CodexRolloutFileFingerprint {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface CodexRolloutReaderState {
+  files: Map<string, CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }>;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -961,8 +971,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    // Rollout files are re-scanned on every dashboard poll, so each line is
-    // parsed once here and shared by all three extractors below.
+    // Parse each changed rollout line once and share it across the extractors.
     let parsed: unknown;
     try {
       parsed = JSON.parse(lines[index] ?? "");
@@ -997,7 +1006,10 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
-export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
+export async function readCodexRolloutState(
+  sessionsDir: string,
+  reader?: CodexRolloutReaderState,
+): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
@@ -1008,8 +1020,29 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
   // same instant, so filesystem mtime stops reflecting content recency. Rank by
   // the newest in-content state timestamp instead (heal preserves those), and
   // keep mtime only as a deterministic tie-breaker.
+  const nextFiles = new Map<
+    string,
+    CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }
+  >();
   const candidates = await Promise.all(
     files.map(async (filePath) => {
+      let fingerprint: CodexRolloutFileFingerprint | null = null;
+      try {
+        const fileStat = await stat(filePath);
+        fingerprint = { ino: fileStat.ino, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+      } catch {
+        // Preserve the existing best-effort read below for a stat/read race.
+      }
+      const cached = reader?.files.get(filePath);
+      if (
+        fingerprint &&
+        cached?.ino === fingerprint.ino &&
+        cached.mtimeMs === fingerprint.mtimeMs &&
+        cached.size === fingerprint.size
+      ) {
+        nextFiles.set(filePath, cached);
+        return cached.candidate;
+      }
       let content: string;
       try {
         content = await readFile(filePath, "utf8");
@@ -1019,17 +1052,19 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
       if (!result.rollout && !result.rateLimit && !result.model) {
+        if (fingerprint) {
+          nextFiles.set(filePath, { ...fingerprint, candidate: null });
+        }
         return null;
       }
-      let mtimeMs: number;
-      try {
-        mtimeMs = (await stat(filePath)).mtimeMs;
-      } catch {
-        mtimeMs = 0;
+      const candidate = { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
+      if (fingerprint) {
+        nextFiles.set(filePath, { ...fingerprint, candidate });
       }
-      return { result, mtimeMs };
+      return candidate;
     }),
   );
+  if (reader) reader.files = nextFiles;
   const existing = candidates.filter(
     (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
