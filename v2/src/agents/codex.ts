@@ -669,7 +669,10 @@ export async function ensureCodexHooksConfig(
       {
         force: true,
       },
-    ).catch(() => undefined);
+    ).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    });
   }
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {

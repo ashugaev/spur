@@ -1707,6 +1707,17 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function resolveCarriedReasoningEffort(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicit: ProviderReasoningEffort | undefined,
+  project: Pick<ProjectConfig, "reasoningEffort">,
+): ProviderReasoningEffort | undefined {
+  if (explicit !== undefined) return explicit;
+  if (targetAgent !== "claude" && targetAgent !== "codex") return undefined;
+  return session.reasoningEffort ?? project.reasoningEffort?.[targetAgent] ?? "medium";
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1720,6 +1731,9 @@ export function resolveRespawnRequest(
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
+  const reasoningEffort =
+    options?.reasoningEffort ??
+    (agent === "claude" || agent === "codex" ? session.reasoningEffort : undefined);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1727,7 +1741,7 @@ export function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
-    ...(options?.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -6108,7 +6122,11 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      reasoningEffort = resolveRequestReasoningEffort(agent, request.reasoningEffort);
+      reasoningEffort =
+        resolveRequestReasoningEffort(agent, request.reasoningEffort) ??
+        (agent === "claude" || agent === "codex"
+          ? (project.reasoningEffort?.[agent] ?? "medium")
+          : undefined);
       resolvedModel = await resolveAgentLaunchModel(
         agent,
         resolveSpawnModel({
@@ -6964,7 +6982,11 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      reasoningEffort = resolveRequestReasoningEffort(agent, request.reasoningEffort);
+      reasoningEffort =
+        resolveRequestReasoningEffort(agent, request.reasoningEffort) ??
+        (agent === "claude" || agent === "codex"
+          ? (project.reasoningEffort?.[agent] ?? "medium")
+          : undefined);
       resolvedModel = await resolveAgentLaunchModel(
         agent,
         resolveSpawnModel({
@@ -9140,14 +9162,18 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
+    const reasoningEffort = resolveCarriedReasoningEffort(
+      session,
+      session.agent,
+      undefined,
+      project,
+    );
     const planOptions = {
       ...withAgentModeOptions(
         withProjectAgentOptions(session.agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
-          ...(session.reasoningEffort !== undefined
-            ? { reasoningEffort: session.reasoningEffort }
-            : {}),
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
         }),
         { planMode, restrictWrites },
       ),
@@ -9387,14 +9413,18 @@ export class SessionService {
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
+      const reasoningEffort = resolveCarriedReasoningEffort(
+        current,
+        current.agent,
+        undefined,
+        restoreProjectConfig,
+      );
       const planOptions = {
         ...withAgentModeOptions(
           withProjectAgentOptions(current.agent, restoreProjectConfig, {
             ...hookSetup,
             ...(sessionAgentConfig.planOptions ?? {}),
-            ...(current.reasoningEffort !== undefined
-              ? { reasoningEffort: current.reasoningEffort }
-              : {}),
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
           }),
           { planMode, restrictWrites },
         ),
@@ -10056,6 +10086,13 @@ export class SessionService {
     // countLiveSessions treats as live, and the kill() below (source cleanup
     // for a status other than "completed") only runs after this spawn
     // already succeeded — so admission never counts the source twice.
+    const targetAgent = request.agent ? parseAgentName(request.agent) : session.agent;
+    const carriedReasoningEffort = resolveCarriedReasoningEffort(
+      session,
+      targetAgent,
+      request.reasoningEffort,
+      this.getProject(session.project),
+    );
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
@@ -10063,8 +10100,8 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined
-          ? { reasoningEffort: request.reasoningEffort }
+        ...(carriedReasoningEffort !== undefined
+          ? { reasoningEffort: carriedReasoningEffort }
           : {}),
       }),
       request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
@@ -10123,6 +10160,12 @@ export class SessionService {
         }
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
+      const carriedReasoningEffort = resolveCarriedReasoningEffort(
+        session,
+        agent,
+        request.reasoningEffort,
+        this.getProject(session.project),
+      );
 
       let sourceForSpawn = session;
       if (session.status === "running" || session.status === "spawning") {
@@ -10172,8 +10215,8 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
-          ...(request.reasoningEffort !== undefined
-            ? { reasoningEffort: request.reasoningEffort }
+          ...(carriedReasoningEffort !== undefined
+            ? { reasoningEffort: carriedReasoningEffort }
             : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
