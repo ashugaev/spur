@@ -26,12 +26,10 @@ function sample(
     health: {
       daemon: overrides.health?.daemon ?? OK,
       web: overrides.health?.web ?? OK,
-      terminal: overrides.health?.terminal ?? OK,
     },
     units: {
       daemon: overrides.units?.daemon ?? "active",
       web: overrides.units?.web ?? "active",
-      terminal: overrides.units?.terminal ?? "active",
     },
   };
 }

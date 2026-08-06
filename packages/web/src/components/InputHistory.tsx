@@ -86,7 +86,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
           role="dialog"
         >
           <div className="border-b border-[var(--color-border-default)] px-3 py-2 font-bold uppercase text-[var(--color-text-primary)]">
-            Recent inputs
+            History
           </div>
           {entries.length > 0 ? (
             <div className="max-h-80 overflow-y-auto">
@@ -110,7 +110,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
               ))}
             </div>
           ) : (
-            <div className="px-3 py-3 text-[var(--color-text-secondary)]">No saved inputs yet.</div>
+            <div className="px-3 py-3 text-[var(--color-text-secondary)]">No history.</div>
           )}
         </div>
       ) : null}

@@ -4,8 +4,8 @@ import { ModelSelect } from "@/components/ModelSelect.js";
 import type { AgentModel } from "@/lib/types.js";
 
 const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
+  { id: "opus", label: "Opus", isDefault: true },
+  { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
 ];
 

@@ -2,19 +2,22 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { instanceConfigExists, loadConfig } from "./config.js";
 import type { SystemdScope } from "./host-install.js";
+import { DEFAULT_UI_PORT } from "./ports.js";
+import type { HeadroomReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 2_000;
-const DEFAULT_WEB_PORT = 4311;
-const TERMINAL_PORT = 14801;
+const DEFAULT_WEB_PORT = DEFAULT_UI_PORT;
+export const DEFAULT_DAEMON_PORT = 4_310;
 
-export type ServiceId = "daemon" | "web" | "terminal";
+export type ServiceId = "daemon" | "web";
 
-export type ProbeResult =
-  | { ok: true }
-  | { ok: false; reason: "connection-refused" | "http-error" | "timeout" | "unknown" };
+export type ProbeReason = "connection-refused" | "http-error" | "timeout" | "unknown";
+
+export type ProbeResult = { ok: true } | { ok: false; reason: ProbeReason };
 
 export type UnitState = "active" | "activating" | "failed" | "inactive" | "unknown";
 
@@ -32,7 +35,6 @@ export interface ProbeTarget {
 export const SERVICE_UNITS: Record<ServiceId, string> = {
   daemon: "spur-daemon.service",
   web: "spur-web.service",
-  terminal: "spur-direct-terminal.service",
 };
 
 // The web unit carries its listen port as `Environment=PORT=<n>`; npm-init.sh
@@ -57,18 +59,54 @@ export function readWebPort(scope: SystemdScope): number {
   }
 }
 
+// Host-level daemon port resolution: read the bootstrap instance config, same
+// as the daemon itself, defaulting to 4310 when it is unset or unreadable.
+// `allowBootstrapWrite` gates whether a missing instance config may be
+// auto-created by `loadConfig` (its bootstrap side effect) before being read.
+function resolveDaemonPortImpl(allowBootstrapWrite: boolean): number {
+  try {
+    if (!allowBootstrapWrite && !instanceConfigExists()) return DEFAULT_DAEMON_PORT;
+    return loadConfig().server.port;
+  } catch {
+    return DEFAULT_DAEMON_PORT;
+  }
+}
+
+// Used by `spur update`, which always runs after `spur init` has already
+// bootstrapped `~/.spur/config.yaml`, so auto-creating it here is safe.
+export function resolveDaemonPort(): number {
+  return resolveDaemonPortImpl(true);
+}
+
+// Read-only daemon port resolution for `spur doctor`: never triggers
+// `loadConfig`'s auto-bootstrap write of `~/.spur/config.yaml` on a host that
+// has never run any Spur command before. Falls back to the same default port
+// as `resolveDaemonPort` when the instance config does not exist yet.
+export function resolveDaemonPortReadOnly(): number {
+  return resolveDaemonPortImpl(false);
+}
+
 export interface WebUnitOptions {
   webPort: number;
   exposeWeb: boolean;
+  tailscale: boolean;
 }
 
 // The live web unit is the source of truth for what is currently deployed:
-// `Environment=PORT=<n>` is the listen port and `Environment=HOSTNAME=0.0.0.0`
+// `Environment=PORT=<n>` is the listen port and `Environment=WEB_HOST=0.0.0.0`
 // marks external exposure (set by npm-init.sh --expose-web). Reinit must
-// re-apply both so an update or rollback never silently resets to loopback:4311.
+// re-apply both so an update or rollback never silently resets to loopback:5555.
+// A comma-separated WEB_HOST (e.g. `127.0.0.1,100.64.0.1`) marks a Tailscale
+// bind that npm-init.sh already resolved; only re-apply `--tailscale` when one
+// is live, so an unattended `spur update` never triggers a fresh Tailscale
+// install/lookup on a host that had it declined or not yet up.
+// Pre-#573 units set the bind via `HOSTNAME=` rather than `WEB_HOST=`; still
+// recognize that legacy var here so updating a `--expose-web` install doesn't
+// downgrade its public bind back to loopback.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
-  const exposeWeb = /^Environment=HOSTNAME=0\.0\.0\.0\s*$/m.test(unitFileContents);
-  return { webPort: resolveWebPort(unitFileContents), exposeWeb };
+  const exposeWeb = /^Environment=(?:WEB_HOST|HOSTNAME)=0\.0\.0\.0\s*$/m.test(unitFileContents);
+  const tailscale = /^Environment=WEB_HOST=127\.0\.0\.1,\S+/m.test(unitFileContents);
+  return { webPort: resolveWebPort(unitFileContents), exposeWeb, tailscale };
 }
 
 export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
@@ -76,7 +114,7 @@ export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
   try {
     return parseWebUnitOptions(readFileSync(unitPath, "utf-8"));
   } catch {
-    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false };
+    return { webPort: DEFAULT_WEB_PORT, exposeWeb: false, tailscale: false };
   }
 }
 
@@ -89,7 +127,6 @@ export function makeTargets(ports: ProbePorts): Record<ServiceId, ProbeTarget> {
   return {
     daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/sessions` },
     web: { id: "web", url: `http://127.0.0.1:${ports.web}/` },
-    terminal: { id: "terminal", url: `http://127.0.0.1:${TERMINAL_PORT}/health` },
   };
 }
 
@@ -104,24 +141,29 @@ function errorCode(error: unknown): string | undefined {
 
 export type FetchLike = (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean }>;
 
-// Real probe seam: an HTTP GET with a hard timeout. A refused connection maps
-// to `connection-refused` so the decision machine can count it toward the
-// hard-failure threshold; an abort maps to `timeout`; any 5xx/4xx to
-// `http-error`.
+// Shared transport-error classifier for both `probeWith` and `probeInfoWith`:
+// a refused connection maps to `connection-refused` so the decision machine
+// can count it toward the hard-failure threshold; an abort maps to `timeout`;
+// any other/unknown transport error stays in a neutral bucket that resets the
+// healthy streak but must not feed the connection-refused rollback signal.
+function classifyTransportError(error: unknown): ProbeReason {
+  const code = errorCode(error);
+  if (code === "ECONNREFUSED") return "connection-refused";
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return "timeout";
+  }
+  if (code === "ETIMEDOUT") return "timeout";
+  return "unknown";
+}
+
+// Real probe seam: an HTTP GET with a hard timeout. Any 5xx/4xx maps to
+// `http-error`; transport failures are classified by `classifyTransportError`.
 export async function probeWith(fetchLike: FetchLike, target: ProbeTarget): Promise<ProbeResult> {
   try {
     const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     return response.ok ? { ok: true } : { ok: false, reason: "http-error" };
   } catch (error) {
-    const code = errorCode(error);
-    if (code === "ECONNREFUSED") return { ok: false, reason: "connection-refused" };
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      return { ok: false, reason: "timeout" };
-    }
-    if (code === "ETIMEDOUT") return { ok: false, reason: "timeout" };
-    // Any other/unknown transport error stays in a neutral bucket: it resets the
-    // healthy streak but must not feed the connection-refused rollback signal.
-    return { ok: false, reason: "unknown" };
+    return { ok: false, reason: classifyTransportError(error) };
   }
 }
 
@@ -129,6 +171,93 @@ const realFetch: FetchLike = (url, init) => fetch(url, init);
 
 export function probe(target: ProbeTarget): Promise<ProbeResult> {
   return probeWith(realFetch, target);
+}
+
+export type JsonFetchLike = (
+  url: string,
+  init: { signal: AbortSignal },
+) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+
+function isVersionBody(value: unknown): value is { version: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { version?: unknown }).version === "string"
+  );
+}
+
+export type ProbeInfoResult = { ok: true; version: string } | { ok: false; reason: ProbeReason };
+
+// F8 version-drift probe: fetches a target's JSON body (daemon `/info`) with
+// the same hard timeout as `probeWith`, and the same discriminated
+// `ok`/`reason` shape — so a caller (`checkServiceHealth`) can tell a
+// definitive failure (`connection-refused`) apart from a bare `timeout`
+// (may just be slow/under load) without a second round trip.
+export async function probeInfoWith(
+  fetchLike: JsonFetchLike,
+  target: ProbeTarget,
+): Promise<ProbeInfoResult> {
+  try {
+    const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!response.ok) return { ok: false, reason: "http-error" };
+    const body: unknown = await response.json();
+    return isVersionBody(body)
+      ? { ok: true, version: body.version }
+      : { ok: false, reason: "unknown" };
+  } catch (error) {
+    return { ok: false, reason: classifyTransportError(error) };
+  }
+}
+
+const realJsonFetch: JsonFetchLike = (url, init) => fetch(url, init);
+
+export function probeInfo(target: ProbeTarget): Promise<ProbeInfoResult> {
+  return probeInfoWith(realJsonFetch, target);
+}
+
+function isHeadroomBody(value: unknown): value is HeadroomReport {
+  if (typeof value !== "object" || value === null) return false;
+  const body = value as Record<string, unknown>;
+  const cap = body["cap"];
+  const live = body["live"];
+  const guard = body["guard"];
+  return (
+    typeof cap === "object" &&
+    cap !== null &&
+    typeof (cap as Record<string, unknown>)["global"] === "number" &&
+    typeof live === "object" &&
+    live !== null &&
+    typeof (live as Record<string, unknown>)["count"] === "number" &&
+    Array.isArray(body["sessions"]) &&
+    typeof guard === "object" &&
+    guard !== null &&
+    typeof (guard as Record<string, unknown>)["crossed"] === "boolean" &&
+    typeof body["projectedRoom"] === "number"
+  );
+}
+
+export type ProbeHeadroomResult = { ok: true; body: HeadroomReport } | { ok: false };
+
+// F9-style headroom probe: same injectable JsonFetchLike, timeout, and
+// try/catch shape as probeInfoWith — checkServiceHealth calls this only
+// after the daemon is already known reachable, so a failure here just means
+// "skip the session-headroom check", never a second liveness signal.
+export async function probeHeadroomWith(
+  fetchLike: JsonFetchLike,
+  url: string,
+): Promise<ProbeHeadroomResult> {
+  try {
+    const response = await fetchLike(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!response.ok) return { ok: false };
+    const body: unknown = await response.json();
+    return isHeadroomBody(body) ? { ok: true, body } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export function probeHeadroom(url: string): Promise<ProbeHeadroomResult> {
+  return probeHeadroomWith(realJsonFetch, url);
 }
 
 function parseUnitState(raw: string): UnitState {

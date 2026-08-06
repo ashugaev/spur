@@ -139,6 +139,31 @@ export function readSessionUserActions(
   return out;
 }
 
+// Scans only the live shard, never the gzip archives. This runs on every ungated
+// adaptive-poll tick (github.ts shouldPollThisTick), once per pollable session, so it
+// must stay cheap — iterArchivedThenLive would gunzip up to retainArchives (default 5)
+// full archives synchronously first. A shard only rotates once it exceeds
+// shardHotBytes (default 50MB), which implies far more history than the sinceMs window
+// this function checks (activeGraceMs, typically minutes) — the archives essentially
+// never hold the answer. The one edge case this misses is a match that landed on the
+// last line before a rotation boundary; that only delays adaptive polling by one tick,
+// it never suppresses it, since the slowIntervalMs deadline still fires.
+export function hasRecentSessionUserAction(
+  dataDir: string,
+  sessionId: string,
+  actions: ReadonlySet<string>,
+  sinceMs: number,
+): boolean {
+  if (!existsSync(sessionShardDir(dataDir, sessionId))) return false;
+
+  for (const line of iterLiveLines(sessionUserActionLogPath(dataDir, sessionId))) {
+    const entry = parseJsonLine<UserActionRecord>(line);
+    if (!entry || entry.sessionId !== sessionId || !actions.has(entry.action)) continue;
+    if (Date.parse(entry.ts) >= sinceMs) return true;
+  }
+  return false;
+}
+
 export function deleteSessionUserActions(dataDir: string, sessionId: string): void {
   // Enumerate the shard dir instead of looping to the current retainArchives: a config
   // that was lowered since the archives were written would otherwise leak the higher-
@@ -191,7 +216,6 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (path === "/shepherd/spawn") return { action: "session.spawn_shepherd" };
     if (path === "/sessions/background") return { action: "session.spawn_background" };
     if (path === "/sessions") return { action: "session.spawn" };
-    if (path === "/backlog/take") return { action: "backlog.take" };
     if (path === "/projects/connect") return { action: "project.connect" };
     if (path === "/projects/disconnect") return { action: "project.disconnect" };
     const preflight = path.match(/^\/projects\/([^/]+)\/preflight$/);
@@ -211,6 +235,8 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     }
     const memorySet = path.match(/^\/sessions\/([^/]+)\/session-memory\/[^/]+$/);
     if (memorySet?.[1]) return { action: "session.memory_set", sessionId: memorySet[1] };
+    const sharedMemorySet = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
+    if (sharedMemorySet?.[1]) return { action: "shared.memory_set", sessionId: sharedMemorySet[1] };
 
     const cancelWake = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/);
     if (cancelWake?.[1]) return { action: "session.wake_cancel", sessionId: cancelWake[1] };
@@ -230,6 +256,8 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (kill?.[1]) return { action: "session.kill", sessionId: kill[1] };
     const restore = path.match(/^\/sessions\/([^/]+)\/restore$/);
     if (restore?.[1]) return { action: "session.restore", sessionId: restore[1] };
+    const reopen = path.match(/^\/sessions\/([^/]+)\/reopen$/);
+    if (reopen?.[1]) return { action: "session.reopen", sessionId: reopen[1] };
     const handoff = path.match(/^\/sessions\/([^/]+)\/handoff$/);
     if (handoff?.[1]) return { action: "session.handoff", sessionId: handoff[1] };
     const respawn = path.match(/^\/sessions\/([^/]+)\/respawn$/);
@@ -246,6 +274,10 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method === "DELETE") {
     const projectDelete = path.match(/^\/projects\/([^/]+)$/);
     if (projectDelete?.[1]) return { action: "project.delete", projectId: projectDelete[1] };
+    const sharedMemoryRemove = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
+    if (sharedMemoryRemove?.[1]) {
+      return { action: "shared.memory_remove", sessionId: sharedMemoryRemove[1] };
+    }
   }
 
   return { action: "unknown" };

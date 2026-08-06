@@ -10,6 +10,7 @@ import {
   findLatestCursorTranscriptFile,
   parseCursorJsonlRecord,
   readCursorJsonlState,
+  readCursorTranscriptEntries,
   toCursorProjectPath,
   type CursorParsedRecord,
 } from "../../src/cursor-jsonl-state.js";
@@ -256,6 +257,52 @@ describe("classifyCursorJsonlState", () => {
   });
 });
 
+describe("parseCursorJsonlRecord text retention", () => {
+  it("does not populate text on an ordinary assistant record with a message body", () => {
+    const line = JSON.stringify({
+      role: "assistant",
+      message: { content: [{ type: "text", text: "Here is a long assistant reply body." }] },
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record).toBeDefined();
+    expect(record?.role).toBe("assistant");
+    expect(record?.text).toBeUndefined();
+  });
+
+  it("still populates text on a turn_ended terminal-error record", () => {
+    const line = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "Rate limited: out of usage",
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record?.terminalError).toBe(true);
+    expect(record?.text).toBe("Rate limited: out of usage");
+  });
+
+  it("still surfaces the terminal error text via latestCursorTerminalError-equivalent classification", () => {
+    const ordinary = parseCursorJsonlRecord(
+      JSON.stringify({
+        role: "assistant",
+        message: { content: [{ type: "text", text: "no error here" }] },
+      }),
+      NOW,
+    );
+    const errorLine = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "Rate limited: out of usage",
+    });
+    const error = parseCursorJsonlRecord(errorLine, NOW);
+    expect(ordinary).toBeDefined();
+    expect(error).toBeDefined();
+    if (!ordinary || !error) return;
+    // classifyCursorJsonlState never reads `text`; the ordinary record's
+    // missing text field must not change the classified state.
+    expect(classifyCursorJsonlState([ordinary, error], NOW)).toBe("error");
+  });
+});
+
 describe("Cursor JSONL fixtures", () => {
   it.each([
     ["working-tool-use.jsonl", "working"],
@@ -476,5 +523,92 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("error");
     expect(state?.rateLimit).toEqual({ limited: true, reason: "cursor out of usage" });
+  });
+});
+
+describe("toCursorProjectPath", () => {
+  // Expected slugs verified against real `~/.cursor/projects/<slug>` directories.
+  it.each([
+    // Slash-adjacent dot (`/.spur`) collapses with the slash into one hyphen.
+    ["/home/alek/.spur/worktrees/sp/spur-e7e6", "home-alek-spur-worktrees-sp-spur-e7e6"],
+    // Mid-segment dot (`daemon.xOPkB8`) becomes a hyphen — the regression: an
+    // earlier version deleted the dot and pointed at a nonexistent project dir.
+    [
+      "/tmp/spur-isolated-daemon.xOPkB8/data/shepherd",
+      "tmp-spur-isolated-daemon-xOPkB8-data-shepherd",
+    ],
+    // Consecutive separators (`/-`, `--`) collapse to a single hyphen.
+    [
+      "/tmp/claude-1001/-home-alek--spur/scratchpad/data/shepherd",
+      "tmp-claude-1001-home-alek-spur-scratchpad-data-shepherd",
+    ],
+    // Underscores are kept verbatim — Cursor does not hyphenate them, and the
+    // GitHub Actions runner path (`_work`) depends on it.
+    [
+      "/home/github-runner/actions-runner-3/_work/spur/spur-runtime-ab12/worktrees/test/rt-cursor-1",
+      "home-github-runner-actions-runner-3-_work-spur-spur-runtime-ab12-worktrees-test-rt-cursor-1",
+    ],
+  ])("slugifies %s", (worktreePath, expected) => {
+    expect(toCursorProjectPath(worktreePath)).toBe(expected);
+  });
+});
+
+describe("readCursorTranscriptEntries", () => {
+  const tempRoots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function seedTranscript(worktreePath: string, fixtureName: string): Promise<void> {
+    const content = await readFile(join(CURSOR_FIXTURES_DIR, fixtureName), "utf8");
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    const chatDir = join(transcriptsDir, "chat");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(join(chatDir, "chat.jsonl"), content);
+  }
+
+  it("parses a tool entry (no callId) from a tool_use transcript", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-tool-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    await seedTranscript(worktreePath, "working-tool-use.jsonl");
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    const tool = entries.find((entry) => entry.kind === "tool");
+    expect(tool).toEqual({ kind: "tool", name: "Grep" });
+    expect(entries.map((entry) => entry.kind)).toEqual(["message", "message", "tool"]);
+  });
+
+  it("parses a question entry with options omitted from an AskUserQuestion transcript", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-question-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    await seedTranscript(worktreePath, "needs-input-ask-user.jsonl");
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).not.toBeNull();
+    if (!entries) throw new Error("expected entries");
+
+    expect(entries).toEqual([{ kind: "question", header: "", prompt: "" }]);
+    const question = entries[0];
+    expect(question && "options" in question).toBe(false);
+  });
+
+  it("returns null when no transcript resolves", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-missing-"));
+    tempRoots.push(worktreePath);
+
+    const entries = await readCursorTranscriptEntries(worktreePath);
+    expect(entries).toBeNull();
   });
 });

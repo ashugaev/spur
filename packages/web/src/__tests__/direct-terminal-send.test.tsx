@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVoiceState = {
@@ -43,6 +43,7 @@ const mockTerminal = {
     registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
     registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
   },
+  options: {},
 };
 
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
@@ -178,5 +179,68 @@ describe("DirectTerminal send failures", () => {
       expect(mockVoiceState.confirmDraft).toHaveResolved();
     });
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("DirectTerminal header agent and model", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("shows the agent display name and model when both are provided", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="codex" model="gpt-5-codex" sessionId="labeled-session" />);
+    });
+
+    const header = screen.getByTestId("direct-terminal-header");
+    expect(within(header).getByText(/codex/)).toBeInTheDocument();
+    expect(within(header).getByText(/gpt-5-codex/)).toBeInTheDocument();
+    expect(header.textContent).not.toContain("undefined");
+  });
+
+  it("shows only the agent label when model is omitted", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="unlabeled-session" />);
+    });
+
+    const header = screen.getByTestId("direct-terminal-header");
+    expect(within(header).getByText(/claude/)).toBeInTheDocument();
+    expect(header.textContent).not.toContain("undefined");
+  });
+});
+
+describe("DirectTerminal controls safe-area", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("insets the bottom controls sideways from bottom/side safe-area without adding vertical height", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="safe-area-session" />);
+    });
+
+    const controls = screen.getByTestId("direct-terminal-controls");
+    // Vertical padding stays fixed — no extra top/bottom height from the inset.
+    expect(controls.className).toContain("py-1.5");
+    expect(controls.className).not.toContain("pt-[");
+    expect(controls.className).not.toContain("pb-[");
+    // Side padding grows to clear rounded bottom corners (portrait) or a side
+    // notch (landscape); resolves to the 0.5rem base on flat screens.
+    expect(controls.className).toContain(
+      "pl-[max(0.5rem,env(safe-area-inset-left),env(safe-area-inset-bottom))]",
+    );
+    expect(controls.className).toContain(
+      "pr-[max(0.5rem,env(safe-area-inset-right),env(safe-area-inset-bottom))]",
+    );
   });
 });

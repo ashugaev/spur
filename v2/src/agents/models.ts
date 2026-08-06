@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import type { AgentName } from "../types.js";
 
@@ -14,13 +15,6 @@ export interface AgentModel {
   isDefault?: boolean;
   isCurrent?: boolean;
 }
-
-const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
-  { id: "haiku", label: "Haiku" },
-  { id: "fable", label: "Fable" },
-];
 
 const CODEX_FALLBACK_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5", isDefault: true }];
 
@@ -172,7 +166,7 @@ export async function listAgentModels(
 ): Promise<AgentModel[]> {
   switch (agent) {
     case "claude":
-      return CLAUDE_MODELS;
+      return listClaudeModels();
     case "codex":
       return listCodexModels(opts);
     case "cursor":

@@ -56,6 +56,7 @@ export function TerminalModal({
         agentInputEnabled={!tmuxSessionOverride}
         agent={session.agent}
         apiSessionId={session.id}
+        model={session.model}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
         title={buildTerminalTitle(session, titleSuffix)}

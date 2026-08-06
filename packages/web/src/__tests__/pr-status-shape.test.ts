@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { isPrInfoShape, parseReviewDecision, prInfosEqual } from "@/lib/pr-status-shape.js";
+import {
+  isPrInfoShape,
+  isPrReady,
+  parseReviewDecision,
+  prInfosEqual,
+  type PrInfo,
+} from "@/lib/pr-status-shape.js";
+
+function makePrInfo(overrides: Partial<PrInfo> = {}): PrInfo {
+  return {
+    state: "open",
+    reviewDecision: null,
+    ciStatus: null,
+    canMerge: true,
+    mergeConflict: false,
+    totalThreads: 0,
+    unresolvedThreads: 0,
+    ...overrides,
+  };
+}
 
 describe("pr-status-shape", () => {
   it("accepts reviewDecision in the PR info shape", () => {
@@ -109,5 +128,47 @@ describe("pr-status-shape", () => {
         },
       ),
     ).toBe(false);
+  });
+
+  describe("isPrReady", () => {
+    it("is true when mergeable, no unresolved threads, and no review decision", () => {
+      expect(
+        isPrReady(makePrInfo({ canMerge: true, unresolvedThreads: 0, reviewDecision: null })),
+      ).toBe(true);
+    });
+
+    it("is true when the review decision is approved", () => {
+      expect(isPrReady(makePrInfo({ reviewDecision: "approved" }))).toBe(true);
+    });
+
+    it("is true when the review decision is review_required", () => {
+      expect(isPrReady(makePrInfo({ reviewDecision: "review_required" }))).toBe(true);
+    });
+
+    it("is false when changes were requested", () => {
+      expect(isPrReady(makePrInfo({ reviewDecision: "changes_requested" }))).toBe(false);
+    });
+
+    it("is false when there are unresolved threads", () => {
+      expect(isPrReady(makePrInfo({ unresolvedThreads: 1 }))).toBe(false);
+    });
+
+    it("is false when not mergeable", () => {
+      expect(isPrReady(makePrInfo({ canMerge: false }))).toBe(false);
+    });
+
+    it("does not re-check mergeConflict (unreachable alongside canMerge in practice)", () => {
+      expect(isPrReady(makePrInfo({ canMerge: true, mergeConflict: true }))).toBe(true);
+    });
+
+    it("does not re-check state", () => {
+      expect(isPrReady(makePrInfo({ state: null, canMerge: true, unresolvedThreads: 0 }))).toBe(
+        true,
+      );
+    });
+
+    it("does not hide a failing optional CI check", () => {
+      expect(isPrReady(makePrInfo({ ciStatus: "failure", canMerge: true }))).toBe(true);
+    });
   });
 });

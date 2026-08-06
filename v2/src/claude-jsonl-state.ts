@@ -1,5 +1,5 @@
 import { open, readFile, stat } from "node:fs/promises";
-import type { ConversationMessage, SessionState } from "./types.js";
+import type { ConversationMessage, SessionState, TranscriptEntry } from "./types.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
@@ -17,6 +17,10 @@ export interface ParsedRecord {
   requestsUserInput?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
+  /** True when the record is a synthetic `error: "server_error"` API error. */
+  serverError?: boolean;
+  /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
+  model?: string;
   timestampMs: number;
 }
 
@@ -28,10 +32,41 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+// Claude stamps locally-generated placeholder assistant records (API errors,
+// stop-sequence stubs) with this instead of a model id.
+const SYNTHETIC_MODEL = "<synthetic>";
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
 
+/** Scan backward for the model reported by the most recent assistant record. */
+export function deriveClaudeLiveModel(records: ParsedRecord[]): string | undefined {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record && record.role === "assistant" && record.model) {
+      return record.model;
+    }
+  }
+  return undefined;
+}
+
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
+
+// Claude transcript tail. A trailing synthetic assistant record flagged
+// `error: "server_error"` means the session is wedged on a transient Claude
+// API failure (5xx or connection failure). Walks backwards skipping
+// CLAUDE_BOOKKEEPING_RECORD_TYPES — the same shape as detectClaudeRateLimit —
+// because Claude always appends a `system`/`file-history-snapshot` record
+// after the error, which would otherwise mask it.
+export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): boolean {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
+      continue;
+    }
+    return record.serverError === true;
+  }
+  return false;
+}
 
 export function classifyClaudeJsonlState(
   records: ParsedRecord[],
@@ -43,6 +78,10 @@ export function classifyClaudeJsonlState(
    */
   fileMtimeMs?: number,
 ): SessionState {
+  if (hasTrailingClaudeServerError(records)) {
+    return "error";
+  }
+
   // Walk backwards, skip progress noise to find the last meaningful record.
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -216,6 +255,10 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       hasToolUse: toolUseHints.hasToolUse,
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
+      ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
+      ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
+        ? { model: message["model"] }
+        : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -245,6 +288,8 @@ export async function readClaudeJsonlState(
   state: SessionState;
   reader: ClaudeJsonlReaderState;
   rateLimit: RateLimitDetection | null;
+  serverError: boolean;
+  liveModel?: string;
 } | null> {
   // With a pinned id, resolve the transcript by id and never fall back to the
   // newest-mtime scan (which could cross-bind to a sibling session sharing the
@@ -274,10 +319,13 @@ export async function readClaudeJsonlState(
 
   // Mtime unchanged and we already have records → skip re-read
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+    const cachedLiveModel = deriveClaudeLiveModel(currentReader.tailRecords);
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
+      serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
+      ...(cachedLiveModel ? { liveModel: cachedLiveModel } : {}),
     };
   }
 
@@ -321,10 +369,13 @@ export async function readClaudeJsonlState(
     return null;
   }
 
+  const liveModel = deriveClaudeLiveModel(combined);
   return {
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectClaudeRateLimit(combined),
+    serverError: hasTrailingClaudeServerError(combined),
+    ...(liveModel ? { liveModel } : {}),
   };
 }
 
@@ -377,4 +428,119 @@ export async function readClaudeConversation(
   }
 
   return parseConversationLines(text.split("\n"), Date.now());
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+interface ClaudeQuestionOption {
+  label: string;
+  index: number;
+}
+
+interface ClaudeQuestion {
+  header: string;
+  prompt: string;
+  options?: ClaudeQuestionOption[];
+  multiSelect?: boolean;
+}
+
+function extractAskUserQuestions(input: unknown): ClaudeQuestion[] {
+  if (typeof input !== "object" || input === null) return [];
+  const questionsValue = (input as Record<string, unknown>)["questions"];
+  if (!Array.isArray(questionsValue)) return [];
+
+  const questions: ClaudeQuestion[] = [];
+  for (const raw of questionsValue) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const q = raw as Record<string, unknown>;
+    const header = typeof q["header"] === "string" ? q["header"] : "";
+    const prompt = typeof q["question"] === "string" ? q["question"] : "";
+    const optionsValue = q["options"];
+    const options = Array.isArray(optionsValue)
+      ? optionsValue.map((option, index) => ({
+          label:
+            typeof option === "object" &&
+            option !== null &&
+            typeof (option as Record<string, unknown>)["label"] === "string"
+              ? ((option as Record<string, unknown>)["label"] as string)
+              : "",
+          index,
+        }))
+      : undefined;
+    const multiSelect = typeof q["multiSelect"] === "boolean" ? q["multiSelect"] : undefined;
+    questions.push({
+      header,
+      prompt,
+      ...(options ? { options } : {}),
+      ...(multiSelect !== undefined ? { multiSelect } : {}),
+    });
+  }
+  return questions;
+}
+
+/** Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion prompts. */
+export async function readClaudeTranscriptEntries(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let fileText: string;
+  try {
+    fileText = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of fileText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const message = unwrapMessage(parsed);
+    const role = extractRole(parsed, message);
+    if (role !== "user" && role !== "assistant") continue;
+
+    const timestampMs = extractTimestampMs(parsed, message, nowMs);
+
+    const messageText = extractTextContent(message);
+    if (messageText) {
+      entries.push({ kind: "message", role, text: messageText, timestampMs });
+    }
+
+    if (role !== "assistant") continue;
+
+    for (const block of contentBlocks(message)) {
+      if (typeof block !== "object" || block === null) continue;
+      const tool = block as Record<string, unknown>;
+      if (tool["type"] !== "tool_use") continue;
+
+      const name = typeof tool["name"] === "string" ? tool["name"] : "";
+      const callId = typeof tool["id"] === "string" ? tool["id"] : undefined;
+
+      if (name === "AskUserQuestion") {
+        for (const question of extractAskUserQuestions(tool["input"])) {
+          entries.push({ kind: "question", ...question, timestampMs });
+        }
+        continue;
+      }
+
+      entries.push({
+        kind: "tool",
+        name,
+        ...(callId ? { callId } : {}),
+        timestampMs,
+      });
+    }
+  }
+
+  return entries;
 }

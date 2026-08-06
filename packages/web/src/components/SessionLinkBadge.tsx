@@ -7,6 +7,7 @@ import {
   GithubIcon,
   GitlabIcon,
   isReviewLinkLabel,
+  isTrackerLinkLabel,
   JiraIcon,
   MergeConflictBadge,
   type PrInfo,
@@ -24,7 +25,7 @@ interface SessionLinkBadgeProps {
 }
 
 function hoverClassForLink(link: SpurSessionLink): string {
-  if (link.label === "tracker") {
+  if (isTrackerLinkLabel(link.label)) {
     return "hover:text-[var(--color-status-attention)]";
   }
   return "hover:text-[var(--color-text-primary)]";
@@ -58,7 +59,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
         ) : (
           <GithubIcon />
         )
-      ) : link.label === "tracker" ? (
+      ) : isTrackerLinkLabel(link.label) ? (
         <JiraIcon />
       ) : null}
       <span className="text-[10px]" style={labelStyle}>

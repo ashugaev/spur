@@ -1,3 +1,5 @@
+import type { HostMemory } from "./host-memory.js";
+
 export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 3;
 
@@ -24,7 +26,7 @@ export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
 
-export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
+export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -87,6 +89,32 @@ export interface SessionMemoryListResponse {
 
 export interface SessionMemoryRecordResponse {
   record: SessionMemoryRecord;
+}
+
+export type SharedMemoryScope = "task" | "project" | "global";
+
+export interface SharedMemoryEntry {
+  key: string;
+  body: string;
+}
+
+export interface SetSharedMemoryRequest {
+  body: string;
+}
+
+export interface SharedMemoryListResponse {
+  scope: SharedMemoryScope;
+  keys: string[];
+}
+
+export interface SharedMemoryEntryResponse {
+  scope: SharedMemoryScope;
+  entry: SharedMemoryEntry;
+}
+
+export interface SharedMemoryRemoveResponse {
+  scope: SharedMemoryScope;
+  key: string;
 }
 
 export type SessionPipelineStatus = "running" | "completed" | "errored";
@@ -160,17 +188,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
-}
-
-export interface TakeBacklogItemRequest {
-  projectId: string;
-  backlogId: string;
-  externalId: string;
-}
-
-export interface TakeBacklogItemResponse {
-  item: AvailableBacklogItem;
-  session: SessionView;
+  position: number;
 }
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
@@ -214,9 +232,18 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   intervalMs: number;
   emitExisting: boolean;
   query?: string;
+  // Applies only to the query-based work-item poll: restricts results to draft PRs; default (unset) excludes drafts.
+  draft?: boolean;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export interface GitHubAdaptivePollConfig {
+  slowIntervalMs: number;
+  activeGraceMs: number;
+}
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
+  adaptivePoll?: GitHubAdaptivePollConfig;
+};
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
@@ -238,18 +265,12 @@ export interface JiraSourceConfig {
   token: string;
 }
 
-export interface BacklogSpawnConfig {
-  prompt?: string;
-  agent?: AgentName;
-}
-
 export interface BacklogConfig {
   source: string;
   provider: BacklogProviderId;
   query: string;
   intervalMs: number;
   runOnStart: boolean;
-  spawn?: BacklogSpawnConfig;
 }
 
 export interface GitHubCiSourceConfig extends BaseSourceConfig {
@@ -335,6 +356,10 @@ export interface SidecarConfig {
   dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
+  /** Agents allowed to use this sidecar. Undefined = all agents. */
+  agents?: AgentName[];
+  /** Present when this sidecar exposes an MCP server to the launching agent. */
+  mcp?: SidecarMcpConfig;
 }
 
 export interface SidecarPortConfig {
@@ -342,6 +367,19 @@ export interface SidecarPortConfig {
   start: number;
   end: number;
   url?: string;
+}
+
+export interface SidecarMcpConfig {
+  server: string;
+  /** Selects which `ports` entry carries the reserved port for this MCP server. */
+  portId: string;
+  path: string;
+  clientHost?: string;
+}
+
+export interface SidecarMcpBinding {
+  server: string;
+  url: string;
 }
 
 export type WorkspaceAccessItemKind = "copy" | "link";
@@ -406,6 +444,28 @@ export interface ReviewSignal {
   key: string;
   kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
+}
+
+// The PR/MR the snapshot's signals were collected from. `null` covers legacy
+// on-disk snapshots (bare array, no PR identity) so callers cannot mistake
+// "unknown" for a real number via `=== undefined`.
+export interface ReviewSnapshot {
+  prNumber: number | null;
+  signals: Map<string, ReviewSignal>;
+}
+
+// The baseline to diff the next poll's signals against: the stored snapshot's
+// signals when it was collected from the same PR/MR, otherwise `undefined` so
+// the caller takes the existing first-observation path. A rebind (or a legacy
+// snapshot with no recorded PR) must never diff against a different PR's
+// signals — `changes_requested`, `ready_for_review`, `approved:<login>`, etc.
+// are not PR-unique text, so a stale match would silently suppress the new
+// PR's identical-text signal.
+export function reviewSnapshotBaseline(
+  stored: ReviewSnapshot | undefined,
+  prNumber: number,
+): Map<string, ReviewSignal> | undefined {
+  return stored && stored.prNumber === prNumber ? stored.signals : undefined;
 }
 
 export interface ReviewEventData {
@@ -497,6 +557,67 @@ export interface ProjectConfig {
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
+  maxLiveSessions?: number;
+}
+
+export type AdmissionCapSource = "default" | "config" | "derived";
+
+// Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
+// `admission` block is ignored before semantic parsing, same footgun as
+// rateLimitReactivation/authRotation/tags. All fields are resolved
+// (defaults already applied) so callers never re-derive them.
+export interface AdmissionConfig {
+  enabled: boolean;
+  maxLiveSessions: number;
+  // Set once at the config boundary (parseAdmission), never re-derived downstream.
+  maxLiveSessionsSource: AdmissionCapSource;
+  perSessionBytes: number;
+  reserveFraction: number;
+  memoryGuard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    shedEnabled: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    shedSwapUsedFraction: number;
+  };
+}
+
+export interface HeadroomReport {
+  cap: {
+    global: number;
+    source: AdmissionCapSource;
+    perSessionBytes: number;
+    reserveFraction: number;
+  };
+  projectCaps: Record<string, number>;
+  live: {
+    count: number;
+    byProject: Record<string, number>;
+  };
+  projectedRoom: number;
+  sessions: Array<{
+    id: string;
+    project: string;
+    status: SessionStatus;
+    rssBytes: number;
+  }>;
+  memory: HostMemory | null;
+  guard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    crossed: boolean;
+  };
 }
 
 export interface AppConfig {
@@ -507,6 +628,7 @@ export interface AppConfig {
   };
   dataDir: string;
   worktreeDir: string;
+  projectsRoot: string;
   defaultAgent: AgentName;
   tmux: {
     socketName: string;
@@ -559,9 +681,22 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  sessionGc: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxGroupsPerSweep: number;
+    statuses: SessionGcStatus[];
+  };
+  admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
+
+// The only statuses session GC ever reclaims: a session still `running`,
+// `spawning`, `paused`, or `errored` may resume work in its worktree, so GC
+// must never treat it as a candidate regardless of age.
+export type SessionGcStatus = "completed" | "killed" | "stopped";
 
 export interface SessionPipelineState {
   steps: string[];
@@ -624,6 +759,20 @@ export interface SessionStateSubscriptionRecordResponse {
 export interface SessionRecord {
   id: string;
   project: string;
+  // The id of the workspace (shared git worktree) this session lives in.
+  // Equals the session's own id for a session that does not share a
+  // workspace; otherwise the id of the session whose workspace it joined
+  // (desk sibling, handoff). Written once at session creation, and filled in
+  // for every record by normalizeSessionRecord on write.
+  //
+  // Optional because this is the on-disk shape and a record written before
+  // this field existed genuinely lacks it. Never read it directly — go
+  // through `workspaceIdOf` in session-desk.ts, the one accessor that
+  // resolves the legacy shapes.
+  workspaceId?: string;
+  // Legacy input field: the pre-workspaceId name for the same fact. Read
+  // for back-compat by normalizeSessionRecord/workspaceIdOf; no longer
+  // written by any code path.
   deskId?: string;
   agent: AgentName;
   model?: string;
@@ -646,6 +795,7 @@ export interface SessionRecord {
   stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
   selfDestruct?: SelfDestructConfig;
@@ -657,6 +807,7 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
 }
@@ -693,15 +844,27 @@ export interface SidecarPortView {
   port: number;
 }
 
+// A desk-shared (non-mcp) project sidecar's `tmuxSession` is
+// `${anchorId}--${name}`; a per-session (mcp) sidecar's is
+// `${sessionId}--${name}` — this is the sole source of the pane name outside
+// the daemon (web terminal attach, CLI `spur sidecar` commands).
+export interface SessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports: SidecarPortView[];
+  tmuxSession: string;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
   stateHistory?: SessionStateTransition[];
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
+  sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
@@ -712,6 +875,7 @@ export interface DashboardSessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
@@ -779,6 +943,7 @@ export interface SpawnSessionRequest {
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
+  subscriptions?: SubscribeSessionStatesRequest[];
 }
 
 export interface SendMessageAttachment {
@@ -918,7 +1083,7 @@ export interface ProjectListEntry {
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 
@@ -1015,8 +1180,29 @@ export interface ConversationMessage {
   timestampMs: number;
 }
 
+export type TranscriptEntry =
+  | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      inputSummary?: string;
+      output?: string;
+      timestampMs?: number;
+    }
+  | { kind: "reasoning"; text: string; timestampMs?: number }
+  | {
+      kind: "question";
+      header: string;
+      prompt: string;
+      options?: { label: string; index: number }[];
+      multiSelect?: boolean;
+      timestampMs?: number;
+    };
+
 export interface ConversationResponse {
   messages: ConversationMessage[];
+  entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
 }

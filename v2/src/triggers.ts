@@ -59,6 +59,20 @@ interface RetryState {
   interrupt: boolean;
 }
 
+interface DeliveryFailure {
+  attempts: number;
+  nextAttemptAt: number;
+}
+
+// Rate-limit suppression is deliberately excluded from the failure/backoff
+// path: the target session is still alive and will accept the batch once the
+// rate limit clears, so it must not count toward DELIVERY_MAX_ATTEMPTS or
+// trigger a drop.
+type DeliveryOutcome =
+  | { status: "delivered" }
+  | { status: "suppressed" }
+  | { status: "failed"; error: string };
+
 type WorkItemLifecycleBaseDraft = WorkItemEventData & {
   autoComplete: boolean;
   createdAt: string;
@@ -69,17 +83,35 @@ const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
 };
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
+// Bounds for a delivery that keeps throwing (e.g. the target session never
+// acknowledges). Without these, the flush loop would retry every 5s forever.
+// Start short so a session that was only briefly busy stays responsive, then
+// double the backoff on each failure (10s, 20s, 40s, ... 640s) and give up
+// after 8 attempts, dropping and logging the batch. Backoff alone sums to
+// 1270s; each attempt can also block up to the submit-ack window
+// (agents/index.ts DEFAULT_SUBMIT_ACK_WINDOW_MS x (1 + resends)) and, on a
+// busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
+// so worst case elapsed time is unbounded, not just the backoff sum.
+const DELIVERY_RETRY_BASE_MS = 10_000;
+const DELIVERY_MAX_ATTEMPTS = 8;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
   "needs_input",
-  // A running session can show state "error" when only its last turn failed
-  // (e.g. a transient transport error) while the process is still alive —
-  // that is not a dead session, so it must not be claimed as replaceable.
-  "error",
 ]);
+
+// A running session whose live state is "error" is wedged on a transient
+// last-turn failure — a Claude server error (session-service.ts's
+// reactivation nudge self-clears it once it recovers) or a Cursor
+// terminalError record — not actually closed or dead — the same
+// "still alive, just blocked" shape as rate_limited. Scoped to
+// status === "running" because a genuinely closed session (status stopped,
+// errored, or killed) can also carry state "error", and that case IS closed.
+function isLiveServerErrorWedge(session: SessionView): boolean {
+  return session.status === "running" && session.state === "error";
+}
 
 function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   if (!data || typeof data !== "object") return false;
@@ -153,7 +185,10 @@ async function shouldClaimWorkItemSpawn(
         });
         return false;
       }
-      if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
+      if (
+        session.status === "running" &&
+        (ACTIVE_WORK_ITEM_STATES.has(session.state) || isLiveServerErrorWedge(session))
+      ) {
         return false;
       }
       if (!sessionAllowsWorkItemReplacement(session)) {
@@ -487,12 +522,13 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
-// The rate-limit reactivation wakeup (session-service.ts processScheduledWakes)
-// calls SessionService.send() directly and never flows through this
+// The rate-limit reactivation wakeup and the server-error reactivation wakeup
+// (both in session-service.ts's processScheduledWakes) call
+// SessionService.send() directly and never flow through this
 // handleSendEvent/flushPending queue, so a blanket block here is already
-// correct — no whitelist exception is needed to let it through.
-function isBlockedByRateLimit(session: SessionView): boolean {
-  return session.state === "rate_limited";
+// correct — no whitelist exception is needed to let either through.
+function isBlockedAwaitingRecovery(session: SessionView): boolean {
+  return session.state === "rate_limited" || isLiveServerErrorWedge(session);
 }
 
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
@@ -553,6 +589,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const pendingBatches = new Map<string, PendingBatch>();
   const interruptedKeys = new Map<string, number>();
   const retryStates = new Map<string, RetryState>();
+  const deliveryFailures = new Map<string, DeliveryFailure>();
   const serialByKey = new Map<string, Promise<void>>();
   const autoCompleteChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
@@ -564,6 +601,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: { keepInterrupted?: boolean; keepRetryState?: boolean },
   ): void => {
     pendingBatches.delete(queueKey);
+    deliveryFailures.delete(queueKey);
     deletePendingSendBatch(deps.config.dataDir, queueKey);
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
@@ -582,7 +620,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     batch: PendingBatch,
     interrupt: boolean,
     options?: { attempt?: number; clearAfter?: boolean; keepRetryState?: boolean },
-  ): Promise<void> => {
+  ): Promise<DeliveryOutcome> => {
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
@@ -619,6 +657,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
         clearBatch(queueKey, clearOptions);
       }
+      return { status: "delivered" };
     } catch (error) {
       if (error instanceof SessionRateLimitedError) {
         logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
@@ -633,7 +672,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             attempt: options?.attempt ?? null,
           },
         });
-        return;
+        return { status: "suppressed" };
       }
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
@@ -651,6 +690,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       logger.warn(
         `[trigger:${batch.projectId}/${batch.triggerId}] failed to deliver queued updates: ${message}`,
       );
+      return { status: "failed", error: message };
     }
   };
 
@@ -718,13 +758,67 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     return created;
   };
 
+  // Accounts for a delivery that threw. Backs off exponentially and, once the
+  // attempt cap is hit, drops the batch and logs it instead of spamming the
+  // target forever. The give-up is recorded in the event log (and stderr) so a
+  // permanently-failing delivery is visible to an operator.
+  const recordDeliveryFailure = (
+    queueKey: string,
+    batch: PendingBatch,
+    interrupt: boolean,
+    reason: string,
+  ): void => {
+    const attempts = (deliveryFailures.get(queueKey)?.attempts ?? 0) + 1;
+    if (attempts >= DELIVERY_MAX_ATTEMPTS) {
+      clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for ${batch.batch.sessionId} after ${attempts} failed delivery attempts: ${reason}`,
+        details: {
+          reason: "retry_exhausted",
+          attempts,
+          interrupt,
+        },
+      });
+      logger.warn(
+        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued updates for ${batch.batch.sessionId} after ${attempts} attempts: ${reason}`,
+      );
+      return;
+    }
+    const backoff = DELIVERY_RETRY_BASE_MS * 2 ** (attempts - 1);
+    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: Date.now() + backoff });
+  };
+
+  const isInDeliveryBackoff = (queueKey: string): boolean => {
+    const failure = deliveryFailures.get(queueKey);
+    return failure !== undefined && Date.now() < failure.nextAttemptAt;
+  };
+
+  // Delivers outside the CI-failed retry path and, on a thrown error, feeds
+  // the result into the delivery-failure backoff. Every non-retry call site
+  // needs this same branch, so it lives here once.
+  const deliverAndTrackFailure = async (
+    queueKey: string,
+    batch: PendingBatch,
+    interrupt: boolean,
+  ): Promise<void> => {
+    const result = await deliverBatch(queueKey, batch, interrupt);
+    if (result.status === "failed") {
+      recordDeliveryFailure(queueKey, batch, interrupt, result.error);
+    }
+  };
+
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
     if (!pendingBatches.has(queueKey)) return;
 
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -744,8 +838,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session)) {
-      return; // stays queued; delivered later once the session leaves rate_limited
+    if (isBlockedAwaitingRecovery(session)) {
+      return; // stays queued; delivered later once the session leaves rate_limited/error
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
@@ -823,9 +917,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (isInDeliveryBackoff(queueKey)) return;
+
     if (isDeliverableState(session)) {
       interruptedKeys.delete(queueKey);
-      await deliverBatch(queueKey, batch, false);
+      await deliverAndTrackFailure(queueKey, batch, false);
       return;
     }
 
@@ -833,7 +929,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     // session is still working. `clearBatch` only runs on success, so reaching
     // here means the prior deliverBatch threw.
     if (session.state === "working" && interruptedKeys.has(queueKey)) {
-      await deliverBatch(queueKey, batch, true);
+      await deliverAndTrackFailure(queueKey, batch, true);
     }
   };
 
@@ -884,7 +980,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -904,7 +1000,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session)) {
+    if (isBlockedAwaitingRecovery(session)) {
       return; // batch already queued above; explicitly deferred
     }
 
@@ -932,8 +1028,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    // A delivery already failing its backoff window stays queued for the flush
+    // loop; a fresh event must not bypass the backoff and re-spam the target.
+    if (isInDeliveryBackoff(queueKey)) return;
+
     if (isDeliverableState(session)) {
-      await deliverBatch(queueKey, batch, false);
+      await deliverAndTrackFailure(queueKey, batch, false);
       return;
     }
 
@@ -947,7 +1047,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     interruptedKeys.set(queueKey, Date.now());
-    await deliverBatch(queueKey, batch, true);
+    await deliverAndTrackFailure(queueKey, batch, true);
   };
 
   // Reloads batches persisted by earlier `recordPendingSendBatch` calls (see

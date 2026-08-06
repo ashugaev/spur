@@ -2,12 +2,13 @@
 
 import {
   collectHostInstallChecks,
+  hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +16,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   connectProjectConfig,
+  deleteJson,
   disconnectProjectConfig,
   getJson,
   listProjects,
@@ -55,13 +57,17 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
-import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
-import { runUpdate, runUpdateMonitor } from "./update.js";
+import { assertValidSharedMemoryScope } from "./shared-memory.js";
+import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import { listSessions } from "./metadata.js";
+import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
@@ -78,22 +84,33 @@ import {
   type SessionMemoryListResponse,
   type SessionMemoryRecord,
   type SessionMemoryRecordResponse,
+  type SessionGcStatus,
   type SessionState,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
+  type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
 } from "./types.js";
-import { version } from "./version.js";
-import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import { getVersion } from "./version.js";
+import {
+  checkProjectWorkspace,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
+  workspaceExists,
+} from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -287,6 +304,34 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSharedMemoryList(
+  scope: SharedMemoryScope,
+  response: SharedMemoryListResponse,
+): string {
+  if (response.keys.length === 0) {
+    return dimText(`No ${scope} memory.`);
+  }
+  return response.keys.map((key) => `- ${key}`).join("\n");
+}
+
+function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
+  return `${boldText(response.entry.key)}\n${response.entry.body}`;
+}
+
+function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
+  return `Removed ${response.key}.`;
+}
+
+function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
+  const scope = typeof value === "string" ? value : "";
+  try {
+    assertValidSharedMemoryScope(scope);
+  } catch {
+    throw new Error("--scope must be task, project, or global");
+  }
+  return scope;
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -519,7 +564,7 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill",
+  action: "pause" | "complete" | "kill" | "reopen",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -800,12 +845,110 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText("Next: `spur list` to auto-connect this repo."),
       dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
     );
+    return lines.join("\n");
   }
-  const failed = result.hostChecks.filter((check) => !check.ok);
+  lines.push(
+    dimText("No project config found. Rerun with `spur doctor --scaffold` to create one."),
+  );
+  const failed = result.hostChecks.filter((check) => !check.ok && check.severity === "error");
   if (failed.length > 0) {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
   return lines.join("\n");
+}
+
+// Bounds one interactive `spur gc` run; the daemon sweep has its own
+// sessionGc.maxGroupsPerSweep instead.
+const DEFAULT_GC_CLI_LIMIT = 100;
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null) {
+    return "-";
+  }
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const unit = BYTE_UNITS[unitIndex] ?? "B";
+  return unitIndex === 0 ? `${bytes} ${unit}` : `${value.toFixed(1)} ${unit}`;
+}
+
+export function renderSessionGcResult(report: GcReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.sessions} record(s) in ${report.scanned.groups} group(s); planned ${report.groups.length} (limit ${report.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+    ),
+    "",
+  ];
+  if (report.groups.length === 0) {
+    lines.push(dimText("Nothing to collect."));
+    return lines.join("\n");
+  }
+  for (const group of report.groups) {
+    const records = `${group.sessionIds.length} record${group.sessionIds.length === 1 ? "" : "s"}`;
+    const detail = group.error
+      ? `error: ${group.error}`
+      : group.action === "blocked"
+        ? group.blockReasons.join(",")
+        : group.worktreePath || "(no worktree)";
+    lines.push(
+      `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
+    );
+    lines.push(dimText(`           ${group.sessionIds.join(" ")}`));
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${formatBytes(report.totals.freedBytes)} freed, ${report.totals.errors} error(s).`,
+  );
+  const restoreLoss = report.groups.flatMap((group) => group.restoreLossSessionIds);
+  if (restoreLoss.length > 0) {
+    lines.push(
+      dimText(
+        `${restoreLoss.length} stopped session(s) lose \`spur restore\` once collected: ${restoreLoss.join(" ")}`,
+      ),
+    );
+  }
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    throw new Error("--statuses must list at least one of completed,killed,stopped");
+  }
+  const statuses: SessionGcStatus[] = [];
+  for (const part of parts) {
+    if (part !== "completed" && part !== "killed" && part !== "stopped") {
+      throw new Error(`--statuses only accepts completed,killed,stopped (got ${part})`);
+    }
+    statuses.push(part);
+  }
+  return [...new Set(statuses)];
+}
+
+function parseNonNegativeIntegerOption(value: string, flag: string): number {
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(value.trim(), 10);
+}
+
+function parsePositiveIntegerOption(value: string, flag: string): number {
+  const parsed = parseNonNegativeIntegerOption(value, flag);
+  if (parsed === 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -923,7 +1066,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -935,10 +1078,18 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "doctor") {
     return [
-      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
-      "Run `spur init` if host checks report missing units, linger, or inactive services.",
-      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Read-only by default: checks npm/systemd host install, PATH, core deps, project config, and daemon/web health.",
+      "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
+      "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
+    ];
+  }
+  if (command.name() === "gc") {
+    return [
+      "Dry run by default: prints every group with its age, size, and the action it would take. Nothing is touched without `--execute`.",
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
+      "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
+      "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -1266,7 +1417,7 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const scTmuxSession = sidecarTmuxSession(session.id, scName);
+    const scTmuxSession = firstSidecar.tmuxSession;
     try {
       if (!firstSidecar.alive) {
         await postJson<SessionView>(
@@ -1552,22 +1703,30 @@ async function runInteractiveSessionList(
   });
 }
 
-async function outputResult<T>(args: {
+// Exported so the exit-code wiring (the only externally observable effect
+// besides stdout) can be unit-tested directly, without driving the full
+// commander parse + host/config seams doctor's action depends on.
+export async function outputResult<T>(args: {
   json: boolean;
   label: string;
   action: () => Promise<T>;
   render: (value: T) => string;
   success?: (value: T) => string;
+  exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
-    return;
+  } else {
+    if (args.success) {
+      writeStdout(brandLine(args.success(value)));
+    }
+    writeStdout(args.render(value));
   }
-  if (args.success) {
-    writeStdout(brandLine(args.success(value)));
+  const code = args.exitCode?.(value);
+  if (code !== undefined) {
+    process.exitCode = code;
   }
-  writeStdout(args.render(value));
 }
 
 function resolveCliSpawnOverrides(options: {
@@ -1593,6 +1752,84 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function buildSubscriptionRequest(
+  targetSessionId: string,
+  rawStates: string[] | undefined,
+  rawMessage: string | undefined,
+  emptyStatesError: string,
+): SubscribeSessionStatesRequest {
+  const states = (rawStates ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error(emptyStatesError);
+  }
+  const message = rawMessage?.trim();
+  return {
+    targetSessionId,
+    states,
+    ...(message ? { message } : {}),
+  };
+}
+
+function resolveCliSpawnSubscriptions(options: {
+  subscribeTo?: string;
+  subscribeState?: string[];
+  subscribeMessage?: string;
+}): SubscribeSessionStatesRequest[] | undefined {
+  if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
+    throw new Error("--subscribe-to must be a non-empty session id");
+  }
+  const target = options.subscribeTo?.trim();
+  if (!target) {
+    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
+      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    }
+    return undefined;
+  }
+  return [
+    buildSubscriptionRequest(
+      target,
+      options.subscribeState,
+      options.subscribeMessage,
+      "--subscribe-to requires at least one --subscribe-state",
+    ),
+  ];
+}
+
+// Spawn-time subscribe targets fail silently on the server (spawn stays
+// non-fatal so a typo'd target never blocks the new session — see
+// applyRequestedStateSubscriptions). Validate here instead, before any
+// spawn side effect (tmux/worktree), so a bad --subscribe-to id is a clear
+// CLI error rather than a session that never gets its wakeup.
+async function ensureCliSpawnSubscriptionTargetsExist(
+  cliEntrypoint: string,
+  configPath: string,
+  subscriptions: SubscribeSessionStatesRequest[] | undefined,
+): Promise<void> {
+  if (!subscriptions) {
+    return;
+  }
+  for (const entry of subscriptions) {
+    try {
+      await getJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(entry.targetSessionId)}`,
+        configPath,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/session not found/i.test(message)) {
+        // Not a 404 for this target — a daemon-start failure, 500, or
+        // transport error shouldn't be relabeled as an unknown target.
+        throw error;
+      }
+      throw new Error(
+        `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+        { cause: error },
+      );
+    }
+  }
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -1604,19 +1841,21 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version(version, "-V, --version", "Show version");
+    .version(getVersion(), "-V, --version", "Show version");
 
   program
     .command("init")
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
-    .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--web-port <port>", "Web listen port (default 5555)")
+    .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
+        tailscale: Boolean(options.tailscale),
       });
     });
 
@@ -1640,19 +1879,69 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("reinit", { hidden: true })
+    .description(
+      "Reinstall user systemd units preserving the live web port/exposure/Tailscale bind, then restart and health-check.",
+    )
+    .action(() => {
+      reinitUnits(cliEntrypoint);
+    });
+
+  program
     .command("doctor")
-    .description("Check host install and scaffold a local Spur project config.")
+    .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
+    .option("--scaffold", "Write spur.yaml when no project config is found")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = collectHostInstallChecks();
+          const hostChecks = await collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
+            try {
+              const projectConfig = loadProjectConfig(existingProjectConfigPath);
+              // Severity is the check's static importance if it fails (an
+              // invalid spur.yaml blocks connect/spawn — always "error"), not
+              // a flag that flips with the outcome; the renderer only
+              // surfaces it once `ok` is false.
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: true,
+                severity: "error",
+                detail: "spur.yaml parses and validates",
+              });
+              // D1-D3: per-project path/git/branch validation — only ever
+              // runs against the project(s) this repo's spur.yaml actually
+              // defines, config-conditional by construction (never fires on a
+              // bare host with no project config, since this whole branch is
+              // already gated on `existingProjectConfigPath`).
+              for (const [projectId, project] of Object.entries(projectConfig.projects)) {
+                hostChecks.push(
+                  ...(await checkProjectWorkspace({
+                    projectId,
+                    path: project.path,
+                    defaultBranch: project.defaultBranch,
+                    worktree: project.worktree,
+                  })),
+                );
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: false,
+                severity: "error",
+                detail: message,
+                fix: "Fix the reported error in spur.yaml",
+              });
+            }
             return { hostChecks, existingProjectConfigPath };
+          }
+          if (!options.scaffold) {
+            return { hostChecks };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1672,8 +1961,67 @@ export function createProgram(cliEntrypoint: string): Command {
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
             : result.configPath
               ? `Created ${displayPathFromCwd(result.configPath)}.`
-              : "Created project config.",
+              : "Host and project checks complete.",
         render: renderDoctorResult,
+        exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("gc")
+    .description(
+      "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
+    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum groups to act on in one run")
+    .option("--no-sizes", "Skip `du` size measurement (no freed-byte reporting)")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const olderThanDays =
+        options.olderThan === undefined
+          ? config.sessionGc.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const statuses =
+        options.statuses === undefined
+          ? config.sessionGc.statuses
+          : parseSessionGcStatusesOption(String(options.statuses));
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      const sizes = options.sizes !== false;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning session gc" : "running session gc",
+        action: async () => {
+          const plan = planSessionGc({
+            sessions: listSessions(config.dataDir),
+            worktreeDir: config.worktreeDir,
+            now: new Date(),
+            olderThanDays,
+            statuses,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            pathExists: (path) => workspaceExists(path),
+          });
+          return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
+        },
+        render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });
 
@@ -1702,6 +2050,16 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--subscribe-to <sessionId>",
+      "Subscribe the new session to another session's state transitions",
+    )
+    .option(
+      "--subscribe-state <state>",
+      "State to watch for --subscribe-to; repeatable",
+      appendOptionValue,
+    )
+    .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1720,6 +2078,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
+      const subscriptions = resolveCliSpawnSubscriptions(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
@@ -1728,6 +2087,7 @@ export function createProgram(cliEntrypoint: string): Command {
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      await ensureCliSpawnSubscriptionTargetsExist(cliEntrypoint, configPath, subscriptions);
 
       let branch: string | undefined = options.branch;
 
@@ -1766,6 +2126,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(subscriptions ? { subscriptions } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -1994,7 +2355,7 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("subscribe", { hidden: true })
+    .command("subscribe")
     .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
@@ -2051,16 +2412,12 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!target) {
           throw new Error("subscribe requires a targetSessionId, --list, or --remove");
         }
-        const states = (options.state ?? []).map(parseSubscriptionState);
-        if (states.length === 0) {
-          throw new Error("subscribe requires at least one --state");
-        }
-        const message = options.message?.trim();
-        const payload: SubscribeSessionStatesRequest = {
-          targetSessionId: target,
-          states,
-          ...(message ? { message } : {}),
-        };
+        const payload = buildSubscriptionRequest(
+          target,
+          options.state,
+          options.message,
+          "subscribe requires at least one --state",
+        );
         await outputResult({
           json: Boolean(options.json),
           label: "subscribing",
@@ -2177,6 +2534,22 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("reopen")
+    .description("Restart a completed session in place, keeping its id and history.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "reopening session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        success: (session) => `Reopened ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -2308,6 +2681,120 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("memory")
+    .description("Manage shared markdown memory across task, project, and global scopes.")
+    .usage("<set|get|list|rm> [key] [body] --scope <task|project|global>")
+    .argument("<action>", "set, get, list, or rm")
+    .argument("[key]", "Memory key")
+    .argument("[body]", "Body for set (or use --file)")
+    .requiredOption("--scope <scope>", "task, project, or global")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--file <path>", "Read the set body from a file instead of the body argument")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        action: string,
+        key: string | undefined,
+        body: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const scope = parseSharedMemoryScope(options.scope);
+        const sessionId = options.session?.trim() || runningSessionId();
+        if (!sessionId) {
+          throw new Error("memory requires --session or SPUR_SESSION");
+        }
+
+        if (action === "list") {
+          if (key !== undefined || body !== undefined) {
+            throw new Error("memory list does not accept extra arguments");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading ${scope} memory`,
+            action: () =>
+              getJson<SharedMemoryListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}`,
+                configPath,
+              ),
+            render: (response) => renderSharedMemoryList(scope, response),
+          });
+          return;
+        }
+
+        if (!key) {
+          throw new Error(`memory ${action} requires a key`);
+        }
+
+        if (action === "get") {
+          if (body !== undefined) {
+            throw new Error("memory get accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading memory ${key}`,
+            action: () =>
+              getJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "set") {
+          const filePath = options.file?.trim();
+          if (body !== undefined && filePath) {
+            throw new Error("memory set accepts a body argument or --file, not both");
+          }
+          if (body === undefined && !filePath) {
+            throw new Error("memory set requires a body argument or --file");
+          }
+          const resolvedBody = filePath ? readFileSync(filePath, "utf-8") : (body as string);
+          const payload: SetSharedMemoryRequest = { body: resolvedBody };
+          await outputResult({
+            json: Boolean(options.json),
+            label: `saving memory ${key}`,
+            action: () =>
+              postJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                payload,
+                configPath,
+              ),
+            success: (response) => `Saved ${response.entry.key}.`,
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "rm") {
+          if (body !== undefined) {
+            throw new Error("memory rm accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `removing memory ${key}`,
+            action: () =>
+              deleteJson<SharedMemoryRemoveResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryRemoveResponse,
+          });
+          return;
+        }
+
+        throw new Error("memory action must be set, get, list, or rm");
+      },
+    );
 
   program
     .command("actions")
@@ -2695,6 +3182,20 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: a source-install / main-deploy host that never runs
+      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
+      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // permissions error writing into `<home>/.spur/` must never abort
+      // daemon boot, so failures are reported and swallowed, not thrown.
+      try {
+        ensureNpmPinFile();
+      } catch (error) {
+        writeStderr(
+          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",

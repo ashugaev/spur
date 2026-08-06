@@ -96,4 +96,45 @@ describe("agent helpers", () => {
       },
     );
   });
+
+  it("adds the restrict-writes gate env only for cursor sessions with restrictWrites", () => {
+    expect(
+      agentSessionConfig("cursor", {
+        dataDir: "/tmp/spur-data",
+        sessionId: "api-1",
+        restrictWrites: true,
+      }),
+    ).toEqual({
+      env: {
+        CURSOR_CONFIG_DIR: "/tmp/spur-data/cursor/api-1",
+        SPUR_CURSOR_RESTRICT_WRITES: "1",
+      },
+      planOptions: {
+        cursorConfigDir: "/tmp/spur-data/cursor/api-1",
+      },
+    });
+
+    expect(
+      agentSessionConfig("cursor", {
+        dataDir: "/tmp/spur-data",
+        sessionId: "api-1",
+        restrictWrites: false,
+      }),
+    ).toEqual({
+      env: {
+        CURSOR_CONFIG_DIR: "/tmp/spur-data/cursor/api-1",
+      },
+      planOptions: {
+        cursorConfigDir: "/tmp/spur-data/cursor/api-1",
+      },
+    });
+
+    expect(
+      agentSessionConfig("claude", {
+        dataDir: "/tmp/spur-data",
+        sessionId: "api-1",
+        restrictWrites: true,
+      }),
+    ).toEqual({});
+  });
 });

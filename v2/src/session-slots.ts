@@ -95,6 +95,29 @@ function normalizeTitle(title: string): string {
   return normalized;
 }
 
+export function normalizeSlotLinks(links: unknown): SessionLink[] {
+  const linksRaw = links ?? [];
+  if (!Array.isArray(linksRaw)) {
+    throw new Error("links must be an array");
+  }
+  return linksRaw.map((link: unknown, index) => {
+    if (!link || typeof link !== "object") {
+      throw new Error(`links[${index}] must be an object`);
+    }
+    const linkRecord = link as { label?: unknown; url?: unknown };
+    if (typeof linkRecord.label !== "string") {
+      throw new Error(`links[${index}].label must be a string`);
+    }
+    if (typeof linkRecord.url !== "string") {
+      throw new Error(`links[${index}].url must be a string`);
+    }
+    return {
+      label: normalizeSlotLabel(linkRecord.label),
+      url: normalizeSlotUrl(linkRecord.url),
+    } satisfies SessionLink;
+  });
+}
+
 export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): NormalizedSlotsUpdate {
   if (request.title !== undefined && typeof request.title !== "string") {
     throw new Error("slot title must be a string");
@@ -112,26 +135,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     throw new Error("setTitleIfAbsent requires a title");
   }
 
-  const linksRaw: unknown = request.links ?? [];
-  if (!Array.isArray(linksRaw)) {
-    throw new Error("links must be an array");
-  }
-  const links = linksRaw.map((link: unknown, index) => {
-    if (!link || typeof link !== "object") {
-      throw new Error(`links[${index}] must be an object`);
-    }
-    const linkRecord = link as { label?: unknown; url?: unknown };
-    if (typeof linkRecord.label !== "string") {
-      throw new Error(`links[${index}].label must be a string`);
-    }
-    if (typeof linkRecord.url !== "string") {
-      throw new Error(`links[${index}].url must be a string`);
-    }
-    return {
-      label: normalizeSlotLabel(linkRecord.label),
-      url: normalizeSlotUrl(linkRecord.url),
-    } satisfies SessionLink;
-  });
+  const links = normalizeSlotLinks(request.links);
 
   const unlinkRaw: unknown = request.unlinkLabels ?? [];
   if (!Array.isArray(unlinkRaw)) {

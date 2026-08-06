@@ -5,6 +5,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -19,6 +20,7 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
@@ -55,7 +57,7 @@ export type SpawnModalMode =
       project: ProjectControl;
       model: FieldControl<string | null>;
       branch: FieldControl<string>;
-      workspaceMode: FieldControl<"default" | "worktree" | "shared">;
+      workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
@@ -193,9 +195,7 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
             <option value="default">Default</option>
@@ -397,6 +397,7 @@ export function SpawnModal({
               onClick={onSubmit}
               type="button"
             >
+              {submitting ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
               <span>{submitting ? submitBusyLabel : submitLabel}</span>
               {!submitting ? (
                 <span

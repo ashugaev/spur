@@ -1,5 +1,5 @@
 import { ImageResponse } from "next/og";
-import { BG_BASE_HEX } from "@/design/colors";
+import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 
 export const size = { width: 32, height: 32 };
 export const contentType = "image/png";
@@ -17,12 +17,7 @@ export default function Icon() {
       }}
     >
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path
-          d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07"
-          stroke="white"
-          strokeWidth="2"
-          strokeLinecap="round"
-        />
+        <path d={SPARK_GLYPH_PATH} stroke="white" strokeWidth="2" strokeLinecap="round" />
       </svg>
     </div>,
     { ...size },

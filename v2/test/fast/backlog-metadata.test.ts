@@ -1,12 +1,9 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  claimAvailableBacklogItem,
-  readAvailableBacklogItems,
-  replaceAvailableBacklogItems,
-} from "../../src/metadata.js";
+import { readAvailableBacklogItems, replaceAvailableBacklogItems } from "../../src/metadata.js";
 import type { AvailableBacklogItem } from "../../src/types.js";
 
 const tempDirs: string[] = [];
@@ -27,6 +24,7 @@ function item(overrides: Partial<AvailableBacklogItem> = {}): AvailableBacklogIt
     title: "Fix checkout",
     url: "https://jira.example.com/browse/WEB-17",
     fetchedAt: "2026-06-16T12:00:00.000Z",
+    position: 0,
     ...overrides,
   };
 }
@@ -36,25 +34,76 @@ afterEach(async () => {
 });
 
 describe("backlog metadata", () => {
-  it("claims an available item once and removes it from available backlog", async () => {
+  it("reads items back in fetch/position order, not externalId or fetchedAt order", async () => {
     const dataDir = await tempDataDir();
-    replaceAvailableBacklogItems(dataDir, "api", "features", [item()]);
-
-    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([item()]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).toEqual(item());
-    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).toBeNull();
-  });
-
-  it("does not re-add claimed items on later polls", async () => {
-    const dataDir = await tempDataDir();
-    replaceAvailableBacklogItems(dataDir, "api", "features", [item()]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).not.toBeNull();
-
     replaceAvailableBacklogItems(dataDir, "api", "features", [
-      item({ fetchedAt: "2026-06-16T12:05:00.000Z" }),
+      item({
+        externalId: "30003",
+        key: "WEB-3",
+        fetchedAt: "2026-06-16T12:02:00.000Z",
+        position: 2,
+      }),
+      item({
+        externalId: "10001",
+        key: "WEB-1",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+        position: 0,
+      }),
+      item({
+        externalId: "20002",
+        key: "WEB-2",
+        fetchedAt: "2026-06-16T12:01:00.000Z",
+        position: 1,
+      }),
     ]);
 
-    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([]);
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+      "20002",
+      "30003",
+    ]);
+  });
+
+  it("backfills position from array index for a legacy item missing position, instead of dropping it", async () => {
+    const dataDir = await tempDataDir();
+    const path = join(dataDir, "source-state", "available-backlog", "api", "features.json");
+    mkdirSync(join(dataDir, "source-state", "available-backlog", "api"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        items: [
+          item({ externalId: "10001", position: 0 }),
+          { ...item({ externalId: "20002" }), position: undefined },
+          { ...item({ externalId: "30003" }), position: undefined },
+        ],
+      }),
+      "utf-8",
+    );
+
+    // Legacy files were persisted sorted by externalId, so array order is the legacy order;
+    // items missing position are backfilled from their array index and kept, not dropped.
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+      "20002",
+      "30003",
+    ]);
+  });
+
+  it("still drops a persisted item missing a required non-position field", async () => {
+    const dataDir = await tempDataDir();
+    const path = join(dataDir, "source-state", "available-backlog", "api", "features.json");
+    mkdirSync(join(dataDir, "source-state", "available-backlog", "api"), { recursive: true });
+    const { title: _title, ...missingTitle } = item({ externalId: "20002" });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        items: [item({ externalId: "10001", position: 0 }), missingTitle],
+      }),
+      "utf-8",
+    );
+
+    expect(readAvailableBacklogItems(dataDir, "api", "features").map((i) => i.externalId)).toEqual([
+      "10001",
+    ]);
   });
 });

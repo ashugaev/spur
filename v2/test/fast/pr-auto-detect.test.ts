@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
+import type * as prLookupModule from "../../src/pr-lookup.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
+const { existsSyncMock } = vi.hoisted(() => ({
+  existsSyncMock: vi.fn(() => true),
+}));
 const ghMock = vi.fn();
 const glabMock = vi.fn();
+const readRemoteUrlsMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const writeWorkspaceStateMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -23,7 +30,8 @@ const agentProcessMatchersMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
 
-vi.mock("../../src/gh.js", () => ({
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/glab.js", () => ({
@@ -50,7 +58,7 @@ vi.mock("../../src/agents/index.js", () => ({
 vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
-  findProjectConfigPath: vi.fn(),
+  findProjectConfigPathInDirectory: vi.fn(),
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
@@ -76,6 +84,27 @@ vi.mock("../../src/metadata.js", () => ({
   readSession: readSessionMock,
   writeServiceInstance: vi.fn(),
   writeSession: writeSessionMock,
+}));
+// node:fs is stubbed below (existsSync always true, mkdirSync/writeFileSync
+// no-ops) for the rest of this suite's needs, which breaks
+// workspace-store.js's real tmp-file-and-rename write (renameSync is real
+// and would throw ENOENT on the never-actually-written tmp file). This
+// suite only cares that a found PR binding lands on the session record via
+// writeSession, so resolve workspace state straight off the passed-in
+// record — the same "no workspace file yet" value the real resolver would
+// give here, since every test in this file uses a single non-desk session
+// id (`workspaceId === id`) and never actually writes a workspace file.
+vi.mock("../../src/workspace-store.js", () => ({
+  resolveWorkspaceState: (
+    _dataDir: string,
+    record: { slots?: SessionSlots; pr?: SessionRecord["pr"] },
+  ) => ({
+    ...(record.slots ? { slots: record.slots } : {}),
+    ...(record.pr ? { pr: record.pr } : {}),
+  }),
+  writeWorkspaceState: writeWorkspaceStateMock,
+  deleteWorkspaceState: vi.fn(),
+  readWorkspaceState: vi.fn().mockReturnValue(null),
 }));
 vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
@@ -126,6 +155,7 @@ vi.mock("../../src/workspace.js", () => ({
   hasUncommittedChanges: vi.fn(),
   hasUnpushedCommits: vi.fn(),
   readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
@@ -142,6 +172,18 @@ vi.mock("../../src/registry.js", () => ({
     mutate({ configPaths: [], unconfiguredProjects: [] }),
   ),
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
+  // Keep existing per-test buildMergedConfigMock setups driving the merged config.
+  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
+    invalidateRemovedPaths: vi.fn(),
+    scan: () => {
+      const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
+      return {
+        config: merged.config,
+        configPaths: merged.configPaths,
+        newDiagnostics: [],
+      };
+    },
+  })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -152,7 +194,7 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...actual,
     mkdirSync: vi.fn(),
-    existsSync: vi.fn().mockReturnValue(true),
+    existsSync: existsSyncMock,
     realpathSync: vi.fn((p: string) => p),
     writeFileSync: vi.fn(),
   };
@@ -164,6 +206,7 @@ function baseConfig(): AppConfig {
     server: { host: "127.0.0.1", port: 4310 },
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
+    projectsRoot: "/tmp/spur-data/projects",
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
@@ -177,6 +220,32 @@ function baseConfig(): AppConfig {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    },
+    admission: {
+      enabled: true,
+      maxLiveSessions: 1000,
+      maxLiveSessionsSource: "derived",
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: {
+        enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1_073_741_824,
+        minFreeSwapBytes: 0,
+        admissionFloorBytes: 8_000_000_000,
+        shedCriticalFloorBytes: 4_000_000_000,
+        restoreFloorBytes: 9_610_612_736,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
     },
     projects: {
       api: {
@@ -207,6 +276,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
     id: "api-a1b2",
     project: "api",
+    workspaceId: overrides.workspaceId ?? "api-a1b2",
     agent: "claude",
     prompt: "fix the bug",
     branch: "spur/auto-detect-pr-slot",
@@ -237,6 +307,60 @@ async function loadModule() {
 }
 
 const PR_WAITING_LIMIT = 5;
+const PR_SLUG = { host: "github.com", owner: "acme", name: "api" };
+const DATA_DIR = "/tmp/spur-data";
+
+interface GraphqlPrNode {
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+}
+
+/**
+ * Builds the response for whatever branch aliases the batched query actually
+ * asked for, so a test asserts on call counts instead of on argv order.
+ */
+function graphqlEnvelope(args: string[], prByBranch: Record<string, GraphqlPrNode> = {}): string {
+  const repo: Record<string, unknown> = {
+    nameWithOwner: "acme/api",
+    isFork: false,
+    parent: null,
+  };
+  for (const arg of args) {
+    const match = /^b(\d+)=([\s\S]*)$/.exec(arg);
+    if (!match) {
+      continue;
+    }
+    const pr = prByBranch[match[2] ?? ""];
+    repo[`a${match[1]}`] = { nodes: pr ? [pr] : [] };
+  }
+  return JSON.stringify({
+    data: {
+      rateLimit: { limit: 5000, cost: 1, remaining: 4_800, resetAt: "2026-08-04T06:00:00Z" },
+      r: repo,
+    },
+  });
+}
+
+function mockGraphql(prByBranch: Record<string, GraphqlPrNode> = {}): void {
+  ghMock.mockImplementation((_cwd: string, ...args: string[]) =>
+    Promise.resolve(graphqlEnvelope(args, prByBranch)),
+  );
+}
+
+function branchArgsOf(callIndex: number): string[] {
+  return (ghMock.mock.calls[callIndex] ?? []).filter((arg: unknown) =>
+    /^b\d+=/.test(String(arg)),
+  ) as string[];
+}
+
+const OPEN_PR_42: GraphqlPrNode = {
+  number: 42,
+  title: "Keep PR binding native",
+  url: "https://github.com/org/repo/pull/42",
+  state: "OPEN",
+};
 
 describe("PR auto-detect", () => {
   beforeEach(() => {
@@ -253,6 +377,10 @@ describe("PR auto-detect", () => {
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
     readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
+    existsSyncMock.mockReturnValue(true);
+    readRemoteUrlsMock
+      .mockReset()
+      .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
   });
 
   afterEach(() => {
@@ -264,15 +392,7 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(
-      JSON.stringify([
-        {
-          number: 42,
-          title: "Keep PR binding native",
-          url: "https://github.com/org/repo/pull/42",
-        },
-      ]),
-    );
+    mockGraphql({ [session.branch]: OPEN_PR_42 });
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -280,16 +400,30 @@ describe("PR auto-detect", () => {
     // First poll runs on construct; advance to let async settle
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(ghMock).toHaveBeenCalledWith(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      session.branch,
-      "--json",
-      "number,title,url",
-      "--limit",
-      "1",
+    // One batched GraphQL query, not one `gh pr list --head` per branch.
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const call = ghMock.mock.calls[0] ?? [];
+    expect(call[0]).toBe(session.worktreePath);
+    expect(call[1]).toBe("api");
+    expect(call.slice(1, 4)).toEqual(["api", "--hostname", "github.com"]);
+    expect(call[4]).toBe("graphql");
+    expect(call).toContain("owner=acme");
+    expect(call).toContain("name=api");
+    expect(call).toContain(`b0=${session.branch}`);
+    expect(call).not.toContain("list");
+    // The binding is workspace-owned state: it lands in the workspace file
+    // keyed by the workspace id, and is mirrored onto the session record for
+    // the transitional legacy readers.
+    expect(writeWorkspaceStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      session.id,
+      expect.objectContaining({
+        pr: {
+          number: 42,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      }),
     );
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
@@ -305,7 +439,7 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
+  it("falls back to GitLab after an arbitrary-host GitHub transport failure", async () => {
     const { buildMergedConfig } = await import("../../src/registry.js");
     const baseProject = baseConfig().projects.api;
     if (!baseProject) {
@@ -340,7 +474,10 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([]));
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([["origin", "git@gitea.corp.internal:org/repo.git"]]),
+    );
+    ghMock.mockRejectedValue(new Error("gh: authentication failed for gitea.corp.internal"));
     glabMock.mockResolvedValue(
       JSON.stringify([
         {
@@ -389,23 +526,14 @@ describe("PR auto-detect", () => {
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
     readCurrentBranchMock.mockResolvedValueOnce("feature/live");
-    ghMock.mockResolvedValue(JSON.stringify([]));
+    mockGraphql();
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(ghMock).toHaveBeenCalledWith(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      "feature/live",
-      "--json",
-      "number,title,url",
-      "--limit",
-      "1",
-    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(branchArgsOf(0)).toEqual(["b0=feature/live"]);
 
     service.dispose();
   });
@@ -451,9 +579,7 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(
-      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
-    );
+    mockGraphql({ [session.branch]: OPEN_PR_42 });
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -468,25 +594,58 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("throttles gh calls to 30s minimum", async () => {
+  it("holds a running session to the 30s throttle then the 60s cache backoff", async () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([]));
+    mockGraphql();
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
-    // Advance 5s (one poll interval) — should be throttled
+    // Advance 5s (one poll interval) — throttled.
     await vi.advanceTimersByTimeAsync(5_000);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
-    // Advance past 30s throttle
+    // Past the 30s throttle but still inside the first 60s miss backoff.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    // Past the backoff: exactly one more lookup.
     await vi.advanceTimersByTimeAsync(30_000);
     expect(ghMock).toHaveBeenCalledTimes(2);
+
+    service.dispose();
+  });
+
+  it("does not re-query an absent branch inside its backoff and does after it", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    // 59s of 5s sweeps, all inside the first backoff step.
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+
+    // Second step is 2min: the sweeps in between spend nothing.
+    await vi.advanceTimersByTimeAsync(115_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ghMock).toHaveBeenCalledTimes(3);
 
     service.dispose();
   });
@@ -496,24 +655,32 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich("waiting");
-    ghMock.mockResolvedValue(JSON.stringify([]));
+    mockGraphql();
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
 
     // Initial poll fires on construct; let it settle
     await vi.advanceTimersByTimeAsync(100);
-    const initialCalls = ghMock.mock.calls.length; // 1 (initial)
+    expect(ghMock).toHaveBeenCalledTimes(1);
 
-    // Run checks spaced > 30s apart until we hit the limit
-    for (let i = initialCalls; i < PR_WAITING_LIMIT; i++) {
-      await vi.advanceTimersByTimeAsync(35_000);
-    }
+    // Cache-skipped sweeps do not consume the waiting limit. The first 175s
+    // therefore contain only the initial lookup and the 60s-backoff retry.
+    await vi.advanceTimersByTimeAsync(5 * 35_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+
+    // The remaining retries follow the 2m, 4m and capped 5m backoff steps.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     const callsAtLimit = ghMock.mock.calls.length;
     expect(callsAtLimit).toBe(PR_WAITING_LIMIT);
+    expect(
+      (
+        service as unknown as { prCheckTrackers: Map<string, { waitingChecks: number }> }
+      ).prCheckTrackers.get(session.id)?.waitingChecks,
+    ).toBe(PR_WAITING_LIMIT);
 
-    // Next check should be skipped (backoff)
-    await vi.advanceTimersByTimeAsync(35_000);
+    // Past the limit nothing is attempted again, even once the backoff expires.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(ghMock).toHaveBeenCalledTimes(callsAtLimit);
 
     service.dispose();
@@ -523,7 +690,7 @@ describe("PR auto-detect", () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([]);
     readSessionMock.mockReturnValue({ ...session });
-    ghMock.mockResolvedValue(JSON.stringify([]));
+    mockGraphql();
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -548,13 +715,14 @@ describe("PR auto-detect", () => {
         checkPrForSession(session: SessionRecord, state: string): void;
       }
     ).checkPrForSession(session, "working");
-    await vi.advanceTimersByTimeAsync(0);
+    // The queued lookup rides the next sweep's flush.
+    await vi.advanceTimersByTimeAsync(5_100);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
   });
 
-  it("silently handles gh failures", async () => {
+  it("absorbs a gh failure without recording a miss", async () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
@@ -563,15 +731,17 @@ describe("PR auto-detect", () => {
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
+    const { readPrLookupEntry } = await import("../../src/pr-lookup-cache.js");
     await vi.advanceTimersByTimeAsync(100);
 
-    // Should log the failure but not throw
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        event: "session.pr_auto_detect.failed",
-      }),
-    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(writeWorkspaceStateMock).not.toHaveBeenCalled();
+    // A failed lookup is not an answer: no cache entry, so the branch is
+    // retried on the next throttle window instead of being written off.
+    expect(readPrLookupEntry(DATA_DIR, PR_SLUG, session.branch)).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
 
     service.dispose();
   });
@@ -589,9 +759,7 @@ describe("PR auto-detect", () => {
       },
     });
     setupEnrich();
-    ghMock.mockResolvedValue(
-      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
-    );
+    mockGraphql({ [session.branch]: OPEN_PR_42 });
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -600,5 +768,216 @@ describe("PR auto-detect", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
 
     service.dispose();
+  });
+
+  it("batches one project's whole eligible set into a single gh call per sweep", async () => {
+    const sessions = [
+      ...Array.from({ length: 40 }, (_unused, index) =>
+        makeSession({
+          id: `api-stopped-${index}`,
+          workspaceId: `api-stopped-${index}`,
+          status: "stopped",
+          branch: `feature/stopped-${index}`,
+          worktreePath: `/tmp/spur-worktrees/api-stopped-${index}`,
+          tmuxSession: `api-stopped-${index}`,
+        }),
+      ),
+      ...Array.from({ length: 2 }, (_unused, index) =>
+        makeSession({
+          id: `api-live-${index}`,
+          workspaceId: `api-live-${index}`,
+          branch: `feature/live-${index}`,
+          worktreePath: `/tmp/spur-worktrees/api-live-${index}`,
+          tmuxSession: `api-live-${index}`,
+        }),
+      ),
+    ];
+    listSessionsMock.mockReturnValue(sessions);
+    readSessionMock.mockImplementation((_dataDir: string, id: string) => ({
+      ...(sessions.find((session) => session.id === id) ?? sessions[0]),
+    }));
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    // 42 branches, one repo, one query.
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(branchArgsOf(0)).toHaveLength(42);
+
+    service.dispose();
+  });
+
+  it("coalesces duplicate repo and branch sessions into one miss mutation", async () => {
+    const sessions = [
+      makeSession({ id: "api-a", workspaceId: "api-a", worktreePath: "/tmp/api-a" }),
+      makeSession({ id: "api-b", workspaceId: "api-b", worktreePath: "/tmp/api-b" }),
+    ];
+    listSessionsMock.mockReturnValue(sessions);
+    readSessionMock.mockImplementation((_dataDir: string, id: string) => ({
+      ...(sessions.find((session) => session.id === id) ?? sessions[0]),
+    }));
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const { readPrLookupEntry } = await import("../../src/pr-lookup-cache.js");
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(branchArgsOf(0)).toEqual([`b0=${sessions[0]?.branch ?? ""}`]);
+    expect(readPrLookupEntry(DATA_DIR, PR_SLUG, sessions[0]?.branch ?? "")?.misses).toBe(1);
+
+    service.dispose();
+  });
+
+  it("skips a session whose worktree directory is gone", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql();
+    existsSyncMock.mockReturnValue(false);
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledTimes(0);
+
+    service.dispose();
+  });
+
+  it("drops a stopped session to the 30min throttle", async () => {
+    const session = makeSession({ status: "stopped" });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+
+    service.dispose();
+  });
+
+  it("binds a PR opened by hand long after the session stopped", async () => {
+    const session = makeSession({ status: "stopped" });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(writeWorkspaceStateMock).not.toHaveBeenCalled();
+
+    // The user opens the PR by hand half an hour later.
+    mockGraphql({ [session.branch]: OPEN_PR_42 });
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(writeWorkspaceStateMock).toHaveBeenCalledWith(
+      DATA_DIR,
+      session.id,
+      expect.objectContaining({
+        pr: { number: 42, repo: "org/repo", url: "https://github.com/org/repo/pull/42" },
+      }),
+    );
+
+    service.dispose();
+  });
+
+  it("writes no cache entry when the graphql budget is exhausted", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql();
+
+    const { SessionService } = await loadModule();
+    const { GH_POLL_MIN_GRAPHQL_REMAINING, recordGraphqlBudget, _resetGhUsageForTests } =
+      await import("../../src/gh.js");
+    const { readPrLookupEntry } = await import("../../src/pr-lookup-cache.js");
+    _resetGhUsageForTests();
+    recordGraphqlBudget(GH_POLL_MIN_GRAPHQL_REMAINING - 1, Date.now() + 60 * 60_000);
+
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledTimes(0);
+    expect(readPrLookupEntry(DATA_DIR, PR_SLUG, session.branch)).toBeNull();
+    expect(
+      (
+        service as unknown as { prCheckTrackers: Map<string, { found: boolean }> }
+      ).prCheckTrackers.get(session.id)?.found,
+    ).toBe(false);
+
+    // Budget recovers: the very next throttle window spends exactly one call.
+    _resetGhUsageForTests();
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("releases the sweep's poll claim when enqueuePrLookup rejects", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    // Real `enqueuePrLookup` never rejects (its own doc comment says so):
+    // every gh failure it sees is caught and settled as a `skipped` outcome.
+    // Proving `resolveQueuedPrLookup`'s finally releases the claim on a
+    // rejection needs a synthetic one, scoped to this test only with
+    // `vi.doMock` (not the file-wide `vi.mock`) so the other 18 tests in this
+    // file keep importing a genuinely fresh, unmocked `pr-lookup.js` module
+    // per `vi.resetModules()` cycle.
+    vi.doMock("../../src/pr-lookup.js", async (importOriginal) => {
+      const original = await importOriginal<typeof prLookupModule>();
+      return { ...original, enqueuePrLookup: () => Promise.reject(new Error("gh unavailable")) };
+    });
+
+    try {
+      const { SessionService } = await loadModule();
+      const { claimPollPrLookup } = await import("../../src/pr-lookup.js");
+      const service = new SessionService();
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      // The rejection is not swallowed: the sweep logs it instead of hanging.
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({ event: "session.pr_auto_detect.failed" }),
+      );
+      // And the claim taken before the rejecting await is released, not
+      // leaked: a later claimant owns the key instead of joining a claim
+      // nobody settles.
+      const claim = claimPollPrLookup({
+        dataDir: DATA_DIR,
+        slug: PR_SLUG,
+        branch: session.branch,
+        capMs: 5 * 60_000,
+      });
+      expect(claim.status).toBe("owner");
+
+      service.dispose();
+    } finally {
+      // Unregister unconditionally: an assertion failure above must not leave
+      // a rejecting `enqueuePrLookup` mock for a test appended after this one.
+      vi.doUnmock("../../src/pr-lookup.js");
+    }
   });
 });

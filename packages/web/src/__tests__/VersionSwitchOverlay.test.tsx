@@ -90,4 +90,114 @@ describe("VersionSwitchOverlay", () => {
 
     expect(screen.queryByTestId("version-switch-overlay")).not.toBeInTheDocument();
   });
+
+  it("shows a Diagnose update button on failure that spawns an agent and disables once spawned", async () => {
+    const fetchMock = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input) === "/api/diagnose-update") {
+          return new Response(JSON.stringify({ id: "sess-1" }), { status: 201 });
+        }
+        return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
+      });
+
+    renderOverlay(<StartSwitchTrigger version="1.5.0" />);
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByText("trigger-start-switch"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+    vi.useRealTimers();
+
+    const diagnoseButton = screen.getByRole("button", { name: "Diagnose update" });
+    expect(diagnoseButton).toBeInTheDocument();
+    expect(diagnoseButton).not.toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(diagnoseButton);
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/diagnose-update",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+
+    const spawnedButton = await screen.findByRole("button", { name: "Agent spawned" });
+    expect(spawnedButton).toBeDisabled();
+
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload now" })).toBeInTheDocument();
+  });
+
+  it("shows Retry diagnose and re-enables the button when the spawn request fails", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/diagnose-update") {
+        return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
+    });
+
+    renderOverlay(<StartSwitchTrigger version="1.5.0" />);
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByText("trigger-start-switch"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+    vi.useRealTimers();
+
+    const diagnoseButton = screen.getByRole("button", { name: "Diagnose update" });
+
+    await act(async () => {
+      fireEvent.click(diagnoseButton);
+    });
+
+    const retryButton = await screen.findByRole("button", { name: "Retry diagnose" });
+    expect(retryButton).not.toBeDisabled();
+  });
+
+  it("resets the Diagnose button to idle on a fresh failure after a prior spawn", async () => {
+    const fetchMock = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input) === "/api/diagnose-update") {
+          return new Response(JSON.stringify({ id: "sess-1" }), { status: 201 });
+        }
+        return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
+      });
+
+    renderOverlay(<StartSwitchTrigger version="1.5.0" />);
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByText("trigger-start-switch"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+    vi.useRealTimers();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Diagnose update" }));
+    });
+    expect(await screen.findByRole("button", { name: "Agent spawned" })).toBeDisabled();
+
+    fetchMock.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("version-switch-overlay")).not.toBeInTheDocument();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByText("trigger-start-switch"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+    vi.useRealTimers();
+
+    const diagnoseButton = await screen.findByRole("button", { name: "Diagnose update" });
+    expect(diagnoseButton).not.toBeDisabled();
+  });
 });

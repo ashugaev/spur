@@ -45,7 +45,7 @@ curl http://127.0.0.1:4310/info
 If your config uses another port, either update the global config or override the URL explicitly:
 
 ```bash
-SPUR_DAEMON_URL=http://127.0.0.1:4311 pnpm dev
+SPUR_DAEMON_URL=http://127.0.0.1:4400 pnpm dev
 ```
 
 ## `tmux` is missing

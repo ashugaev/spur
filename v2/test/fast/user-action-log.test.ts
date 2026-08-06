@@ -8,6 +8,7 @@ import {
   appendUserAction,
   buildUserActionRecord,
   deleteSessionUserActions,
+  hasRecentSessionUserAction,
   readSessionUserActions,
   readUserActionLog,
   sessionUserActionLogPath,
@@ -123,6 +124,121 @@ describe("read shard vs global", () => {
   });
 });
 
+describe("hasRecentSessionUserAction", () => {
+  const actions = new Set(["session.send", "session.source_reply"]);
+
+  it("returns false when the session has no shard yet", async () => {
+    const dir = await makeDir();
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, 0)).toBe(false);
+  });
+
+  it("never falls back to the global log: a matching in-window entry there alone is not enough without a shard", async () => {
+    const dir = await makeDir();
+    // Write directly to the global log only — bypass appendUserAction so no
+    // per-session shard gets created for demo-1.
+    const line = `${JSON.stringify(
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    )}\n`;
+    writeFileSync(userActionLogPath(dir), line, { encoding: "utf-8", mode: 0o600 });
+    expect(existsSync(sessionUserActionLogPath(dir, "demo-1"))).toBe(false);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns true for a matching action inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
+  });
+
+  it("returns false for a matching action aged out of the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:00.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:10.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a non-matching action type inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.kill", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a different session id", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-2", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("only scans the live shard, not archived ones: a match rotated into a .gz archive is not found", async () => {
+    const dir = await makeDir();
+    // retainArchives=5 with only 4 padding appends keeps the matching record inside
+    // retention (it lands in an archive, not evicted past it) — this matters because
+    // if the padding count evicted it past every retained archive, this test would
+    // pass identically whether hasRecentSessionUserAction correctly scans only the
+    // live shard or incorrectly still walks archives too: the record wouldn't exist
+    // anywhere either way. Each record here exceeds shardHotBytes on its own, so
+    // every append rotates a single record straight into .1.gz and shifts prior
+    // archives up by one; with retainArchives=5 the match survives through 4 shifts
+    // and is pruned on the 5th, so 4 padding appends keeps it discoverable in an
+    // archive (verified: reverting the live-shard-only fix makes this test fail).
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 5 });
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("finds a matching entry still in the live shard after other entries have rotated out", async () => {
+    const dir = await makeDir();
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 2 });
+    for (let i = 0; i < 40; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    // Raise the threshold so this append lands in — and stays in — the live shard
+    // instead of immediately triggering another rotation.
+    setUserActionLogConfig({
+      hotBytes: 1024 * 1024,
+      shardHotBytes: 1024 * 1024,
+      retainArchives: 2,
+    });
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
+  });
+});
+
 describe("deleteSessionUserActions", () => {
   it("removes the shard and its archives but leaves the global log intact", async () => {
     const dir = await makeDir();
@@ -193,6 +309,13 @@ describe("buildUserActionRecord decoder", () => {
     expect(typeof result?.ts).toBe("string");
   });
 
+  it("decodes session.reopen with sessionId", () => {
+    expect(build({ path: "/sessions/demo-1/reopen" })).toMatchObject({
+      action: "session.reopen",
+      sessionId: "demo-1",
+    });
+  });
+
   it("matches nested routes before their prefixes", () => {
     expect(build({ path: "/sessions/demo-1/wake/cancel" })?.action).toBe("session.wake_cancel");
     expect(build({ path: "/sessions/demo-1/wake" })?.action).toBe("session.wake");
@@ -201,6 +324,16 @@ describe("buildUserActionRecord decoder", () => {
       "session.memory_resolve",
     );
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
+  });
+
+  it("decodes shared-memory writes and removals with sessionId, not falling into session-memory", () => {
+    const set = build({ path: "/sessions/demo-1/shared-memory/task/decision.api" });
+    expect(set).toMatchObject({ action: "shared.memory_set", sessionId: "demo-1" });
+    const remove = build({
+      method: "DELETE",
+      path: "/sessions/demo-1/shared-memory/project/gotcha.env",
+    });
+    expect(remove).toMatchObject({ action: "shared.memory_remove", sessionId: "demo-1" });
   });
 
   it("sub-decodes /slots by body keys", () => {

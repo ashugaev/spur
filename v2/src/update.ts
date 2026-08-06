@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
@@ -19,6 +18,7 @@ import {
   probe,
   readWebPort,
   readWebUnitOptions,
+  resolveDaemonPort,
   SERVICE_UNITS,
   unitStateWith,
   type PollSample,
@@ -36,11 +36,10 @@ import {
   type RollbackState,
   type UpdateInProgress,
 } from "./update-state.js";
-import { version } from "./version.js";
+import { getVersion } from "./version.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
-const DEFAULT_DAEMON_PORT = 4310;
 const VERIFY_ATTEMPTS = 5;
 const VERIFY_INTERVAL_MS = 3_000;
 
@@ -146,16 +145,33 @@ function realPidAlive(pid: number): boolean {
   }
 }
 
-// `spur update` is host-level, so resolve the daemon's listen port the same way
-// the daemon does: read the bootstrap instance config, defaulting to 4310 when
-// it is unset or unreadable. Otherwise a non-default `server.port` host would
-// see the daemon probe as connection-refused and false-rollback a healthy update.
-function resolveDaemonPort(): number {
+// Derive the npm prefix from the location the running spur package occupies, so
+// `npm install -g` lands the new version in the SAME place instead of npm's
+// configured/default prefix (on prod that is `/usr`, unwritable by the daemon
+// user -> EACCES). Returns null when the entrypoint is not inside an
+// `@shugaev/spur` install (source checkout / dev), where the bare install is the
+// correct default.
+export function resolveInstallPrefix(entrypoint: string): string | null {
+  const marker = `/lib/node_modules/${PACKAGE_SPEC}/`;
+  let resolved: string;
   try {
-    return loadConfig().server.port;
+    resolved = realpathSync(entrypoint);
   } catch {
-    return DEFAULT_DAEMON_PORT;
+    resolved = entrypoint;
   }
+  const index = resolved.indexOf(marker);
+  return index === -1 ? null : resolved.slice(0, index);
+}
+
+// Reinstall the user systemd units, preserving the live web port / external
+// exposure / Tailscale bind the operator deployed instead of resetting the
+// units to loopback:5555. Shared by `spur update`'s reinit dep and the
+// `spur reinit` CLI command so every migration path (CLI update, UI/deploy
+// switch, install-and-restart.sh) converges on the same unit-reinstall logic.
+export function reinitUnits(cliEntrypoint: string): void {
+  const scope = resolveSystemdScope(homedir());
+  const { webPort, exposeWeb, tailscale } = readWebUnitOptions(scope);
+  runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb, tailscale });
 }
 
 export function createRealUpdateDeps(
@@ -163,21 +179,31 @@ export function createRealUpdateDeps(
   statePath: string = defaultRollbackStatePath(),
 ): UpdateDeps {
   const scope = resolveSystemdScope(homedir());
+  const installPrefix = resolveInstallPrefix(cliEntrypoint);
   return {
     now: () => Date.now(),
     sleep: (ms) => delay(ms),
     probe: (target) => probe(target),
     unitState: (unit) => unitStateWith(scope, unit),
     installVersion: (target) => {
-      execFileSync("npm", ["install", "-g", `${PACKAGE_SPEC}@${target}`], { stdio: "inherit" });
+      const args = ["install", "-g"];
+      if (installPrefix) {
+        args.push("--prefix", installPrefix);
+      }
+      args.push(`${PACKAGE_SPEC}@${target}`);
+      execFileSync("npm", args, { stdio: "inherit" });
     },
     reinit: () => {
-      // Preserve the live web port / external exposure the operator deployed
-      // instead of resetting the units to loopback:4311.
-      const { webPort, exposeWeb } = readWebUnitOptions(scope);
-      runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb });
+      // Match install-and-restart.sh: pin the npm prefix for the reinit chain
+      // (npm-init.sh requires `npm config get prefix == ~/.local`) so `spur
+      // update` also succeeds when the ambient npm prefix diverges from the
+      // install location, not just the daemon deploy/switch path.
+      if (installPrefix) {
+        process.env["npm_config_prefix"] = installPrefix;
+      }
+      reinitUnits(cliEntrypoint);
     },
-    currentVersion: version,
+    currentVersion: getVersion(),
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),
     writeState: (state) => writeState(statePath, state),
@@ -191,26 +217,18 @@ export function createRealUpdateDeps(
   };
 }
 
-const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web", "terminal"];
+const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web"];
 
 async function buildSample(deps: UpdateDeps, atMs: number): Promise<PollSample> {
   const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [[daemonH, webH, terminalH], [daemonU, webU, terminalU]] = await Promise.all([
-    Promise.all([
-      deps.probe(targets.daemon),
-      deps.probe(targets.web),
-      deps.probe(targets.terminal),
-    ]),
-    Promise.all([
-      deps.unitState(SERVICE_UNITS.daemon),
-      deps.unitState(SERVICE_UNITS.web),
-      deps.unitState(SERVICE_UNITS.terminal),
-    ]),
+  const [[daemonH, webH], [daemonU, webU]] = await Promise.all([
+    Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]),
+    Promise.all([deps.unitState(SERVICE_UNITS.daemon), deps.unitState(SERVICE_UNITS.web)]),
   ]);
   return {
     atMs,
-    health: { daemon: daemonH, web: webH, terminal: terminalH },
-    units: { daemon: daemonU, web: webU, terminal: terminalU },
+    health: { daemon: daemonH, web: webH },
+    units: { daemon: daemonU, web: webU },
   };
 }
 
@@ -261,15 +279,10 @@ export async function runUpdate(
   }
 
   const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [daemonH, webH, terminalH] = await Promise.all([
-    deps.probe(targets.daemon),
-    deps.probe(targets.web),
-    deps.probe(targets.terminal),
-  ]);
+  const [daemonH, webH] = await Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]);
   const preflight: Record<ServiceId, ProbeResult> = {
     daemon: daemonH,
     web: webH,
-    terminal: terminalH,
   };
   const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
   if (!allHealthy && !force) {
@@ -279,10 +292,16 @@ export async function runUpdate(
 
   const startedAt = new Date(deps.now()).toISOString();
   // Only a fully healthy preflight may (re)record the rollback anchor; a forced
-  // update on an unhealthy host keeps the previous known-good version.
-  const lastKnownGood = allHealthy
-    ? { version: deps.currentVersion, healthyAt: startedAt }
-    : state.lastKnownGood;
+  // update on an unhealthy host keeps the previous known-good version. Also
+  // require a real release version: `assertNotSourceCheckout` normally rules
+  // out a git-describe-shaped `currentVersion` reaching here, but under
+  // SPUR_UPDATE_FORCE=1 it wouldn't be -- and a non-release anchor can never
+  // be reinstalled by `installVersion` on rollback, so keep the previous
+  // known-good instead of recording one that would break rollback.
+  const lastKnownGood =
+    allHealthy && isReleaseVersion(deps.currentVersion)
+      ? { version: deps.currentVersion, healthyAt: startedAt }
+      : state.lastKnownGood;
   const inProgress: UpdateInProgress = {
     fromVersion: deps.currentVersion,
     toVersion: target,
