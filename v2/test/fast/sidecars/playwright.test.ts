@@ -92,13 +92,11 @@ describe("resolvePlaywrightSidecarCommand", () => {
     // The shape the sweep would face without exec: the shell holds the
     // unexpanded port (no digits) and node's ppid is that shell, so neither
     // process is matchable and the whole tree leaks.
-    const shell: ProcessInfo = {
-      pid: 2000,
+    const shell: Pick<ProcessSnapshotEntry, "ppid" | "args"> = {
       ppid: 1,
       args: `sh -lc node ${bin} --headless --isolated --host 127.0.0.1 --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
     };
-    const nodeUnderShell: ProcessInfo = {
-      pid: 2001,
+    const nodeUnderShell: Pick<ProcessSnapshotEntry, "ppid" | "args"> = {
       ppid: 2000,
       args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8751`,
     };
@@ -252,12 +250,15 @@ describe("sweepLeakedPlaywright", () => {
     const renderer = spawnIdle();
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
-      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+      // listProcesses passes an options object, so the callback is the last
+      // argument, not the third.
+      execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
+        const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
           stdout: [
-            `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
-            `${browser} ${server} /opt/chromium --headless --remote-debugging-pipe`,
-            `${renderer} ${browser} /opt/chromium --type=renderer`,
+            `${server} 1 1000 00:01 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
+            `${browser} ${server} 1000 00:01 /opt/chromium --headless --remote-debugging-pipe`,
+            `${renderer} ${browser} 1000 00:01 /opt/chromium --type=renderer`,
             "",
           ].join("\n"),
         });
@@ -289,9 +290,10 @@ describe("sweepLeakedPlaywright", () => {
     const server = spawnIdle();
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
-      execFile: (_cmd: string, _args: string[], cb: (e: null, r: { stdout: string }) => void) => {
+      execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
+        const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
-          stdout: `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
+          stdout: `${server} 1 1000 00:01 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
         });
       },
     }));
