@@ -345,6 +345,35 @@ export async function signalSidecarPane(sessionName: string): Promise<PendingRea
 }
 
 /**
+ * Which of `tree` (signaled at `originalSnapshot` time) are still fair game
+ * to SIGKILL-and-confirm at `snapshot2` time. A pid absent from `snapshot2`
+ * is NOT proof of death — `ps` can race a genuinely-still-alive pid under
+ * load — so it stays a candidate (probed to ESRCH by the caller) rather than
+ * being dropped from both the SIGKILL set and the confirmation set, which
+ * would report a clean reap that never happened. A pid present with a
+ * *smaller* `etimes` than at signal time is a reused pid: drop it, never
+ * signal it.
+ */
+function computeSurvivorCandidates(
+  tree: readonly number[],
+  snapshot2: ProcSnapshot,
+  originalSnapshot: ProcSnapshot,
+): number[] {
+  return tree.filter((pid) => {
+    const current = snapshot2.byPid.get(pid);
+    if (!current) {
+      return true;
+    }
+    const original = originalSnapshot.byPid.get(pid);
+    return !(original && current.etimes < original.etimes);
+  });
+}
+
+// Test-only: exercises the missing-pid and reused-pid rules above without
+// needing a real `ps` race to land on the missing-pid branch.
+export const _computeSurvivorCandidatesForTests = computeSurvivorCandidates;
+
+/**
  * ONE shared grace window for every pending reap (not one per sidecar),
  * then a re-taken snapshot to filter out already-reused pids, SIGKILL, and
  * a bounded confirmation. Never throws — a survivor becomes a `warn` entry
@@ -377,16 +406,11 @@ export async function confirmReaps(
     let probeCandidates: number[];
     if (snapshot2.ok) {
       const treeSet = new Set(pending.tree);
-      const survivorCandidates = pending.tree.filter((pid) => {
-        const current = snapshot2.byPid.get(pid);
-        if (!current) {
-          return false;
-        }
-        const original = pending.snapshot.byPid.get(pid);
-        // A pid present with a smaller etimes is a reused pid: drop it,
-        // never signal it.
-        return !(original && current.etimes < original.etimes);
-      });
+      const survivorCandidates = computeSurvivorCandidates(
+        pending.tree,
+        snapshot2,
+        pending.snapshot,
+      );
       const ownedStillContained = pending.ownedGroups.filter((pgid) => {
         const members = snapshot2.byPgid.get(pgid) ?? [];
         return members.length > 0 && members.every((member) => treeSet.has(member.pid));

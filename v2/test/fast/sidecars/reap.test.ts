@@ -9,6 +9,7 @@ import {
   findLeakedSidecarTrees,
   reapRecordedIdentity,
   snapshotProcesses,
+  _computeSurvivorCandidatesForTests,
   _isPathInsideForTests,
   _parsePsOutputForTests,
   type ProcSnapshot,
@@ -335,6 +336,34 @@ describe("buildSidecarClaims", () => {
       session({ id: "api-1", worktreePath: "/nonexistent/path/for/spur/test" }),
     ]);
     expect(claims.size).toBe(0);
+  });
+});
+
+describe("_computeSurvivorCandidatesForTests", () => {
+  it("keeps a pid missing from the re-snapshot as a survivor candidate, never drops it silently", () => {
+    // spur-6128 FIX 2: a pid can transiently fail to enumerate in a `ps`
+    // fork of a genuinely-still-alive tree under load. Dropping it here
+    // would exclude it from BOTH the SIGKILL pass and confirmGone's ESRCH
+    // probe, letting confirmReaps report a clean reap that never ran.
+    const originalSnapshot = snapshotFrom([info({ pid: 500 })]);
+    const snapshot2 = snapshotFrom([]); // pid 500 absent from the re-snapshot
+    const candidates = _computeSurvivorCandidatesForTests([500], snapshot2, originalSnapshot);
+    expect(candidates).toEqual([500]);
+  });
+
+  it("drops a pid whose etimes went backwards — a reused pid, never signal it", () => {
+    const originalSnapshot = snapshotFrom([info({ pid: 500, etimes: 100 })]);
+    const snapshot2 = snapshotFrom([info({ pid: 500, etimes: 1 })]);
+    const candidates = _computeSurvivorCandidatesForTests([500], snapshot2, originalSnapshot);
+    expect(candidates).toEqual([]);
+  });
+
+  it("keeps a pid present with an unchanged or larger etimes", () => {
+    const originalSnapshot = snapshotFrom([info({ pid: 500, etimes: 10 })]);
+    const snapshot2 = snapshotFrom([info({ pid: 500, etimes: 10 })]);
+    expect(_computeSurvivorCandidatesForTests([500], snapshot2, originalSnapshot)).toEqual([500]);
+    const grown = snapshotFrom([info({ pid: 500, etimes: 11 })]);
+    expect(_computeSurvivorCandidatesForTests([500], grown, originalSnapshot)).toEqual([500]);
   });
 });
 
