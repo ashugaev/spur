@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -19,9 +20,14 @@ import {
   ensureDefaultAccount,
   findAccount,
   isAccountAuthenticated,
+  isAccountReady,
   listAccounts,
   removeAccount,
+  seedSessionHome,
+  sessionClaudeHome,
+  swapSessionCredentials,
   touchAccountUsed,
+  type ClaudeAccount,
 } from "../../src/claude-accounts.js";
 
 describe("claude-accounts store", () => {
@@ -64,6 +70,74 @@ describe("claude-accounts store", () => {
     expect(isAccountAuthenticated(account)).toBe(false);
     writeFileSync(join(account.configDir, ".credentials.json"), "{}", "utf-8");
     expect(isAccountAuthenticated(account)).toBe(true);
+  });
+
+  it("isAccountReady: credentials without onboarding → false", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), "{}", "utf-8");
+    expect(isAccountReady(account)).toBe(false);
+  });
+
+  it("isAccountReady: onboarding without credentials → false", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(
+      join(account.configDir, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true }),
+      "utf-8",
+    );
+    expect(isAccountReady(account)).toBe(false);
+  });
+
+  it("isAccountReady: credentials and onboarding → true", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), "{}", "utf-8");
+    writeFileSync(
+      join(account.configDir, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true }),
+      "utf-8",
+    );
+    expect(isAccountReady(account)).toBe(true);
+  });
+
+  it("isAccountReady: malformed .claude.json → false", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), "{}", "utf-8");
+    writeFileSync(join(account.configDir, ".claude.json"), "not-json", "utf-8");
+    expect(isAccountReady(account)).toBe(false);
+  });
+
+  it("isAccountReady: host layout — ~/.claude.json onboarding is used, not ~/.claude/.claude.json", () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "spur-fake-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      const hostConfigDir = join(fakeHome, ".claude");
+      mkdirSync(hostConfigDir, { recursive: true });
+      writeFileSync(join(hostConfigDir, ".credentials.json"), "{}", "utf-8");
+      writeFileSync(
+        join(fakeHome, ".claude.json"),
+        JSON.stringify({ hasCompletedOnboarding: true }),
+        "utf-8",
+      );
+      const account: ClaudeAccount = {
+        id: "default",
+        label: "default",
+        configDir: hostConfigDir,
+        createdAt: new Date().toISOString(),
+      };
+      expect(isAccountReady(account)).toBe(true);
+      // Placing onboarding inside configDir (wrong path) is not enough.
+      rmSync(join(fakeHome, ".claude.json"), { force: true });
+      writeFileSync(
+        join(hostConfigDir, ".claude.json"),
+        JSON.stringify({ hasCompletedOnboarding: true }),
+        "utf-8",
+      );
+      expect(isAccountReady(account)).toBe(false);
+    } finally {
+      process.env.HOME = originalHome;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   it("removeAccount deletes the index entry and the config dir", () => {
@@ -212,6 +286,97 @@ describe("ensureAccountProjectsLink", () => {
       createdAt: new Date().toISOString(),
     };
     expect(() => ensureAccountProjectsLink(account)).not.toThrow();
+  });
+
+  it("sessionClaudeHome: returns <sessionToolDir>/claude-home", () => {
+    expect(sessionClaudeHome("/data/session-tools/sess-1")).toBe(
+      "/data/session-tools/sess-1/claude-home",
+    );
+  });
+
+  it("seedSessionHome: copies credentials, seeds .claude.json, creates projects symlink", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"abc"}', "utf-8");
+    writeFileSync(
+      join(account.configDir, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true, mcpServers: {} }),
+      "utf-8",
+    );
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    seedSessionHome(sessionHome, account);
+
+    expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"abc"}');
+    const dotClaude = JSON.parse(readFileSync(join(sessionHome, ".claude.json"), "utf-8"));
+    expect(dotClaude.hasCompletedOnboarding).toBe(true);
+    const projectsLink = join(sessionHome, "projects");
+    expect(lstatSync(projectsLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(projectsLink)).toBe(join(homedir(), ".claude", "projects"));
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("seedSessionHome: second call preserves runtime credentials and .claude.json", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"v1"}', "utf-8");
+    writeFileSync(
+      join(account.configDir, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true }),
+      "utf-8",
+    );
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    seedSessionHome(sessionHome, account);
+    writeFileSync(join(sessionHome, ".claude.json"), '{"custom":true}', "utf-8");
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"v2"}', "utf-8");
+    seedSessionHome(sessionHome, account);
+
+    // Runtime state remains owned by the session after initial seeding.
+    expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"v1"}');
+    expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"custom":true}');
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("seedSessionHome: rejects a source account without onboarding state", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"abc"}', "utf-8");
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+
+    expect(() => seedSessionHome(sessionHome, account)).toThrow();
+    expect(existsSync(join(sessionHome, ".claude.json"))).toBe(false);
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("swapSessionCredentials: replaces credentials only; .claude.json is byte-identical", () => {
+    const account = addAccount(dataDir);
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"old"}', "utf-8");
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    mkdirSync(sessionHome, { recursive: true });
+    writeFileSync(join(sessionHome, ".credentials.json"), '{"token":"old"}', "utf-8");
+    writeFileSync(join(sessionHome, ".claude.json"), '{"oauthAccount":"old"}', "utf-8");
+
+    writeFileSync(join(account.configDir, ".credentials.json"), '{"token":"new"}', "utf-8");
+    swapSessionCredentials(sessionHome, account);
+
+    expect(readFileSync(join(sessionHome, ".credentials.json"), "utf-8")).toBe('{"token":"new"}');
+    expect(readFileSync(join(sessionHome, ".claude.json"), "utf-8")).toBe('{"oauthAccount":"old"}');
+    expect(readFileSync(join(account.configDir, ".credentials.json"), "utf-8")).toBe(
+      '{"token":"new"}',
+    );
+    rmSync(sessionToolDir, { recursive: true, force: true });
+  });
+
+  it("swapSessionCredentials: cleans up tmp file on copy failure", () => {
+    const account = addAccount(dataDir);
+    const sessionToolDir = mkdtempSync(join(tmpdir(), "spur-st-"));
+    const sessionHome = sessionClaudeHome(sessionToolDir);
+    mkdirSync(sessionHome, { recursive: true });
+
+    expect(() => swapSessionCredentials(sessionHome, account)).toThrow();
+    const leaked = readdirSync(sessionHome).filter((f) => f.includes(".tmp."));
+    expect(leaked).toHaveLength(0);
+    rmSync(sessionToolDir, { recursive: true, force: true });
   });
 
   it("remove-safety: removeAccount only removes <accountsRoot>/<id>, not an external configDir", () => {

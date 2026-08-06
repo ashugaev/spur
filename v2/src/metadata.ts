@@ -5,15 +5,17 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
   type ReviewSignal,
+  type ReviewSnapshot,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
   type ServiceInstanceRecord,
@@ -37,6 +39,21 @@ function sessionIndexFilePath(dataDir: string): string {
   return join(dataDir, "sessions", ".index.json");
 }
 
+// dataDir/sessions-archive/ is a sibling of dataDir/sessions/, never nested
+// inside it — findSessionFilePath's readdir of dataDir/sessions/ and
+// listSessions' scan of the same dir must never see archived records.
+function archivedSessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, `${sessionId}.json`);
+}
+
+function sessionShardDir(dataDir: string, sessionId: string): string {
+  return join(dataDir, "sessions", sessionId);
+}
+
+function archivedSessionShardDir(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, sessionId);
+}
+
 function reviewSnapshotDir(
   dataDir: string,
   providerId: ReviewProviderId,
@@ -56,6 +73,10 @@ function availableBacklogFilePath(dataDir: string, projectId: string, backlogId:
 
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-review-pagination", projectId, `${sourceId}.json`);
 }
 
 function lifecycleBaselineRegistryFilePath(
@@ -178,6 +199,28 @@ function isSessionRecord(value: unknown): value is SessionRecord {
   return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
 }
 
+// Distinguishes "file vanished between readdir and read" (a benign race with
+// a concurrent GC archive) from every other read failure, which must still
+// surface — a corrupt record on disk is a real problem, not a race.
+// readSessionFile wraps every failure from its inner try (including a
+// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
+// error code only survives on `cause`, never on the thrown error itself.
+function isEnoentCause(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return isRecord(cause) && cause["code"] === "ENOENT";
+}
+
+function tryReadSessionFile(path: string): SessionRecord | null {
+  try {
+    return readSessionFileCached(path);
+  } catch (error) {
+    if (isEnoentCause(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function readSessionFile(path: string): SessionRecord {
   let rawSession: unknown;
   try {
@@ -196,6 +239,71 @@ function readSessionFile(path: string): SessionRecord {
     writeJsonFile(path, normalizedSession);
   }
   return normalizedSession;
+}
+
+// listSessions() re-reads and re-parses every session file every call — on a
+// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
+// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// writeJsonFile always renames a freshly created inode (never edits in
+// place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
+// last read" fingerprint — cheaper and safer than an mtime-only key, which
+// can't distinguish two writes landing in the same millisecond. The cache is
+// internal to this module: no export changes, so callers and their tests are
+// unaffected except that unchanged records are now the SAME object across
+// calls (see the "no in-place mutation of a listed record" contract).
+interface FileFingerprint {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+}
+
+interface CachedSessionFile extends FileFingerprint {
+  record: SessionRecord;
+}
+
+const sessionFileCache = new Map<string, CachedSessionFile>();
+
+function statFingerprint(path: string): FileFingerprint | null {
+  try {
+    return statSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function sameFingerprint(a: FileFingerprint, b: FileFingerprint): boolean {
+  return a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function readSessionFileCached(path: string): SessionRecord {
+  // File vanished (or was never there) between readdir and this stat. Fall
+  // through to the raw read so the caller sees today's exact error.
+  const preStat = statFingerprint(path);
+  if (!preStat) {
+    return readSessionFile(path);
+  }
+
+  const cached = sessionFileCache.get(path);
+  if (cached && sameFingerprint(cached, preStat)) {
+    return cached.record;
+  }
+
+  const record = readSessionFile(path);
+
+  // Cache keyed on the PRE-read fingerprint. writeJsonFile (the only writer
+  // of session JSON) always writes to a tmp path and renameSync's it into
+  // place, which always yields a new inode — so if readSessionFile's
+  // legacy-PR self-heal rewrite (above) just fired, this entry's fingerprint
+  // is already stale the instant it's stored: the NEXT call's pre-read stat
+  // will miss it (new inode) and re-parse once, this time with no rewrite,
+  // and settle into a fingerprint that matches going forward.
+  sessionFileCache.set(path, {
+    ino: preStat.ino,
+    mtimeMs: preStat.mtimeMs,
+    size: preStat.size,
+    record,
+  });
+  return record;
 }
 
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
@@ -449,9 +557,25 @@ function writeJsonFile(path: string, value: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function parseReviewSignals(path: string): Map<string, ReviewSignal> {
-  const signals = JSON.parse(readFileSync(path, "utf-8")) as ReviewSignal[];
-  return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]));
+// Discriminates the current envelope (`{prNumber, signals}`) from the legacy
+// on-disk shape (a bare `ReviewSignal[]`) purely on `Array.isArray` — no
+// `version` field, since nothing would ever read one. A legacy file carries
+// no PR identity, so it normalizes to `prNumber: null`, which by construction
+// matches no scoped terminal key and no fresh PR number: never a skip, always
+// a re-baseline on the next poll.
+function parseReviewSnapshot(path: string): ReviewSnapshot {
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  const envelope = isRecord(parsed) ? parsed : null;
+  const signalsRaw = (Array.isArray(parsed) ? parsed : envelope?.signals) as
+    | ReviewSignal[]
+    | undefined;
+  const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  return {
+    prNumber,
+    signals: new Map(
+      (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
+    ),
+  };
 }
 
 function normalizePipelineState(pipeline: SessionPipelineState): SessionPipelineState {
@@ -601,20 +725,43 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 
+// Deletes cache entries under rootDir that weren't in this listing's visited
+// set — a real path-boundary check (trailing separator), not a raw string
+// prefix, so a sibling dir sharing rootDir as a string prefix (e.g.
+// "/data/sessions-old" vs "/data/sessions") is never mistaken for a child.
+function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedPath of sessionFileCache.keys()) {
+    if (cachedPath.startsWith(rootPrefix) && !visited.has(cachedPath)) {
+      sessionFileCache.delete(cachedPath);
+    }
+  }
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return [];
+  if (!existsSync(rootDir)) {
+    pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    return [];
+  }
 
   const sessions: SessionRecord[] = [];
+  const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
     for (const fileName of readdirSync(projectDir)) {
       if (!fileName.endsWith(".json")) continue;
       const filePath = join(projectDir, fileName);
-      sessions.push(readSessionFile(filePath));
+      visited.add(filePath);
+      const session = tryReadSessionFile(filePath);
+      if (session) {
+        sessions.push(session);
+      }
     }
   }
+
+  pruneStaleSessionFileCacheEntries(rootDir, visited);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -623,6 +770,50 @@ export function listSessions(dataDir: string): SessionRecord[] {
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
   return path ? readSessionFile(path) : null;
+}
+
+// Group-atomic archival for session GC: moves every member's record (and its
+// per-session log shard dir, if any) out of dataDir/sessions/ into the
+// sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files
+// move first, the index second — a crash in between leaves stale index
+// entries that findSessionFilePath already self-heals (it deletes an
+// indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
+// into sessions/<project>/<id>.json; the next findSessionFilePath scan or
+// writeSession repairs the index.
+export function archiveSessions(
+  dataDir: string,
+  members: readonly Pick<SessionRecord, "id" | "project">[],
+): { archivedIds: string[]; archiveDir: string } {
+  const archiveDir = join(dataDir, "sessions-archive");
+  const archivedIds: string[] = [];
+  for (const member of members) {
+    const sourcePath = sessionFilePath(dataDir, member.project, member.id);
+    if (!existsSync(sourcePath)) {
+      continue;
+    }
+    const targetPath = archivedSessionFilePath(dataDir, member.project, member.id);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    renameSync(sourcePath, targetPath);
+
+    const shardDir = sessionShardDir(dataDir, member.id);
+    if (existsSync(shardDir)) {
+      const targetShardDir = archivedSessionShardDir(dataDir, member.project, member.id);
+      mkdirSync(dirname(targetShardDir), { recursive: true });
+      renameSync(shardDir, targetShardDir);
+    }
+    archivedIds.push(member.id);
+  }
+
+  if (archivedIds.length > 0) {
+    const archivedIdSet = new Set(archivedIds);
+    const index = readSessionIndex(dataDir);
+    const nextIndex = Object.fromEntries(
+      Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
+    );
+    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+  }
+
+  return { archivedIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -741,15 +932,15 @@ export function readReviewSourceSnapshots(
   providerId: ReviewProviderId,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   const dir = reviewSnapshotDir(dataDir, providerId, projectId, sourceId);
   if (!existsSync(dir)) return new Map();
 
-  const snapshots = new Map<string, Map<string, ReviewSignal>>();
+  const snapshots = new Map<string, ReviewSnapshot>();
   for (const fileName of readdirSync(dir)) {
     if (!fileName.endsWith(".json")) continue;
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSignals(join(dir, fileName)));
+    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
   }
   return snapshots;
 }
@@ -760,9 +951,9 @@ export function readReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   const path = reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId);
-  return existsSync(path) ? parseReviewSignals(path) : null;
+  return existsSync(path) ? parseReviewSnapshot(path) : null;
 }
 
 export function writeReviewSourceSnapshot(
@@ -771,11 +962,12 @@ export function writeReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
-  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), [
-    ...snapshot.values(),
-  ]);
+  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
+    prNumber: snapshot.prNumber,
+    signals: [...snapshot.signals.values()],
+  });
 }
 
 export function deleteReviewSourceSnapshot(
@@ -794,7 +986,7 @@ export function readGitHubSourceSnapshots(
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   return readReviewSourceSnapshots(dataDir, "github", projectId, sourceId);
 }
 
@@ -803,7 +995,7 @@ export function readGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   return readReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
@@ -812,7 +1004,7 @@ export function writeGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
   writeReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId, snapshot);
 }
@@ -954,6 +1146,43 @@ export function readCommentSeenRegistry(
   sourceId: string,
 ): Set<string> {
   return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function readGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, string> {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function writeGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  cursors: ReadonlyMap<string, string>,
+): void {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (cursors.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...cursors].sort(([left], [right]) => left.localeCompare(right))),
+  );
 }
 
 export function recordCommentSeen(
