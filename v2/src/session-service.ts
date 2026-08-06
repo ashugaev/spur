@@ -3507,7 +3507,8 @@ export class SessionService {
     try {
       const nextStates = new Map<string, AttentionState>();
       const nextRunStates = new Map<string, SessionState>();
-      const sessions = listSessions(this.config.dataDir).filter(
+      const allSessions = listSessions(this.config.dataDir);
+      const liveSessions = allSessions.filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
       // Run the sweep before the per-session loop, off this same liveIds
@@ -3516,13 +3517,13 @@ export class SessionService {
       // life. Safe to run first: it only deletes/truncates ids ABSENT from
       // liveIds, so nothing the loop is about to populate for a live id is at
       // risk of being evicted on this same pass.
-      const liveIds = new Set(sessions.map((session) => session.id));
+      const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
       const claudeAccounts = this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
-      for (const session of sessions) {
+      for (const session of liveSessions) {
         try {
-          const view = await this.enrich(session, claudeAccounts, sessions);
+          const view = await this.enrich(session, claudeAccounts, allSessions);
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
