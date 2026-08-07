@@ -12,6 +12,7 @@ import {
   makeSessionWithTracker,
   mockGitHubStatus,
   mockGitLabStatus,
+  mockPrState,
   mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
@@ -1100,19 +1101,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return merged state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          ciStatus: null,
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrState(page, "merged");
 
     await page.goto("/");
 
@@ -1131,19 +1120,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return closed state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "closed",
-          ciStatus: null,
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrState(page, "closed");
 
     await page.goto("/");
 

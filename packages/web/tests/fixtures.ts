@@ -328,6 +328,27 @@ export async function mockPrStatusBatch(
   return { count: () => requestCount };
 }
 
+export async function mockPrState(
+  page: Page,
+  state: string,
+  overrides?: Record<string, unknown>,
+): Promise<void> {
+  await page.route(/\/api\/pr-status\?/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state,
+        ciStatus: null,
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+        ...overrides,
+      }),
+    });
+  });
+}
+
 export async function mockTagCatalog(page: Page): Promise<void> {
   await page.route("/api/tags", (route) => {
     void route.fulfill({
