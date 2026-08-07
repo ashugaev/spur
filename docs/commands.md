@@ -38,6 +38,12 @@ Freed bytes come from `du -s --block-size=1` measured before removal. A file har
 
 Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
 
+## daemon
+
+`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+
+Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+
 ## spawn
 
 ```bash
@@ -199,13 +205,13 @@ config survive — the merge reads `~/.claude.json` user-scope servers, `~/.clau
 are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
 is silently replaced by Spur's own.
 
-## build, daemon
+## build
 
 ```bash
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon. Daemon boot reloads registered configs, rehydrates session state, resumes pipelines, and restarts sources/triggers. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
+`build` also restarts a running daemon when Spur config is discoverable. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
 
 ## Validate
 

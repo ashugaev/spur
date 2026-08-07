@@ -20204,10 +20204,16 @@ describe("SessionService", () => {
         },
       },
     });
-    sidecarTmuxAliveMock
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValue(true);
+    // Drive "alive" off the real launch rather than call order: an
+    // undisposed SessionService from an earlier test can tick an extra
+    // sidecarTmuxAlive call, shifting a mockResolvedValueOnce queue by one
+    // and making startSidecarInternal's own check see "already alive" before
+    // the sidecar has actually been reserved/launched.
+    let sidecarAlive = false;
+    createTmuxSidecarSessionMock.mockImplementation(async () => {
+      sidecarAlive = true;
+    });
+    sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
 
     const { SessionService } = await loadSessionServiceModule();
@@ -20274,10 +20280,16 @@ describe("SessionService", () => {
       },
     });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
-    sidecarTmuxAliveMock
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValue(true);
+    // Same call-order fragility as the previous test: drive "alive" off the
+    // real launch/kill instead of a fixed call-count queue.
+    let sidecarAlive = false;
+    createTmuxSidecarSessionMock.mockImplementation(async () => {
+      sidecarAlive = true;
+    });
+    killSidecarTmuxMock.mockImplementation(async () => {
+      sidecarAlive = false;
+    });
+    sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

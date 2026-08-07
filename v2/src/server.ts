@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { fileURLToPath, URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
+import { assertConfigMayUseProdSlot } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -407,6 +408,7 @@ export async function startServer(
       `${ghPathState.message}; GitHub automation disabled until gh is available`,
     );
   }
+  assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
