@@ -144,6 +144,62 @@ describe("SessionRow", () => {
     );
   });
 
+  it("renders the done action when PR state is closed", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "closed",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Merge PR for api-a1" })).not.toBeInTheDocument();
+  });
+
+  it("shows done rather than restore for a restorable session with a closed PR", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "closed",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          tmuxSession: null,
+          status: "errored",
+          state: "error",
+          error: "Agent runtime exited unexpectedly.",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows interval wake timer details from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
