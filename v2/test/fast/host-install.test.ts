@@ -14,6 +14,7 @@ const {
   platformMock,
   probeMock,
   probeInfoMock,
+  probeHeadroomMock,
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
@@ -22,6 +23,7 @@ const {
   platformMock: vi.fn(),
   probeMock: vi.fn(),
   probeInfoMock: vi.fn(),
+  probeHeadroomMock: vi.fn(),
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
@@ -49,7 +51,12 @@ vi.mock("node:fs", async () => {
 
 vi.mock("../../src/update-health.js", async () => {
   const actual = await vi.importActual<typeof UpdateHealth>("../../src/update-health.js");
-  return { ...actual, probe: probeMock, probeInfo: probeInfoMock };
+  return {
+    ...actual,
+    probe: probeMock,
+    probeInfo: probeInfoMock,
+    probeHeadroom: probeHeadroomMock,
+  };
 });
 
 vi.mock("../../src/port-probe.js", async () => {
@@ -229,6 +236,8 @@ beforeEach(() => {
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
   probeInfoMock.mockReset();
   probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+  probeHeadroomMock.mockReset();
+  probeHeadroomMock.mockResolvedValue({ ok: false });
   isHostPortFreeMock.mockReset();
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
@@ -781,6 +790,139 @@ describe("checkServiceHealth", () => {
       severity: "info",
     });
   });
+
+  describe("session-headroom", () => {
+    it("reports ok:true severity:warn when reachable with room", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 3, byProject: { demo: 3 } },
+          projectedRoom: 7,
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_610_612_736 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 536_870_912 },
+            { id: "demo-3", project: "demo", status: "running", rssBytes: 0 },
+          ],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: true, severity: "warn" });
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        [
+          "[ok] 3/10 live sessions, room for 7 more",
+          "Measured RSS per live session:",
+          "  demo-1: 1.5 GiB",
+          "  demo-2: 512.0 MiB",
+          "  demo-3: 0 B",
+        ].join("\n"),
+      );
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("reports ok:false severity:warn with candidate ids in fix when reachable and full", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 2,
+            source: "config",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 2, byProject: { demo: 2 } },
+          projectedRoom: 0,
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_073_741_824 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 805_306_368 },
+          ],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.detail).toContain("  demo-1: 1.0 GiB");
+      expect(check?.detail).toContain("  demo-2: 768.0 MiB");
+      expect(check?.fix).toContain("demo-1");
+      expect(check?.fix).toContain("demo-2");
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        "\n  fix: raise admission.maxLiveSessions",
+      );
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("reports memory guard remediation without an empty stop-sessions suffix", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 0, byProject: {} },
+          projectedRoom: 10,
+          sessions: [],
+          memory: {
+            totalBytes: 68_719_476_736,
+            availableBytes: 536_870_912,
+            swapTotalBytes: 8_589_934_592,
+            swapFreeBytes: 268_435_456,
+          },
+          guard: {
+            enforce: false,
+            minAvailableBytes: 1_073_741_824,
+            minFreeSwapBytes: 536_870_912,
+            crossed: true,
+          },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({
+        ok: false,
+        severity: "warn",
+        fix: "free host memory or swap, or adjust admission.memoryGuard.minAvailableBytes or admission.memoryGuard.minFreeSwapBytes in ~/.spur/config.yaml",
+      });
+      expect(check?.detail).toContain("memory guard crossed");
+      expect(check?.fix).not.toContain("stop sessions:");
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("emits no session-headroom check when the daemon is unreachable", async () => {
+      probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+      probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      expect(result.checks.find((entry) => entry.id === "session-headroom")).toBeUndefined();
+      expect(probeHeadroomMock).not.toHaveBeenCalled();
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+  });
 });
 
 async function writeFakeUnits(daemonBody: string, webBody: string): Promise<string> {
@@ -1002,6 +1144,82 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
     expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: sidecar-orphans", () => {
+  it("reports ok:true when no leaked sidecar process trees exist", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+  });
+
+  it("degrades to ok:true when the worktree dir itself is unreadable, instead of reporting a leak", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        "worktreeDir: /nonexistent/spur-host-install-worktree-dir",
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    });
+  });
+
+  it("never writes or signals — collectHostInstallChecks stays read-only", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const killSpy = vi.spyOn(process, "kill");
+
+    await collectHostInstallChecks(fakeHome);
+
+    expect(killSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
   });
 });
 

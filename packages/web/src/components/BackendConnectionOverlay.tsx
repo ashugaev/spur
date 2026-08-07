@@ -24,8 +24,8 @@ export function BackendConnectionOverlay() {
             Reconnecting to Spur…
           </p>
           <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-            The backend is unavailable (attempt {attempts}). This page will reload automatically
-            once it&apos;s back.
+            The backend is unavailable (attempt {attempts}). This page will reconnect once it&apos;s
+            back.
           </p>
         </div>
       </div>

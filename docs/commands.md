@@ -4,13 +4,45 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## doctor
 
-Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
+Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything.
+
+When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
+
+## gc
+
+```bash
+spur gc [--execute] [--older-than <days>] [--statuses completed,killed,stopped] [--project <id>] [--limit <n>] [--no-sizes] [--json]
+```
+
+Reclaims stale session worktrees and moves terminal session records out of the daemon's 2s scan. Dry run unless `--execute`; prints every candidate group with age, size, and the action it would take. Daemon-free — reads the config and data dir directly, no running daemon needed.
+
+Unit of collection is the workspace group, not the session: every session sharing a `workspaceId`, plus any group sharing an identical `worktreePath`. One non-eligible member blocks the whole group, so a live sibling protects a parked one.
+
+Actions: `reclaim` removes the worktree, then archives the records; `archive` only moves records (worktree already gone, or the session ran in the project path); `blocked` does nothing and prints its reasons.
+
+Blocked reasons: `not_eligible_status`, `too_recent`, `changed_during_run`, `path_outside_worktree_dir`, `shared_workspace_path`, `path_is_cwd_or_ancestor`, `uncommitted_changes`, `unpushed_commits`, `open_pr`, `probe_failed`. Every guard is re-checked immediately before removal, against a fresh record read — a probe that throws blocks, never passes. `changed_during_run` covers any change to the fields a guard reads: status, `updatedAt`, `worktree`, `worktreePath`, `branch`, PR binding.
+
+Open-PR detection is one `gh pr list --repo <slug> --state open` per repo per run, matched against the stored `session.pr` number and the session branch. A saturated list is a block, not an empty result.
+
+Worktrees go out through `git worktree remove` plus `git worktree prune`, so the parent repo's metadata stays consistent. Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard dir; `mv` one back into `<dataDir>/sessions/<projectId>/` to un-archive (the index self-heals). A collected `stopped` session can no longer be restored — `spur gc` lists those ids before it acts.
+
+Worktree removal happens before archival. A group whose removal succeeded but whose archival failed reports `removed: true, archived: false` with an error; its record stays in `sessions/` pointing at a deleted path, and the next run collects it as `archive`. Nothing to do by hand.
+
+Freed bytes come from `du -s --block-size=1` measured before removal. A file hardlinked into several worktrees (pnpm store) counts once per worktree, so a large total can overstate the disk actually returned. `--no-sizes` skips measurement (no freed-byte reporting). Exits `1` when any group errored during `--execute`.
+
+Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
+
+## daemon
+
+`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+
+Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
 ## spawn
 
@@ -23,7 +55,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `[prompt...]` optional. Empty opens the session without an initial message and skips default `spawn.steps`.
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
-- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
+- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, or `cursor models`.
 - `--mode <name>` picks a session mode from `projects.<id>.modes`, overriding the project default. Unknown name fails the spawn. See [Modes](configuration.md#modes).
 - `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
@@ -50,9 +82,9 @@ spur wake <sessionId> --at <iso-time> [message...]
 spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
 ```
 
-`shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit).
+`shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying.
 
 ## list
 
@@ -60,13 +92,19 @@ TTY opens a live selector: `Enter` attach in place, `l` log view, `p` pause, `c`
 
 Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex signals. The log view combines key session events with a live tail of the main agent pane.
 
-`pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace, so `killed` and `completed` sessions are never restorable.
+`pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace (shepherd excepted, see above), so `killed` and `completed` sessions are never restorable.
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
-While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` worktree session, `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
+While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
 
-Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery).
+Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
+
+- `gh.poll_cycle`: one completed poll cycle; includes `calls` and `graphqlCost`.
+- `gh.usage`: minute/hour `gh` invocation and GraphQL-cost windows.
+- `gh.poll_budget_paused`: polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known.
+
+GitHub source cadence, including `adaptivePoll`, lives in [Configuration](configuration.md#field-reference).
 
 ## spur-slots
 
@@ -139,6 +177,8 @@ Commands run through `sh -lc` with no `exec`, so login-shell init still applies 
 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
+Stop and restart reap the sidecar's whole tmux pane process tree, not just the pane's direct child — a supervisor (nodemon, tsx watch) that `setsid`s a worker into its own process group no longer leaves that worker behind. `spur sidecar sweep` reports sidecar process trees no live session claims (pid, rss, age, worktree); nothing is killed unless you pass `--reap`.
+
 ### Built-in MCP sidecars
 
 A sidecar entry can carry MCP wiring, injecting its reserved port into the launching agent's MCP
@@ -166,13 +206,13 @@ config survive — the merge reads `~/.claude.json` user-scope servers, `~/.clau
 are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
 is silently replaced by Spur's own.
 
-## build, daemon
+## build
 
 ```bash
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+`build` also restarts a running daemon when Spur config is discoverable. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
 
 ## Validate
 

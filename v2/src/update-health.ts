@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { instanceConfigExists, loadConfig } from "./config.js";
 import type { SystemdScope } from "./host-install.js";
 import { DEFAULT_UI_PORT } from "./ports.js";
+import type { HeadroomReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -212,6 +213,51 @@ const realJsonFetch: JsonFetchLike = (url, init) => fetch(url, init);
 
 export function probeInfo(target: ProbeTarget): Promise<ProbeInfoResult> {
   return probeInfoWith(realJsonFetch, target);
+}
+
+function isHeadroomBody(value: unknown): value is HeadroomReport {
+  if (typeof value !== "object" || value === null) return false;
+  const body = value as Record<string, unknown>;
+  const cap = body["cap"];
+  const live = body["live"];
+  const guard = body["guard"];
+  return (
+    typeof cap === "object" &&
+    cap !== null &&
+    typeof (cap as Record<string, unknown>)["global"] === "number" &&
+    typeof live === "object" &&
+    live !== null &&
+    typeof (live as Record<string, unknown>)["count"] === "number" &&
+    Array.isArray(body["sessions"]) &&
+    typeof guard === "object" &&
+    guard !== null &&
+    typeof (guard as Record<string, unknown>)["crossed"] === "boolean" &&
+    typeof body["projectedRoom"] === "number"
+  );
+}
+
+export type ProbeHeadroomResult = { ok: true; body: HeadroomReport } | { ok: false };
+
+// F9-style headroom probe: same injectable JsonFetchLike, timeout, and
+// try/catch shape as probeInfoWith — checkServiceHealth calls this only
+// after the daemon is already known reachable, so a failure here just means
+// "skip the session-headroom check", never a second liveness signal.
+export async function probeHeadroomWith(
+  fetchLike: JsonFetchLike,
+  url: string,
+): Promise<ProbeHeadroomResult> {
+  try {
+    const response = await fetchLike(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!response.ok) return { ok: false };
+    const body: unknown = await response.json();
+    return isHeadroomBody(body) ? { ok: true, body } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export function probeHeadroom(url: string): Promise<ProbeHeadroomResult> {
+  return probeHeadroomWith(realJsonFetch, url);
 }
 
 function parseUnitState(raw: string): UnitState {

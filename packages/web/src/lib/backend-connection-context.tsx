@@ -13,17 +13,19 @@ export const RECONNECT_INTERVAL_MS = 2_000;
 const RECONNECT_MAX_INTERVAL_MS = 8_000;
 const RETRY_BASE_INTERVAL_MS = 4_000;
 // Require this many consecutive failures before flipping to "disconnected".
-// Combined with retryIntervalMs this buys a 20-32s confirmation window:
-// 20s when probes fail instantly, 32s when each probe burns its full timeout.
+// Combined with retryIntervalMs this buys a 20-52s confirmation window:
+// 20s when probes fail instantly, 52s when each probe burns its full timeout.
 export const FAILURE_THRESHOLD = 4;
-// Must stay comfortably below RETRY_BASE_INTERVAL_MS: a black-holed
-// connection (sleep/wake, VPN drop that neither errors nor resolves) would
-// otherwise never resolve and never count as a failure, leaving the gate
-// stuck showing a healthy app against a dead backend. While disconnected
-// a 3s probe under a 2s tick causes the in-flight guard to skip a tick
-// (~4s effective cadence); instant failures and a recovered backend still
-// get the full 2s cadence.
-export const PROBE_TIMEOUT_MS = 3_000;
+// Budget for one probe of a zero-I/O endpoint. Sized for a weak mobile link
+// (high RTT, head-of-line blocking behind other in-flight requests) rather
+// than for a LAN: a probe that answers in 6s still proves the backend is
+// alive, and cutting it off at 3s was the main source of false-alarm
+// overlays. It only stretches the confirmation window when probes actually
+// hang — a genuinely dead daemon still fails instantly and trips the gate
+// in 20s. Longer than the tick cadence in both phases, so the in-flight
+// guard skips ticks and the effective cadence is the probe itself;
+// instant failures and a recovered backend still get the full tick cadence.
+export const PROBE_TIMEOUT_MS = 8_000;
 
 // Precondition: consecutiveFailures is in 1..FAILURE_THRESHOLD-1.
 export function retryIntervalMs(consecutiveFailures: number): number {
@@ -67,9 +69,8 @@ async function probeBackend(): Promise<string | null> {
 }
 
 export function BackendConnectionProvider({ children }: { children: ReactNode }) {
-  // A version switch owns its own overlay + reload; the general liveness
-  // gate must stay dormant while one is in flight so the two never race on
-  // window.location.reload().
+  // A version switch owns its own recovery overlay. The general liveness
+  // gate stays dormant while one is in flight so the two never compete.
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const dormant = versionSwitchPhase !== "idle";
   const [state, setState] = useState<BackendConnectionState>(CONNECTED_STATE);
@@ -78,11 +79,6 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
   // via the functional setter form so overlapping/stale reads can't drop a
   // real failure and indefinitely defer reaching FAILURE_THRESHOLD.
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
-  const reloadedRef = useRef(false);
-  // Last daemon version observed on a healthy probe, used to decide whether
-  // a recovery is a real restart/update (different version, needs a reload
-  // for fresh assets) or just a transient blip on the same daemon.
-  const lastVersionRef = useRef<string | null>(null);
   // Fires the very first probe of an activation immediately instead of
   // waiting a full heartbeat — otherwise opening the UI against an
   // already-dead daemon shows a broken dashboard for HEARTBEAT_INTERVAL_MS
@@ -95,8 +91,6 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
   useEffect(() => {
     if (dormant) {
       setConsecutiveFailures(0);
-      reloadedRef.current = false;
-      lastVersionRef.current = null;
       needsInitialProbeRef.current = true;
       setState(CONNECTED_STATE);
       return;
@@ -141,29 +135,15 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
               setState((current) => ({ phase: "disconnected", attempts: current.attempts + 1 }));
               return;
             }
-            // Flip to connected first: if reload() below turns out to be a
-            // no-op (embedded webview, cancelled beforeunload) the overlay
-            // must not stay stuck against a now-healthy backend.
-            const baseline = lastVersionRef.current;
-            const versionChanged = baseline === null || baseline !== version;
-            lastVersionRef.current = version;
             setState(CONNECTED_STATE);
             setConsecutiveFailures(0);
-            if (versionChanged) {
-              // A real daemon restart/update needs fresh assets.
-              if (!reloadedRef.current) {
-                reloadedRef.current = true;
-                window.location.reload();
-              }
-            }
-            // Same version recovering from a transient blip: stay
-            // connected without reloading, so React Query can refetch in
-            // place and preserve unsaved composer/spawn input.
+            // Keep the mounted app tree and its transports alive. Active
+            // queries and terminal sockets recover through their existing
+            // polling/reconnect paths without discarding local UI state.
             return;
           }
 
           if (version !== null) {
-            lastVersionRef.current = version;
             setConsecutiveFailures(0);
             return;
           }

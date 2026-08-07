@@ -1,12 +1,13 @@
-import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
+import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
 
-const execFileAsync = promisify(execFile);
+// Re-exported for callers/tests that import the shared process-info shape
+// through this module.
+export type { ProcessInfo };
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -141,37 +142,6 @@ export async function waitForPlaywrightReady(
   return false;
 }
 
-export interface ProcessInfo {
-  pid: number;
-  ppid: number;
-  args: string;
-}
-
-/**
- * Enumerate live processes via `ps` (no shell). Malformed lines are skipped.
- */
-async function listProcesses(): Promise<ProcessInfo[]> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="]));
-  } catch {
-    return [];
-  }
-  const processes: ProcessInfo[] = [];
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(trimmed);
-    if (!match) continue;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const args = match[3] ?? "";
-    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-    processes.push({ pid, ppid, args });
-  }
-  return processes;
-}
-
 function extractPlaywrightPort(args: string): number | undefined {
   const match = /--port\s+(\d+)/.exec(args);
   if (!match) return undefined;
@@ -199,73 +169,16 @@ export function isLeakedManagedPlaywright(
   return !ownedPorts.has(port);
 }
 
-function collectDescendants(rootPid: number, processes: readonly ProcessInfo[]): number[] {
-  const childrenByPpid = new Map<number, number[]>();
-  for (const proc of processes) {
-    const list = childrenByPpid.get(proc.ppid) ?? [];
-    list.push(proc.pid);
-    childrenByPpid.set(proc.ppid, list);
-  }
-  const ordered: number[] = [];
-  const seen = new Set<number>([rootPid]);
-  const queue: number[] = [rootPid];
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (pid === undefined) break;
-    ordered.push(pid);
-    for (const child of childrenByPpid.get(pid) ?? []) {
-      if (seen.has(child)) continue;
-      seen.add(child);
-      queue.push(child);
-    }
-  }
-  return ordered;
-}
-
-function killPid(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-      // Permission or other errors are non-fatal for a best-effort sweep.
-    }
-  }
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-const KILL_TREE_GRACE_MS = 1000;
-
-/**
- * SIGTERM the process and all descendants (catches chromium children), wait a
- * grace period, then SIGKILL survivors. Guards ESRCH for already-dead pids.
- */
-async function killProcessTree(pid: number): Promise<void> {
-  const processes = await listProcesses();
-  const tree = collectDescendants(pid, processes);
-  // Kill leaves first so parents do not respawn children mid-teardown.
-  for (const target of [...tree].reverse()) {
-    killPid(target, "SIGTERM");
-  }
-  await sleep(KILL_TREE_GRACE_MS);
-  for (const target of [...tree].reverse()) {
-    if (processAlive(target)) {
-      killPid(target, "SIGKILL");
-    }
-  }
-}
-
 /**
  * Find leaked managed playwright servers (orphaned, our bin, port not owned by
- * a live session) and kill their process trees. Returns the count of leaked
- * roots killed.
+ * a live session) and kill their process trees. Takes ONE shared `ps`
+ * snapshot for the whole sweep and passes it into every `killProcessTree`
+ * call (`../process-tree.js`) via its `list` override, instead of forking a
+ * fresh `ps` per leaked root. `killProcessTree` re-reads each target's
+ * `/proc/<pid>/stat` starttime right before SIGKILL and only signals pids
+ * whose starttime is unchanged, so a pid reused for something else after
+ * SIGTERM is never signaled a second time.
+ * Returns the count of leaked roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
   // Nothing this daemon started can be running if the package cannot be
@@ -281,7 +194,7 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
-    await killProcessTree(proc.pid);
+    await killProcessTree(proc.pid, { list: async () => processes });
   }
   return leaked.length;
 }

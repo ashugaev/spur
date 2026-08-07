@@ -1,12 +1,17 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
   hasGitHubMergeConflictRestoreReplay,
+  readGitHubReviewPagination,
+  readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
+  recordCommentSeen,
   writeGitHubSourceSnapshot,
+  writeGitHubReviewPagination,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -17,11 +22,13 @@ const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
   readCurrentBranchMock: vi.fn(),
   isGitWorktreeMock: vi.fn().mockResolvedValue(true),
 }));
-vi.mock("../../src/gh.js", () => ({
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
+  readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
 
@@ -31,11 +38,23 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
+  resolvePrSummary,
   resolveTrackedBranch,
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
 
-const { resolveBoundPrSummary } = await import("../../src/review-providers/github.js");
+const {
+  _resetGitHubReviewBatchForTests,
+  collectGitHubSignalsBatch,
+  resolveBoundPrSummary,
+  hasActiveChecks,
+  githubReviewProvider,
+} = await import("../../src/review-providers/github.js");
+const { _resetPrLookupsForTests, claimPollPrLookup, enqueuePrLookup, flushPrLookups } =
+  await import("../../src/pr-lookup.js");
+const { _resetPrLookupCacheForTests, readPrLookupEntry } =
+  await import("../../src/pr-lookup-cache.js");
+const { _resetGhUsageForTests } = await import("../../src/gh.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -71,6 +90,32 @@ function sourceSession(worktreePath: string): SessionRecord {
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
   };
+}
+
+function reviewBatchEnvelope(
+  pr: Record<string, unknown>,
+  issueComments: Array<Record<string, unknown>> = [],
+): string {
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-03-18T11:00:00.000Z" },
+      r: {
+        a0: {
+          ...pr,
+          commits: { nodes: [] },
+          reviewThreads: { nodes: [] },
+          reviews: { nodes: [] },
+          comments: {
+            nodes: issueComments.map((comment) => ({
+              ...comment,
+              databaseId: comment.id,
+              author: comment.user,
+            })),
+          },
+        },
+      },
+    },
+  });
 }
 
 describe("shortText", () => {
@@ -177,7 +222,16 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = ["FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "CANCELED", "ACTION_REQUIRED"];
+    const states = [
+      "FAILURE",
+      "FAILED",
+      "TIMED_OUT",
+      "CANCELLED",
+      "CANCELED",
+      "ACTION_REQUIRED",
+      "ERROR",
+      "STARTUP_FAILURE",
+    ];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
@@ -204,6 +258,42 @@ describe("summarizeFailingCi", () => {
 
     expect(result).toContain("build");
     expect(result).not.toContain("docs");
+  });
+});
+
+describe("hasActiveChecks", () => {
+  it("returns false for an empty checks array", () => {
+    expect(hasActiveChecks([])).toBe(false);
+  });
+
+  it("returns false when every check is in a known-terminal state", () => {
+    const checks: GitHubCheck[] = [
+      { name: "build", state: "SUCCESS" },
+      { name: "lint", state: "FAILURE" },
+      { name: "docs", state: "SKIPPED" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(false);
+  });
+
+  it("returns true for a check in an unrecognized, non-terminal-shaped state", () => {
+    const checks: GitHubCheck[] = [{ name: "e2e", state: "IN_PROGRESS" }];
+    expect(hasActiveChecks(checks)).toBe(true);
+  });
+
+  it("returns true when active and terminal checks are mixed", () => {
+    const checks: GitHubCheck[] = [
+      { name: "build", state: "SUCCESS" },
+      { name: "e2e", state: "QUEUED" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(true);
+  });
+
+  it("treats ERROR and STARTUP_FAILURE as terminal, not active, so a permanently failed check never pins CI-active hysteresis", () => {
+    const checks: GitHubCheck[] = [
+      { name: "legacy-status", state: "ERROR" },
+      { name: "action-run", state: "STARTUP_FAILURE" },
+    ];
+    expect(hasActiveChecks(checks)).toBe(false);
   });
 });
 
@@ -322,6 +412,144 @@ describe("resolveBoundPrSummary", () => {
   });
 });
 
+describe("collectSignals GraphQL batch", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  function graphqlResult(checks: unknown[]): string {
+    return JSON.stringify({
+      data: {
+        rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+        r: {
+          a0: {
+            number: 42,
+            title: "Fix CI alert",
+            url: "https://github.com/acme/api/pull/42",
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: {
+              nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: checks } } } }],
+            },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+        },
+      },
+    });
+  }
+
+  it("reports no active CI for an empty check rollup", async () => {
+    ghMock.mockResolvedValueOnce(graphqlResult([]));
+
+    const result = await githubReviewProvider.collectSignals(
+      sourceSession("/wt"),
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+    );
+
+    expect(result?.ciActive).toBe(false);
+    expect(result?.ciCheckFetchFailed).toBe(false);
+  });
+
+  it("reports active CI from the batched rollup", async () => {
+    ghMock.mockResolvedValueOnce(
+      graphqlResult([{ name: "workflow", status: "IN_PROGRESS", conclusion: null }]),
+    );
+
+    const result = await githubReviewProvider.collectSignals(
+      sourceSession("/wt"),
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+    );
+
+    expect(result?.ciActive).toBe(true);
+    expect(result?.ciCheckFetchFailed).toBe(false);
+  });
+});
+
+describe("resolvePrSummary", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+  afterEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("resolves the highest-numbered OPEN PR when the branch also has a closed one", async () => {
+    // `gh pr list --head <branch> --state all` can return several PRs for one
+    // branch (retried work); `prs[0]`'s ordering was never a documented gh
+    // contract. The live PR must win over stale history regardless of order.
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 10,
+          title: "old attempt",
+          url: "https://github.com/o/r/pull/10",
+          reviewDecision: null,
+          mergeable: "UNKNOWN",
+          mergeStateStatus: "UNKNOWN",
+          state: "CLOSED",
+          isDraft: false,
+        },
+        {
+          number: 21,
+          title: "current attempt",
+          url: "https://github.com/o/r/pull/21",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "OPEN",
+          isDraft: false,
+        },
+      ]),
+    );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr?.number).toBe(21);
+    expect(pr?.state).toBe("OPEN");
+  });
+
+  it("falls back to the highest-numbered PR overall when none is open", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 10,
+          title: "first attempt",
+          url: "https://github.com/o/r/pull/10",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "CLOSED",
+          isDraft: false,
+        },
+        {
+          number: 21,
+          title: "second attempt",
+          url: "https://github.com/o/r/pull/21",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          state: "MERGED",
+          isDraft: false,
+        },
+      ]),
+    );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr?.number).toBe(21);
+    expect(pr?.state).toBe("MERGED");
+  });
+});
+
 describe("resolveTrackedBranch", () => {
   beforeEach(() => {
     readCurrentBranchMock.mockReset();
@@ -344,6 +572,1272 @@ describe("resolveTrackedBranch", () => {
     readCurrentBranchMock.mockRejectedValueOnce(new Error("missing worktree"));
 
     await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+});
+
+describe("GitHub review batching", () => {
+  const tempDirs: string[] = [];
+
+  beforeEach(() => {
+    ghMock.mockReset();
+    _resetGitHubReviewBatchForTests();
+    _resetPrLookupsForTests();
+    _resetPrLookupCacheForTests();
+    _resetGhUsageForTests();
+  });
+
+  afterEach(async () => {
+    _resetGitHubReviewBatchForTests();
+    _resetPrLookupsForTests();
+    _resetPrLookupCacheForTests();
+    _resetGhUsageForTests();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function makeDataDir(): Promise<string> {
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-review-batch-"));
+    tempDirs.push(dataDir);
+    return dataDir;
+  }
+
+  function unboundSession(id: string): SessionRecord {
+    const { pr: _pr, ...session } = sourceSession(`/tmp/${id}`);
+    return { ...session, id, branch: "feature/no-pr" };
+  }
+
+  it("shares the persisted absent cache with branch attention lookups", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: { nodes: [] } },
+        },
+      }),
+    );
+    const sessions = [unboundSession("api-1"), unboundSession("api-2")];
+
+    await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect([...second.values()]).toEqual([
+      { status: "skipped", reason: "cached" },
+      { status: "skipped", reason: "cached" },
+    ]);
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      )?.misses,
+    ).toBe(1);
+  });
+
+  it("shares one in-flight branch lookup across attention and review polling", async () => {
+    const dataDir = await makeDataDir();
+    const slug = { host: "github.com", owner: "acme", name: "api" };
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: { nameWithOwner: "acme/api", isFork: false, parent: null, a0: { nodes: [] } },
+        },
+      }),
+    );
+    const claim = claimPollPrLookup({
+      dataDir,
+      slug,
+      branch: "feature/no-pr",
+      capMs: 5 * 60_000,
+    });
+    if (claim.status !== "owner") throw new Error("attention did not own lookup");
+    const attention = enqueuePrLookup({
+      slug,
+      branch: "feature/no-pr",
+      worktreePath: "/tmp/api-attention",
+    }).then((outcome) => {
+      claim.settle(outcome);
+      return outcome;
+    });
+    const review = collectGitHubSignalsBatch(
+      [unboundSession("api-review")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    await flushPrLookups();
+
+    await expect(attention).resolves.toEqual({ status: "absent" });
+    await expect(review).resolves.toEqual(
+      new Map([["api-review", { status: "skipped", reason: "cached" }]]),
+    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(readPrLookupEntry(dataDir, slug, "feature/no-pr")?.misses).toBe(1);
+  });
+
+  it.each([
+    ["missing connection", null],
+    [
+      "partial nodes",
+      {
+        nodes: [
+          {
+            id: "PR_42",
+            number: 42,
+            title: "Partial",
+            url: "https://github.com/acme/api/pull/42",
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: { nodes: [] },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+          null,
+        ],
+      },
+    ],
+  ])("rejects an unbound %s without writing a cache miss", async (_name, connection) => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: connection },
+        },
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [unboundSession("api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(result.get("api-1")?.status).toBe("error");
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      ),
+    ).toBeNull();
+  });
+
+  it("records a failed initial query envelope before rejecting its payload", async () => {
+    const dataDir = await makeDataDir();
+    const error = Object.assign(new Error("GraphQL query failed"), {
+      stdout: JSON.stringify({
+        data: {
+          rateLimit: { cost: 4, remaining: 900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: { a0: null },
+        },
+        errors: [{ message: "partial failure" }],
+      }),
+    });
+    ghMock.mockRejectedValueOnce(error);
+    const session = unboundSession("api-1");
+
+    const first = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(first.get("api-1")?.status).toBe("error");
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "budget" });
+    expect(ghMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects valid partial repo data with a global error before cursor traversal", async () => {
+    const dataDir = await makeDataDir();
+    const existing = new Map([["pull-request:PR_42", "stored-cursor"]]);
+    writeGitHubReviewPagination(dataDir, "api", "pr-watch", existing);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: {
+            a0: {
+              id: "PR_42",
+              number: 42,
+              title: "Valid partial result",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: [],
+                pageInfo: { hasPreviousPage: true, startCursor: "new-cursor" },
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+        errors: [{ message: "rate limit metadata unavailable" }],
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(result.get("api-1")?.status).toBe("error");
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(existing);
+  });
+
+  it("parks an unbound terminal PR in the shared cache", async () => {
+    const dataDir = await makeDataDir();
+    const terminal = {
+      number: 41,
+      title: "Merged work",
+      url: "https://github.com/acme/api/pull/41",
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isDraft: false,
+      state: "MERGED",
+      commits: { nodes: [] },
+      reviewThreads: { nodes: [] },
+      reviews: { nodes: [] },
+      comments: { nodes: [] },
+    };
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: { nodes: [terminal] } },
+        },
+      }),
+    );
+    const session = unboundSession("api-1");
+
+    await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "cached" });
+    expect(
+      readPrLookupEntry(
+        dataDir,
+        { host: "github.com", owner: "acme", name: "api" },
+        "feature/no-pr",
+      )?.terminal,
+    ).toEqual({ number: 41, state: "MERGED" });
+  });
+
+  it("limits each repo cycle to 50 targets and rotates the remainder", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 51 }, (_unused, index) => ({
+      ...sourceSession(`/tmp/api-${index}`),
+      id: `api-${index}`,
+      pr: {
+        number: index + 1,
+        repo: "acme/api",
+        url: `https://github.com/acme/api/pull/${index + 1}`,
+      },
+    }));
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const numbers = args
+        .filter((arg) => /^n\d+=/.test(arg))
+        .map((arg) => Number(arg.slice(arg.indexOf("=") + 1)));
+      const aliases = Object.fromEntries(
+        numbers.map((number, index) => [
+          `a${index}`,
+          {
+            number,
+            title: `PR ${number}`,
+            url: `https://github.com/acme/api/pull/${number}`,
+            reviewDecision: null,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            isDraft: false,
+            state: "OPEN",
+            commits: { nodes: [] },
+            reviewThreads: { nodes: [] },
+            reviews: { nodes: [] },
+            comments: { nodes: [] },
+          },
+        ]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const first = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(48);
+    expect(first.get("api-50")).toEqual({ status: "skipped", reason: "capacity" });
+    expect(second.get("api-50")?.status).toBe("ok");
+  });
+
+  it("caps unbound aliases below GitHub's 500,000-node query limit", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 10 }, (_unused, index) => ({
+      ...unboundSession(`api-${index}`),
+      branch: `feature/${index}`,
+      worktreePath: `/tmp/api-${index}`,
+    }));
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const branchVariables = args.filter((arg) => /^b\d+=/.test(arg));
+      const aliases = Object.fromEntries(
+        branchVariables.map((_branch, index) => [`a${index}`, { nodes: [] }]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(ghMock.mock.calls[0]?.join(" ").match(/b\d+=/g)).toHaveLength(9);
+    expect([...result.values()].filter((entry) => entry.status === "skipped")).toEqual([
+      { status: "skipped", reason: "capacity" },
+    ]);
+  });
+
+  it("requests the newest 100 signals and surfaces the newest item", async () => {
+    const dataDir = await makeDataDir();
+    const comments = Array.from({ length: 100 }, (_unused, index) => ({
+      id: index + 2,
+      body: `comment ${index + 2}`,
+      author: { login: "reviewer" },
+    }));
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope(
+        {
+          number: 42,
+          title: "Newest feedback",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          isDraft: false,
+          state: "OPEN",
+        },
+        comments,
+      ),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    const call = ghMock.mock.calls[0]?.join(" ") ?? "";
+    expect(call).toContain("comments(last:100)");
+    expect(call).toContain("reviewThreads(last:100)");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("comment:101")).toBe(true);
+    expect(collected.collected.snapshot.has("comment:1")).toBe(false);
+  });
+
+  it("paginates older checks, reviews, and PR comments in one bounded request", async () => {
+    const dataDir = await makeDataDir();
+    const checks = Array.from({ length: 100 }, (_unused, index) => ({
+      name: `check-${index + 2}`,
+      conclusion: "SUCCESS",
+      status: "COMPLETED",
+    }));
+    const reviews = Array.from({ length: 100 }, (_unused, index) => ({
+      databaseId: index + 2,
+      state: "COMMENTED",
+      body: `review ${index + 2}`,
+      author: { login: "reviewer" },
+    }));
+    const comments = Array.from({ length: 100 }, (_unused, index) => ({
+      databaseId: index + 2,
+      body: `comment ${index + 2}`,
+      author: { login: "reviewer" },
+    }));
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Older signals",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: {
+                  nodes: [
+                    {
+                      commit: {
+                        statusCheckRollup: {
+                          contexts: {
+                            nodes: checks,
+                            pageInfo: { hasPreviousPage: true, startCursor: "check-2" },
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+                reviewThreads: { nodes: [] },
+                reviews: {
+                  nodes: reviews,
+                  pageInfo: { hasPreviousPage: true, startCursor: "review-2" },
+                },
+                comments: {
+                  nodes: comments,
+                  pageInfo: { hasPreviousPage: true, startCursor: "comment-2" },
+                },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2099-08-04T18:00:00.000Z" },
+            s0: {
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        contexts: {
+                          nodes: [
+                            { name: "old-check", conclusion: "FAILURE", status: "COMPLETED" },
+                          ],
+                          pageInfo: { hasPreviousPage: false, startCursor: "check-1" },
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+            s1: {
+              reviews: {
+                nodes: [
+                  {
+                    databaseId: 1,
+                    state: "COMMENTED",
+                    body: "old review",
+                    author: { login: "reviewer" },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false, startCursor: "review-1" },
+              },
+            },
+            s2: {
+              comments: {
+                nodes: [{ databaseId: 1, body: "old comment", author: { login: "reviewer" } }],
+                pageInfo: { hasPreviousPage: false, startCursor: "comment-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=check-2");
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before1=review-2");
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before2=comment-2");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.get("ci_failed")?.text).toContain("old-check");
+    expect(collected.collected.snapshot.has("review:1")).toBe(true);
+    expect(collected.collected.snapshot.has("comment:1")).toBe(true);
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(new Map());
+  });
+
+  it("bounds and resumes older review pagination across cycles", async () => {
+    const dataDir = await makeDataDir();
+    const initial = () =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: {
+            a0: {
+              id: "PR_42",
+              number: 42,
+              title: "Long reviews",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: { nodes: [] },
+              reviews: {
+                nodes: [],
+                pageInfo: { hasPreviousPage: true, startCursor: "cursor-0" },
+              },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      });
+    const page = (index: number, hasPreviousPage: boolean) =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_700 - index, resetAt: "2099-08-04T18:00:00.000Z" },
+          s0: {
+            reviews: {
+              nodes: [
+                {
+                  databaseId: 1_000 + index,
+                  state: "COMMENTED",
+                  body: `review ${index}`,
+                  author: { login: "reviewer" },
+                },
+              ],
+              pageInfo: { hasPreviousPage, startCursor: `cursor-${index}` },
+            },
+          },
+        },
+      });
+    ghMock.mockResolvedValueOnce(initial());
+    for (let index = 1; index <= 10; index += 1) {
+      ghMock.mockResolvedValueOnce(page(index, true));
+    }
+
+    await collectGitHubSignalsBatch([sourceSession("/tmp/api-1")], dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(11);
+    expect([...readGitHubReviewPagination(dataDir, "api", "pr-watch").values()]).toContain(
+      "cursor-10",
+    );
+
+    ghMock.mockResolvedValueOnce(initial()).mockResolvedValueOnce(page(11, false));
+    const recovered = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[12]?.join(" ")).toContain("before0=cursor-10");
+    const collected = recovered.get("api-1");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review:1011")).toBe(true);
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(new Map());
+  });
+
+  it("surfaces every new same-thread comment returned between polls", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-03-18T11:00:00.000Z" },
+          r: {
+            a0: {
+              number: 42,
+              title: "Thread feedback",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: [
+                  {
+                    isResolved: false,
+                    comments: {
+                      nodes: [101, 102, 103].map((databaseId) => ({
+                        databaseId,
+                        body: `feedback ${databaseId}`,
+                        path: "src/api.ts",
+                        line: databaseId,
+                        author: { login: "reviewer" },
+                      })),
+                    },
+                  },
+                ],
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[0]?.join(" ")).toContain("comments(last:100)");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect([...collected.collected.snapshot.keys()]).toEqual(
+      expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
+    );
+  });
+
+  it("paginates past 100 same-thread comments to the prior high-water mark", async () => {
+    const dataDir = await makeDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["review-comment:1"]);
+    const comment = (databaseId: number) => ({
+      databaseId,
+      body: `feedback ${databaseId}`,
+      path: "src/api.ts",
+      line: databaseId,
+      author: { login: "reviewer" },
+    });
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Burst feedback",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: Array.from({ length: 100 }, (_unused, index) => comment(index + 3)),
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-3" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: [comment(1), comment(2)],
+                pageInfo: { hasPreviousPage: false, startCursor: "cursor-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=cursor-3");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:2")).toBe(true);
+    expect(collected.collected.snapshot.has("review-comment:102")).toBe(true);
+    expect(collected.collected.snapshot.has("review-comment:1")).toBe(false);
+  });
+
+  it("records a failed pagination envelope before rejecting its payload", async () => {
+    const dataDir = await makeDataDir();
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Failed pagination",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: [],
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-100" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockRejectedValueOnce(
+        Object.assign(new Error("GraphQL page failed"), {
+          stdout: JSON.stringify({
+            data: {
+              rateLimit: { cost: 6, remaining: 900, resetAt: "2099-08-04T18:00:00.000Z" },
+              t0: null,
+            },
+            errors: [{ message: "page failure" }],
+          }),
+        }),
+      );
+    const session = sourceSession("/tmp/api-1");
+
+    const first = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(first.get("api-1")?.status).toBe("error");
+    expect(second.get("api-1")).toEqual({ status: "skipped", reason: "budget" });
+    expect(ghMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps pagination cursors unchanged when GitHub returns partial data with errors", async () => {
+    const dataDir = await makeDataDir();
+    const existing = new Map([["pull-request:PR_42", "stored-cursor"]]);
+    writeGitHubReviewPagination(dataDir, "api", "pr-watch", existing);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Partial pagination",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [],
+                  pageInfo: { hasPreviousPage: true, startCursor: "newest-cursor" },
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2099-08-04T18:00:00.000Z" },
+            p0: {
+              reviewThreads: {
+                nodes: [],
+                pageInfo: { hasPreviousPage: false, startCursor: "oldest-cursor" },
+              },
+            },
+          },
+          errors: [{ path: ["p0", "reviewThreads"], message: "partial thread page" }],
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(result.get("api-1")?.status).toBe("error");
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(existing);
+  });
+
+  it("commits parent and child cursors atomically after a nested failure", async () => {
+    const dataDir = await makeDataDir();
+    const newestThreads = Array.from({ length: 100 }, (_unused, index) => ({
+      id: `THREAD_${index + 2}`,
+      comments: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
+    }));
+    const initial = () =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: {
+            a0: {
+              id: "PR_42",
+              number: 42,
+              title: "Atomic pagination",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: newestThreads,
+                pageInfo: { hasPreviousPage: true, startCursor: "thread-2" },
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      });
+    const parent = () =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_799, resetAt: "2099-08-04T18:00:00.000Z" },
+          p0: {
+            reviewThreads: {
+              nodes: [
+                {
+                  id: "THREAD_1",
+                  comments: {
+                    nodes: [],
+                    pageInfo: { hasPreviousPage: true, startCursor: "comment-2" },
+                  },
+                },
+              ],
+              pageInfo: { hasPreviousPage: false, startCursor: "thread-1" },
+            },
+          },
+        },
+      });
+    const child = JSON.stringify({
+      data: {
+        rateLimit: { cost: 1, remaining: 4_798, resetAt: "2099-08-04T18:00:00.000Z" },
+        t0: {
+          comments: {
+            nodes: [{ databaseId: 1, body: "old feedback", author: { login: "reviewer" } }],
+            pageInfo: { hasPreviousPage: false, startCursor: "comment-1" },
+          },
+        },
+      },
+    });
+    ghMock
+      .mockResolvedValueOnce(initial())
+      .mockResolvedValueOnce(parent())
+      .mockRejectedValueOnce(new Error("nested pagination failed"));
+
+    const first = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+    expect(first.get("api-1")?.status).toBe("error");
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(new Map());
+
+    ghMock
+      .mockResolvedValueOnce(initial())
+      .mockResolvedValueOnce(parent())
+      .mockResolvedValueOnce(child);
+    const recovered = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(recovered.get("api-1")?.status).toBe("ok");
+    const collected = recovered.get("api-1");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:1")).toBe(true);
+  });
+
+  it("persists and resumes a comment cursor after the cycle budget", async () => {
+    const dataDir = await makeDataDir();
+    const initial = () =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: {
+            a0: {
+              id: "PR_42",
+              number: 42,
+              title: "Long thread",
+              url: "https://github.com/acme/api/pull/42",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+              isDraft: false,
+              state: "OPEN",
+              commits: { nodes: [] },
+              reviewThreads: {
+                nodes: [
+                  {
+                    id: "THREAD_LONG",
+                    comments: {
+                      nodes: [],
+                      pageInfo: { hasPreviousPage: true, startCursor: "cursor-0" },
+                    },
+                  },
+                ],
+              },
+              reviews: { nodes: [] },
+              comments: { nodes: [] },
+            },
+          },
+        },
+      });
+    const page = (index: number, hasPreviousPage: boolean) =>
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+          t0: {
+            comments: {
+              nodes: [
+                {
+                  databaseId: 1_000 + index,
+                  body: `page ${index}`,
+                  author: { login: "reviewer" },
+                },
+              ],
+              pageInfo: { hasPreviousPage, startCursor: `cursor-${index}` },
+            },
+          },
+        },
+      });
+    ghMock.mockResolvedValueOnce(initial());
+    for (let index = 1; index <= 10; index += 1) {
+      ghMock.mockResolvedValueOnce(page(index, true));
+    }
+
+    await collectGitHubSignalsBatch([sourceSession("/tmp/api-1")], dataDir, "api", "pr-watch");
+
+    ghMock.mockResolvedValueOnce(initial()).mockResolvedValueOnce(page(11, false));
+    const resumed = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[12]?.join(" ")).toContain("before0=cursor-10");
+    const collected = resumed.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:1011")).toBe(true);
+  });
+
+  it("migrates and resumes a legacy thread-only comment cursor", async () => {
+    const dataDir = await makeDataDir();
+    writeGitHubReviewPagination(
+      dataDir,
+      "api",
+      "pr-watch",
+      new Map([["THREAD_LEGACY", "cursor-10"]]),
+    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Legacy cursor",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_LEGACY",
+                      comments: {
+                        nodes: [],
+                        pageInfo: { hasPreviousPage: true, startCursor: "cursor-0" },
+                      },
+                    },
+                  ],
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: [{ databaseId: 1, body: "old feedback", author: { login: "reviewer" } }],
+                pageInfo: { hasPreviousPage: false, startCursor: "cursor-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=cursor-10");
+    expect(result.get("api-1")?.status).toBe("ok");
+    expect(readGitHubReviewPagination(dataDir, "api", "pr-watch")).toEqual(new Map());
+  });
+
+  it("resumes comments on a thread outside the newest 100 after the cycle budget", async () => {
+    const dataDir = await makeDataDir();
+    const newestThreads = Array.from({ length: 100 }, (_unused, index) => ({
+      id: `THREAD_${index + 2}`,
+      comments: {
+        nodes: [],
+        pageInfo: { hasPreviousPage: false, startCursor: `comment-${index + 2}` },
+      },
+    }));
+    const comments = (start: number) =>
+      Array.from({ length: 100 }, (_unused, index) => ({
+        databaseId: start + index,
+        body: `feedback ${start + index}`,
+        author: { login: "reviewer" },
+      }));
+    let commentPage = 0;
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const call = args.join(" ");
+      if (call.includes("r:repository")) {
+        return Promise.resolve(
+          JSON.stringify({
+            data: {
+              rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+              r: {
+                a0: {
+                  id: "PR_42",
+                  number: 42,
+                  title: "Many threads and comments",
+                  url: "https://github.com/acme/api/pull/42",
+                  reviewDecision: null,
+                  mergeable: "MERGEABLE",
+                  mergeStateStatus: "CLEAN",
+                  isDraft: false,
+                  state: "OPEN",
+                  commits: { nodes: [] },
+                  reviewThreads: {
+                    nodes: newestThreads,
+                    pageInfo: { hasPreviousPage: true, startCursor: "thread-2" },
+                  },
+                  reviews: { nodes: [] },
+                  comments: { nodes: [] },
+                },
+              },
+            },
+          }),
+        );
+      }
+      if (call.includes("... on PullRequest{reviewThreads")) {
+        return Promise.resolve(
+          JSON.stringify({
+            data: {
+              rateLimit: { cost: 1, remaining: 4_799, resetAt: "2026-08-04T18:00:00.000Z" },
+              p0: {
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "THREAD_1",
+                      comments: {
+                        nodes: comments(1_101),
+                        pageInfo: { hasPreviousPage: true, startCursor: "comment-1101" },
+                      },
+                    },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "thread-1" },
+                },
+              },
+            },
+          }),
+        );
+      }
+      commentPage += 1;
+      const start = 1_101 - commentPage * 100;
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_798, resetAt: "2026-08-04T18:00:00.000Z" },
+            t0: {
+              comments: {
+                nodes: comments(start),
+                pageInfo: {
+                  hasPreviousPage: commentPage < 11,
+                  startCursor: `comment-${start}`,
+                },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    await collectGitHubSignalsBatch([sourceSession("/tmp/api-1")], dataDir, "api", "pr-watch");
+    const secondCycleCall = ghMock.mock.calls.length;
+    const resumed = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+    const secondCycleCalls = ghMock.mock.calls.slice(secondCycleCall).map((call) => call.join(" "));
+
+    expect(secondCycleCalls.some((call) => call.includes("id0=THREAD_1"))).toBe(true);
+    expect(secondCycleCalls.some((call) => call.includes("... on PullRequest{reviewThreads"))).toBe(
+      false,
+    );
+    expect(secondCycleCalls.some((call) => call.includes("before0=comment-101"))).toBe(true);
+    const collected = resumed.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:1")).toBe(true);
+  });
+
+  it("paginates to an active review thread outside the newest 100 threads", async () => {
+    const dataDir = await makeDataDir();
+    const threads = Array.from({ length: 100 }, (_unused, index) => ({
+      id: `THREAD_${index + 2}`,
+      comments: {
+        nodes: [],
+        pageInfo: { hasPreviousPage: false, startCursor: `comment-${index + 2}` },
+      },
+    }));
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 3, remaining: 4_800, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: {
+                id: "PR_42",
+                number: 42,
+                title: "Many threads",
+                url: "https://github.com/acme/api/pull/42",
+                reviewDecision: null,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                isDraft: false,
+                state: "OPEN",
+                commits: { nodes: [] },
+                reviewThreads: {
+                  nodes: threads,
+                  pageInfo: { hasPreviousPage: true, startCursor: "thread-2" },
+                },
+                reviews: { nodes: [] },
+                comments: { nodes: [] },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 2, remaining: 4_798, resetAt: "2026-08-04T18:00:00.000Z" },
+            p0: {
+              reviewThreads: {
+                nodes: [
+                  {
+                    id: "THREAD_1",
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 999,
+                          body: "active oldest thread",
+                          author: { login: "reviewer" },
+                        },
+                      ],
+                      pageInfo: { hasPreviousPage: false, startCursor: "comment-999" },
+                    },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false, startCursor: "thread-1" },
+              },
+            },
+          },
+        }),
+      );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+
+    expect(ghMock.mock.calls[0]?.join(" ")).toContain("reviewThreads(last:100)");
+    expect(ghMock.mock.calls[1]?.join(" ")).toContain("before0=thread-2");
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    expect(collected.collected.snapshot.has("review-comment:999")).toBe(true);
   });
 });
 
@@ -375,21 +1869,18 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
-          number: 42,
-          title: "Keep branch mergeable",
-          url: "https://github.com/acme/api/pull/42",
-          reviewDecision: null,
-          mergeable: "CONFLICTING",
-          mergeStateStatus: "DIRTY",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope({
+        number: 42,
+        title: "Keep branch mergeable",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "DIRTY",
+        state: "OPEN",
+        isDraft: false,
+      }),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -430,21 +1921,18 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
-          number: 42,
-          title: "Keep branch mergeable",
-          url: "https://github.com/acme/api/pull/42",
-          reviewDecision: null,
-          mergeable: "MERGEABLE",
-          mergeStateStatus: "CLEAN",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope({
+        number: 42,
+        title: "Keep branch mergeable",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        state: "OPEN",
+        isDraft: false,
+      }),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -478,21 +1966,19 @@ describe("github source rearm", () => {
     const { dataDir, worktreePath } = await createRuntimeState();
     writeSession(dataDir, sourceSession(worktreePath));
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify({
+    ghMock.mockResolvedValueOnce(
+      reviewBatchEnvelope(
+        {
           number: 42,
           title: "Keep branch mergeable",
           url: "https://github.com/acme/api/pull/42",
           reviewDecision: null,
           mergeable: "MERGEABLE",
           mergeStateStatus: "CLEAN",
-        }),
-      )
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce(
-        JSON.stringify([
+          state: "OPEN",
+          isDraft: false,
+        },
+        [
           {
             id: 1001,
             body: "Please rerun the focused runtime test.",
@@ -500,9 +1986,9 @@ describe("github source rearm", () => {
               login: "reviewer",
             },
           },
-        ]),
-      )
-      .mockResolvedValueOnce("[]");
+        ],
+      ),
+    );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -535,7 +2021,10 @@ describe("github source rearm", () => {
   it("clears stale rearm markers when the session disappears", async () => {
     const { dataDir } = await createRuntimeState();
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
-    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", new Map());
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", {
+      prNumber: 42,
+      signals: new Map(),
+    });
 
     const controller = new AbortController();
     const handle = await githubSourceModule.start({
@@ -560,5 +2049,58 @@ describe("github source rearm", () => {
       handle.stop();
       clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     }
+  });
+});
+
+describe("review snapshot envelope", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function createDataDir(): Promise<string> {
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-gh-snapshot-"));
+    tempDirs.push(dataDir);
+    return dataDir;
+  }
+
+  it("round-trips prNumber and signal keys through the real writer and reader", async () => {
+    const dataDir = await createDataDir();
+    const signal = { key: "ci_failed", kind: "ci_failed" as const, text: "CI is failing: build." };
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", {
+      prNumber: 42,
+      signals: new Map([[signal.key, signal]]),
+    });
+
+    const stored = readGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1");
+
+    expect(stored?.prNumber).toBe(42);
+    expect(stored?.signals.get("ci_failed")).toEqual(signal);
+  });
+
+  it("parses a hand-written legacy bare-array snapshot to prNumber: null", async () => {
+    // Legacy on-disk shape predates the envelope: a bare `ReviewSignal[]`, no
+    // `prNumber` field. `Array.isArray` is the sole discriminator (no `version`
+    // field — nothing would ever read one), and the legacy default is `null`.
+    const dataDir = await createDataDir();
+    const dir = join(dataDir, "source-state", "github", "api", "pr-watch");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "api-1.json"),
+      JSON.stringify([
+        { key: "closed", kind: "closed", text: "PR #42 was closed without merging." },
+      ]),
+      "utf-8",
+    );
+
+    const stored = readGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1");
+
+    expect(stored?.prNumber).toBeNull();
+    expect(stored?.signals.get("closed")).toEqual({
+      key: "closed",
+      kind: "closed",
+      text: "PR #42 was closed without merging.",
+    });
   });
 });

@@ -212,7 +212,7 @@ describe("SessionDetail header", () => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture({ model: "claude-opus-4-8" })), {
+        return new Response(JSON.stringify(sessionFixture({ model: "claude-model-id" })), {
           status: 200,
         });
       }
@@ -227,7 +227,7 @@ describe("SessionDetail header", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("claude-opus-4-8")).toBeInTheDocument();
+      expect(screen.getByText("claude-model-id")).toBeInTheDocument();
     });
   });
 

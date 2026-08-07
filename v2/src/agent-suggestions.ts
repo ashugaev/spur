@@ -120,11 +120,27 @@ async function loadSuggestions(context: SuggestionContext): Promise<AgentSuggest
     context.agent === "claude"
       ? await loadClaudeSuggestions(context.projectPath)
       : await loadCodexSuggestions(context.projectPath, context.codexHomePath);
+  // CACHE_TTL_MS above is a freshness check on read only; without a sweep an
+  // expired entry for a worktree that is never queried again (e.g. a deleted
+  // session) stays resident forever. Sweep expired keys on every write,
+  // mirroring memoizedProbe's sweep-on-access pattern (runtime-tmux.ts).
+  const now = Date.now();
+  for (const [staleKey, entry] of cache) {
+    if (entry.expiresAt <= now) {
+      cache.delete(staleKey);
+    }
+  }
   cache.set(key, {
-    expiresAt: Date.now() + CACHE_TTL_MS,
+    expiresAt: now + CACHE_TTL_MS,
     value,
   });
   return value;
+}
+
+// Bounded-memory assertion mechanism, mirroring
+// _capturePaneCacheSizeForTests (runtime-tmux.ts).
+export function _suggestionsCacheSizeForTests(): number {
+  return cache.size;
 }
 
 async function loadClaudeSuggestions(projectPath: string): Promise<AgentSuggestionsResponse> {

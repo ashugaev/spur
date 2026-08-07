@@ -6,12 +6,17 @@ import {
   createSendBatchParser,
   restoreSendBatch,
 } from "../../src/send-batches.js";
-import type { GitHubSignal } from "../../src/types.js";
+import type { GitHubSignal, ReviewSnapshot } from "../../src/types.js";
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: vi.fn(),
   readReviewSourceSnapshot: vi.fn(),
 }));
+
+// Builds the on-disk/in-memory envelope shape the snapshot readers now return.
+function storedSnapshot(signals: GitHubSignal[], prNumber: number | null = 42): ReviewSnapshot {
+  return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
+}
 
 function githubEventData(overrides: Record<string, unknown> = {}) {
   return {
@@ -254,8 +259,7 @@ describe("GitHub batch", () => {
       ],
     });
 
-    const snapshot = new Map<string, GitHubSignal>();
-    snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     mock.mockReturnValue(snapshot);
 
     batch.prune("/data");
@@ -275,7 +279,7 @@ describe("GitHub batch", () => {
 
   it("isEmpty() returns true after prune with no remaining signals", async () => {
     const { readGitHubSourceSnapshot } = await import("../../src/metadata.js");
-    vi.mocked(readGitHubSourceSnapshot).mockReturnValue(new Map());
+    vi.mocked(readGitHubSourceSnapshot).mockReturnValue(storedSnapshot([]));
 
     const batch = makeBatch();
     batch.prune("/data");
@@ -341,8 +345,7 @@ describe("GitLab batch", () => {
     const { readGitHubSourceSnapshot, readReviewSourceSnapshot } =
       await import("../../src/metadata.js");
     vi.mocked(readGitHubSourceSnapshot).mockReset().mockReturnValue(null);
-    const snapshot = new Map<string, GitHubSignal>();
-    snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     vi.mocked(readReviewSourceSnapshot).mockReset().mockReturnValue(snapshot);
 
     const batch = makeBatch({
