@@ -5,6 +5,7 @@ import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { AgentModel } from "./models.js";
+import type { ProviderReasoningEffort } from "../types.js";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
@@ -145,6 +146,7 @@ interface ClaudePlanOptions {
   model?: string;
   claudeConfigDir?: string;
   sessionId?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 }
 
 function withClaudeConfigDir(command: string, configDir?: string): string {
@@ -178,9 +180,10 @@ export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): Ag
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
+  const reasoningEffortArg = options?.reasoningEffort ? ` --effort ${options.reasoningEffort}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}${reasoningEffortArg}`,
       options?.claudeConfigDir,
     ),
     initialMessage: prompt,
@@ -199,9 +202,10 @@ export function buildClaudeResumePlan(
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
+  const reasoningEffortArg = options?.reasoningEffort ? ` --effort ${options.reasoningEffort}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${reasoningEffortArg}`,
       options?.claudeConfigDir,
     ),
     readyMarkers: ["❯"],

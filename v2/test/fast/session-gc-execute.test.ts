@@ -44,6 +44,7 @@ function makeDeps(overrides: Partial<SessionGcExecutorDeps> = {}): SessionGcExec
   return {
     cwd: "/home/dev",
     readGroupMembers: (ids) => ids.map((id) => makeSession({ id })),
+    checkGroupLiveness: vi.fn<SessionGcExecutorDeps["checkGroupLiveness"]>(() => "inactive"),
     probeGuards: vi.fn(async () => []),
     openPrIndex: vi.fn(
       async (): Promise<GcOpenPrIndex> => ({ numbers: new Set(), branches: new Set() }),
@@ -75,6 +76,113 @@ describe("executeSessionGc", () => {
     expect(report.totals.worktreesRemoved).toBe(1);
     expect(report.totals.recordsArchived).toBe(1);
     expect(report.totals.freedBytes).toBe(1024);
+  });
+
+  it("checks every coalesced member after awaited probes and blocks the whole group", async () => {
+    const sharedPath = `${WORKTREE_DIR}/api/shared`;
+    const records = [
+      makeSession({ id: "api-1", workspaceId: "shared", worktreePath: sharedPath }),
+      makeSession({ id: "api-2", workspaceId: "shared", worktreePath: sharedPath }),
+    ];
+    const plan = planSessionGc({
+      sessions: records,
+      worktreeDir: WORKTREE_DIR,
+      now: NOW,
+      olderThanDays: 30,
+      statuses: ["completed", "killed", "stopped"],
+      limit: 100,
+      pathExists: () => true,
+    });
+    const order: string[] = [];
+    const deps = makeDeps({
+      readGroupMembers: (ids) =>
+        ids.map((id) => records.find((record) => record.id === id) ?? null),
+      probeGuards: vi.fn(async () => {
+        order.push("guards");
+        return [];
+      }),
+      openPrIndex: vi.fn(async (): Promise<GcOpenPrIndex> => {
+        order.push("pr");
+        return { numbers: new Set(), branches: new Set() };
+      }),
+      checkGroupLiveness: vi.fn<SessionGcExecutorDeps["checkGroupLiveness"]>((ids) => {
+        order.push(`liveness:${ids.join(",")}`);
+        return "live";
+      }),
+      removeWorktree: vi.fn(async () => {
+        order.push("remove");
+      }),
+    });
+
+    const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+    expect(order).toEqual(["guards", "pr", "liveness:api-1,api-2"]);
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(deps.pruneRepo).not.toHaveBeenCalled();
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]?.blockReasons).toEqual(["live_session"]);
+  });
+
+  it.each(["unknown", "throw"] as const)(
+    "fails closed when the execution-time liveness check returns %s",
+    async (failure) => {
+      const record = makeSession({ id: "api-1" });
+      const plan = planOne(record);
+      const deps = makeDeps({
+        readGroupMembers: () => [record],
+        checkGroupLiveness: vi.fn<SessionGcExecutorDeps["checkGroupLiveness"]>(() => {
+          if (failure === "throw") throw new Error("metadata unreadable");
+          return "unknown";
+        }),
+      });
+
+      const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+      expect(deps.removeWorktree).not.toHaveBeenCalled();
+      expect(deps.archiveGroup).not.toHaveBeenCalled();
+      expect(report.groups[0]?.blockReasons).toEqual(["liveness_check_failed"]);
+    },
+  );
+
+  it("checks liveness again immediately before archive", async () => {
+    const record = makeSession({ id: "api-1" });
+    const plan = planOne(record);
+    const order: string[] = [];
+    const checkGroupLiveness = vi
+      .fn<SessionGcExecutorDeps["checkGroupLiveness"]>()
+      .mockImplementationOnce(() => {
+        order.push("liveness:remove");
+        return "inactive";
+      })
+      .mockImplementationOnce(() => {
+        order.push("liveness:archive");
+        return "live";
+      });
+    const deps = makeDeps({
+      readGroupMembers: () => [record],
+      checkGroupLiveness,
+      removeWorktree: vi.fn(async () => {
+        order.push("remove");
+      }),
+      pruneRepo: vi.fn(async () => {
+        order.push("prune");
+      }),
+      archiveGroup: vi.fn(() => {
+        order.push("archive");
+        return { archivedIds: [record.id] };
+      }),
+    });
+
+    const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+    expect(order).toEqual(["liveness:remove", "remove", "prune", "liveness:archive"]);
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "blocked",
+      blockReasons: ["live_session"],
+      removed: true,
+      archived: false,
+    });
   });
 
   it("dry run performs zero removeWorktree, archive, or size-skipping writes but still reports sizes and reasons", async () => {

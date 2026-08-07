@@ -29,6 +29,7 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  assertConfigMayUseProdSlot,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
@@ -61,6 +62,7 @@ import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
+import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
@@ -856,6 +858,44 @@ function renderDoctorResult(result: DoctorResult): string {
   }
   return lines.join("\n");
 }
+
+function renderSidecarSweepResult(result: SidecarSweepResult): string {
+  if (!result.supported) {
+    return dimText("Process table or procfs unreadable on this host — sweep skipped.");
+  }
+  if (result.leaked.length === 0) {
+    return dimText("No leaked sidecar process trees found.");
+  }
+  // Keyed by rootPid, not just presence: an outcome with survivors left
+  // alive after the SIGKILL confirmation window is a partial kill, not a
+  // clean reap — surfacing it as "[reaped]" would tell the operator nothing
+  // is left running when something still is.
+  const outcomeByRootPid = new Map(result.reaped.map((outcome) => [outcome.panePid, outcome]));
+  const lines = result.leaked.map((tree) => {
+    const ageMinutes = Math.floor(tree.ageSeconds / 60);
+    const outcome = outcomeByRootPid.get(tree.rootPid);
+    const status =
+      outcome === undefined
+        ? tree.reapable
+          ? "reapable"
+          : "report-only"
+        : outcome.survivors.length === 0
+          ? "reaped"
+          : "partial";
+    const survivorsSuffix =
+      outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
+    // Tree total, not the root pid's own rss — the root alone understated
+    // the measured 863333/863351 leak by 17x.
+    return dimText(
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+    );
+  });
+  return lines.join("\n");
+}
+
+// Test-only: exercises the sweep summary's status/survivors formatting
+// without spinning up a live CLI command or the daemon route it calls.
+export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -3094,6 +3134,33 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  sidecar
+    .command("sweep")
+    .description("Report sidecar process trees no live session claims; --reap to kill them.")
+    .option("--reap", "Signal reapable leaked trees instead of only reporting them")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sweeping sidecar process trees",
+        action: () =>
+          postJson<SidecarSweepResult>(
+            cliEntrypoint,
+            "/sidecars/sweep",
+            { reap: Boolean(options.reap) },
+            configPath,
+          ),
+        success: (result) =>
+          result.leaked.length === 0
+            ? "No leaked sidecar process trees found."
+            : `Found ${result.leaked.length} leaked sidecar process tree(s).`,
+        render: renderSidecarSweepResult,
+      });
+    });
+
   const branch = program
     .command("branch", { hidden: true })
     .description("Internal branch policy helpers.");
@@ -3179,6 +3246,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
@@ -3221,6 +3289,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -3236,6 +3305,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),

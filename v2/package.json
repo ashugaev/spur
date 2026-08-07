@@ -31,8 +31,8 @@
   ],
   "scripts": {
     "build": "tsc && node bin/restart-daemon-if-running.mjs",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "prepack": "pnpm build",

@@ -22,6 +22,15 @@ const startServerMock = vi.fn(async () => {
 
 const writeStderrMock = vi.fn();
 
+const ensureInstanceConfigMock = vi.fn(() => ({
+  configPath: "/tmp/spur.yaml",
+  initialized: false,
+}));
+
+const assertConfigMayUseProdSlotMock = vi.fn();
+const restartDaemonIfRunningMock = vi.fn();
+const stopDaemonIfRunningMock = vi.fn();
+
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
 }));
@@ -37,17 +46,15 @@ vi.mock("../../src/client.js", () => ({
   listProjects: vi.fn(),
   postJson: vi.fn(),
   postPreflight: vi.fn(),
-  restartDaemonIfRunning: vi.fn(),
-  stopDaemonIfRunning: vi.fn(),
+  restartDaemonIfRunning: restartDaemonIfRunningMock,
+  stopDaemonIfRunning: stopDaemonIfRunningMock,
 }));
 
 vi.mock("../../src/config.js", () => ({
   defaultVoiceModelPath: vi.fn(),
+  assertConfigMayUseProdSlot: assertConfigMayUseProdSlotMock,
   createProjectConfigScaffold: vi.fn(),
-  ensureInstanceConfig: vi.fn(() => ({
-    configPath: "/tmp/spur.yaml",
-    initialized: false,
-  })),
+  ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
   loadConfig: vi.fn(() => ({
@@ -73,7 +80,7 @@ async function parseCli(args: string[]): Promise<void> {
   await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", ...args]);
 }
 
-describe("spur daemon start CLI", () => {
+describe("spur daemon CLI", () => {
   beforeEach(() => {
     vi.resetModules();
     callOrder.length = 0;
@@ -83,6 +90,11 @@ describe("spur daemon start CLI", () => {
     });
     startServerMock.mockClear();
     writeStderrMock.mockClear();
+    ensureInstanceConfigMock.mockClear();
+    restartDaemonIfRunningMock.mockClear();
+    stopDaemonIfRunningMock.mockClear();
+    assertConfigMayUseProdSlotMock.mockClear();
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -110,5 +122,83 @@ describe("spur daemon start CLI", () => {
         "failed to write npm global-prefix pin file: EACCES: permission denied",
       ),
     );
+  });
+
+  it("reaches stopDaemonIfRunning for a plain stop with no --config", async () => {
+    stopDaemonIfRunningMock.mockResolvedValueOnce({ stopped: true });
+
+    await parseCli(["daemon", "stop", "--json"]);
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith(undefined);
+    expect(stopDaemonIfRunningMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to start when the --config path does not exist and is not the default", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "start", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(startServerMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop when the --config path does not exist and is not the default", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "stop", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(stopDaemonIfRunningMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart when the --config path does not exist and is not the default", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/does-not-exist.yaml does not exist.");
+    });
+
+    await expect(
+      parseCli(["daemon", "restart", "--config", "/tmp/does-not-exist.yaml", "--json"]),
+    ).rejects.toThrow("does not exist");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/does-not-exist.yaml");
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(restartDaemonIfRunningMock).not.toHaveBeenCalled();
+    expect(startServerMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop an existing non-default config that claims the prod slot", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/rogue.yaml may not bind the production slot.");
+    });
+
+    await expect(
+      parseCli(["daemon", "stop", "--config", "/tmp/rogue.yaml", "--json"]),
+    ).rejects.toThrow("may not bind the production slot");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/rogue.yaml");
+    expect(stopDaemonIfRunningMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart an existing non-default config that claims the prod slot", async () => {
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("Instance config /tmp/rogue.yaml may not bind the production slot.");
+    });
+
+    await expect(
+      parseCli(["daemon", "restart", "--config", "/tmp/rogue.yaml", "--json"]),
+    ).rejects.toThrow("may not bind the production slot");
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith("/tmp/rogue.yaml");
+    expect(restartDaemonIfRunningMock).not.toHaveBeenCalled();
   });
 });

@@ -996,7 +996,7 @@ test.describe("S2: Actions bar", () => {
     const session = makeWorkingSession({
       id: "detail-s2-handoff-1",
       agent: "codex",
-      model: "gpt-5.3-codex",
+      model: "codex-model-id",
       workspaceExists: true,
     });
     const handedOff = makeSpawningSession({ id: "detail-s2-handoff-next", agent: "cursor" });
