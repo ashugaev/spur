@@ -45,19 +45,41 @@ describe("spawn draft storage", () => {
     ["malformed", "not-json"],
     ["old schema", JSON.stringify({ ...draft, version: 0, savedAt: NOW })],
     ["stale", JSON.stringify({ ...draft, version: 1, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
-    [
-      "a v1 draft written before modelIsExplicit existed",
-      (() => {
-        const { modelIsExplicit: _modelIsExplicit, ...legacyDraft } = draft;
-        return JSON.stringify({ ...legacyDraft, version: 1, savedAt: NOW });
-      })(),
-    ],
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
     window.localStorage.setItem(key, value);
 
     expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it("restores a v1 draft written before modelIsExplicit existed, dropping only the model", () => {
+    const { modelIsExplicit: _modelIsExplicit, ...legacyDraft } = draft;
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(key, JSON.stringify({ ...legacyDraft, version: 1, savedAt: NOW }));
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+
+    expect(restored).toEqual({ ...draft, model: null, modelIsExplicit: false });
+    // Every field the user actually typed survives, only the untrustworthy
+    // model/explicitness pair is reset.
+    expect(restored?.prompt).toBe(draft.prompt);
+    expect(restored?.branch).toBe(draft.branch);
+    expect(restored?.branchIsExplicit).toBe(draft.branchIsExplicit);
+    expect(restored?.steps).toEqual(draft.steps);
+    expect(restored?.trackerUrl).toBe(draft.trackerUrl);
+  });
+
+  it("normalizes an invalid explicit-but-null model instead of discarding the draft", () => {
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...draft, model: null, modelIsExplicit: true, version: 1, savedAt: NOW }),
+    );
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+
+    expect(restored).toEqual({ ...draft, model: null, modelIsExplicit: false });
   });
 
   it("clears only the confirmed project's draft", () => {
