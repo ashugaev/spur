@@ -43,6 +43,8 @@ tmux:
   socketName: spur-4310
 ui:
   port: 5555
+models:
+  codexHome: ~/.codex
 
 projects:
   backend-api:
@@ -52,8 +54,11 @@ projects:
     worktree: true
     defaultAgent: codex # agent chosen when a spawn omits --agent
     defaultModels: # per-agent default model, applied when that agent is chosen without an explicit model
-      codex: gpt-5.5
-      cursor: composer-2.5
+      codex: codex-model-id
+      cursor: cursor-model-id
+    reasoningEffort:
+      claude: medium
+      codex: medium
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -183,12 +188,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 ## Field reference
 
 - `server.host`: optional, default `127.0.0.1`.
-- `server.port`: optional, default `4310`.
-- `dataDir`: optional, default `~/.spur`.
+- `server.port`: optional, default `4310`. A daemon booted from any config path other than the default `~/.spur/config.yaml` refuses to bind this port — that slot belongs to the default-path daemon only. See [`daemon`](commands.md#daemon).
+- `dataDir`: optional, default `~/.spur` — refused equally whether set explicitly or left to inherit this default, so a non-default config almost always needs an explicit override (see `daemon` link above).
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
+- `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
@@ -204,6 +210,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
+- `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
+- `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.

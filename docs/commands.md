@@ -4,13 +4,13 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## doctor
 
-Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command.
+Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything.
 
 When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
 
@@ -38,6 +38,12 @@ Freed bytes come from `du -s --block-size=1` measured before removal. A file har
 
 Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
 
+## daemon
+
+`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+
+Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
+
 ## spawn
 
 ```bash
@@ -49,7 +55,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `[prompt...]` optional. Empty opens the session without an initial message and skips default `spawn.steps`.
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
-- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
+- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, or `cursor models`.
 - `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.
@@ -170,6 +176,8 @@ Commands run through `sh -lc` with no `exec`, so login-shell init still applies 
 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
+Stop and restart reap the sidecar's whole tmux pane process tree, not just the pane's direct child — a supervisor (nodemon, tsx watch) that `setsid`s a worker into its own process group no longer leaves that worker behind. `spur sidecar sweep` reports sidecar process trees no live session claims (pid, rss, age, worktree); nothing is killed unless you pass `--reap`.
+
 ### Built-in MCP sidecars
 
 A sidecar entry can carry MCP wiring, injecting its reserved port into the launching agent's MCP
@@ -221,13 +229,13 @@ For claude, any non-empty `exclude` makes the generated config authoritative for
 same as enabling an MCP sidecar — the caveats above apply. With no `exclude` and no MCP sidecar,
 Spur passes no MCP flags and claude resolves servers itself.
 
-## build, daemon
+## build
 
 ```bash
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon. Daemon boot reloads registered configs, rehydrates session state, resumes pipelines, and restarts sources/triggers. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
+`build` also restarts a running daemon when Spur config is discoverable. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
 
 ## Validate
 

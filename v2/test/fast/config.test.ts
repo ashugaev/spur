@@ -86,6 +86,7 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
+    expect(config.models.codexHome).toContain(".codex");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
     if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
@@ -108,6 +109,32 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("uses the instance Codex cache home and ignores a project value", async () => {
+    const instancePath = await writeConfig(`
+models:
+  codexHome: ~/.cache/codex
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
+models:
+  - ignored
+projects:
+  backend:
+    path: $REPO_PATH
+`,
+    );
+
+    const instance = loadConfig(instancePath);
+    const project = loadProjectConfig(projectPath, instance);
+
+    expect(instance.models.codexHome).toContain(".cache/codex");
+    expect(project.models.codexHome).toBe(instance.models.codexHome);
   });
 
   it("accepts cursor as an instance and project default agent", async () => {
@@ -1249,19 +1276,44 @@ projects:
     path: $REPO_PATH
     codexArgs:
       - -c
-      - 'model_reasoning_effort="high"'
-      - --enable
-      - fast_mode
+      - 'service_tier="fast"'
 `);
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.codexArgs).toEqual([
+    expect(config.projects["backend"]?.codexArgs).toEqual(["-c", 'service_tier="fast"']);
+  });
+
+  it("allows legacy reasoning effort in raw Codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.codexArgs).toEqual([
       "-c",
       'model_reasoning_effort="high"',
-      "--enable",
-      "fast_mode",
     ]);
+  });
+
+  it("parses provider reasoning effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: low
+      codex: high
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({
+      claude: "low",
+      codex: "high",
+    });
   });
 
   it("rejects non-string project codex args", async () => {
@@ -2465,7 +2517,7 @@ projects:
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    ]).toEqual(["cursor", "auto", true, true]);
     expect([
       uiBlock?.agent,
       uiBlock?.model,
@@ -2486,6 +2538,9 @@ projects:
       trigger.spawn.autoComplete,
       trigger.spawn.allowedTriggers,
     ]).toEqual([true, undefined, []]);
+    expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
+    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}} --comment.",
@@ -2498,15 +2553,10 @@ projects:
     );
   });
 
-  it("pins codex non-fast service_tier and high reasoning for the sp project", async () => {
+  it("sets medium provider reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.codexArgs).toEqual([
-      "-c",
-      'model_reasoning_effort="high"',
-      "-c",
-      'service_tier="default"',
-    ]);
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {

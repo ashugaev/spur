@@ -116,7 +116,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSidecarSession: vi.fn(),
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
-  killSidecarTmux: vi.fn(),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
@@ -210,6 +209,7 @@ function baseConfig(): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     voice: {
       provider: "whisper_cpp",
       language: "en",

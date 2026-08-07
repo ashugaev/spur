@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { fileURLToPath, URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
+import { assertConfigMayUseProdSlot } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -197,6 +198,13 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
     request.clearPort = clearPort;
   }
   return request;
+}
+
+function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
+  if (!isRecord(raw)) {
+    return { reap: false };
+  }
+  return { reap: raw["reap"] === true };
 }
 
 function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
@@ -400,6 +408,7 @@ export async function startServer(
       `${ghPathState.message}; GitHub automation disabled until gh is available`,
     );
   }
+  assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
@@ -739,7 +748,9 @@ export async function startServer(
           sendError(response, 400, `Unsupported agent: ${rawAgent}`);
           return;
         }
-        sendJson(response, 200, { models: await listAgentModels(agent) });
+        sendJson(response, 200, {
+          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+        });
         return;
       }
 
@@ -1343,6 +1354,12 @@ export async function startServer(
           200,
           await service.stopSidecar(stopSidecarMatch[1], stopSidecarMatch[2]),
         );
+        return;
+      }
+
+      if (method === "POST" && path === "/sidecars/sweep") {
+        const { reap } = parseSweepSidecarsRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.sweepSidecarProcesses(reap));
         return;
       }
 

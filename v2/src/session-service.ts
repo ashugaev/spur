@@ -39,6 +39,18 @@ import {
   resolveSessionSidecars,
 } from "./sidecars/index.js";
 import {
+  assembleSidecarSweepClaims,
+  confirmReaps,
+  reapRecordedIdentity,
+  reapSidecarPane,
+  readProcessStarttime,
+  signalSidecarPane,
+  sweepSidecars,
+  type PendingReap,
+  type ReapOutcome,
+  type SidecarSweepResult,
+} from "./sidecars/reap.js";
+import {
   deleteAgentHookState,
   readAgentHookState,
   type AgentHookStateRecord,
@@ -174,7 +186,6 @@ import {
   getTmuxSessionActivity,
   getTmuxPanePid,
   isProcessRunningInTmux,
-  killSidecarTmux,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
@@ -287,8 +298,10 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isTerminalSessionStatus,
   type AdmissionCapSource,
   type AgentName,
+  type ProviderReasoningEffort,
   type AgentSuggestionsResponse,
   type AppConfig,
   type AvailableBacklogItem,
@@ -329,6 +342,7 @@ import {
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
+  type SidecarProcessIdentity,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -730,10 +744,6 @@ interface SessionStateResult {
   liveModel?: string;
 }
 
-function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
-  return status === "completed" || status === "killed";
-}
-
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
 const SIDECAR_PROBE_INTERVAL_MS = 1_000;
 const SIDECAR_PROBE_REQUEST_TIMEOUT_MS = 2_000;
@@ -946,6 +956,7 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
+  modelsCacheHome: string;
   mcpBindings?: SidecarMcpBinding[];
   mcpExclude?: string[];
 }) {
@@ -964,6 +975,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
+    ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -994,6 +1006,7 @@ function withAgentModeOptions(
     codexHomePath?: string;
     cursorConfigDir?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
   },
   modes: { planMode: boolean; restrictWrites: boolean },
 ): {
@@ -1001,6 +1014,7 @@ function withAgentModeOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
 } {
@@ -1016,7 +1030,8 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
 }
 
 function withProjectAgentOptions(
-  project: Pick<ProjectConfig, "codexArgs">,
+  agent: AgentName,
+  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -1029,8 +1044,14 @@ function withProjectAgentOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
 } {
-  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
+  const reasoningEffort = agent === "cursor" ? undefined : project.reasoningEffort?.[agent];
+  return {
+    ...options,
+    ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  };
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -2405,6 +2426,12 @@ export class SessionService {
           const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
           if (!tmuxName || !liveTmux.has(tmuxName)) continue;
           const stopped = await killTmuxSessionTree(tmuxName);
+          // Drop the owner's sidecarProcs entry the same way every other
+          // sidecar kill site does — otherwise its dead pane's pgid stays
+          // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
+          // sidecar restarts, masking the orphan from the sweep and doctor.
+          const ownerId = this.sidecarOwnerIdForName(candidate, project, name);
+          this.clearSidecarProcEntry(ownerId, name);
           return {
             attempted: true,
             stoppedTmux: stopped ? tmuxName : null,
@@ -2591,7 +2618,8 @@ export class SessionService {
           continue;
         }
         const sessionId = name.slice(0, -`--${builtinName}`.length);
-        await killSidecarTmux(sessionId, builtinName).catch(() => {});
+        await this.reapSidecarByName(sessionId, builtinName);
+        this.clearSidecarProcEntry(sessionId, builtinName);
       }
       await this.sweepLeakedBuiltinSidecars("reaper");
     } finally {
@@ -3873,7 +3901,8 @@ export class SessionService {
             continue;
           }
           if (await sidecarTmuxAlive(session.id, sidecarName)) {
-            await killSidecarTmux(session.id, sidecarName);
+            await this.reapSidecarByName(session.id, sidecarName);
+            this.clearSidecarProcEntry(session.id, sidecarName);
             reaped += 1;
           }
         }
@@ -4627,9 +4656,8 @@ export class SessionService {
       if (plan.kind === "clear") {
         if (plan.crossSession) {
           this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
-          await killTmuxSession(
-            sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
-          );
+          await this.reapSidecarByName(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          this.clearSidecarProcEntry(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.releaseSidecarPortFromSession(
             plan.crossSession.sessionId,
             plan.crossSession.sidecarName,
@@ -4674,7 +4702,13 @@ export class SessionService {
     clearPort?: number;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
-      if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+      const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
+      const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+      // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
+      // "session exists" — that pane's escapee tree can hold a reserved port
+      // forever unless treated as not-alive here and reaped before restart.
+      const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+      if (alive && !paneDead) {
         if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
           this.scheduleSidecarUrlReadyAndPublish(
             args.session.id,
@@ -4684,6 +4718,24 @@ export class SessionService {
           );
         }
         return args.session;
+      }
+      if (paneDead) {
+        await this.reapSidecarByName(args.session.id, args.sidecarName);
+        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+      } else if (!alive) {
+        // tmux session/window is gone entirely (killed externally, crashed)
+        // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
+        // fall through to the recorded sidecarProcs identity — the exact
+        // leak shape reapRecordedIdentity targets — before reserving the
+        // port for a new instance, or a still-live escapee tree from the
+        // old instance keeps running under the reused port.
+        const owner = readSession(this.config.dataDir, args.session.id);
+        const identity = owner?.sidecarProcs?.[args.sidecarName];
+        if (owner && identity) {
+          const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+          this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
+        }
+        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
       }
 
       // Built-ins may defer command resolution (e.g. a bundle-resolved bin
@@ -4735,7 +4787,39 @@ export class SessionService {
         });
         await verifySidecarStartup(reservedSession.id, args.sidecarName);
 
+        // Record this instance's identity so a tree that outlives its
+        // tmux supervisor is still identifiable and reapable later — see
+        // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
+        // (race, no procfs) leaves sidecarProcs unset for this name rather
+        // than blocking the start.
+        const freshPanePid = await getTmuxPanePid(
+          sidecarTmuxSession(reservedSession.id, args.sidecarName),
+          { fresh: true },
+        );
+        const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+        const identity: SidecarProcessIdentity | undefined =
+          freshPanePid !== null && starttime !== null
+            ? { pid: freshPanePid, pgid: freshPanePid, starttime }
+            : undefined;
+
         const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+        // clearSidecarProcEntry above already dropped this name from disk
+        // when the pane was dead or the tmux session was gone —
+        // reservedSession can still be a stale
+        // in-memory copy from before that write (ensureSidecarReservation
+        // returns the untouched `session` param when the sidecar has no
+        // ports to reserve). Build sidecarProcs explicitly rather than
+        // trusting the `...reservedSession` spread, so an unreadable
+        // identity persists as cleared instead of resurrecting the stale
+        // pgid clearSidecarProcEntry just removed.
+        const sidecarProcsWithoutStale = Object.fromEntries(
+          Object.entries(reservedSession.sidecarProcs ?? {}).filter(
+            ([name]) => name !== args.sidecarName,
+          ),
+        );
+        const nextSidecarProcs = identity
+          ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
+          : sidecarProcsWithoutStale;
         const updated: SessionRecord = {
           ...reservedSession,
           updatedAt: nowIso(),
@@ -4743,6 +4827,11 @@ export class SessionService {
             ? {}
             : { sidecarNames: [...sidecarNames, args.sidecarName] }),
         };
+        if (Object.keys(nextSidecarProcs).length > 0) {
+          updated.sidecarProcs = nextSidecarProcs;
+        } else {
+          delete updated.sidecarProcs;
+        }
         writeSession(this.config.dataDir, updated);
         this.scheduleSidecarUrlReadyAndPublish(
           reservedSession.id,
@@ -4752,7 +4841,8 @@ export class SessionService {
         );
         return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
-        await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
         const baseRecord =
           reservedSession !== args.session
             ? args.session
@@ -6351,6 +6441,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -6360,7 +6451,7 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
@@ -6534,9 +6625,9 @@ export class SessionService {
           if (!sidecar.mcp && failedSpawnDeskAlive) {
             continue;
           }
-          await killSidecarTmux(sidecarOwnerId(failedSpawnSession, sidecar), scName).catch(
-            () => {},
-          );
+          const failedSpawnOwnerId = sidecarOwnerId(failedSpawnSession, sidecar);
+          await this.reapSidecarByName(failedSpawnOwnerId, scName);
+          this.clearSidecarProcEntry(failedSpawnOwnerId, scName);
         }
         // Startup attachments are preserved for a respawn, so the ids come
         // from the persisted placeholder — they are out of scope here.
@@ -6645,9 +6736,9 @@ export class SessionService {
       if (!sidecar.mcp && deskAlive) {
         continue;
       }
-      await killSidecarTmux(sidecarOwnerId(prepared.placeholder, sidecar), sidecarName).catch(
-        () => {},
-      );
+      const cleanupOwnerId = sidecarOwnerId(prepared.placeholder, sidecar);
+      await this.reapSidecarByName(cleanupOwnerId, sidecarName);
+      this.clearSidecarProcEntry(cleanupOwnerId, sidecarName);
     }
     if (finalFailure) {
       this.removeSessionArtifacts(prepared.placeholder);
@@ -7323,6 +7414,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -7330,7 +7422,7 @@ export class SessionService {
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+        ...withAgentModeOptions(withProjectAgentOptions(agent, project, hookSetup), {
           planMode,
           restrictWrites,
         }),
@@ -8491,13 +8583,75 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  // Reaps a sidecar's whole tmux pane process tree (group-first where
+  // proven, per-pid leaves-first otherwise) and waits for confirmation.
+  // Never throws — a survivor becomes a `warn` log entry, not a rejected
+  // promise (invariant: reap never blocks teardown). This is THE reap path
+  // for every single-shot sidecar-kill site; only teardownSessionSidecars
+  // bypasses it (signals all its sidecars first, confirms once, batching
+  // the grace window instead of paying it once per sidecar here).
+  private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+    return outcome;
+  }
+
+  private logSidecarReapSurvivors(
+    ownerId: string,
+    sidecarName: string,
+    outcome: ReapOutcome | null,
+  ): void {
+    if (!outcome || outcome.survivors.length === 0) {
+      return;
+    }
+    this.logEvent("session.sidecar.reap_incomplete", {
+      level: "warn",
+      sessionId: ownerId,
+      message: `Sidecar ${sidecarName} reap on ${ownerId} left ${outcome.survivors.length} process(es) alive after the confirmation window`,
+      details: { sidecarName, survivors: outcome.survivors },
+    });
+  }
+
+  // Drops sidecarProcs[sidecarName] from the owner record once its pane has
+  // been reaped, so a stopped sidecar's stale pgid can never be mistaken for
+  // a live claim by the sweep predicate. Mirrors the `delete mirrored.slots`
+  // pattern in writeWorkspaceStateWithLegacyMirror.
+  private clearSidecarProcEntry(ownerId: string, sidecarName: string): void {
+    const record = readSession(this.config.dataDir, ownerId);
+    if (!record?.sidecarProcs?.[sidecarName]) {
+      return;
+    }
+    const nextProcs = Object.fromEntries(
+      Object.entries(record.sidecarProcs).filter(([name]) => name !== sidecarName),
+    );
+    const updated: SessionRecord = { ...record };
+    if (Object.keys(nextProcs).length > 0) {
+      updated.sidecarProcs = nextProcs;
+    } else {
+      delete updated.sidecarProcs;
+    }
+    writeSession(this.config.dataDir, updated);
+  }
+
   // Kills a sidecar's tmux pane and unlinks its slot on the OWNER id (the
   // anchor's record for a desk-shared project sidecar, else the session's
   // own). Used by stopSidecar before its own event-logged write; the caller
   // re-reads its own record afterward rather than trusting this return.
+  // Never gates on sidecarTmuxAlive alone (a dead pane and an absent tmux
+  // session are exactly the states a leaked tree lives in): falls through to
+  // the recorded `sidecarProcs` identity when the tmux session is gone.
   private async killSidecarAndUnlinkSlot(ownerId: string, sidecarName: string): Promise<void> {
     this.abortSidecarUrlProbe(ownerId, sidecarName);
-    await killSidecarTmux(ownerId, sidecarName);
+    if (await sidecarTmuxAlive(ownerId, sidecarName)) {
+      await this.reapSidecarByName(ownerId, sidecarName);
+    } else {
+      const owner = readSession(this.config.dataDir, ownerId);
+      const identity = owner?.sidecarProcs?.[sidecarName];
+      if (owner && identity) {
+        const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+      }
+    }
 
     const afterKill = readSession(this.config.dataDir, ownerId);
     if (!afterKill) return;
@@ -8515,6 +8669,7 @@ export class SessionService {
     } else {
       writeSession(this.config.dataDir, { ...afterKill, updatedAt: nowIso() });
     }
+    this.clearSidecarProcEntry(ownerId, sidecarName);
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
@@ -8532,7 +8687,11 @@ export class SessionService {
     }
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
 
-    if (!(await sidecarTmuxAlive(ownerId, sidecarName))) {
+    // A dead pane or an absent tmux session with no recorded identity means
+    // there is genuinely nothing left to reap.
+    const owner = readSession(this.config.dataDir, ownerId);
+    const alive = await sidecarTmuxAlive(ownerId, sidecarName);
+    if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
       return this.enrich(session);
     }
 
@@ -8550,12 +8709,29 @@ export class SessionService {
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
   }
 
+  // Report-first sweep for sidecar process trees no live session claims.
+  // Reaping only happens when `reap` is true — callers are `spur sidecar
+  // sweep [--reap]`; `spur doctor` calls `findLeakedSidecarTrees` directly
+  // and never reaches this method, keeping doctor read-only.
+  async sweepSidecarProcesses(reap: boolean): Promise<SidecarSweepResult> {
+    const sessions = listSessions(this.config.dataDir);
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
+    if (!assembled) {
+      return { supported: false, leaked: [], reaped: [] };
+    }
+    return sweepSidecars({ ...assembled, reap });
+  }
+
+  // Signals every torn-down sidecar's pane first, then confirms the whole
+  // batch through ONE shared grace window — not one sleep per sidecar (that
+  // would multiply teardown latency by sidecar count).
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     // Resolved once for the whole teardown: re-reading it per sidecar would
     // both cost a listSessions each time and let a sibling transitioning
     // mid-loop leave the desk's sidecars half torn down.
     const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
+    const pendingBySidecar: Array<{ ownerId: string; scName: string; pending: PendingReap }> = [];
     for (const scName of sessionSidecarNames(session, project)) {
       const sidecar = project?.sidecars[scName];
       // Non-mcp project sidecars are desk-shared: while another desk member's
@@ -8581,7 +8757,13 @@ export class SessionService {
           });
         }
       }
-      await killSidecarTmux(ownerId, scName).catch(() => {});
+      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+      pendingBySidecar.push({ ownerId, scName, pending });
+    }
+    const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    for (const [index, entry] of pendingBySidecar.entries()) {
+      this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
+      this.clearSidecarProcEntry(entry.ownerId, entry.scName);
     }
   }
 
@@ -9085,6 +9267,7 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
+      modelsCacheHome: this.config.models.codexHome,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
@@ -9094,7 +9277,7 @@ export class SessionService {
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(session.agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
@@ -9325,6 +9508,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(restoreProjectConfig.mcp?.exclude.length
           ? { mcpExclude: restoreProjectConfig.mcp.exclude }
@@ -9340,7 +9524,7 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(restoreProjectConfig, {
+          withProjectAgentOptions(current.agent, restoreProjectConfig, {
             ...hookSetup,
             ...(sessionAgentConfig.planOptions ?? {}),
           }),
@@ -9932,7 +10116,8 @@ export class SessionService {
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
+      launchCommand: claudeCommand(),
+      env: { CLAUDE_CONFIG_DIR: account.configDir },
     });
     return { loginTmuxSession };
   }

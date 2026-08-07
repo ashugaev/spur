@@ -427,6 +427,90 @@ describe("session workspaceId normalization", () => {
   });
 });
 
+describe("sidecarProcs", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("keeps a valid entry across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: { dev: { pid: 1234, pgid: 1234, starttime: 5678 } },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("drops a malformed entry instead of persisting it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: {
+        dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+        broken: { pid: -1, pgid: 0, starttime: NaN } as unknown as {
+          pid: number;
+          pgid: number;
+          starttime: number;
+        },
+      },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("stays absent on a record written without the field", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toBeUndefined();
+  });
+
+  it("drops a null entry instead of throwing on read (hand-edited/corrupted JSON)", async () => {
+    // writeSession's own normalizeSessionRecord would filter this out before
+    // it ever hits disk, so a bad entry can only originate from a file
+    // written outside that path — write raw JSON directly to simulate it.
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-1.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify({
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarProcs: {
+          dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+          broken: null,
+        },
+      })}\n`,
+    );
+
+    expect(() => readSession(dataDir, "api-1")).not.toThrow();
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();
