@@ -1035,8 +1035,7 @@ function withProjectAgentOptions(
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
 } {
-  const reasoningEffort =
-    agent === "claude" || agent === "codex" ? project.reasoningEffort?.[agent] : undefined;
+  const reasoningEffort = agent === "cursor" ? undefined : project.reasoningEffort?.[agent];
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
@@ -7341,15 +7340,10 @@ export class SessionService {
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(
-          withProjectAgentOptions(agent, project, {
-            ...hookSetup,
-          }),
-          {
-            planMode,
-            restrictWrites,
-          },
-        ),
+        ...withAgentModeOptions(withProjectAgentOptions(agent, project, hookSetup), {
+          planMode,
+          restrictWrites,
+        }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
