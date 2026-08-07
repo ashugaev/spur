@@ -1691,7 +1691,10 @@ export async function startServer(
       } finally {
         // Reached even when a teardown step throws, so a failed cleanup costs the signal
         // path nothing: it still exits here instead of waiting out the backstop or
-        // systemd's SIGKILL. Programmatic stop() keeps propagating the error.
+        // systemd's SIGKILL. Note the awaits above swallow their own failures by design —
+        // awaitBounded and stopTriggersBounded log and continue, because a best-effort
+        // teardown must not abandon the steps behind it. Only a synchronous throw
+        // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
         disarmBackstop?.();
         if (exitProcess) {
           process.exit(0);
