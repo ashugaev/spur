@@ -20281,13 +20281,12 @@ describe("SessionService", () => {
     });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
     // Same call-order fragility as the previous test: drive "alive" off the
-    // real launch/kill instead of a fixed call-count queue.
+    // real launch instead of a fixed call-count queue. Teardown no longer goes
+    // through a tmux kill helper — it reaps the pane group — so nothing flips
+    // this back to false here; the slot unlink is what this test pins.
     let sidecarAlive = false;
     createTmuxSidecarSessionMock.mockImplementation(async () => {
       sidecarAlive = true;
-    });
-    killSidecarTmuxMock.mockImplementation(async () => {
-      sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
 
