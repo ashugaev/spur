@@ -785,7 +785,6 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -936,7 +935,6 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -1064,13 +1062,11 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
   notes?: string;
 }
 

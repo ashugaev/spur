@@ -209,8 +209,8 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
-- `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`; each resolves to `medium` when omitted. A request value overrides this value. Applies to fresh launch, resume, restore, and `send` relaunch. Cursor rejects request values and ignores this field.
-- `projects.<id>.codexArgs`: optional raw Codex arguments. Must not set `model_reasoning_effort`; use `reasoningEffort` so typed request values retain precedence.
+- `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
+- `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
