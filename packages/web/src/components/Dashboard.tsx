@@ -1055,14 +1055,17 @@ export function Dashboard() {
   // True only when spawnModel reflects a real user choice (a direct dropdown
   // click, or a restored draft/lastSelection value that was itself once a
   // real choice) -- never an auto-preselect. ModelSelect's preselectWhenEmpty
-  // effect can only run while spawnModel is null, so this ref is kept false
+  // effect can only run while spawnModel is null, so this flag is kept false
   // whenever spawnModel is null and true whenever it isn't, EXCEPT right
   // after that auto-preselect fires: that path sets spawnModel through the
-  // plain onChange (not onUserSelect), so the ref stays false. Gates both the
-  // persisted draft's model field and the spawn payload's model field so an
-  // auto-pick the user never interacted with is never frozen into storage or
-  // submitted on their behalf.
-  const spawnModelExplicitRef = useRef(false);
+  // plain onChange (not onUserSelect), so the flag stays false. Gates both
+  // the persisted draft's model field and the spawn payload's model field so
+  // an auto-pick the user never interacted with is never frozen into storage
+  // or submitted on their behalf. Kept in state (not a ref) so re-clicking an
+  // already-selected model -- which flips this flag without changing
+  // spawnModel itself, so React would otherwise bail out of the re-render --
+  // still reaches the spawnDraft memo below as a real dependency change.
+  const [spawnModelExplicit, setSpawnModelExplicit] = useState(false);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
   const spawnDraftDirtyRef = useRef(false);
@@ -1523,7 +1526,7 @@ export function Dashboard() {
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
-    spawnModelExplicitRef.current = (draft?.model ?? null) !== null;
+    setSpawnModelExplicit(draft?.modelIsExplicit ?? false);
     setSpawnBranch(draft?.branch ?? "");
     spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
     setSpawnPlanMode(draft?.planMode ?? false);
@@ -1543,13 +1546,15 @@ export function Dashboard() {
     return draft;
   };
 
-  // Same as restoreSpawnDraft, but when the target project has no saved
-  // draft, seeds agent/model from lastSelection instead of the claude/Default
-  // reset applySpawnDraft falls back to. Needed everywhere a project
-  // resolution can land with no draft -- not just the initial modal-open
-  // click, but also this project-settling effect below, which re-fires (and
-  // re-resolves the project) once configuredProjectOptions finishes loading
-  // after the modal was already opened against the not-yet-resolved "" project.
+  // Wraps restoreSpawnDraft (now purely an internal helper -- every live call
+  // site below goes through this wrapper instead) to also seed agent/model
+  // from lastSelection when the target project has no saved draft, instead
+  // of the claude/Default reset applySpawnDraft falls back to. Needed
+  // everywhere a project resolution can land with no draft -- not just the
+  // initial modal-open click, but also this project-settling effect below,
+  // which re-fires (and re-resolves the project) once configuredProjectOptions
+  // finishes loading after the modal was already opened against the
+  // not-yet-resolved "" project.
   const restoreSpawnDraftOrLastSelection = (nextProjectId: string) => {
     const draft = restoreSpawnDraft(nextProjectId);
     if (!draft) {
@@ -1557,7 +1562,7 @@ export function Dashboard() {
       setSpawnAgent(agent);
       const rememberedModel = lastSelection.modelByAgent[agent] ?? null;
       setSpawnModel(rememberedModel);
-      spawnModelExplicitRef.current = rememberedModel !== null;
+      setSpawnModelExplicit(rememberedModel !== null);
     }
   };
 
@@ -1608,7 +1613,8 @@ export function Dashboard() {
       // preselect's first pick into storage and block ModelSelect's
       // preselect effect from ever reconsidering it (e.g. once the user
       // favorites a different model).
-      model: spawnModelExplicitRef.current ? spawnModel : null,
+      model: spawnModelExplicit ? spawnModel : null,
+      modelIsExplicit: spawnModelExplicit,
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
@@ -1624,6 +1630,7 @@ export function Dashboard() {
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
+    spawnModelExplicit,
     spawnOpen,
     spawnPlanMode,
     spawnProjectId,
@@ -1802,7 +1809,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      if (spawnModel !== null && spawnModelExplicitRef.current) payload.model = spawnModel;
+      if (spawnModel !== null && spawnModelExplicit) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
@@ -1845,7 +1852,7 @@ export function Dashboard() {
       });
       setSpawnPrompt("");
       setSpawnModel(null);
-      spawnModelExplicitRef.current = false;
+      setSpawnModelExplicit(false);
       setSpawnBranch("");
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
@@ -2597,12 +2604,12 @@ export function Dashboard() {
                   // Only onUserSelect (a real dropdown click) marks the model
                   // explicit; this onChange also fires for ModelSelect's own
                   // auto-preselect, which must not count as a user choice.
-                  if (next === null) spawnModelExplicitRef.current = false;
+                  if (next === null) setSpawnModelExplicit(false);
                   setSpawnModel(next);
                 },
                 preselectWhenEmpty: !isShepherdSpawn,
                 onUserSelect: (id) => {
-                  spawnModelExplicitRef.current = id !== null;
+                  setSpawnModelExplicit(id !== null);
                   // preselectWhenEmpty hides the Default menu item for every
                   // branch except Shepherd, so `id` is only ever null here on
                   // the Shepherd path (which the !isShepherdSpawn guard skips).
@@ -2705,12 +2712,12 @@ export function Dashboard() {
               setSpawnAgent(next);
               if (isShepherdSpawn) {
                 setSpawnModel(null);
-                spawnModelExplicitRef.current = false;
+                setSpawnModelExplicit(false);
                 return;
               }
               const rememberedModel = lastSelection.modelByAgent[next] ?? null;
               setSpawnModel(rememberedModel);
-              spawnModelExplicitRef.current = rememberedModel !== null;
+              setSpawnModelExplicit(rememberedModel !== null);
               lastSelection.recordAgent(next);
             }}
             onClose={closeSpawnModal}

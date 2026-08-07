@@ -10,6 +10,7 @@ export interface SpawnDraft {
   prompt: string;
   agent: AgentName;
   model: string | null;
+  modelIsExplicit: boolean;
   branch: string;
   branchIsExplicit: boolean;
   workspaceMode: WorkspaceMode;
@@ -64,6 +65,7 @@ function isStoredSpawnDraft(
     typeof draft.prompt === "string" &&
     isAgentName(draft.agent) &&
     (draft.model === null || typeof draft.model === "string") &&
+    typeof draft.modelIsExplicit === "boolean" &&
     typeof draft.branch === "string" &&
     typeof draft.branchIsExplicit === "boolean" &&
     isWorkspaceMode(draft.workspaceMode) &&

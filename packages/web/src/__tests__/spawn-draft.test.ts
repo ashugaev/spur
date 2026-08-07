@@ -14,6 +14,7 @@ const draft: SpawnDraft = {
   prompt: "Fix reconnect state loss",
   agent: "codex",
   model: "gpt-5.6-codex",
+  modelIsExplicit: true,
   branch: "feature/spawn-draft",
   branchIsExplicit: true,
   workspaceMode: "worktree",
@@ -44,6 +45,13 @@ describe("spawn draft storage", () => {
     ["malformed", "not-json"],
     ["old schema", JSON.stringify({ ...draft, version: 0, savedAt: NOW })],
     ["stale", JSON.stringify({ ...draft, version: 1, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
+    [
+      "a v1 draft written before modelIsExplicit existed",
+      (() => {
+        const { modelIsExplicit: _modelIsExplicit, ...legacyDraft } = draft;
+        return JSON.stringify({ ...legacyDraft, version: 1, savedAt: NOW });
+      })(),
+    ],
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
     window.localStorage.setItem(key, value);

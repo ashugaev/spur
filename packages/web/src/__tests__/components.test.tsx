@@ -1297,6 +1297,7 @@ describe("Dashboard", () => {
       prompt: "Stale Shepherd prompt",
       agent: "codex",
       model: "gpt-5.6-codex",
+      modelIsExplicit: true,
       branch: "feature/stale-shepherd",
       branchIsExplicit: true,
       workspaceMode: "worktree",
@@ -1625,6 +1626,121 @@ describe("Dashboard", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Close" }));
       fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
+
+    it("keeps an explicit re-click of the already-selected model over a later favorite", async () => {
+      // Regression test: re-clicking a model row that is already the current
+      // selection calls onChange with the SAME value, so React bails out of
+      // the re-render -- but onUserSelect still needs to mark the choice
+      // explicit so the draft-persisting memo picks it up on its next real
+      // render, not silently keep whatever explicitness was cached before.
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      // preselectWhenEmpty auto-picks "Sonnet", the first model with no
+      // favorites yet -- not a real user choice.
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Add favorite Haiku" }));
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Remove favorite Haiku" })).toBeInTheDocument();
+      });
+
+      // Explicitly re-click Sonnet, which is already the current selection.
+      fireEvent.click(screen.getByRole("menuitem", { name: /Sonnet/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+    });
+
+    it("falls back to the last-selected model when switching to a project with no draft", async () => {
+      // syncSpawnProject (an explicit "Spawn project" dropdown change) is the
+      // third live call site of restoreSpawnDraftOrLastSelection, alongside
+      // the initial modal-open click and the project-settling effect covered
+      // above -- it must fall back to lastSelection the same way, not reset
+      // to Default/null.
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku" } }),
+      );
+      writeSpawnDraft({
+        projectId: "api",
+        prompt: "",
+        agent: "claude",
+        model: "opus",
+        modelIsExplicit: true,
+        branch: "",
+        branchIsExplicit: false,
+        workspaceMode: "default",
+        defaultBranch: "",
+        planMode: false,
+        selfDestruct: false,
+        selfDestructConditions: "",
+        steps: [],
+        trackerUrl: null,
+      });
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                { id: "sonnet", label: "Sonnet" },
+                { id: "opus", label: "Opus" },
+                { id: "haiku", label: "Haiku" },
+              ],
+            }),
+          );
+        }
+        if (url === "/api/sessions") {
+          return new Response(
+            JSON.stringify({
+              projects: [
+                { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+                { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
+              ],
+              sessions: [],
+            }),
+          );
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "sp" },
+      });
 
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
@@ -2592,6 +2708,7 @@ describe("Dashboard", () => {
       prompt: "Keep the chosen branch",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "feature/explicit-branch",
       branchIsExplicit: true,
       workspaceMode: "default",
@@ -2690,6 +2807,7 @@ describe("Dashboard", () => {
       prompt: "Stored prompt",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "",
       branchIsExplicit: false,
       workspaceMode: "default",
@@ -2746,6 +2864,7 @@ describe("Dashboard", () => {
       prompt: "Saved Spur draft",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "feature/sp-draft",
       branchIsExplicit: true,
       workspaceMode: "default",
