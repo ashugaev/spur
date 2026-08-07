@@ -1531,6 +1531,23 @@ export function Dashboard() {
     return draft;
   };
 
+  // Same as restoreSpawnDraft, but when the target project has no saved
+  // draft, seeds agent/model from lastSelection instead of the claude/Default
+  // reset applySpawnDraft falls back to. Needed everywhere a project
+  // resolution can land with no draft -- not just the initial modal-open
+  // click, but also this project-settling effect below, which re-fires (and
+  // re-resolves the project) once configuredProjectOptions finishes loading
+  // after the modal was already opened against the not-yet-resolved "" project.
+  const restoreSpawnDraftOrLastSelection = (nextProjectId: string) => {
+    const draft = restoreSpawnDraft(nextProjectId);
+    if (!draft) {
+      const agent = lastSelection.lastAgent ?? "claude";
+      setSpawnAgent(agent);
+      setSpawnModel(lastSelection.modelByAgent[agent] ?? null);
+    }
+    return draft;
+  };
+
   useEffect(() => {
     if (spawnPinnedProjectId) {
       if (spawnProjectId !== spawnPinnedProjectId) {
@@ -1547,7 +1564,7 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
       if (spawnOpen && !carriesUnscopedEdits) {
-        restoreSpawnDraft(nextProjectId);
+        restoreSpawnDraftOrLastSelection(nextProjectId);
       } else {
         setSpawnProjectId(nextProjectId);
       }
@@ -2181,12 +2198,7 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    const draft = restoreSpawnDraft(resolvePreferredSpawnProjectId());
-    if (!draft) {
-      const agent = lastSelection.lastAgent ?? "claude";
-      setSpawnAgent(agent);
-      setSpawnModel(lastSelection.modelByAgent[agent] ?? null);
-    }
+    restoreSpawnDraftOrLastSelection(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 

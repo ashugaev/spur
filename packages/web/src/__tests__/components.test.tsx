@@ -1414,6 +1414,57 @@ describe("Dashboard", () => {
       });
     });
 
+    it("keeps the persisted agent/model when the spawn modal opens before the project list has loaded", async () => {
+      // "Spawn Session" renders unconditionally, before /api/sessions
+      // resolves, so a slow project-list fetch can settle AFTER the modal is
+      // already open. Regression test for a race where the project-settling
+      // effect (which re-resolves the default spawn project once
+      // configuredProjectOptions finishes loading) called plain
+      // restoreSpawnDraft and discarded the agent/model that openSpawnModal
+      // had already seeded from lastSelection, falling back to the fallback
+      // pick ("sonnet") instead of the persisted "haiku".
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku" } }),
+      );
+      let resolveSessions: (() => void) | null = null;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          const agent = new URL(url, "http://localhost").searchParams.get("agent") ?? "";
+          const models =
+            agent === "codex"
+              ? [{ id: "gpt-5.5", label: "GPT-5.5" }]
+              : [
+                  { id: "sonnet", label: "Sonnet" },
+                  { id: "opus", label: "Opus" },
+                  { id: "haiku", label: "Haiku" },
+                ];
+          return new Response(JSON.stringify({ models }));
+        }
+        if (url === "/api/sessions") {
+          await new Promise<void>((resolve) => {
+            resolveSessions = resolve;
+          });
+          return new Response(JSON.stringify(sessionsPayload()));
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+
+      render(<Dashboard />);
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      resolveSessions?.();
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
+
     it("persists the agent and reseeds the model when switching agent in the spawn dialog", async () => {
       mockDashboardFetch();
 
