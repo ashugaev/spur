@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import type * as timersPromisesModule from "node:timers/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarClaims,
   collectTree,
@@ -18,6 +19,25 @@ import {
 } from "../../../src/sidecars/reap.js";
 import type { SessionRecord } from "../../../src/types.js";
 import { createTempDir } from "../../helpers/common.js";
+
+// Spy on the module's own sleep so timing assertions can count invocations
+// instead of trusting wall-clock, which a loaded CI host can blow past even
+// when the implementation is correct (a single `ps` fork can itself take
+// hundreds of ms under contention). Defaults to the real delay so every
+// other test in this file — including the real-process reap below — keeps
+// its actual timing; only the ONE test that needs invocation counts
+// overrides it.
+const timerPromisesSleepMock = vi.hoisted(() => vi.fn<(ms: number) => Promise<void>>());
+
+vi.mock("node:timers/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof timersPromisesModule>();
+  return { ...actual, setTimeout: timerPromisesSleepMock };
+});
+
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+  timerPromisesSleepMock.mockReset().mockImplementation((ms: number) => actual.setTimeout(ms));
+});
 
 // Narrows `T | undefined` without a non-null assertion.
 function must<T>(value: T | undefined, message: string): T {
@@ -369,22 +389,29 @@ describe("_computeSurvivorCandidatesForTests", () => {
 
 describe("confirmReaps", () => {
   it("sleeps ONE shared grace window regardless of pending count", async () => {
+    // Deterministic by call count, not wall-clock: a loaded host can push a
+    // single real sleep well past any fixed millisecond budget, which would
+    // make a timing-based assertion flaky without the implementation ever
+    // regressing. Skip the real delay entirely and just count invocations.
+    timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
     const pendings = [1, 2, 3].map((n) => ({
       sessionName: `sidecar-${n}`,
       panePid: null,
       // A pid that certainly doesn't exist — still exercises the sleep path
-      // (tree non-empty) without requiring a real spawned process.
+      // (tree non-empty) without requiring a real spawned process. It also
+      // fails process.kill(pid, 0) with ESRCH on the very first probe, so
+      // confirmGone's own interval sleep is never reached — the only sleep
+      // call left to observe is confirmReaps' shared grace window.
       tree: [900000 + n],
       ownedGroups: [],
       snapshot: { ok: true, byPid: new Map(), byPgid: new Map() } as ProcSnapshot,
     }));
-    const startedAt = Date.now();
     const outcomes = await confirmReaps(pendings, 100);
-    const elapsedMs = Date.now() - startedAt;
     expect(outcomes).toHaveLength(3);
-    // Three serial 100ms sleeps would take >=300ms; one shared window stays
-    // well under that.
-    expect(elapsedMs).toBeLessThan(250);
+    // One shared window sleeps exactly once; per-pending sleeping would call
+    // this three times, once per pending.
+    expect(timerPromisesSleepMock).toHaveBeenCalledTimes(1);
+    expect(timerPromisesSleepMock).toHaveBeenCalledWith(100);
   });
 
   it("reaps a real spawned process tree with zero survivors", async () => {
