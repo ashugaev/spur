@@ -24,7 +24,7 @@ CONFIG FOOTGUNS
 
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
-  Provider reasoning effort comes only from current project config. An omitted provider emits no flag; typed Codex effort follows legacy raw arguments. Reference: `docs/configuration.md`.
+  Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
   Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, and protect the instance path. One canonical problem path emits one warning per daemon lifetime.
