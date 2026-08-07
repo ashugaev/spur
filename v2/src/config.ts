@@ -1354,9 +1354,6 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
-  if (codexArgs?.some((arg) => arg.includes("model_reasoning_effort"))) {
-    throw new Error(`${label}.codexArgs must not set model_reasoning_effort; use reasoningEffort`);
-  }
   const reasoningEffort = parseProjectReasoningEffort(projectId, raw["reasoningEffort"]);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);

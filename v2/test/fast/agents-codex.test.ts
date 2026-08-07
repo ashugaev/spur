@@ -147,6 +147,16 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="medium"'`);
   });
 
+  it("appends typed reasoning effort after legacy raw args", () => {
+    const plan = buildCodexPlan("prompt", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"'],
+      reasoningEffort: "medium",
+    });
+    expect(plan.launchCommand.indexOf(`'-c' 'model_reasoning_effort="high"'`)).toBeLessThan(
+      plan.launchCommand.indexOf(`-c 'model_reasoning_effort="medium"'`),
+    );
+  });
+
   it("passes startup images on the launch command and skips tmux prompt delivery", () => {
     const plan = buildCodexPlan("describe this", {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
@@ -224,6 +234,16 @@ describe("buildCodexResumePlan", () => {
   it("sets configured reasoning effort on resume", () => {
     const plan = buildCodexResumePlan("thread-123", "codex", { reasoningEffort: "high" });
     expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="high"'`);
+  });
+
+  it("appends typed reasoning effort after legacy raw args on resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", {
+      codexArgs: ["-c", 'model_reasoning_effort="low"'],
+      reasoningEffort: "high",
+    });
+    expect(plan.launchCommand.indexOf(`'-c' 'model_reasoning_effort="low"'`)).toBeLessThan(
+      plan.launchCommand.indexOf(`-c 'model_reasoning_effort="high"'`),
+    );
   });
 
   it("does not include initialMessage", () => {

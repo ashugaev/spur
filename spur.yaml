@@ -25,7 +25,8 @@ projects:
           kind: link
           value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
     reasoningEffort:
-      codex: high
+      claude: medium
+      codex: medium
     codexArgs:
       - -c
       - 'service_tier="default"'

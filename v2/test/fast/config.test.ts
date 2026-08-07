@@ -1284,7 +1284,7 @@ projects:
     expect(config.projects["backend"]?.codexArgs).toEqual(["-c", 'service_tier="fast"']);
   });
 
-  it("rejects reasoning effort in raw Codex args", async () => {
+  it("allows legacy reasoning effort in raw Codex args", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1294,9 +1294,10 @@ projects:
       - 'model_reasoning_effort="high"'
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.codexArgs must not set model_reasoning_effort; use reasoningEffort",
-    );
+    expect(loadConfig(configPath).projects["backend"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+    ]);
   });
 
   it("parses provider reasoning effort", async () => {
@@ -2539,7 +2540,7 @@ projects:
     ]).toEqual([true, undefined, []]);
     expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
     expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
-    expect(config.projects["sp"]?.reasoningEffort).toEqual({ codex: "high" });
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}} --comment.",
@@ -2552,10 +2553,10 @@ projects:
     );
   });
 
-  it("sets high Codex reasoning for the sp project", async () => {
+  it("sets medium provider reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.reasoningEffort).toEqual({ codex: "high" });
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {

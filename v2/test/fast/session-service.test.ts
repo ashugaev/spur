@@ -1293,7 +1293,6 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
       model: "opus",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
-      reasoningEffort: "medium",
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
@@ -1874,7 +1873,7 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(placeholder.reasoningEffort).toBe("high");
+    expect(placeholder).not.toHaveProperty("reasoningEffort");
     await vi.waitFor(() => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "codex",
@@ -2803,7 +2802,6 @@ describe("SessionService", () => {
         planMode: true,
         model: "opus",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
-        reasoningEffort: "medium",
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -2851,7 +2849,6 @@ describe("SessionService", () => {
         restrictWrites: true,
         model: "opus",
         agentSessionId: PINNED_CLAUDE_SESSION_ID,
-        reasoningEffort: "medium",
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -2933,7 +2930,6 @@ describe("SessionService", () => {
       expect.stringContaining("slot-instructions\nhello"),
       {
         planMode: true,
-        reasoningEffort: "medium",
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -2949,7 +2945,7 @@ describe("SessionService", () => {
     expect(result.planMode).toBe(true);
   });
 
-  it("uses request reasoning effort over the project value", async () => {
+  it("uses project reasoning effort for a fresh launch", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -2972,13 +2968,12 @@ describe("SessionService", () => {
       project: "api",
       agent: "codex",
       prompt: "hello",
-      reasoningEffort: "low",
     });
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
-      reasoningEffort: "low",
+      reasoningEffort: "high",
     });
-    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({ reasoningEffort: "low" });
+    expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("reasoningEffort");
   });
 
   it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
@@ -3004,7 +2999,6 @@ describe("SessionService", () => {
       "codex",
       "slot-instructions\ndescribe this image",
       {
-        reasoningEffort: "medium",
         startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
       },
     );
@@ -3042,7 +3036,6 @@ describe("SessionService", () => {
 
     const [, initialMessage, options] = buildAgentLaunchPlanMock.mock.calls[0] ?? [];
     expect(options).toEqual({
-      reasoningEffort: "medium",
       startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
     });
     expect(initialMessage).toContain(
@@ -3065,7 +3058,7 @@ describe("SessionService", () => {
     });
 
     const [, initialMessage, options] = buildAgentLaunchPlanMock.mock.calls[0] ?? [];
-    expect(options).toEqual({ reasoningEffort: "medium" });
+    expect(options).toEqual({});
     expect(initialMessage).toContain(
       "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-report.pdf]",
     );
@@ -3248,7 +3241,6 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
       model: "opus",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
-      reasoningEffort: "medium",
     });
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
@@ -13525,13 +13517,21 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
   });
 
-  it("uses persisted plan mode and reasoning effort during native send recovery", async () => {
+  it("uses persisted plan mode and current project reasoning effort during native send recovery", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          reasoningEffort: { claude: "high" },
+        },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
       agent: "claude",
       planMode: true,
-      reasoningEffort: "high",
       agentSessionId: "session-uuid",
       prompt: "hello",
       branch: "api-1",
@@ -16651,7 +16651,7 @@ describe("SessionService", () => {
       "claude",
       "/tmp/spur-worktrees/api/api-1",
       'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
-      { reasoningEffort: "medium" },
+      {},
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith({
       sessionName: "api-1",
@@ -16770,7 +16770,7 @@ describe("SessionService", () => {
       "claude",
       "/tmp/spur-worktrees/api/api-1",
       'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.',
-      { planMode: true, reasoningEffort: "medium" },
+      { planMode: true },
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -16822,7 +16822,7 @@ describe("SessionService", () => {
       "claude",
       "/tmp/spur-worktrees/api/api-1",
       "",
-      { reasoningEffort: "medium" },
+      {},
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -16904,7 +16904,7 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
       'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
-      { reasoningEffort: "medium" },
+      {},
     );
     expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).toHaveBeenCalledWith({
@@ -17029,9 +17029,7 @@ describe("SessionService", () => {
 
     const restored = await service.restore("api-1");
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
-      reasoningEffort: "medium",
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {});
     expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
     expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
@@ -17375,9 +17373,7 @@ describe("SessionService", () => {
 
       await service.reopen("api-1");
 
-      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
-        reasoningEffort: "medium",
-      });
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {});
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
     });
@@ -17592,12 +17588,20 @@ describe("SessionService", () => {
   });
 
   it("restore falls back to a fresh launch when codex buildAgentRestorePlan returns null", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          reasoningEffort: { codex: "low" },
+        },
+      },
+    });
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
       agent: "codex",
-      reasoningEffort: "low",
       prompt: "hello",
       branch: "api-1",
       worktree: true,
@@ -20514,7 +20518,6 @@ describe("SessionService", () => {
         {
           model: "opus",
           agentSessionId: PINNED_CLAUDE_SESSION_ID,
-          reasoningEffort: "medium",
         },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
@@ -20927,7 +20930,6 @@ describe("SessionService", () => {
         {
           model: "opus",
           agentSessionId: PINNED_CLAUDE_SESSION_ID,
-          reasoningEffort: "medium",
         },
       );
       expect(
