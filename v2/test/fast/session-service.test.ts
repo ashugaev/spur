@@ -8043,6 +8043,29 @@ describe("SessionService", () => {
       );
     });
 
+    it("releases the admission reservation from an unknown-mode spawn so the next spawn is not refused", async () => {
+      mockClaudeJsonlState("waiting");
+      const configured = configWithModes();
+      loadConfigMock.mockReturnValue({
+        ...configured,
+        admission: { ...configured.admission, maxLiveSessions: 1 },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello", mode: "bogus" }),
+      ).rejects.toThrow('Unknown mode "bogus"; configured modes: manager, council');
+      expect(writeSessionMock).not.toHaveBeenCalled();
+
+      // If the reservation from the rejected spawn above leaked, this second
+      // spawn would be refused by the cap of 1 instead of succeeding.
+      await expect(service.spawn({ project: "api", prompt: "hello" })).resolves.toMatchObject({
+        id: "api-1",
+      });
+    });
+
     it("counts a session inside its restore warmup window exactly once though its on-disk status is stopped", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
       listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", status: "stopped" })]);
