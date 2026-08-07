@@ -2021,6 +2021,7 @@ describe("Spur web API routes", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
       delete process.env["GITHUB_TOKEN"];
+      delete process.env["GITLAB_TOKEN"];
     });
 
     function makePrGql(overrides: Record<string, unknown> = {}) {
