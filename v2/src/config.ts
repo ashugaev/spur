@@ -1,18 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir, totalmem } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  type AdmissionCapSource,
+  type AdmissionConfig,
+  type AgentReasoningEffortConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
-  type BacklogSpawnConfig,
   type CronSourceConfig,
+  type GitHubCiSourceConfig,
+  type GitHubAdaptivePollConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
   type JiraSourceConfig,
@@ -42,11 +47,19 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+} from "./user-action-log.js";
+import { DEFAULT_UI_PORT } from "./ports.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
+import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -54,7 +67,6 @@ const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;
 const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
-const DEFAULT_UI_PORT = 5555;
 const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_VOICE_LANGUAGE = "auto";
@@ -75,7 +87,13 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
+  codexHome: string;
+  voiceProvider:
+    | "whisper_cpp"
+    | "faster_whisper"
+    | "azure_openai"
+    | "openai_compatible"
+    | "openai_realtime";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
@@ -165,6 +183,35 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+// Used for ratio fields (e.g. admission.reserveFraction) that scale a byte
+// count: zero would derive a cap of always-zero, above 1 would reserve more
+// than the host has.
+function asOptionalFraction(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`${label} must be a positive number no greater than 1`);
+  }
+  return value;
+}
+
+function asOptionalPercent(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error(`${label} must be a number from 0 to 100`);
+  }
+  return value;
+}
+
+// Used for values consumed as loop bounds / archive indices, where a fractional value
+// would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
+function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -224,6 +271,27 @@ function parseDefaultModels(
     models[key] = asString(entry, `${label}.defaultModels.${key}`);
   }
   return models;
+}
+
+function parseProjectReasoningEffort(
+  projectId: string,
+  value: unknown,
+): AgentReasoningEffortConfig | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
+  const effort: AgentReasoningEffortConfig = {};
+  for (const [agent, entry] of Object.entries(raw)) {
+    if (agent !== "claude" && agent !== "codex") {
+      throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
+    }
+    if (entry !== "low" && entry !== "medium" && entry !== "high") {
+      throw new Error(
+        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
+      );
+    }
+    effort[agent] = entry;
+  }
+  return effort;
 }
 
 function parseTriggerSpawnBlock(
@@ -432,6 +500,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    codexHome: join(homedir(), ".codex"),
     voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
     voiceLanguage: DEFAULT_VOICE_LANGUAGE,
@@ -514,18 +583,25 @@ export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): voi
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible" | undefined {
+):
+  | "whisper_cpp"
+  | "faster_whisper"
+  | "azure_openai"
+  | "openai_compatible"
+  | "openai_realtime"
+  | undefined {
   if (value === undefined) return undefined;
   if (
     value === "whisper_cpp" ||
     value === "faster_whisper" ||
     value === "azure_openai" ||
-    value === "openai_compatible"
+    value === "openai_compatible" ||
+    value === "openai_realtime"
   ) {
     return value;
   }
   throw new Error(
-    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"`,
+    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime"`,
   );
 }
 
@@ -535,6 +611,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   }
   if (source.type === "sentry") {
     return [SENTRY_ISSUE_NEW_EVENT];
+  }
+  if (source.type === "github-ci") {
+    return [GITHUB_CI_RUN_COMPLETED_EVENT];
   }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
@@ -574,6 +653,26 @@ function parseCronSource(
   };
 }
 
+function parseGitHubAdaptivePoll(
+  value: unknown,
+  sourceLabel: string,
+  intervalMs: number,
+): GitHubAdaptivePollConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `${sourceLabel}.adaptivePoll`;
+  const raw = asObject(value, label);
+  const slowIntervalMs =
+    asOptionalNumber(raw["slowIntervalMs"], `${label}.slowIntervalMs`) ?? intervalMs * 5;
+  if (slowIntervalMs <= intervalMs) {
+    throw new Error(`${label}.slowIntervalMs must be greater than ${sourceLabel}.intervalMs`);
+  }
+  const activeGraceMs = asOptionalNumber(raw["activeGraceMs"], `${label}.activeGraceMs`) ?? 600_000;
+  return { slowIntervalMs, activeGraceMs };
+}
+
 function parseReviewSource<TProvider extends ReviewProviderId>(
   provider: TProvider,
   projectId: string,
@@ -582,12 +681,20 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
 ): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
+  const draft = asOptionalBoolean(raw["draft"], `${label}.draft`);
+  const intervalMs = asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000;
+  const adaptivePoll =
+    provider === "github"
+      ? parseGitHubAdaptivePoll(raw["adaptivePoll"], label, intervalMs)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
-    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    intervalMs,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
+    ...(draft !== undefined ? { draft } : {}),
+    ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -649,21 +756,6 @@ function parseJiraSource(
   };
 }
 
-function parseBacklogSpawn(
-  projectId: string,
-  backlogId: string,
-  value: unknown,
-): BacklogSpawnConfig {
-  const label = `projects.${projectId}.backlog.${backlogId}.spawn`;
-  const raw = asObject(value, label);
-  const prompt = asOptionalString(raw["prompt"], `${label}.prompt`);
-  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
-  return {
-    ...(prompt !== undefined ? { prompt } : {}),
-    ...(agent !== undefined ? { agent } : {}),
-  };
-}
-
 function parseBacklog(
   projectId: string,
   backlogId: string,
@@ -695,9 +787,33 @@ function parseBacklog(
     query: asString(raw["query"], `${label}.query`),
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
-    ...(raw["spawn"] !== undefined
-      ? { spawn: parseBacklogSpawn(projectId, backlogId, raw["spawn"]) }
-      : {}),
+  };
+}
+
+function parseGitHubCiSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): GitHubCiSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const repo = asString(raw["repo"], `${label}.repo`);
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts[0] === "" || repoParts[1] === "") {
+    throw new Error(`${label}.repo must be "owner/name"`);
+  }
+  const conclusion = asOptionalString(raw["conclusion"], `${label}.conclusion`) ?? "success";
+  if (conclusion !== "success" && conclusion !== "any") {
+    throw new Error(`${label}.conclusion must be "success" or "any"`);
+  }
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  return {
+    type: "github-ci",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    repo,
+    conclusion,
+    ...(branch !== undefined ? { branch } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
   };
 }
 
@@ -807,6 +923,9 @@ function parseSource(
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
   }
+  if (type === "github-ci") {
+    return parseGitHubCiSource(projectId, sourceId, raw);
+  }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
 }
@@ -914,8 +1033,31 @@ function parseSidecars(
     }
     const entryLabel = `${label}.${name}`;
     const entryRaw = asObject(entry, entryLabel);
-    const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
+    // Object.hasOwn guards against a sidecar name like "constructor"/"toString"
+    // (VALID_ID_RE allows them) resolving to Object.prototype's own members
+    // instead of falling through to the normal "unknown built-in" path below.
+    const builtin = Object.hasOwn(BUILTIN_SIDECARS, name) ? BUILTIN_SIDECARS[name] : undefined;
+    if (builtin) {
+      // Built-ins carry a code-only command/ports/mcp/agents (bundle-resolved
+      // bin, MCP wiring). YAML only ever overrides "autoStart": MCP sidecars
+      // start pre-agent-launch, ahead of the dependency-aware autostart pass,
+      // so "dependsOn" (and any other override) can't be honored — reject it
+      // at the boundary instead of silently dropping it.
+      const extraKeys = Object.keys(entryRaw).filter((key) => key !== "autoStart");
+      if (extraKeys.length > 0) {
+        throw new Error(
+          `${entryLabel} is a built-in sidecar; only "autoStart" may be set here (got: ${extraKeys.join(", ")}). ` +
+            `Its command/env/ports/mcp/agents are fixed in code, and "dependsOn" is not supported because MCP ` +
+            `sidecars start before the agent launches, ahead of the dependency-aware autostart pass. ` +
+            `Use a different sidecar name to define your own.`,
+        );
+      }
+      result[name] = { ...builtin.config, autoStart };
+      continue;
+    }
+    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
+    const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
     if (envRaw !== undefined) {
@@ -991,9 +1133,75 @@ function parseSidecars(
         );
       }
     }
-    result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
+    result[name] = {
+      command,
+      autoStart,
+      ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
+      ...(env ? { env } : {}),
+      ...(ports ? { ports } : {}),
+    };
   }
+  validateSidecarDependencies(label, result);
   return result;
+}
+
+function validateSidecarDependencies(label: string, sidecars: Record<string, SidecarConfig>): void {
+  for (const [name, sidecar] of Object.entries(sidecars)) {
+    const dependencies = sidecar.dependsOn ?? [];
+    const seen = new Set<string>();
+    for (const dependency of dependencies) {
+      const dependencyLabel = `${label}.${name}.dependsOn`;
+      if (dependency === name) {
+        throw new Error(`${dependencyLabel} must not include the sidecar itself`);
+      }
+      if (seen.has(dependency)) {
+        throw new Error(`${dependencyLabel} must not include duplicate sidecar "${dependency}"`);
+      }
+      if (!sidecars[dependency]) {
+        throw new Error(`${dependencyLabel} references unknown sidecar "${dependency}"`);
+      }
+      // startSidecarWithDependencies recurses over the raw project sidecars, so
+      // a dependency on an agent-scoped built-in would start it for an agent it
+      // is not scoped to (and regardless of its own autoStart). Built-in MCP
+      // sidecars also start before the agent launches, ahead of this
+      // dependency-aware pass, so the ordering could not be honored anyway.
+      if (Object.hasOwn(BUILTIN_SIDECARS, dependency)) {
+        throw new Error(
+          `${dependencyLabel} must not reference the built-in sidecar "${dependency}": ` +
+            `built-in MCP sidecars start before the agent launches and are agent-scoped, ` +
+            `so they cannot be used as a dependency. Enable it with ` +
+            `sidecars.${dependency}.autoStart instead.`,
+        );
+      }
+      seen.add(dependency);
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const path: string[] = [];
+
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) {
+      const start = path.indexOf(name);
+      const cycle = [...path.slice(start), name].join(" -> ");
+      throw new Error(`${label} dependency cycle: ${cycle}`);
+    }
+
+    visiting.add(name);
+    path.push(name);
+    for (const dependency of sidecars[name]?.dependsOn ?? []) {
+      visit(dependency);
+    }
+    path.pop();
+    visiting.delete(name);
+    visited.add(name);
+  };
+
+  for (const name of Object.keys(sidecars)) {
+    visit(name);
+  }
 }
 
 function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {
@@ -1146,6 +1354,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
+  const reasoningEffort = parseProjectReasoningEffort(projectId, raw["reasoningEffort"]);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
@@ -1163,6 +1372,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const defaultModels = parseDefaultModels(raw["defaultModels"], label);
+  const maxLiveSessions = asOptionalPositiveInteger(
+    raw["maxLiveSessions"],
+    `${label}.maxLiveSessions`,
+  );
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1246,6 +1459,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
@@ -1256,6 +1470,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sources,
     backlog,
     triggers,
+    ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
   };
 }
 
@@ -1297,6 +1512,226 @@ function parseTags(value: unknown): TagDefinition[] {
   return tags;
 }
 
+const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
+  autoRotateOnRateLimit: false,
+  cooldownMinutes: 60,
+  maxRotationsPerEpisode: 2,
+};
+
+// Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
+// per-agent account stores plug in separately). Instance-only, same footgun as
+// rateLimitReactivation/tags: parsed only when mode === "instance", so a
+// per-project authRotation is silently ignored. Config carries only the rotate
+// policy; the accounts themselves are a runtime store (claude-accounts.ts).
+function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
+  if (value === undefined) {
+    return DEFAULT_AUTH_ROTATION;
+  }
+  const root = asObject(value, "authRotation");
+  return {
+    autoRotateOnRateLimit:
+      asOptionalBoolean(root["autoRotateOnRateLimit"], "authRotation.autoRotateOnRateLimit") ??
+      DEFAULT_AUTH_ROTATION.autoRotateOnRateLimit,
+    cooldownMinutes:
+      asNonNegativeNumber(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
+      DEFAULT_AUTH_ROTATION.cooldownMinutes,
+    maxRotationsPerEpisode:
+      asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
+      DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
+  };
+}
+
+const SESSION_GC_STATUSES = ["completed", "killed", "stopped"] as const;
+
+export const DEFAULT_SESSION_GC: AppConfig["sessionGc"] = {
+  enabled: false,
+  olderThanDays: 30,
+  intervalMinutes: 360,
+  maxGroupsPerSweep: 20,
+  statuses: [...SESSION_GC_STATUSES],
+};
+
+function isSessionGcStatus(value: unknown): value is (typeof SESSION_GC_STATUSES)[number] {
+  return typeof value === "string" && (SESSION_GC_STATUSES as readonly string[]).includes(value);
+}
+
+function parseSessionGcStatuses(value: unknown): AppConfig["sessionGc"]["statuses"] {
+  if (value === undefined) {
+    return [...DEFAULT_SESSION_GC.statuses];
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("sessionGc.statuses must be a non-empty array of completed|killed|stopped");
+  }
+  return value.map((entry) => {
+    if (!isSessionGcStatus(entry)) {
+      throw new Error(
+        `sessionGc.statuses must only contain completed|killed|stopped (got ${JSON.stringify(entry)})`,
+      );
+    }
+    return entry;
+  });
+}
+
+// Instance-only, same footgun as authRotation/rateLimitReactivation: parsed
+// only when mode === "instance", so a per-project sessionGc block is
+// silently ignored (the daemon sweep and `spur gc` both always read the
+// merged instance config, never a project one).
+function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
+  if (value === undefined) {
+    return DEFAULT_SESSION_GC;
+  }
+  const root = asObject(value, "sessionGc");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "sessionGc.enabled") ?? DEFAULT_SESSION_GC.enabled,
+    olderThanDays:
+      asNonNegativeNumber(root["olderThanDays"], "sessionGc.olderThanDays") ??
+      DEFAULT_SESSION_GC.olderThanDays,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "sessionGc.intervalMinutes") ??
+      DEFAULT_SESSION_GC.intervalMinutes,
+    maxGroupsPerSweep:
+      asOptionalPositiveInteger(root["maxGroupsPerSweep"], "sessionGc.maxGroupsPerSweep") ??
+      DEFAULT_SESSION_GC.maxGroupsPerSweep,
+    statuses: parseSessionGcStatuses(root["statuses"]),
+  };
+}
+
+// Estimated from an agent, Playwright MCP sidecar, and isolated daemon:
+// 1.5 GiB per session leaves room above the 1.21 GiB design estimate.
+const DEFAULT_ADMISSION_MAX_LIVE_SESSIONS = 100;
+const DEFAULT_ADMISSION_PER_SESSION_BYTES = 1_610_612_736;
+const DEFAULT_ADMISSION_RESERVE_FRACTION = 0.7;
+const DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES = 1_073_741_824;
+const DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES = 0;
+const DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE = 20;
+const DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION = 0.9;
+const ADMISSION_FLOOR_MIN_BYTES = 1_073_741_824;
+const SHED_CRITICAL_FLOOR_MIN_BYTES = 536_870_912;
+
+export function deriveMaxLiveSessions(
+  totalBytes: number,
+  perSessionBytes: number,
+  reserveFraction: number,
+): number {
+  return Math.max(1, Math.floor((totalBytes * reserveFraction) / perSessionBytes));
+}
+
+export function deriveAdmissionFloorBytes(totalBytes: number): number {
+  return Math.max(ADMISSION_FLOOR_MIN_BYTES, Math.floor(totalBytes / 8));
+}
+
+export function deriveShedCriticalFloorBytes(totalBytes: number): number {
+  return Math.max(SHED_CRITICAL_FLOOR_MIN_BYTES, Math.floor(totalBytes / 16));
+}
+
+// Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
+// per-project `admission` block is ignored before semantic parsing. Only
+// projects.<id>.maxLiveSessions works per-project.
+function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
+  const perSessionBytes = DEFAULT_ADMISSION_PER_SESSION_BYTES;
+  const reserveFraction = DEFAULT_ADMISSION_RESERVE_FRACTION;
+  const totalBytes = totalmem();
+  const admissionFloorBytes = deriveAdmissionFloorBytes(totalBytes);
+  const shedCriticalFloorBytes = deriveShedCriticalFloorBytes(totalBytes);
+  if (mode !== "instance" || value === undefined) {
+    return {
+      enabled: true,
+      maxLiveSessions: DEFAULT_ADMISSION_MAX_LIVE_SESSIONS,
+      maxLiveSessionsSource: "default",
+      perSessionBytes,
+      reserveFraction,
+      memoryGuard: {
+        enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
+        minFreeSwapBytes: DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+        admissionFloorBytes,
+        shedCriticalFloorBytes,
+        restoreFloorBytes: admissionFloorBytes + perSessionBytes,
+        pressureSomeAvg10Refuse: DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+        shedSwapUsedFraction: DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
+      },
+    };
+  }
+  const root = asObject(value, "admission");
+  const resolvedPerSessionBytes =
+    asOptionalNumber(root["perSessionBytes"], "admission.perSessionBytes") ?? perSessionBytes;
+  const resolvedReserveFraction =
+    asOptionalFraction(root["reserveFraction"], "admission.reserveFraction") ?? reserveFraction;
+  const memoryGuardRaw = root["memoryGuard"]
+    ? asObject(root["memoryGuard"], "admission.memoryGuard")
+    : {};
+  const configuredMaxLiveSessions = asOptionalPositiveInteger(
+    root["maxLiveSessions"],
+    "admission.maxLiveSessions",
+  );
+  const resolvedAdmissionFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["admissionFloorBytes"],
+      "admission.memoryGuard.admissionFloorBytes",
+    ) ?? admissionFloorBytes;
+  const resolvedShedCriticalFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["shedCriticalFloorBytes"],
+      "admission.memoryGuard.shedCriticalFloorBytes",
+    ) ?? shedCriticalFloorBytes;
+  if (resolvedShedCriticalFloorBytes >= resolvedAdmissionFloorBytes) {
+    throw new Error(
+      `admission.memoryGuard.shedCriticalFloorBytes (${resolvedShedCriticalFloorBytes}) must be less than admissionFloorBytes (${resolvedAdmissionFloorBytes})`,
+    );
+  }
+  const hasSizingInput =
+    root["perSessionBytes"] !== undefined || root["reserveFraction"] !== undefined;
+  const maxLiveSessionsSource: AdmissionCapSource =
+    configuredMaxLiveSessions !== undefined ? "config" : hasSizingInput ? "derived" : "default";
+  const maxLiveSessions =
+    configuredMaxLiveSessions ??
+    (hasSizingInput
+      ? deriveMaxLiveSessions(totalBytes, resolvedPerSessionBytes, resolvedReserveFraction)
+      : DEFAULT_ADMISSION_MAX_LIVE_SESSIONS);
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
+    maxLiveSessions,
+    maxLiveSessionsSource,
+    perSessionBytes: resolvedPerSessionBytes,
+    reserveFraction: resolvedReserveFraction,
+    memoryGuard: {
+      enforce:
+        asOptionalBoolean(memoryGuardRaw["enforce"], "admission.memoryGuard.enforce") ?? false,
+      enforceFloors:
+        asOptionalBoolean(memoryGuardRaw["enforceFloors"], "admission.memoryGuard.enforceFloors") ??
+        true,
+      shedEnabled:
+        asOptionalBoolean(memoryGuardRaw["shedEnabled"], "admission.memoryGuard.shedEnabled") ??
+        true,
+      minAvailableBytes:
+        asNonNegativeNumber(
+          memoryGuardRaw["minAvailableBytes"],
+          "admission.memoryGuard.minAvailableBytes",
+        ) ?? DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
+      minFreeSwapBytes:
+        asNonNegativeNumber(
+          memoryGuardRaw["minFreeSwapBytes"],
+          "admission.memoryGuard.minFreeSwapBytes",
+        ) ?? DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+      admissionFloorBytes: resolvedAdmissionFloorBytes,
+      shedCriticalFloorBytes: resolvedShedCriticalFloorBytes,
+      restoreFloorBytes: resolvedAdmissionFloorBytes + resolvedPerSessionBytes,
+      pressureSomeAvg10Refuse:
+        asOptionalPercent(
+          memoryGuardRaw["pressureSomeAvg10Refuse"],
+          "admission.memoryGuard.pressureSomeAvg10Refuse",
+        ) ?? DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+      shedSwapUsedFraction:
+        asOptionalFraction(
+          memoryGuardRaw["shedSwapUsedFraction"],
+          "admission.memoryGuard.shedSwapUsedFraction",
+        ) ?? DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
+    },
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1310,8 +1745,12 @@ function parseConfigFile(
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const userActionLog = root["userActionLog"]
+    ? asObject(root["userActionLog"], "userActionLog")
+    : {};
   const rateLimitReactivation = root["rateLimitReactivation"]
     ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
     : {};
@@ -1338,10 +1777,26 @@ function parseConfigFile(
 
   const tags = parseTags(root["tags"]);
 
+  const projectsRootRaw =
+    mode === "instance" ? asOptionalString(root["projectsRoot"], "projectsRoot") : undefined;
+
   const serverPort =
     mode === "instance"
       ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
       : resolvedDefaults.serverPort;
+
+  const dataDir =
+    mode === "instance"
+      ? resolveFrom(
+          configDir,
+          asOptionalString(root["dataDir"], "dataDir") ?? resolvedDefaults.dataDir,
+        )
+      : resolvedDefaults.dataDir;
+
+  const projectsRoot =
+    projectsRootRaw !== undefined
+      ? resolveFrom(configDir, projectsRootRaw)
+      : join(dataDir, "projects");
 
   return {
     configPath,
@@ -1352,13 +1807,7 @@ function parseConfigFile(
           : resolvedDefaults.serverHost,
       port: serverPort,
     },
-    dataDir:
-      mode === "instance"
-        ? resolveFrom(
-            configDir,
-            asOptionalString(root["dataDir"], "dataDir") ?? resolvedDefaults.dataDir,
-          )
-        : resolvedDefaults.dataDir,
+    dataDir,
     worktreeDir:
       mode === "instance"
         ? resolveFrom(
@@ -1366,6 +1815,7 @@ function parseConfigFile(
             asOptionalString(root["worktreeDir"], "worktreeDir") ?? resolvedDefaults.worktreeDir,
           )
         : resolvedDefaults.worktreeDir,
+    projectsRoot,
     defaultAgent:
       mode === "instance"
         ? (asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? resolvedDefaults.defaultAgent)
@@ -1382,6 +1832,16 @@ function parseConfigFile(
         mode === "instance"
           ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
           : resolvedDefaults.uiPort,
+    },
+    models: {
+      codexHome:
+        mode === "instance"
+          ? resolveFrom(
+              configDir,
+              asOptionalString(models["codexHome"], "models.codexHome") ??
+                resolvedDefaults.codexHome,
+            )
+          : resolvedDefaults.codexHome,
     },
     voice: (() => {
       if (mode === "project") {
@@ -1442,6 +1902,10 @@ function parseConfigFile(
         return { provider, language, model, baseUrl, apiKey };
       }
 
+      if (provider === "openai_realtime") {
+        return { provider, language, model };
+      }
+
       if (provider === "azure_openai") {
         const endpointRaw = asOptionalString(voice["endpoint"], "voice.endpoint");
         const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
@@ -1480,10 +1944,26 @@ function parseConfigFile(
               asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
               DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    userActionLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(userActionLog["hotBytes"], "userActionLog.hotBytes") ??
+              DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(userActionLog["shardHotBytes"], "userActionLog.shardHotBytes") ??
+              DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalPositiveInteger(
+                userActionLog["retainArchives"],
+                "userActionLog.retainArchives",
+              ) ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_USER_ACTION_LOG_CONFIG,
     rateLimitReactivation:
       mode === "instance"
         ? {
@@ -1494,6 +1974,10 @@ function parseConfigFile(
               ) ?? 0,
           }
         : { afterHours: 0 },
+    authRotation:
+      mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
+    sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    admission: parseAdmission(root["admission"], mode),
     projects: normalizedProjects,
     tags,
   };
@@ -1546,6 +2030,80 @@ export function instanceConfigExists(input?: string): boolean {
   return existsSync(resolveInstanceConfigPath(input));
 }
 
+// Tolerant of a symlinked/bind-mounted $HOME: resolves both paths to their
+// real on-disk location before comparing, falling back to a plain resolved
+// string compare when either side does not exist (e.g. a config path that is
+// about to be bootstrap-created).
+function samePathOnDisk(a: string, b: string): boolean {
+  try {
+    return realpathSync.native(a) === realpathSync.native(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
+}
+
+function isDefaultInstanceConfigPath(configPath: string): boolean {
+  return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
+}
+
+// Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
+// `startServer` caller) must neither bootstrap a prod-default config
+// template at an arbitrary path, nor bind or target the production slot
+// (server.port 4310 or dataDir ~/.spur) from a non-default config path —
+// that slot belongs only to whatever daemon boots from the default config
+// path (see deploy/spur-daemon.service, which has no --config and
+// Restart=always). Resolving and (read-only) parsing the config here, before
+// any bootstrap write or HTTP call, is what closes both holes at once:
+//   - a missing non-default path is refused instead of silently
+//     bootstrap-written with prod defaults (port 4310, dataDir ~/.spur);
+//   - an existing non-default path that (explicitly or by omission) still
+//     resolves to port 4310 or dataDir ~/.spur is refused before `stop`/
+//     `restart` can resolve a base URL from it and target production.
+// The default instance config path is always exempt, regardless of
+// existence or contents: refusing it would crash-loop production on first
+// boot or on a legitimate restart.
+//
+// Known limit: the default path is homedir()-relative, so a child process
+// with a temp HOME running `daemon start` with no --config gets a
+// default-path config under that HOME and is exempted here, even though it
+// can still win the host-global :4310 bind during a restart window. Do not
+// "fix" this by re-basing on os.userInfo().homedir() — if the unit's
+// Environment=HOME ever diverges from the passwd home, that flips this
+// guard fail-closed on the real prod daemon and crash-loops it instead.
+export function assertConfigMayUseProdSlot(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (isDefaultInstanceConfigPath(configPath)) {
+    return;
+  }
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `Instance config ${configPath} does not exist. ` +
+        `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+        `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+    );
+  }
+  const result = loadInstanceConfigReadOnly(input);
+  if (result.status !== "ok") {
+    // Unparseable (or, unreachably here, absent): a config that cannot be
+    // parsed cannot claim the prod slot either way. Let the real,
+    // non-read-only config load surface the parse error right after.
+    return;
+  }
+  const config = result.config;
+  const prodDataDir = resolveFrom(dirname(DEFAULT_INSTANCE_CONFIG_PATH), DEFAULT_DATA_DIR);
+  const claimsProdPort = config.server.port === DEFAULT_SERVER_PORT;
+  const claimsProdDataDir = samePathOnDisk(config.dataDir, prodDataDir);
+  if (!claimsProdPort && !claimsProdDataDir) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${configPath} may not bind the production slot ` +
+      `(server.port ${config.server.port}, dataDir ${config.dataDir}). ` +
+      `A non-default config path must not claim port ${DEFAULT_SERVER_PORT} or dataDir ${prodDataDir}. ` +
+      `Set server.port and dataDir explicitly in this config, or use scripts/spur-isolated-daemon.sh.`,
+  );
+}
+
 export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
   const configPath = resolveInstanceConfigPath(input);
   if (existsSync(configPath)) {
@@ -1554,6 +2112,28 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
   return { configPath, initialized: true };
+}
+
+export type InstanceConfigReadResult =
+  | { status: "absent" }
+  | { status: "invalid"; error: string }
+  | { status: "ok"; config: AppConfig };
+
+// Read-only counterpart to `loadConfig`/`ensureInstanceConfig`: never
+// bootstrap-writes `~/.spur/config.yaml` when it is missing (that write is a
+// deliberate `ensureInstanceConfig` side effect other callers rely on).
+// `doctor` needs to distinguish "never initialized" (not an error) from "a
+// real, corrupt instance config sitting on disk" (an error) without ever
+// creating the file as a side effect of merely checking it.
+export function loadInstanceConfigReadOnly(input?: string): InstanceConfigReadResult {
+  if (!instanceConfigExists(input)) {
+    return { status: "absent" };
+  }
+  try {
+    return { status: "ok", config: parseConfigFile(resolveInstanceConfigPath(input), "instance") };
+  } catch (error) {
+    return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
@@ -1598,6 +2178,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          codexHome: defaults.models.codexHome,
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
@@ -1618,7 +2199,9 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
                     ? { voiceApiVersion: defaults.voice.apiVersion }
                     : {}),
                 }
-              : defaults.voice.modelPath !== undefined
+              : (defaults.voice.provider === "whisper_cpp" ||
+                    defaults.voice.provider === "faster_whisper") &&
+                  defaults.voice.modelPath !== undefined
                 ? { voiceModelPath: defaults.voice.modelPath }
                 : {}),
         }

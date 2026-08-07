@@ -1,7 +1,7 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SessionState } from "./types.js";
+import type { SessionState, TranscriptEntry } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
@@ -24,6 +24,7 @@ export interface CursorJsonlReaderState {
 
 const TAIL_RECORD_LIMIT = 50;
 export const CURSOR_JSONL_ACTIVITY_WINDOW_MS = 60_000;
+export const CURSOR_JSONL_TOOL_USE_GRACE_MS = 15 * 60_000; // 900_000ms
 
 function tryParseJson(line: string): Record<string, unknown> | null {
   try {
@@ -33,13 +34,23 @@ function tryParseJson(line: string): Record<string, unknown> | null {
   }
 }
 
+// Cursor slugifies the absolute workspace path into its
+// `~/.cursor/projects/<slug>` directory name by replacing every run of
+// characters that are neither alphanumeric nor an underscore with a single
+// hyphen, then trimming leading and trailing hyphens. Underscores are kept
+// verbatim (GitHub Actions `_work` dirs rely on this); a mid-segment dot
+// (`spur-isolated-daemon.xOPkB8`) becomes a hyphen (`...daemon-xOPkB8`); a
+// slash-adjacent dot (`/.spur`) collapses with the slash into one hyphen
+// (`-spur`). Deleting dots outright — as an earlier version did — only happened
+// to match slash-adjacent dots and silently pointed dotted worktree paths
+// (shared shepherd workspaces, scratchpad dirs) at a nonexistent project dir,
+// so the transcript was never found.
 export function toCursorProjectPath(worktreePath: string): string {
   return worktreePath
     .replaceAll("\\", "/")
-    .replaceAll(":", "")
-    .replace(/^\/+/, "")
-    .replace(/\//g, "-")
-    .replace(/\./g, "");
+    .replace(/[^a-zA-Z0-9_]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
 }
 
 async function findLatestCursorTranscriptInDir(transcriptsDir: string): Promise<string | null> {
@@ -131,7 +142,6 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
-  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -147,19 +157,39 @@ export function parseCursorJsonlRecord(
     if (type === "tool_result") {
       hasToolResult = true;
     }
-    if (type === "text" && typeof tool["text"] === "string") {
-      textParts.push(tool["text"]);
-    }
   }
-  const text = textParts.join("\n").trim();
+  // `text` is intentionally not populated here: the only reader of
+  // CursorParsedRecord.text is latestCursorTerminalError, which is gated on
+  // `terminalError` (set only by the turn_ended branch above). Retaining the
+  // full assistant message body on every ordinary record for a value nothing
+  // reads is what made cursorJsonlReaders' 50-record tail expensive per
+  // session.
   return {
     role,
     hasToolUse,
     hasToolResult,
     ...(requestsUserInput ? { requestsUserInput: true } : {}),
-    ...(text ? { text } : {}),
     timestampMs: fallbackTimestampMs,
   };
+}
+
+// Cursor JSONL records never carry a genuine per-record timestamp (unlike Claude's
+// JSONL, which stamps real event times); `record.timestampMs` is always the wall-clock
+// moment we happened to parse the line, so a full re-read after a daemon restart stamps
+// every historical record with "now". `fileMtimeMs` (the file's real last-write time) is
+// therefore the only trustworthy staleness signal here and must take priority; the
+// record timestamp is only a last-resort fallback for callers that don't supply it.
+function lastActivityMs(record: CursorParsedRecord, fileMtimeMs?: number): number {
+  return fileMtimeMs ?? record.timestampMs;
+}
+
+function isWithinActivityWindow(
+  nowMs: number,
+  record: CursorParsedRecord,
+  fileMtimeMs: number | undefined,
+  windowMs: number,
+): boolean {
+  return nowMs - lastActivityMs(record, fileMtimeMs) <= windowMs;
 }
 
 function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
@@ -182,17 +212,28 @@ export function classifyCursorJsonlState(
     if (!record) {
       continue;
     }
+    if (record.terminalError) {
+      return "needs_input";
+    }
     if (record.role === "assistant") {
       if (record.requestsUserInput) {
         return "needs_input";
       }
-      return record.hasToolUse ? "working" : "waiting";
+      if (!record.hasToolUse) {
+        return "waiting";
+      }
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_TOOL_USE_GRACE_MS)
+        ? "working"
+        : "waiting";
     }
     if (record.hasToolResult) {
-      return "working";
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
+        ? "working"
+        : "waiting";
     }
-    const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-    return nowMs - lastActivityMs <= CURSOR_JSONL_ACTIVITY_WINDOW_MS ? "working" : "waiting";
+    return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
+      ? "working"
+      : "waiting";
   }
   return "working";
 }
@@ -256,7 +297,7 @@ export async function readCursorJsonlState(
       if (!trimmed) {
         continue;
       }
-      const record = parseCursorJsonlRecord(trimmed, nowMs);
+      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
       if (record) {
         newRecords.push(record);
       }
@@ -284,4 +325,69 @@ export async function readCursorJsonlState(
     reader: nextReader,
     rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+/**
+ * Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion
+ * prompts. Cursor tool_use blocks carry no id (unlike Claude), so tool entries omit
+ * callId. Cursor's AskUserQuestion input is always `{}`, so question entries carry
+ * an empty header/prompt and omit options.
+ */
+export async function readCursorTranscriptEntries(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  if (!filePath) return null;
+
+  let fileText: string;
+  try {
+    fileText = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of fileText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const role = parsed["role"];
+    if (role !== "user" && role !== "assistant") continue;
+
+    const message = parsed["message"];
+    if (typeof message !== "object" || message === null) continue;
+    const content = (message as Record<string, unknown>)["content"];
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const b = block as Record<string, unknown>;
+
+      if (b["type"] === "text" && typeof b["text"] === "string") {
+        const text = b["text"].trim();
+        if (text) {
+          entries.push({ kind: "message", role, text });
+        }
+        continue;
+      }
+
+      if (b["type"] === "tool_use") {
+        const name = typeof b["name"] === "string" ? b["name"] : "";
+        if (name === "AskUserQuestion") {
+          entries.push({ kind: "question", header: "", prompt: "" });
+          continue;
+        }
+        entries.push({ kind: "tool", name });
+      }
+    }
+  }
+
+  return entries;
 }

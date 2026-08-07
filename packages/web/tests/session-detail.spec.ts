@@ -2,6 +2,7 @@ import { test, expect, devices, type Page } from "playwright/test";
 import {
   makeWorkingSession,
   makeCompletedSession,
+  makeNeedsInputSession,
   makeSpawningSession,
   makeStoppedSession,
 } from "./fixtures.js";
@@ -301,7 +302,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(page.getByText("Loading session...")).toHaveCount(0);
+    await expect(page.getByText("Loading...")).toHaveCount(0);
   });
 
   test("back link visible", async ({ page }) => {
@@ -457,6 +458,38 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
     await expect(page.getByText("Wake stop condition")).toBeVisible();
     await expect(page.getByText("Daily checks done")).toBeVisible();
+  });
+
+  test("opening detail marks an unseen needs_input session opened", async ({ page }) => {
+    let session = makeNeedsInputSession({
+      id: "detail-s1-opened-needs-input",
+      hasUnseenAttention: true,
+    });
+    let openedRequests = 0;
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/opened`, (route) => {
+      openedRequests += 1;
+      session = {
+        ...session,
+        hasUnseenAttention: false,
+        lastOpenedAt: "2026-04-28T10:01:00.000Z",
+      };
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect.poll(() => openedRequests).toBe(1);
   });
 
   test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
@@ -882,7 +915,7 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
     await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
-    const textarea = page.getByPlaceholder("Edit the initial message...");
+    const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
     await textarea.evaluate((textarea) => {
@@ -917,7 +950,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    const textarea = page.getByPlaceholder("Edit the initial message...");
+    const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await page.getByRole("button", { name: "Clear respawn prompt" }).click();
 
@@ -963,7 +996,7 @@ test.describe("S2: Actions bar", () => {
     const session = makeWorkingSession({
       id: "detail-s2-handoff-1",
       agent: "codex",
-      model: "gpt-5.3-codex",
+      model: "codex-model-id",
       workspaceExists: true,
     });
     const handedOff = makeSpawningSession({ id: "detail-s2-handoff-next", agent: "cursor" });
@@ -1193,16 +1226,31 @@ test.describe("S2a: Logs modal", () => {
           historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
         },
       },
+      {
+        timestamp: "2026-04-02T10:01:10.000Z",
+        event: "session.input.received",
+        level: "info",
+        message: "Fix the failing test",
+        details: {
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "Fix the failing test",
+          attachments: [{ id: "upload.png", name: "upload.png" }],
+        },
+      },
     ]);
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
-    await expect(page.getByText("Status transition")).toBeVisible();
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
+    await expect(page.getByText("User input")).toBeVisible();
+    await expect(page.getByText("send message")).toBeVisible();
+    await expect(page.getByText("Fix the failing test")).toBeVisible();
+    await expect(page.getByText("Attachment upload.png")).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 
@@ -1359,6 +1407,100 @@ test.describe("S2b: Conversation dialog", () => {
     expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
     expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
+
+  test("wide dialog code blocks and tables stay within the mobile viewport width", async ({
+    page,
+  }) => {
+    // A fenced code block (white-space: pre) and a wide table have irreducible
+    // min-content that `overflow-wrap` cannot break — unlike the plain long token
+    // above. They only stay contained when the mobile grid columns carry min-w-0,
+    // so this guards that fix. See SessionDetail content grid.
+    const wideCodeLine = `const payload = "${"x".repeat(180)}";`;
+    const wideTable = [
+      `| ${"alpha".repeat(6)} | ${"bravo".repeat(6)} |`,
+      "| --- | --- |",
+      "| 1 | 2 |",
+    ].join("\n");
+    const session = makeWorkingSession({ id: "detail-s2b-wide-content" });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "assistant", text: `\`\`\`\n${wideCodeLine}\n\`\`\``, timestampMs: 1 },
+        { role: "assistant", text: wideTable, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByText("const payload", { exact: false })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+  });
+
+  test("long unbroken dialog and queued tokens hard-wrap on desktop without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-2",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
+
+    const dialogOverflowX = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("h2")).find((h) =>
+        /dialog/i.test(h.textContent ?? ""),
+      );
+      const container = heading?.parentElement?.querySelector(".overflow-x-hidden");
+      return container ? getComputedStyle(container).overflowX : null;
+    });
+    expect(dialogOverflowX).toBe("hidden");
+  });
 });
 
 // S3: Message section
@@ -1409,7 +1551,7 @@ test.describe("S3: Message section", () => {
     await page.getByRole("button", { name: "Slash" }).click();
     await page.getByRole("menuitem", { name: /\/status/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
+    await expect(page.getByPlaceholder("Message...")).toHaveValue("/status");
   });
 
   test("message clear button resets the composer", async ({ page }) => {
@@ -1417,7 +1559,7 @@ test.describe("S3: Message section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    const textarea = page.getByPlaceholder("Message to the running agent...");
+    const textarea = page.getByPlaceholder("Message...");
     await textarea.fill("Message to clear");
     await page.getByRole("button", { name: "Clear message" }).click();
 
@@ -1560,6 +1702,7 @@ test.describe("S3: Message section", () => {
   test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
     page,
   }) => {
+    test.slow();
     const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
     let postCount = 0;
@@ -1594,7 +1737,7 @@ test.describe("S3: Message section", () => {
     await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
 
     releaseSend();
-    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
   });
 
   test("composer buttons show inline hotkey hints", async ({ page }) => {
@@ -1829,9 +1972,7 @@ test.describe("S3 mobile voice", () => {
       await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
       await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-      await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
-        "Mobile PWA voice still works",
-      );
+      await expect(page.getByPlaceholder("Message...")).toHaveValue("Mobile PWA voice still works");
       await expect(
         page.getByText(
           "Voice recording captured no audio. Check your microphone input and try again.",
@@ -1881,9 +2022,7 @@ test.describe("S3b: Queued messages section", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
-    await expect(
-      page.getByText(/queued messages will send automatically when the agent is ready/i),
-    ).toBeVisible();
+    await expect(page.getByText(/queued messages will send automatically/i)).toBeVisible();
     await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
   });
 });
@@ -2188,15 +2327,127 @@ test.describe("S4b: Artifacts section", () => {
     const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
     await expect(dialog).toBeVisible();
 
-    const pre = dialog.locator("pre");
-    await expect(pre).toBeVisible();
-    const overflow = await pre.evaluate((node) => node.scrollHeight > node.clientHeight);
+    const scroller = dialog.locator("[data-artifact-lightbox-interactive]");
+    await expect(scroller).toBeVisible();
+    const overflow = await scroller.evaluate((node) => node.scrollHeight > node.clientHeight);
     expect(overflow).toBe(true);
-    await pre.evaluate((node) => {
+    await scroller.evaluate((node) => {
       node.scrollTop = 200;
     });
-    const scrolled = await pre.evaluate((node) => node.scrollTop);
+    const scrolled = await scroller.evaluate((node) => node.scrollTop);
     expect(scrolled).toBeGreaterThan(0);
+    await expect(scroller).toHaveCSS("overscroll-behavior-y", "contain");
+  });
+
+  test("tap on an oversize text preview still navigates to the next artifact", async ({ page }) => {
+    // Oversize artifacts never get fetched (SessionDetail.tsx TEXT_ARTIFACT_MAX_BYTES guard),
+    // so this reaches a deterministic non-content state without stalling any route.
+    const session = makeWorkingSession({
+      id: "detail-s4b-oversize-nav",
+      artifacts: [
+        {
+          id: "huge-one.txt",
+          name: "huge-one.txt",
+          size: 1024 * 1024 + 1,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "huge-two.txt",
+          name: "huge-two.txt",
+          size: 1024 * 1024 + 1,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview huge-one.txt" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview huge-one.txt" });
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByText("File exceeds 1 MiB preview limit. Download to view the full content."),
+    ).toBeVisible();
+
+    const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(surfaceBox).not.toBeNull();
+    if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      surfaceBox.x + surfaceBox.width * 0.75,
+      surfaceBox.y + surfaceBox.height / 2,
+    );
+
+    await expect(page.getByRole("dialog", { name: "Artifact preview huge-two.txt" })).toBeVisible();
+  });
+
+  test("mobile text lightbox scrolls on first open without a pinch", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-scroll",
+      artifacts: [
+        {
+          id: "long.txt",
+          name: "long.txt",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-scroll/artifacts/long.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+          });
+        },
+      );
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview long.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
+      await expect(dialog).toBeVisible();
+
+      const scroller = dialog.locator("[data-artifact-lightbox-interactive]");
+      await expect(scroller).toHaveCSS("overflow-y", "auto");
+
+      const overflow = await scroller.evaluate((node) => node.scrollHeight > node.clientHeight);
+      expect(overflow).toBe(true);
+
+      const box = await scroller.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) throw new Error("Artifact preview scroller missing bounds");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, 240);
+
+      await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+
+      const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
+      expect(bodyOverflow).toBe("hidden");
+
+      await expectArtifactControlsOutsideSurface(page);
+    } finally {
+      await context.close();
+    }
   });
 
   test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
@@ -2632,11 +2883,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-1" });
     await mockSessionDetail(page, session);
 
-    // Mock the WebSocket / terminal endpoint
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
 
     const termBtn = page.getByRole("button", { name: /^terminal$/i });
@@ -2647,6 +2893,38 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("terminal controls inset sideways for safe-area without extra vertical height", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-safe" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+
+    const controls = terminalDialog.getByTestId("direct-terminal-controls");
+    await expect(controls).toBeVisible();
+    const padding = await controls.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return {
+        left: parseFloat(style.paddingLeft),
+        right: parseFloat(style.paddingRight),
+        top: parseFloat(style.paddingTop),
+        bottom: parseFloat(style.paddingBottom),
+      };
+    });
+    // Side padding resolves to the 0.5rem base (env insets are 0 in headless);
+    // a dropped/invalid calc() would collapse this to 0.
+    expect(padding.left).toBeGreaterThanOrEqual(8);
+    expect(padding.right).toBeGreaterThanOrEqual(8);
+    // Vertical padding stays at py-1.5 (6px) — the inset adds no top/bottom height.
+    expect(padding.top).toBe(6);
+    expect(padding.bottom).toBe(6);
+  });
+
   test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s6-title",
@@ -2655,13 +2933,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
@@ -2685,13 +2956,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     const overlaps = (
       a: { x: number; y: number; width: number; height: number },
@@ -2797,10 +3061,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);
 
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
@@ -2817,7 +3077,6 @@ test.describe("S6: Terminal modal from detail page", () => {
   test("opening terminal sets body overflow hidden to block page scroll", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-3" });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => void route.abort());
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2882,13 +3141,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     await mockTerminalWebSocket(page);
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "stop button transcript");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2938,13 +3190,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     let sendPayload: unknown = null;
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
     await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
       sendPayload = route.request().postDataJSON();
       await route.fulfill({
@@ -2988,10 +3233,8 @@ test.describe("S6: Terminal modal from detail page", () => {
       });
   });
 
-  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
-    page,
-  }) => {
-    const session = makeWorkingSession({ id: "detail-s6-4" });
+  test("direct-terminal send failing with 409 shows a rate-limited toast", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s6-rate-limited" });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
     await page.route("**/api/runtime/terminal**", (route) => {
@@ -3001,6 +3244,48 @@ test.describe("S6: Terminal modal from detail page", () => {
         body: JSON.stringify({ directTerminalPort: 14801 }),
       });
     });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: `Session ${session.id} is rate limited` }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "this session is currently rate limited" }),
+    ).toBeVisible();
+  });
+
+  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-4" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();

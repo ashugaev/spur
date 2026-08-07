@@ -78,6 +78,51 @@
   --font-mono: var(--font-sans);
 }
 
+:root[data-theme="light"] {
+  --color-bg-base: #ffffff;
+  --color-bg-surface: rgba(246, 248, 250, 0.85);
+  --color-bg-elevated: #ffffff;
+  --color-terminal-bg: #f6f8fa;
+  --color-border-subtle: rgba(209, 217, 224, 0.6);
+  --color-border-default: #d1d9e0;
+  --color-border-strong: #b7c0c9;
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #59636e;
+  --color-text-tertiary: #818b98;
+  --color-text-inverse: #ffffff;
+  --color-input-bg: #ffffff;
+  --color-input-text: #1f2328;
+  --color-input-border: #d1d9e0;
+  --color-input-placeholder: #818b98;
+  --color-accent: #0969da;
+  --color-accent-hover: #0860ca;
+  --color-accent-violet: #8250df;
+  --color-hover-overlay: rgba(31, 35, 40, 0.05);
+  --color-modal-backdrop: rgba(31, 35, 40, 0.4);
+  --color-row-hover: rgba(31, 35, 40, 0.03);
+  --color-scrollbar-thumb: rgba(31, 35, 40, 0.12);
+  --color-scrollbar-thumb-hover: rgba(31, 35, 40, 0.22);
+  --color-scrollbar-thumb-active: rgba(31, 35, 40, 0.34);
+  --color-activity-pulse: rgba(9, 105, 218, 0.45);
+  --color-shadow-menu: rgba(31, 35, 40, 0.15);
+  --color-shadow-modal-sm: rgba(31, 35, 40, 0.12);
+  --color-shadow-modal-lg: rgba(31, 35, 40, 0.15);
+  --color-status-working: #0969da;
+  --color-status-ready: #1a7f37;
+  --color-status-attention: #bf8700;
+  --color-status-error: #cf222e;
+  --color-chip-error-bg: rgba(207, 34, 46, 0.08);
+  --color-chip-error-border: rgba(207, 34, 46, 0.3);
+  --color-chip-error-text: #cf222e;
+  --color-chip-warn-border: rgba(191, 135, 0, 0.3);
+  --color-chip-warn-text: #9a6700;
+  --color-chip-alive: #1a7f37;
+  --color-dot-bg-error: rgba(207, 34, 46, 0.1);
+  --color-dot-bg-inactive: rgba(129, 139, 152, 0.15);
+  --color-dot-bg-working: rgba(9, 105, 218, 0.1);
+  --color-dot-bg-waiting: rgba(191, 135, 0, 0.12);
+}
+
 /* ── Base styles ─────────────────────────────────────────────────────── */
 
 body {
@@ -106,24 +151,6 @@ input::placeholder,
 textarea::placeholder {
   color: var(--color-input-placeholder);
   opacity: 1;
-}
-
-@media (hover: none) and (pointer: coarse) {
-  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
-  textarea:not(.xterm-helper-textarea),
-  select {
-    font-size: 16px;
-  }
-}
-
-@supports (zoom: 1) {
-  @media (hover: none) and (pointer: coarse) {
-    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
-    textarea:not(.xterm-helper-textarea),
-    select {
-      zoom: 0.75;
-    }
-  }
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────────── */

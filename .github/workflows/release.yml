@@ -50,17 +50,86 @@ jobs:
           rm -rf v2/web/node_modules
           npm install --prefix v2/web --omit=dev --ignore-scripts --no-audit --no-fund
           npm run install --prefix v2/web/node_modules/node-pty
+          # node-pty's published `files` list ships prebuilds/ but not build/,
+          # so the freshly-compiled binary would be dropped by `npm pack` and
+          # the end host would need a C/C++ toolchain to rebuild it. Move the
+          # CI-built binary into the prebuilds layout node-pty already checks
+          # (lib/utils.js loadNativeModule: build/Release, build/Debug, then
+          # prebuilds/<platform>-<arch>) so it survives packaging.
+          # spawn-helper is a macOS-only binding.gyp target (pty.cc guards its
+          # use with `#if defined(__APPLE__)`; on Linux it calls forkpty()
+          # directly) — a Linux build/Release/ never contains it, so only
+          # pty.node is copied here.
+          pty_dir="v2/web/node_modules/node-pty"
+          arch="$(node -p process.arch)"
+          prebuild_dir="$pty_dir/prebuilds/linux-$arch"
+          mkdir -p "$prebuild_dir"
+          cp "$pty_dir/build/Release/pty.node" "$prebuild_dir/pty.node"
+          rm -rf "$pty_dir/build"
+          echo "note: only linux-$arch prebuild is bundled (self-hosted runner is single-arch); linux-arm64 is NOT bundled"
+          # Presence in the tarball is not loadability: node-pty's import is
+          # try/caught in direct-terminal-ws.ts, so a wrong-arch/ABI/libc binary
+          # would still boot the web UI and pass the /ws 101 check while the
+          # terminal silently fails on hosts. build/ is gone, so this require
+          # exercises the moved prebuild — fail the release if it can't load.
+          (cd v2/web && node -e "require('node-pty')") \
+            || { echo "bundled node-pty prebuild failed to load"; exit 1; }
+      - name: Verify node-pty prebuild is packed
+        run: |
+          cd v2
+          arch="$(node -p process.arch)"
+          pack_list="$(npm pack --dry-run 2>&1)"
+          echo "$pack_list" | grep -q "web/node_modules/node-pty/prebuilds/linux-$arch/pty.node" || {
+            echo "packed tarball is missing node-pty/prebuilds/linux-$arch/pty.node"
+            exit 1
+          }
       - name: Verify bundled web boots
         run: |
-          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          NODE_ENV=production WEB_HOST=127.0.0.1 PORT=41799 node v2/web/dist-server/web-server.js &
           web_pid=$!
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)
             if [ "$code" = "200" ]; then break; fi
             sleep 1
           done
+          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; kill "$web_pid" || true; exit 1; }
+          # Terminal WS is served in-process on /ws (attachDirectTerminalWebSocket) —
+          # confirm the upgrade handshake succeeds (101), not a 404, via a raw socket.
+          node -e '
+            const net = require("node:net");
+            const crypto = require("node:crypto");
+            const key = crypto.randomBytes(16).toString("base64");
+            const socket = net.connect(41799, "127.0.0.1", () => {
+              socket.write(
+                "GET /ws?session=nonexistent HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:41799\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                `Sec-WebSocket-Key: ${key}\r\n` +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "\r\n"
+              );
+            });
+            let data = "";
+            const done = (ok) => { socket.destroy(); process.exit(ok ? 0 : 1); };
+            socket.on("data", (chunk) => {
+              data += chunk.toString();
+              if (data.includes("\r\n\r\n")) {
+                const statusLine = data.split("\r\n")[0];
+                if (statusLine.includes("101")) {
+                  console.log("ws upgrade ok:", statusLine);
+                  done(true);
+                } else {
+                  console.error("ws upgrade failed:", statusLine);
+                  done(false);
+                }
+              }
+            });
+            socket.on("error", (err) => { console.error("ws socket error:", err.message); done(false); });
+            setTimeout(() => { console.error("ws upgrade timed out"); done(false); }, 10000);
+          ' && ws_rc=0 || ws_rc=1
           kill "$web_pid" || true
-          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
+          [ "$ws_rc" -eq 0 ] || { echo "bundled web /ws upgrade did not return 101"; exit 1; }
       - name: Build v2
         env:
           SPUR_DISABLE_AUTOSTART: "1"

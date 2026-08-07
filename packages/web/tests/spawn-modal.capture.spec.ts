@@ -76,7 +76,7 @@ test.describe("spawn modal capture", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await modalShot(page, /spawn session/i, "spawn-modal-01-desktop-spawn.png");
 
-    await page.getByRole("button", { name: "✕" }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await mockSessions(page, [], SHEPHERD_PROJECTS);
     await page.reload();
     await page.getByRole("button", { name: "Spawn Shepherd" }).click();

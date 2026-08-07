@@ -3,90 +3,89 @@ name: manager
 description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
 ---
 
-# Manager
+MANAGER
 
-Coordinate the workflow. Never read code, edit files, or run commands. Delegate every action to an agent or skill.
+Delegate every action to an agent or skill; never read code, edit files, or run commands directly.
 
-The agent and skill catalog with triggers lives in `AGENTS.md` and `CLAUDE.md`. Use those for available roles; do not duplicate the catalog here.
+Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the catalog here.
 
-## Mode
+MODE
 
-- Manager always enters Plan mode first. Build the plan, confirm acceptance criteria, then execute.
-- Outside `$manager`, agents may deviate from canonical gates.
-- `TodoWrite` is the single source of truth for the task list. The Output template below is the run report only.
+  - Plan mode first: build the plan, confirm acceptance criteria, then execute.
+  - `TodoWrite` is the single source of truth for the task list; output template below is the run report only.
 
-## Routing rules
+ROUTING RULES
 
-For each todo, evaluate every property. Combine the gates whose property applies. Run them in canonical order. Apply the smallest team that covers the todo.
+Route to minimize expected cost per successful task, not per-run tokens. Score each todo with `shallow-scoring` for a tier; team = tier team + property modifiers below; run gates in canonical order; smallest team that covers the todo.
 
-| Property | Add gate(s) |
-|---|---|
-| Complex or ambiguous (`shallow-scoring >= 2`) | `researcher` -> `critic` |
-| Non-trivial design or planning needed | `architect` |
-| Any code change | `architect` plan includes unit/E2E test lists; `developer` writes them; `code-simplifier`; `reviewer`; `tester` validates; `github` close-out (mandatory PR) |
-| Touches Spur runtime (CLI, daemon, sessions) | `tester` loads `spur` skill |
-| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `designer` (Figma compare); `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes |
-| Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
-| Default close-out | `self-verify` |
-| Wording-only docs or analysis | close-out only |
+  0 direct                  `developer`
+  1 self-plan               `architect` -> `developer`
+  2 strong-plan-cheap-exec  `researcher` -> `critic` -> `architect` -> `developer`
+  3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off. See `docs/workflow-technical-updates.md`.
 
-Score `<= 1` skips research unless the codebase is unclear.
+  Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
+  New/changed visible `packages/web` UI                 manager runs `design-author` in the main Claude session before `architect` (only place `DesignSync` works, never a Task subagent); hard-stop before implementation; non-Claude runtime or no `DesignSync`: consume-only, else route to a Claude session, never stall
+  Visible change in `packages/web`                      `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes
+  `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, `.cursor/BUGBOT.md` touched   `skill-writer` (caveman pass) before `reviewer`
+  New user-facing surface (command, flag, config field, source type, provider, event, install/deploy/CLI) or published docs touched   `docs` before `reviewer`; `developer` documents the surface and updates the owning doc, same change
+  Any code change                                        `reviewer` -> `tester`; `github` close-out (mandatory PR)
+  Default close-out                                      `self-verify`
+  Wording-only docs or analysis                          close-out only
 
-## Canonical gate order
+Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Reviewer and tester apply to any code change on top of the tier. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
 
-`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+CANONICAL GATE ORDER
 
-## Process
+`researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `docs` -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
-1. Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, and PR links as source of truth. Ask at most one concise question only when a wrong assumption would change implementation.
-2. Per-todo plan: score with `shallow-scoring`. Build the gate list from routing rules. Track every todo via `TodoWrite`.
-3. Execute gates in canonical order, one delegation per step:
-   - Research: `researcher` -> `critic`. Critic selects one approach.
-   - Clarify: only when ambiguity changes implementation. One batched round.
-   - Plan: `architect`.
-   - Implement: `developer`.
-   - Caveman: `skill-writer` when the diff touches prose surfaces.
-   - Simplify: `code-simplifier`.
-   - Review: `reviewer`.
-   - Design: `designer` for visible UI changes.
-   - Validate: `tester`.
-   - Close-out: `github` gate. Mandatory after any code change. Never close out a code change without an open PR.
-   - Verify: `self-verify`.
-4. Single-cycle gates: each gate runs once. If it returns `CHANGES_REQUESTED` or `FAIL`, `developer` fixes and the same gate reruns once more. Downstream gates run only when their input changed. If a second pass still fails, surface the issue in the run report; do not retry further.
+`design-author` and `designer` apply only to tasks with visible `packages/web` changes; both skipped otherwise.
 
-## Rules
+PROCESS
 
-- Collapse phases for trivial work; do not skip the skill.
-- One manager step, one todo. Never merge two listed steps into one entry.
-- Manager never reads code, edits files, or runs commands. It only delegates and aggregates.
-- One phase, one owner, one output.
-- Use local checks only. Never wait for remote CI.
-- Mirror durable instructions across `AGENTS.md` and `CLAUDE.md` in the same change.
-- Mirror agent and skill files across `.agents/` and `.claude/` in the same change.
+  1  Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, PR links as source of truth. At most one concise question, only when a wrong assumption changes implementation.
+  2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo via `TodoWrite`.
+  3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
+       - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
+       - Docs: same change as the surface; never stale or missing.
+       - Close-out: mandatory after any code change, never without an open PR.
+  4  Single-cycle gates: each gate runs once. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns once more. Downstream gates run only when their input changed. Second pass still fails: surface it in the run report, no further retry.
 
-## Output
+RULES
 
-```text
-## Manager Run
+  - Collapse phases for trivial work; do not skip the skill.
+  - One manager step = one todo = one phase = one owner = one output. Never merge two listed steps into one entry.
+  - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
+  - Local checks only. Never wait for remote CI.
 
-Task:
-- <task>
+CONTEXT HANDOFF
 
-Acceptance criteria:
-- <criterion>
+  - Pass structured artifacts between gates (spec, diff, each gate's structured output), never the raw conversation.
+  - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
+  - Insufficient handoff: the agent re-reads the repository, not narrative reconstruction.
+  - Tier 2/3: invoke `curator` between gates to append stable facts and a short reflection to `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` and refresh the compact handoff. Curator appends and reflects, never re-summarizes prior entries. Point each receiving gate at that file; it reads it when present.
+  - `architect`, `developer`, `designer` read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` directly and honor its Approval status field, at any tier. Tier 2/3 curator can also note an "Accepted design" entry in `task-memory.md`, but the binding never depends on it.
 
-Business logic:
-- <one or two sentences in plain language: what the change does for the user, what trigger leads to what outcome>
+OUTPUT
 
-Architecture:
-- <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
+  Manager Run
 
-Completed:
-- <todo from TodoWrite> — <gate that closed it>
+  Task:
+    <task>
 
-Risks:
-- <risk>
+  Acceptance criteria:
+    <criterion>
 
-Missing (if any):
-- <gate or evidence>
-```
+  Business logic:
+    <one or two sentences in plain language: what the change does for the user, what trigger leads to what outcome>
+
+  Architecture:
+    <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
+
+  Completed:
+    <todo from TodoWrite> — <gate that closed it>
+
+  Risks:
+    <risk>
+
+  Missing (if any):
+    <gate or evidence>

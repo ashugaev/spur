@@ -8,6 +8,8 @@ const {
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessageMock,
+  writeFileMock,
+  readFileMock,
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
@@ -17,8 +19,15 @@ const {
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
   scanClaudeJsonlForMessageMock: vi.fn(),
+  writeFileMock: vi.fn(),
+  readFileMock: vi.fn(),
   captureCursorSubmitBaselineMock: vi.fn(),
   scanCursorJsonlForMessageMock: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  writeFile: writeFileMock,
+  readFile: readFileMock,
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {
@@ -63,6 +72,10 @@ beforeEach(() => {
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
   scanClaudeJsonlForMessageMock.mockReset();
+  writeFileMock.mockReset().mockResolvedValue(undefined);
+  readFileMock
+    .mockReset()
+    .mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   captureCursorSubmitBaselineMock.mockReset();
   scanCursorJsonlForMessageMock.mockReset();
 });
@@ -108,12 +121,154 @@ describe("setupAgentHooks", () => {
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", [
-      "/tmp/spur-worktrees/api/api-1",
-    ]);
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      {},
+    );
     expect(result).toEqual({
       codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
     });
+  });
+
+  it("writes an http mcp-config.json and returns its path for claude when mcpBindings are set", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [path, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(path).toBe("/tmp/spur-data/session-tools/api-1/mcp-config.json");
+    // Client-facing URL must use "localhost", not the bare IP: @playwright/mcp's
+    // DNS-rebinding protection rejects "127.0.0.1:<port>" with HTTP 403.
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
+  it("merges host/project MCP servers into mcp-config.json, stripping host playwright in favor of Spur's", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/.claude.json") {
+        return JSON.stringify({
+          mcpServers: {
+            digitalocean: { command: "npx", args: ["-y", "digitalocean-mcp"] },
+            playwright: { command: "npx", args: ["-y", "@playwright/mcp"] },
+          },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      claudeConfigDir: "/home/user",
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    expect(readFileMock).toHaveBeenCalledWith("/home/user/.claude.json", "utf8");
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        digitalocean: { command: "npx", args: ["-y", "digitalocean-mcp"] },
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
+  it("prefers the local-scope (projects[worktreePath]) server over .mcp.json on a name collision", async () => {
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path === "/home/user/.claude.json") {
+        return JSON.stringify({
+          projects: {
+            "/tmp/spur-worktrees/api/api-1": {
+              mcpServers: {
+                shared: { command: "npx", args: ["-y", "local-scope-mcp"] },
+              },
+            },
+          },
+        });
+      }
+      if (path === "/tmp/spur-worktrees/api/api-1/.mcp.json") {
+        return JSON.stringify({
+          mcpServers: {
+            shared: { command: "npx", args: ["-y", "project-scope-mcp"] },
+          },
+        });
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      claudeConfigDir: "/home/user",
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        shared: { command: "npx", args: ["-y", "local-scope-mcp"] },
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+      },
+    });
+  });
+
+  it("emits one mcpServers entry per binding for claude", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings: [
+        { server: "playwright", url: "http://localhost:8742/mcp" },
+        { server: "widget", url: "http://localhost:9001/widget" },
+      ],
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        playwright: { type: "http", url: "http://localhost:8742/mcp" },
+        widget: { type: "http", url: "http://localhost:9001/widget" },
+      },
+    });
+  });
+
+  it("forwards mcpBindings to codex hook config", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+    const mcpBindings = [{ server: "playwright", url: "http://localhost:8742/mcp" }];
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      mcpBindings,
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { mcpBindings },
+    );
   });
 
   it("forwards restrictWrites to codex hook setup", async () => {
@@ -135,10 +290,10 @@ describe("setupAgentHooks", () => {
 });
 
 describe("buildAgentLaunchPlan", () => {
-  it("omits --force for cursor when restrictWrites is enabled", () => {
+  it("keeps --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent --model 'auto'");
-    expect(plan.launchCommand).not.toContain("--force");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
+    expect(plan.launchCommand).toContain("--force");
     expect(plan.launchCommand).not.toContain("--plan");
   });
 });
@@ -167,6 +322,23 @@ describe("createAgentSubmitAckBinding", () => {
       { file: "/some/file.jsonl", size: 42 },
       "hello",
       ctx.worktreePath,
+      undefined,
+    );
+  });
+
+  it("threads the pinned agentSessionId into claude baseline and scan", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
+    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+
+    const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
+    const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
+    await binding?.scan("hello");
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid");
+    expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/file.jsonl", size: 42 },
+      "hello",
+      ctx.worktreePath,
+      "pinned-uuid",
     );
   });
 

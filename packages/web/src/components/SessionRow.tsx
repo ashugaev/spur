@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
-import { SessionTags } from "@/components/SessionTags";
+import { TagEditor } from "@/components/TagEditor";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
+import {
+  isReviewLinkLabel,
+  isTrackerLinkLabel,
+  primePrInfo,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -216,7 +221,7 @@ export function SessionRow({
     (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
-  const trackerLink = session.links.find((l) => l.label === "tracker");
+  const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
@@ -228,6 +233,13 @@ export function SessionRow({
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+  const isAttentionState = session.state === "needs_input";
+  const hasSeenAttention = isAttentionState && session.hasUnseenAttention === false;
+  const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
+  const titleColor =
+    isAttentionState && !hasSeenAttention
+      ? "text-[var(--color-text-primary)]"
+      : "text-[var(--color-text-secondary)]";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));
@@ -235,7 +247,9 @@ export function SessionRow({
 
   return (
     <DataRow>
-      <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
+      <span
+        className={`hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline ${attentionTextOpacity}`}
+      >
         {session.projectName}
       </span>
 
@@ -279,13 +293,13 @@ export function SessionRow({
       />
 
       <Link
-        className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline ${attentionTextOpacity}`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
       </Link>
 
-      <SessionTags session={session} />
+      <TagEditor session={session} variant="dots" />
 
       {trackerLink ? (
         <span className="hidden sm:inline-flex">
@@ -299,7 +313,9 @@ export function SessionRow({
         </span>
       ) : null}
 
-      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
+      <span
+        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
+      >
         {session.branch}
       </span>
 

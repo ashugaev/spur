@@ -1,13 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { FiltersModal } from "@/components/FiltersModal";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -20,18 +30,35 @@ import { useLastAgentSelection } from "@/hooks/useLastAgentSelection";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
+import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { JiraIcon } from "@/lib/link-icons";
+import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
+import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
-import type { AgentName } from "@/lib/agents";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import {
+  clearSpawnDraft,
+  readSpawnDraft,
+  writeSpawnDraft,
+  type SpawnDraft,
+} from "@/lib/spawn-draft";
+import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
+  ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
@@ -50,22 +77,26 @@ import {
   type SpurSessionView,
   type SpawnOverrides,
   type SpurSessionsResponse,
-  type TakeBacklogItemResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
+  type WorkspaceMode,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
-import { TagFilter } from "@/components/TagFilter";
+import { useBackendConnection } from "@/lib/backend-connection-context";
+import { useVersionSwitch } from "@/lib/version-switch-context";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
-const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
+const TAG_FILTERS_STORAGE_KEY = "spur:tag-filters";
+const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -94,6 +125,88 @@ function buildSessionProjectLabelMap(
   return labels;
 }
 
+function sessionReviewUrl(session: DashboardSession): string | undefined {
+  return session.links.find((link) => isReviewLinkLabel(link.label))?.url;
+}
+
+interface FacetFilterState {
+  projectId: string;
+  tagFilters: readonly string[];
+  agentFilter: readonly AgentName[];
+  searchQuery: string;
+  prReadyOnly: boolean;
+  prReady: { readonly ready: ReadonlySet<string>; readonly loaded: boolean };
+}
+
+type FacetDimension = "project" | "tag" | "agent" | "prReady";
+
+// Whether `session` passes every facet filter dimension EXCEPT `exclude` —
+// the shared predicate behind every Filters modal chip count, so a chip
+// never counts against its own selection.
+function sessionMatchesFacetFilters(
+  session: DashboardSession,
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+): boolean {
+  if (exclude !== "project" && filters.projectId && session.projectId !== filters.projectId) {
+    return false;
+  }
+  if (
+    exclude !== "tag" &&
+    filters.tagFilters.length > 0 &&
+    !filters.tagFilters.some((tag) => session.tags.includes(tag))
+  ) {
+    return false;
+  }
+  if (
+    exclude !== "agent" &&
+    filters.agentFilter.length > 0 &&
+    !filters.agentFilter.includes(session.agent)
+  ) {
+    return false;
+  }
+  if (filters.searchQuery && !matchesSessionSearch(session, filters.searchQuery)) {
+    return false;
+  }
+  if (exclude !== "prReady" && filters.prReadyOnly && filters.prReady.loaded) {
+    const url = sessionReviewUrl(session);
+    if (!url || !filters.prReady.ready.has(url)) return false;
+  }
+  return true;
+}
+
+// Tallies desks (not sessions) per facet key: a desk counts once for a key
+// as soon as ANY member session carries it — the same "any member of the
+// desk" rule `tagFilteredSessions` / `agentFilteredSessions` /
+// `prReadyFilteredSessions` use to actually narrow the list, so a desk whose
+// matching session (e.g. a ready PR link) lives on a subagent rather than
+// the anchor still counts here. Drives every Filters modal chip count
+// (project, agent, tag, PR-ready) through one path instead of four
+// hand-rolled copies, each of which must independently remember to skip
+// only its own dimension.
+function buildFacetCounts<T extends string>(
+  sessions: readonly DashboardSession[],
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+  keyFn: (session: DashboardSession) => readonly T[],
+): Map<T, number> {
+  const deskKeysByValue = new Map<T, Set<string>>();
+  for (const session of sessions) {
+    if (!sessionMatchesFacetFilters(session, exclude, filters)) continue;
+    for (const key of keyFn(session)) {
+      let deskKeys = deskKeysByValue.get(key);
+      if (!deskKeys) {
+        deskKeys = new Set();
+        deskKeysByValue.set(key, deskKeys);
+      }
+      deskKeys.add(session.deskKey);
+    }
+  }
+  const counts = new Map<T, number>();
+  for (const [key, deskKeys] of deskKeysByValue) counts.set(key, deskKeys.size);
+  return counts;
+}
+
 function sameDeskActiveSessions(
   sessions: readonly DashboardSession[],
   session: DashboardSession,
@@ -113,51 +226,14 @@ function completedIdsFromResponse(value: unknown): string[] {
   return completedIds.filter((id): id is string => typeof id === "string");
 }
 
-function StatItem({
-  icon,
-  label,
-  value,
-  color,
-  active,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: number | string;
-  color?: string;
-  active?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
-      onClick={onClick}
-      type="button"
-    >
-      <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">
-        {label}:
-      </span>
-      <span
-        className="font-bold text-[var(--color-text-primary)]"
-        style={color ? { color } : undefined}
-      >
-        {value}
-      </span>
-    </button>
-  );
-}
-
 function BacklogZone({
   items,
   projectNameMap,
-  takingKey,
   onTake,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
-  takingKey: string | null;
-  onTake: (item: AvailableBacklogItem) => Promise<void>;
+  onTake: (item: AvailableBacklogItem) => void;
 }) {
   if (items.length === 0) return null;
   return (
@@ -190,13 +266,11 @@ function BacklogZone({
             </span>
             <RowIconButton
               activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              disabled={takingKey !== null}
+              disabled={false}
               label="Take task"
-              onClick={() => void onTake(item)}
+              onClick={() => onTake(item)}
             >
-              <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
-                <IconTake />
-              </span>
+              <IconTake />
             </RowIconButton>
           </DataRow>
         );
@@ -249,6 +323,22 @@ function IconClock() {
     </svg>
   );
 }
+function IconGauge() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m12 14 4-4" />
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+    </svg>
+  );
+}
 function IconBolt() {
   return (
     <svg
@@ -292,6 +382,56 @@ function IconStop() {
     </svg>
   );
 }
+
+function IconSliders() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-[13px] w-[13px] opacity-75"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+    >
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="9" cy="6" r="2" fill="var(--color-bg-base)" />
+      <circle cx="16" cy="12" r="2" fill="var(--color-bg-base)" />
+      <circle cx="11" cy="18" r="2" fill="var(--color-bg-base)" />
+    </svg>
+  );
+}
+
+function IconPlus({ className }: { className: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+// Icon per lane for the Filters modal Status section. Label/color live in
+// the single shared `ATTENTION_LANE_META` (also used by AttentionZone), so
+// only the icon assignment — which AttentionZone doesn't render — stays here.
+const STATUS_LANE_ICONS: Record<AttentionLevel, ReactNode> = {
+  error: <IconAlert />,
+  rate_limited: <IconGauge />,
+  respond: <IconChat />,
+  working: <IconBolt />,
+  pending: <IconClock />,
+  stopped: <IconStop />,
+  done: <IconCheck />,
+};
 
 function IconEdit() {
   return (
@@ -388,7 +528,7 @@ function readLocationSearch(): string {
 }
 
 function buildSpawnOverrides(
-  workspaceMode: "default" | "worktree" | "shared",
+  workspaceMode: WorkspaceMode,
   defaultBranch: string,
 ): SpawnOverrides | undefined {
   if (workspaceMode === "worktree") {
@@ -437,12 +577,11 @@ function ProjectMenu({
         aria-expanded={popover.open}
         aria-haspopup="menu"
         aria-label={`Project filter: ${activeProjectName}`}
-        className="inline-flex min-w-0 max-w-full items-center gap-3 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+        className="inline-flex min-w-0 max-w-full items-center text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
         type="button"
         onClick={popover.toggle}
       >
-        <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-        <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] sm:text-2xl">
+        <span className="inline-flex min-w-0 max-w-[230px] items-center gap-1 text-base font-bold uppercase tracking-[-0.02em]">
           <span className="block min-w-0 truncate">{activeProjectName}</span>
           <svg
             aria-hidden="true"
@@ -641,12 +780,12 @@ function NewProjectModal({
           />
         </label>
         <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Project path</span>
+          <span className="text-[var(--color-text-secondary)]">Project path (optional)</span>
           <input
             aria-label="Project path"
             className={INPUT_CLASS}
             onChange={(event) => onPathChange(event.target.value)}
-            placeholder="/absolute/path/to/repo"
+            placeholder="/absolute/path/to/repo (optional)"
             value={path}
           />
         </label>
@@ -824,9 +963,7 @@ function EditProjectModal({
             role="alert"
           >
             <span>
-              {project.configured
-                ? `Disconnect ${project.name}? Spur will stop tracking its spur.yaml.`
-                : `Delete ${project.name}?`}
+              {project.configured ? `Disconnect ${project.name}?` : `Delete ${project.name}?`}
             </span>
             <div className="flex flex-wrap gap-2">
               <button
@@ -889,12 +1026,19 @@ function EditProjectModal({
 }
 
 export function Dashboard() {
-  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
+  // Initialized empty rather than read from `window.location.search` at render
+  // time: the server always renders "", so a non-empty client-side first
+  // render would be a hydration text mismatch. The layout effect below is the
+  // only path that populates these, restoring both together pre-paint. This
+  // removes the mismatch these two states used to contribute — it is not a
+  // whole-component guarantee: `readCollapsedCategories` and the
+  // `activeTagFilters` initializer further below still read localStorage
+  // during render. Both are unreachable pre-paint today only because they're
+  // gated behind fetched-session state, not because render-time storage reads
+  // are safe in general.
+  const [locationSearch, setLocationSearch] = useState("");
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(readLocationSearch());
-    return params.get("project")?.trim() ?? "";
-  });
+  const [projectId, setProjectId] = useState("");
   const { toasts, showErrorToast, dismissToast } = useToasts();
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
@@ -909,27 +1053,29 @@ export function Dashboard() {
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const spawnBranchExplicitRef = useRef(false);
+  const spawnDraftDirtyRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
-    "default",
-  );
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("default");
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
+  const [spawnTrackerUrl, setSpawnTrackerUrl] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const lastSelection = useLastAgentSelection();
   const voice = useVoiceInput({
     contextKey: "spawn",
-    onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      spawnDraftDirtyRef.current = true;
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
@@ -946,20 +1092,55 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
-  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(TAG_FILTER_STORAGE_KEY)?.trim() || null;
+  const [agentFilter, setAgentFilter] = useState<AgentName[]>([]);
+  // Not persisted: PR readiness is remote state that flips without user
+  // action, so a persisted "empty dashboard" on next load would have no
+  // user-visible cause — unlike user-authored tags. Matches the
+  // un-persisted `activeStatFilter` above.
+  const [prReadyOnly, setPrReadyOnly] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          const tags = parsed
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0);
+          if (tags.length > 0) return tags;
+        }
+      } catch {
+        // Corrupt JSON — fall through to the legacy key below.
+      }
+    }
+    // Reached when the new key is absent, empty, or invalid: a still-valid
+    // legacy single-tag value must not be lost before its one-time migration.
+    const legacy = window.localStorage.getItem(LEGACY_TAG_FILTER_STORAGE_KEY)?.trim();
+    return legacy ? [legacy] : [];
   });
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (activeTagFilter) {
-      window.localStorage.setItem(TAG_FILTER_STORAGE_KEY, activeTagFilter);
+    if (activeTagFilters.length > 0) {
+      window.localStorage.setItem(TAG_FILTERS_STORAGE_KEY, JSON.stringify(activeTagFilters));
     } else {
-      window.localStorage.removeItem(TAG_FILTER_STORAGE_KEY);
+      window.localStorage.removeItem(TAG_FILTERS_STORAGE_KEY);
     }
-  }, [activeTagFilter]);
-  const toggleStatFilter = (level: AttentionLevel) =>
+  }, [activeTagFilters]);
+  // One-time migration cleanup: the legacy single-tag key is read once in the
+  // initializer above, then dropped on mount so it never lingers.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
+  }, []);
+  const selectStatFilter = (level: AttentionLevel | null) =>
     setActiveStatFilter((current) => (current === level ? null : level));
+  const toggleAgentFilter = (agent: AgentName) =>
+    setAgentFilter((current) =>
+      current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
+    );
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
@@ -976,43 +1157,38 @@ export function Dashboard() {
   const [editProjectDeleting, setEditProjectDeleting] = useState(false);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Restore locationSearch + projectId from the URL in a layout effect, not a
+  // passive effect: layout effects flush before the browser paints, so the
+  // project name is correct on the first paint AFTER hydration, instead of
+  // one extra frame of "All Projects" while a passive effect chain catches
+  // up. (The very first frame — the raw SSR HTML before hydration runs — is
+  // always "All Projects" regardless; that's an accepted, out-of-scope SSR
+  // characteristic, not something this effect can change.) The render-time
+  // initial state stays "" (above) so the server's first render and the
+  // client's first render still agree — no hydration mismatch — and this
+  // effect only runs after that hydration has already committed
+  // successfully.
+  useLayoutEffect(() => {
     if (typeof window === "undefined") return;
-    const syncSearch = () => setLocationSearch(readLocationSearch());
-    syncSearch();
-    window.addEventListener("popstate", syncSearch);
+    const syncFromLocation = () => {
+      const search = readLocationSearch();
+      setLocationSearch(search);
+      setProjectId(new URLSearchParams(search).get("project")?.trim() ?? "");
+    };
+    syncFromLocation();
+    window.addEventListener("popstate", syncFromLocation);
     return () => {
-      window.removeEventListener("popstate", syncSearch);
+      window.removeEventListener("popstate", syncFromLocation);
     };
   }, []);
 
-  useEffect(() => {
-    if (!spawnOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSpawnOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [spawnOpen]);
-
-  const requestedProject = useMemo(
-    () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
-    [locationSearch],
-  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
 
-  useEffect(() => {
-    setProjectId(requestedProject);
-  }, [requestedProject]);
-
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions"] as const;
+  const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const {
     data,
     isPending,
@@ -1031,12 +1207,44 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
-  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
+  // Single shared catalog source (react-query key ["tag-catalog"]) so the
+  // dashboard dots popover and the detail chips popover dedupe on one cache.
+  const tagCatalog = useTagCatalog();
+  // Self-heal the persisted filter: once the catalog loads, drop any selected
+  // tag that no longer exists in it (deleted tag or corrupted localStorage),
+  // so a stale entry can't keep the trigger active with no way to uncheck it.
+  useEffect(() => {
+    if (tagCatalog.length === 0) return;
+    const known = new Set(tagCatalog.map((tag) => tag.name));
+    setActiveTagFilters((current) => {
+      const pruned = current.filter((name) => known.has(name));
+      return pruned.length === current.length ? current : pruned;
+    });
+  }, [tagCatalog]);
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+  const { phase: versionSwitchPhase } = useVersionSwitch();
+  const { phase: backendPhase } = useBackendConnection();
 
   useEffect(() => {
     if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    // The daemon is expected to be unreachable while a version switch is in
+    // flight, or while the backend-connection gate is showing its own
+    // blocking overlay — don't surface that as a new session-load error
+    // toast, and clear any pre-existing one so it doesn't linger behind the
+    // overlay.
+    if (
+      versionSwitchPhase === "switching" ||
+      versionSwitchPhase === "done" ||
+      backendPhase === "disconnected"
+    ) {
       const current = sessionsErrorToastRef.current;
       if (current) {
         dismissToast(current.id);
@@ -1052,7 +1260,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast]);
+  }, [backendPhase, dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
@@ -1084,31 +1292,61 @@ export function Dashboard() {
   }, [projectSessions, tagCatalog]);
 
   const tagFilteredSessions = useMemo(() => {
-    if (!activeTagFilter) return projectSessions;
+    if (activeTagFilters.length === 0) return projectSessions;
     const keys = new Set(
-      projectSessions.filter((s) => s.tags.includes(activeTagFilter)).map((s) => s.deskKey),
+      projectSessions
+        .filter((s) => activeTagFilters.some((t) => s.tags.includes(t)))
+        .map((s) => s.deskKey),
     );
     return projectSessions.filter((s) => keys.has(s.deskKey));
-  }, [projectSessions, activeTagFilter]);
+  }, [projectSessions, activeTagFilters]);
+
+  const agentFilteredSessions = useMemo(() => {
+    if (agentFilter.length === 0) return tagFilteredSessions;
+    const keys = new Set(
+      tagFilteredSessions.filter((s) => agentFilter.includes(s.agent)).map((s) => s.deskKey),
+    );
+    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [tagFilteredSessions, agentFilter]);
+
+  // One review-link URL per session (undefined when a session has no GitHub
+  // or GitLab review link). usePrReadyUrls filters to GitHub-only itself and
+  // only fetches while prReadyOnly is true.
+  const reviewUrls = useMemo(
+    () =>
+      agentFilteredSessions
+        .map((session) => sessionReviewUrl(session))
+        .filter((url): url is string => Boolean(url)),
+    [agentFilteredSessions],
+  );
+  const prReady = usePrReadyUrls(reviewUrls, prReadyOnly);
+
+  const prReadyFilteredSessions = useMemo(() => {
+    if (!prReadyOnly || !prReady.loaded) return agentFilteredSessions;
+    const keys = new Set(
+      agentFilteredSessions
+        .filter((s) => {
+          const url = sessionReviewUrl(s);
+          return url ? prReady.ready.has(url) : false;
+        })
+        .map((s) => s.deskKey),
+    );
+    return agentFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [agentFilteredSessions, prReadyOnly, prReady]);
 
   const sessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return tagFilteredSessions;
-    const narrowed = tagFilteredSessions.filter(
-      (s) =>
-        s.id.toLowerCase().includes(q) ||
-        (s.title ?? "").toLowerCase().includes(q) ||
-        s.prompt.toLowerCase().includes(q) ||
-        s.projectName.toLowerCase().includes(q) ||
-        (s.branch ?? "").toLowerCase().includes(q),
+    if (!searchQuery.trim()) return prReadyFilteredSessions;
+    const narrowed = prReadyFilteredSessions.filter((session) =>
+      matchesSessionSearch(session, searchQuery),
     );
     const keys = new Set(narrowed.map((s) => s.deskKey));
-    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
-  }, [tagFilteredSessions, searchQuery]);
+    return prReadyFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [prReadyFilteredSessions, searchQuery]);
 
   const visibleBacklog = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return availableBacklog.filter((item) => {
+      if (isBacklogItemActivelyWorked(item, allSessions)) return false;
       if (projectId && item.projectId !== projectId) return false;
       if (!q) return true;
       return (
@@ -1117,7 +1355,7 @@ export function Dashboard() {
         item.projectId.toLowerCase().includes(q)
       );
     });
-  }, [availableBacklog, projectId, searchQuery]);
+  }, [availableBacklog, allSessions, projectId, searchQuery]);
 
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
@@ -1162,20 +1400,84 @@ export function Dashboard() {
     [activeStatFilter, grouped],
   );
 
-  const hasActiveFilters =
-    projectId.length > 0 ||
-    searchQuery.trim().length > 0 ||
-    activeStatFilter !== null ||
-    activeTagFilter !== null;
+  const allStatusesCount = deskCollapsedRows.length;
+
+  // Faceted counts for the Filters modal chips, all driven through
+  // `buildFacetCounts` off the full, unfiltered `allSessions`: each
+  // dimension excludes only itself and applies every other active filter —
+  // including `prReadyOnly` — so toggling one option never zeroes out, nor
+  // silently under-counts, the rest of that same section.
+  const facetFilters: FacetFilterState = useMemo(
+    () => ({
+      projectId,
+      tagFilters: activeTagFilters,
+      agentFilter,
+      searchQuery: searchQuery.trim(),
+      prReadyOnly,
+      prReady,
+    }),
+    [projectId, activeTagFilters, agentFilter, searchQuery, prReadyOnly, prReady],
+  );
+
+  const projectCounts = useMemo(
+    () => buildFacetCounts(allSessions, "project", facetFilters, (s) => [s.projectId]),
+    [allSessions, facetFilters],
+  );
+
+  const allProjectsCount = useMemo(
+    () => [...projectCounts.values()].reduce((total, count) => total + count, 0),
+    [projectCounts],
+  );
+
+  const agentCounts = useMemo(
+    () => buildFacetCounts(allSessions, "agent", facetFilters, (s) => [s.agent]),
+    [allSessions, facetFilters],
+  );
+
+  const tagCounts = useMemo(
+    () => buildFacetCounts(allSessions, "tag", facetFilters, (s) => s.tags),
+    [allSessions, facetFilters],
+  );
+
+  // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
+  // its own facet query: computing this independently of the toggle would
+  // require fetching PR readiness for every session at all times, which
+  // violates "no /api/pr-status/batch request while prReadyOnly is false".
+  const prReadyCount = useMemo(() => {
+    if (!prReady.loaded) return 0;
+    const counts = buildFacetCounts(allSessions, "prReady", facetFilters, (s) => {
+      const url = sessionReviewUrl(s);
+      return url && prReady.ready.has(url) ? (["ready"] as const) : [];
+    });
+    return counts.get("ready") ?? 0;
+  }, [allSessions, facetFilters, prReady]);
+
+  const activeFilterCount =
+    (projectId ? 1 : 0) +
+    (activeStatFilter !== null ? 1 : 0) +
+    activeTagFilters.length +
+    agentFilter.length +
+    (prReadyOnly ? 1 : 0);
+
+  const hasActiveFilters = activeFilterCount > 0 || searchQuery.trim().length > 0;
+
+  const resetAllFilters = () => {
+    setSearchQuery("");
+    setActiveStatFilter(null);
+    setActiveTagFilters([]);
+    setAgentFilter([]);
+    setPrReadyOnly(false);
+    syncProjectFilter("");
+  };
   const hasVisibleSessions = visibleLevels.length > 0;
   const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
   const emptyStateMessage = hasActiveFilters
-    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    ? `No sessions match this filter${projectId ? ` in ${activeProjectName}` : ""}. Reset the filters, or spawn a new session.`
     : grouped.done.length > 0
-      ? "No current sessions are visible."
+      ? "No active sessions."
       : undefined;
 
   const configuredProjectOptions = useMemo(
@@ -1205,6 +1507,30 @@ export function Dashboard() {
     return configuredProjectOptions[0]?.id ?? "";
   };
 
+  const applySpawnDraft = (nextProjectId: string, draft: SpawnDraft | null) => {
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt(draft?.prompt ?? "");
+    setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnModel(draft?.model ?? null);
+    setSpawnBranch(draft?.branch ?? "");
+    spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
+    setSpawnPlanMode(draft?.planMode ?? false);
+    setSpawnSelfDestruct(draft?.selfDestruct ?? false);
+    setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
+    setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
+    setSpawnDefaultBranch(draft?.defaultBranch ?? "");
+    setSpawnTrackerUrl(draft?.trackerUrl ?? null);
+    setSpawnAttachments([]);
+    spawnDraftDirtyRef.current = false;
+  };
+
+  const restoreSpawnDraft = (nextProjectId: string) => {
+    const draft = readSpawnDraft(nextProjectId);
+    applySpawnDraft(nextProjectId, draft);
+    return draft;
+  };
+
   useEffect(() => {
     if (spawnPinnedProjectId) {
       if (spawnProjectId !== spawnPinnedProjectId) {
@@ -1219,14 +1545,21 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      setSpawnProjectId(nextProjectId);
+      const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
+      if (spawnOpen && !carriesUnscopedEdits) {
+        restoreSpawnDraft(nextProjectId);
+      } else {
+        setSpawnProjectId(nextProjectId);
+      }
     }
-  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnOpen, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(normalizedProjectId);
+    if (normalizedProjectId !== spawnProjectId) {
+      restoreSpawnDraft(normalizedProjectId);
+    }
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1234,6 +1567,64 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  const spawnDraft = useMemo<SpawnDraft | null>(() => {
+    if (!spawnProjectId) return null;
+    return {
+      projectId: spawnProjectId,
+      prompt: spawnPrompt,
+      agent: spawnAgent,
+      model: spawnModel,
+      branch: spawnBranch,
+      branchIsExplicit: spawnBranchExplicitRef.current,
+      workspaceMode: spawnWorkspaceMode,
+      defaultBranch: spawnDefaultBranch,
+      planMode: spawnPlanMode,
+      selfDestruct: spawnSelfDestruct,
+      selfDestructConditions: spawnSelfDestructConditions,
+      steps: spawnSteps.map((step) => step.value),
+      trackerUrl: spawnTrackerUrl,
+    };
+  }, [
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnModel,
+    spawnOpen,
+    spawnPlanMode,
+    spawnProjectId,
+    spawnPrompt,
+    spawnSelfDestruct,
+    spawnSelfDestructConditions,
+    spawnSteps,
+    spawnTrackerUrl,
+    spawnWorkspaceMode,
+  ]);
+  const spawnDraftRef = useRef(spawnDraft);
+  spawnDraftRef.current = spawnDraft;
+
+  useEffect(() => {
+    if (!spawnOpen || !spawnDraft) return;
+    const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [spawnDraft, spawnOpen]);
+
+  const closeSpawnModal = useCallback(() => {
+    if (spawnDraftRef.current) writeSpawnDraft(spawnDraftRef.current);
+    setSpawnOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSpawnModal();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [closeSpawnModal, spawnOpen]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -1266,12 +1657,39 @@ export function Dashboard() {
     setLocationSearch(window.location.search);
   };
 
+  const markSessionOpened = useCallback(
+    async (sessionId: string) => {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`opened ${response.status}`);
+      const openedSession = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) =>
+            session.id === openedSession.id ? openedSession : session,
+          ),
+        };
+      });
+    },
+    [queryClient, sessionsQueryKey],
+  );
+
   const addStep = () => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
-  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
-  const updateStep = (id: number, value: string) =>
+  const removeStep = (id: number) => {
+    spawnDraftDirtyRef.current = true;
+    setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
+  };
+  const updateStep = (id: number, value: string) => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+  };
 
   useEffect(() => {
     const project = spawnProjectId.trim();
@@ -1291,7 +1709,9 @@ export function Dashboard() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
+            setSpawnBranch(result.branch);
+          }
         })
         .catch(() => {});
     }, 500);
@@ -1350,6 +1770,7 @@ export function Dashboard() {
       };
       if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
       if (normalizedBranch) payload.branch = normalizedBranch;
@@ -1363,15 +1784,21 @@ export function Dashboard() {
       }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
+      if (spawnTrackerUrl) {
+        payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
+      }
 
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn Spur session"));
+      }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      clearSpawnDraft(nextProjectId);
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -1385,6 +1812,7 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnModel(null);
       setSpawnBranch("");
+      spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
@@ -1393,6 +1821,7 @@ export function Dashboard() {
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
       setSpawnPinnedProjectId(null);
+      setSpawnTrackerUrl(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
     } catch (spawnError) {
@@ -1400,49 +1829,6 @@ export function Dashboard() {
     } finally {
       spawningRef.current = false;
       setSpawning(false);
-    }
-  };
-
-  const handleTakeBacklog = async (item: AvailableBacklogItem) => {
-    const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
-    if (takingBacklogKey) return;
-    setTakingBacklogKey(itemKey);
-    try {
-      const response = await fetch("/api/backlog/take", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: item.projectId,
-          backlogId: item.backlogId,
-          externalId: item.externalId,
-        }),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const result = (await response.json()) as TakeBacklogItemResponse;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== result.session.id,
-        );
-        const currentBacklog = current?.backlog ?? [];
-        return {
-          ...(current ?? {}),
-          sessions: [result.session, ...currentSessions],
-          projects: current?.projects ?? [],
-          backlog: currentBacklog.filter(
-            (entry) =>
-              !(
-                entry.projectId === result.item.projectId &&
-                entry.backlogId === result.item.backlogId &&
-                entry.externalId === result.item.externalId
-              ),
-          ),
-        };
-      });
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    } catch (takeError) {
-      showErrorToast(errorMessage(takeError, "Failed to take backlog item"));
-    } finally {
-      setTakingBacklogKey(null);
     }
   };
 
@@ -1489,17 +1875,13 @@ export function Dashboard() {
       setNewProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
       return;
     }
-    if (!path) {
-      setNewProjectError("Path is required");
-      return;
-    }
     setNewProjectSubmitting(true);
     setNewProjectError(null);
     if (createMissing) setNewProjectMissingPath(null);
     try {
-      const body: CreateProjectRequest = createMissing
-        ? { displayName, prefix, path, createMissing: true }
-        : { displayName, prefix, path };
+      const body: CreateProjectRequest = { displayName, prefix };
+      if (path) body.path = path;
+      if (createMissing) body.createMissing = true;
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1685,7 +2067,9 @@ export function Dashboard() {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+      }
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -1797,33 +2181,52 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    const agent = lastSelection.lastAgent ?? "claude";
-    setSpawnAgent(agent);
-    setSpawnModel(lastSelection.modelByAgent[agent] ?? null);
-    setSpawnAttachments([]);
+    const draft = restoreSpawnDraft(resolvePreferredSpawnProjectId());
+    if (!draft) {
+      const agent = lastSelection.lastAgent ?? "claude";
+      setSpawnAgent(agent);
+      setSpawnModel(lastSelection.modelByAgent[agent] ?? null);
+    }
     setSpawnOpen(true);
   };
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnModel(null);
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
+    applySpawnDraft(SHEPHERD_PROJECT_ID, null);
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
+    setSpawnPinnedProjectId(null);
+    const draft = readSpawnDraft(item.projectId);
+    if (draft?.trackerUrl === item.url) {
+      applySpawnDraft(item.projectId, draft);
+    } else {
+      applySpawnDraft(item.projectId, null);
+      setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
+      setSpawnTrackerUrl(item.url);
+    }
+    setSpawnOpen(true);
+  };
+
+  const addSpawnFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      spawnDraftDirtyRef.current = true;
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setSpawnAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -1834,6 +2237,11 @@ export function Dashboard() {
     }
     return session;
   }, [allSessions, requestedTerminalSessionId]);
+
+  useEffect(() => {
+    if (!terminalSession) return;
+    void markSessionOpened(terminalSession.id).catch(() => {});
+  }, [markSessionOpened, terminalSession?.id]);
 
   useEffect(() => {
     if (
@@ -1889,182 +2297,190 @@ export function Dashboard() {
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
-      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
-          <ProjectMenu
-            activeProjectName={activeProjectName}
-            projects={filterProjectOptions}
-            selectedProjectId={projectId}
-            onSelectProject={syncProjectFilter}
-            onNewProject={openNewProjectModal}
-            onEdit={openEditProjectModal}
-          />
-          {stats.error > 0 ? (
-            <StatItem
-              icon={<IconAlert />}
-              label="Errors"
-              value={stats.error}
-              color="var(--color-status-error)"
-              active={activeStatFilter === "error"}
-              onClick={() => toggleStatFilter("error")}
+      <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
+        <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+          <BrandGlyph />
+          <span className="hidden min-w-0 md:inline-flex">
+            <ProjectMenu
+              activeProjectName={activeProjectName}
+              projects={filterProjectOptions}
+              selectedProjectId={projectId}
+              onSelectProject={syncProjectFilter}
+              onNewProject={openNewProjectModal}
+              onEdit={openEditProjectModal}
             />
-          ) : null}
-          {stats.rate_limited > 0 ? (
-            <StatItem
-              icon={<IconClock />}
-              label="Rate Limited"
-              value={stats.rate_limited}
-              color="var(--color-status-attention)"
-              active={activeStatFilter === "rate_limited"}
-              onClick={() => toggleStatFilter("rate_limited")}
-            />
-          ) : null}
-          <StatItem
-            icon={<IconChat />}
-            label="Needs Input"
-            value={stats.respond}
-            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-            active={activeStatFilter === "respond"}
-            onClick={() => toggleStatFilter("respond")}
-          />
-          <StatItem
-            icon={<IconBolt />}
-            label="Working"
-            value={stats.working}
-            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-            active={activeStatFilter === "working"}
-            onClick={() => toggleStatFilter("working")}
-          />
-          <StatItem
-            icon={<IconClock />}
-            label="Waiting"
-            value={stats.pending}
-            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-            active={activeStatFilter === "pending"}
-            onClick={() => toggleStatFilter("pending")}
-          />
-          <StatItem
-            icon={<IconStop />}
-            label="Stopped"
-            value={stats.stopped}
-            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
-            active={activeStatFilter === "stopped"}
-            onClick={() => toggleStatFilter("stopped")}
-          />
-          <StatItem
-            icon={<IconCheck />}
-            label="Completed"
-            value={stats.done}
-            color={
-              activeStatFilter === "done" && stats.done > 0
-                ? "var(--color-status-ready)"
-                : undefined
-            }
-            active={activeStatFilter === "done"}
-            onClick={() => toggleStatFilter("done")}
-          />
-          {filterTagCatalog.length > 0 ? (
-            <span className="sm:ml-auto">
-              <TagFilter
-                catalog={filterTagCatalog}
-                value={activeTagFilter}
-                onChange={setActiveTagFilter}
-              />
-            </span>
-          ) : null}
-          <div
-            className={`flex min-w-[12rem] flex-[999_1_16rem] flex-col gap-1 ${
-              filterTagCatalog.length > 0 ? "" : "sm:ml-auto"
+          </span>
+          <button
+            aria-label="Filters"
+            className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-[0.08em] transition ${
+              activeFilterCount > 0
+                ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
             }`}
+            onClick={() => setFiltersOpen(true)}
+            type="button"
           >
-            <div className="flex items-stretch border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5">
-                <svg
-                  className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.35-4.35" />
-                </svg>
-                <input
-                  aria-label="Filter sessions"
-                  className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (isVoiceToggleHotkey(event)) {
-                      event.preventDefault();
-                      searchVoice.toggleRecording();
-                    }
+            <IconSliders />
+            <span className="hidden text-[10px] md:inline">Filters</span>
+            {activeFilterCount > 0 ? (
+              <span className="min-w-4 border border-[var(--color-accent)] px-1 text-center font-bold tabular-nums">
+                {activeFilterCount}
+              </span>
+            ) : null}
+          </button>
+          <div className="relative flex min-w-0 max-w-[32rem] flex-1 items-center">
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 focus-within:border-[var(--color-accent)]">
+              <svg
+                aria-hidden="true"
+                className="h-[13px] w-[13px] shrink-0 text-[var(--color-text-tertiary)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                aria-label="Filter sessions"
+                className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    searchVoice.toggleRecording();
+                  }
+                }}
+                placeholder={voicePlaceholder("Filter...", searchVoice)}
+                ref={searchInputRef}
+                value={searchQuery}
+              />
+              {searchQuery.length > 0 ? (
+                <button
+                  aria-label="Clear dashboard search"
+                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                  onClick={() => {
+                    setSearchQuery("");
+                    searchInputRef.current?.focus();
                   }}
-                  placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
-                  ref={searchInputRef}
-                  value={searchQuery}
+                  type="button"
+                >
+                  <CloseIcon />
+                </button>
+              ) : null}
+              {searchVoice.canUseVoice ? (
+                <VoiceControls
+                  borderless
+                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                  groupClassName="flex items-center gap-1"
+                  voice={searchVoice}
                 />
-              </div>
-              <div className="flex shrink-0 items-stretch">
-                {searchQuery.length > 0 ? (
-                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
-                    <button
-                      aria-label="Clear dashboard search"
-                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                      onClick={() => {
-                        setSearchQuery("");
-                        searchInputRef.current?.focus();
-                      }}
-                      type="button"
-                    >
-                      <CloseIcon />
-                    </button>
-                  </div>
-                ) : null}
-                {searchVoice.canUseVoice ? (
-                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
-                    <VoiceControls
-                      borderless
-                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                      groupClassName="flex items-center gap-1"
-                      voice={searchVoice}
-                    />
-                  </div>
-                ) : null}
-              </div>
+              ) : null}
             </div>
             {searchVoice.voiceError ? (
               <div
-                className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
                 role="alert"
               >
                 {searchVoice.voiceError}
               </div>
             ) : searchVoice.recording || searchVoice.voiceBusy ? (
-              <div className="px-2 text-[10px] text-[var(--color-text-tertiary)]">
+              <div className="absolute left-0 top-full z-10 mt-1 px-2 text-[10px] text-[var(--color-text-tertiary)]">
                 <VoiceStatusHint voice={searchVoice} />
               </div>
             ) : null}
           </div>
-          <div className="inline-flex w-full sm:w-auto sm:shrink-0">
+          {hasActiveFilters ? (
             <button
-              aria-label="Spawn Shepherd"
-              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openShepherdSpawnModal}
-              title="Spawn Shepherd"
+              aria-label="Reset all filters"
+              className="h-7 shrink-0 border border-[var(--color-border-default)] px-2 uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              onClick={resetAllFilters}
               type="button"
             >
-              <IconShepherd />
+              Reset
             </button>
+          ) : null}
+          <button
+            aria-label="Spawn Shepherd"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+            onClick={openShepherdSpawnModal}
+            title="Spawn Shepherd"
+            type="button"
+          >
+            <IconShepherd />
+          </button>
+          {!isMobile ? (
             <button
-              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
+              className="inline-flex h-7 shrink-0 items-center gap-[7px] whitespace-nowrap border border-[var(--color-accent)] bg-[var(--color-accent)] px-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
               onClick={openSpawnModal}
               type="button"
             >
+              <IconPlus className="h-3 w-3" />
               Spawn Session
             </button>
-          </div>
-        </header>
+          ) : null}
+        </div>
+      </header>
 
+      {isMobile && !spawnOpen && !terminalSession ? (
+        <button
+          aria-label="Spawn Session"
+          className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center rounded-[14px] border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-[0_6px_20px_var(--color-shadow-modal-lg)] transition hover:bg-[var(--color-accent-hover)]"
+          onClick={openSpawnModal}
+          type="button"
+        >
+          <IconPlus className="h-4 w-4" />
+        </button>
+      ) : null}
+
+      {filtersOpen ? (
+        <FiltersModal
+          activeFilterCount={activeFilterCount}
+          activeStatFilter={activeStatFilter}
+          activeTagFilters={activeTagFilters}
+          agentFilter={agentFilter}
+          agentOptions={AGENT_OPTIONS.map((agent) => ({
+            id: agent,
+            count: agentCounts.get(agent) ?? 0,
+          }))}
+          allProjectsCount={allProjectsCount}
+          allStatusesCount={allStatusesCount}
+          onClearAll={resetAllFilters}
+          onClose={() => setFiltersOpen(false)}
+          onPrReadyOnlyChange={setPrReadyOnly}
+          onSelectProject={syncProjectFilter}
+          onSelectStatus={selectStatFilter}
+          onToggleAgent={toggleAgentFilter}
+          onToggleTag={(tag) =>
+            setActiveTagFilters((current) =>
+              current.includes(tag) ? current.filter((name) => name !== tag) : [...current, tag],
+            )
+          }
+          prReadyCount={prReadyCount}
+          prReadyLoaded={prReady.loaded}
+          prReadyOnly={prReadyOnly}
+          projectId={projectId}
+          projectOptions={filterProjectOptions.map((project) => ({
+            id: project.id,
+            name: project.name,
+            count: projectCounts.get(project.id) ?? 0,
+          }))}
+          statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
+            level,
+            label: ATTENTION_LANE_META[level].label,
+            color: ATTENTION_LANE_META[level].color,
+            icon: STATUS_LANE_ICONS[level],
+            count: stats[level],
+          }))}
+          tagOptions={filterTagCatalog.map((tag) => ({
+            name: tag.name,
+            color: tag.color,
+            count: tagCounts.get(tag.name) ?? 0,
+          }))}
+        />
+      ) : null}
+
+      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         {newProjectOpen ? (
           <NewProjectModal
             displayName={newProjectDisplayName}
@@ -2127,7 +2543,13 @@ export function Dashboard() {
             attachments={spawnAttachments}
             canClose
             clearLabel="Clear spawn prompt"
-            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
+            history={{
+              entries: spawnHistory.entries,
+              onSelect: (next) => {
+                spawnDraftDirtyRef.current = true;
+                setSpawnPrompt(next);
+              },
+            }}
             mode={{
               kind: "spawn",
               project: {
@@ -2140,7 +2562,10 @@ export function Dashboard() {
               },
               model: {
                 value: spawnModel,
-                onChange: setSpawnModel,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnModel(next);
+                },
                 preselectWhenEmpty: !isShepherdSpawn,
                 onUserSelect: (id) => {
                   // preselectWhenEmpty hides the Default menu item for every
@@ -2151,12 +2576,38 @@ export function Dashboard() {
               },
               branch: {
                 value: spawnBranch,
-                onChange: setSpawnBranch,
-                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  spawnBranchExplicitRef.current = next.trim().length > 0;
+                  setSpawnBranch(next);
+                },
+                onBlur: () => {
+                  const normalizedBranch = normalizeBranchName(spawnBranch);
+                  spawnBranchExplicitRef.current = normalizedBranch.length > 0;
+                  setSpawnBranch(normalizedBranch);
+                },
               },
-              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
-              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
-              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
+              workspaceMode: {
+                value: spawnWorkspaceMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnWorkspaceMode(next);
+                },
+              },
+              planMode: {
+                value: spawnPlanMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnPlanMode(next);
+                },
+              },
+              selfDestruct: {
+                value: spawnSelfDestruct,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnSelfDestruct(next);
+                },
+              },
               steps: {
                 items: spawnSteps,
                 onUpdate: updateStep,
@@ -2192,8 +2643,11 @@ export function Dashboard() {
                 <textarea
                   aria-label="Self-destruct conditions"
                   className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
-                  placeholder="Self-destruct conditions"
+                  onChange={(event) => {
+                    spawnDraftDirtyRef.current = true;
+                    setSpawnSelfDestructConditions(event.target.value);
+                  }}
+                  placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
                   value={spawnSelfDestructConditions}
                 />
               ) : null,
@@ -2201,7 +2655,10 @@ export function Dashboard() {
                 spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    onChange={(event) => {
+                      spawnDraftDirtyRef.current = true;
+                      setSpawnDefaultBranch(event.target.value);
+                    }}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
@@ -2209,6 +2666,7 @@ export function Dashboard() {
             }}
             onAddFiles={addSpawnFiles}
             onAgentChange={(next) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAgent(next);
               if (isShepherdSpawn) {
                 setSpawnModel(null);
@@ -2217,18 +2675,22 @@ export function Dashboard() {
               setSpawnModel(lastSelection.modelByAgent[next] ?? null);
               lastSelection.recordAgent(next);
             }}
-            onClose={() => setSpawnOpen(false)}
-            onPromptChange={setSpawnPrompt}
-            onRemoveAttachment={(index) =>
+            onClose={closeSpawnModal}
+            onPromptChange={(next) => {
+              spawnDraftDirtyRef.current = true;
+              setSpawnPrompt(next);
+            }}
+            onRemoveAttachment={(index) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAttachments((current) =>
                 current.filter((_, currentIndex) => currentIndex !== index),
-              )
-            }
+              );
+            }}
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
-            promptAriaLabel="Prompt for the new session..."
-            promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-            promptPlaceholder="Prompt for the new session..."
+            promptAriaLabel="Prompt..."
+            promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+            promptPlaceholder="Prompt..."
             promptRef={spawnPromptRef}
             showCancel={false}
             slashEndpoint={
@@ -2246,7 +2708,7 @@ export function Dashboard() {
         ) : null}
 
         {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
         ) : null}
 
         {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
@@ -2256,12 +2718,7 @@ export function Dashboard() {
               <div className="mt-3 flex justify-center">
                 <button
                   className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  onClick={() => {
-                    setSearchQuery("");
-                    setActiveStatFilter(null);
-                    setActiveTagFilter(null);
-                    syncProjectFilter("");
-                  }}
+                  onClick={resetAllFilters}
                   type="button"
                 >
                   Reset Filters
@@ -2277,8 +2734,7 @@ export function Dashboard() {
               <BacklogZone
                 items={visibleBacklog}
                 projectNameMap={projectNameMap}
-                takingKey={takingBacklogKey}
-                onTake={handleTakeBacklog}
+                onTake={openBacklogSpawnModal}
               />
             ) : null}
             {visibleLevels.map((level) => (

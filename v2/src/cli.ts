@@ -2,12 +2,13 @@
 
 import {
   collectHostInstallChecks,
+  hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +16,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   connectProjectConfig,
+  deleteJson,
   disconnectProjectConfig,
   getJson,
   listProjects,
@@ -27,6 +29,7 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  assertConfigMayUseProdSlot,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
@@ -37,6 +40,8 @@ import {
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
+import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
   brandMark,
@@ -53,37 +58,61 @@ import {
   withSpinner,
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
+import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
-import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import type { SidecarSweepResult } from "./sidecars/reap.js";
+import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { assertValidSharedMemoryScope } from "./shared-memory.js";
+import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import { listSessions } from "./metadata.js";
+import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
-import type {
-  OpenPrAction,
-  ProjectConfigMutationResponse,
-  RespawnSessionRequest,
-  RuntimeInfo,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SessionLink,
-  SessionMemoryListResponse,
-  SessionMemoryRecord,
-  SessionMemoryRecordResponse,
-  ServiceInstanceView,
-  SessionView,
-  SourceReplyRequest,
-  SourceReplyResponse,
-  SpawnSessionRequest,
-  SetSessionMemoryRequest,
-  UpdateSessionSlotsRequest,
-  HandoffSessionRequest,
+import {
+  SESSION_STATES,
+  isSessionState,
+  type OpenPrAction,
+  type ProjectConfigMutationResponse,
+  type RespawnSessionRequest,
+  type RuntimeInfo,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type StartSidecarRequest,
+  type SessionLink,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecord,
+  type SessionMemoryRecordResponse,
+  type SessionGcStatus,
+  type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
+  type ServiceInstanceView,
+  type SessionView,
+  type SharedMemoryEntryResponse,
+  type SharedMemoryListResponse,
+  type SharedMemoryRemoveResponse,
+  type SharedMemoryScope,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type SetSessionMemoryRequest,
+  type SetSharedMemoryRequest,
+  type UpdateSessionSlotsRequest,
+  type HandoffSessionRequest,
 } from "./types.js";
-import { version } from "./version.js";
-import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import { getVersion } from "./version.js";
+import {
+  checkProjectWorkspace,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
+  workspaceExists,
+} from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -279,8 +308,73 @@ function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse
   return renderSessionMemoryRecord(response.record);
 }
 
+function renderSharedMemoryList(
+  scope: SharedMemoryScope,
+  response: SharedMemoryListResponse,
+): string {
+  if (response.keys.length === 0) {
+    return dimText(`No ${scope} memory.`);
+  }
+  return response.keys.map((key) => `- ${key}`).join("\n");
+}
+
+function renderSharedMemoryEntryResponse(response: SharedMemoryEntryResponse): string {
+  return `${boldText(response.entry.key)}\n${response.entry.body}`;
+}
+
+function renderSharedMemoryRemoveResponse(response: SharedMemoryRemoveResponse): string {
+  return `Removed ${response.key}.`;
+}
+
+function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
+  const scope = typeof value === "string" ? value : "";
+  try {
+    assertValidSharedMemoryScope(scope);
+  } catch {
+    throw new Error("--scope must be task, project, or global");
+  }
+  return scope;
+}
+
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
   return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
+function renderStateSubscription(record: SessionStateSubscription): string {
+  const lines = [
+    `${boldText(record.id)} -> ${record.targetSessionId}`,
+    dimText(`states ${record.states.join(", ")} · updated ${record.updatedAt}`),
+  ];
+  if (record.message) {
+    lines.push(record.message);
+  }
+  if (record.lastDeliveredTransitionId) {
+    lines.push(dimText(`last delivered ${record.lastDeliveredAt ?? "unknown"}`));
+  }
+  return lines.join("\n");
+}
+
+function renderStateSubscriptionList(response: SessionStateSubscriptionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No state subscriptions.");
+  }
+  return response.records.map(renderStateSubscription).join("\n\n");
+}
+
+function parseSubscriptionState(value: string): SessionState {
+  const state = value.trim();
+  if (!isSessionState(state)) {
+    throw new Error(`state must be one of: ${SESSION_STATES.join(", ")}`);
+  }
+  return state;
+}
+
+function resolveSubscriberId(options: { session?: string }): string {
+  const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+  if (!sessionId) {
+    throw new Error("subscriber session required: pass --session or set SPUR_SESSION");
+  }
+  return sessionId;
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -430,6 +524,30 @@ async function loadSessionLogs(
   );
 }
 
+async function loadUserActions(
+  cliEntrypoint: string,
+  options: { sessionId?: string; global?: boolean; limit?: number },
+  configPath?: string,
+): Promise<UserActionRecord[]> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(
+      cliEntrypoint,
+      `/user-actions${query ? `?${query}` : ""}`,
+      configPath,
+    );
+  }
+  return getJson<UserActionRecord[]>(
+    cliEntrypoint,
+    `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -448,7 +566,7 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill",
+  action: "pause" | "complete" | "kill" | "reopen",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -473,6 +591,15 @@ type KillCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+};
+
+type SubscribeCommandOptions = {
+  state?: string[];
+  message?: string;
+  session?: string;
+  list?: boolean;
+  remove?: string;
+  json?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -568,6 +695,36 @@ function renderEventLines(entries: SpurLogEntry[]): string {
     return dimText("(no log entries)");
   }
   return entries.map(formatEventLine).join("\n");
+}
+
+function formatUserActionLine(entry: UserActionRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const origin = dimText(entry.origin);
+  const status = entry.outcome.ok
+    ? dimText(String(entry.outcome.status))
+    : accent(String(entry.outcome.status));
+  const latency = dimText(`${entry.latencyMs}ms`);
+  return `${time} ${origin} ${entry.action} ${status} ${latency}`;
+}
+
+function renderUserActionLines(entries: UserActionRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no user actions)");
+  }
+  return entries.map(formatUserActionLine).join("\n");
+}
+
+function formatAgentIssueLine(entry: AgentIssueRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const session = entry.sessionId ? ` ${dimText(entry.sessionId)}` : "";
+  return `${time}${session} ${entry.text}`;
+}
+
+function renderAgentIssueLines(entries: AgentIssueRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no agent issues)");
+  }
+  return entries.map(formatAgentIssueLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -690,12 +847,148 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText("Next: `spur list` to auto-connect this repo."),
       dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
     );
+    return lines.join("\n");
   }
-  const failed = result.hostChecks.filter((check) => !check.ok);
+  lines.push(
+    dimText("No project config found. Rerun with `spur doctor --scaffold` to create one."),
+  );
+  const failed = result.hostChecks.filter((check) => !check.ok && check.severity === "error");
   if (failed.length > 0) {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
   return lines.join("\n");
+}
+
+function renderSidecarSweepResult(result: SidecarSweepResult): string {
+  if (!result.supported) {
+    return dimText("Process table or procfs unreadable on this host — sweep skipped.");
+  }
+  if (result.leaked.length === 0) {
+    return dimText("No leaked sidecar process trees found.");
+  }
+  // Keyed by rootPid, not just presence: an outcome with survivors left
+  // alive after the SIGKILL confirmation window is a partial kill, not a
+  // clean reap — surfacing it as "[reaped]" would tell the operator nothing
+  // is left running when something still is.
+  const outcomeByRootPid = new Map(result.reaped.map((outcome) => [outcome.panePid, outcome]));
+  const lines = result.leaked.map((tree) => {
+    const ageMinutes = Math.floor(tree.ageSeconds / 60);
+    const outcome = outcomeByRootPid.get(tree.rootPid);
+    const status =
+      outcome === undefined
+        ? tree.reapable
+          ? "reapable"
+          : "report-only"
+        : outcome.survivors.length === 0
+          ? "reaped"
+          : "partial";
+    const survivorsSuffix =
+      outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
+    // Tree total, not the root pid's own rss — the root alone understated
+    // the measured 863333/863351 leak by 17x.
+    return dimText(
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+    );
+  });
+  return lines.join("\n");
+}
+
+// Test-only: exercises the sweep summary's status/survivors formatting
+// without spinning up a live CLI command or the daemon route it calls.
+export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// Bounds one interactive `spur gc` run; the daemon sweep has its own
+// sessionGc.maxGroupsPerSweep instead.
+const DEFAULT_GC_CLI_LIMIT = 100;
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null) {
+    return "-";
+  }
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const unit = BYTE_UNITS[unitIndex] ?? "B";
+  return unitIndex === 0 ? `${bytes} ${unit}` : `${value.toFixed(1)} ${unit}`;
+}
+
+export function renderSessionGcResult(report: GcReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.sessions} record(s) in ${report.scanned.groups} group(s); planned ${report.groups.length} (limit ${report.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+    ),
+    "",
+  ];
+  if (report.groups.length === 0) {
+    lines.push(dimText("Nothing to collect."));
+    return lines.join("\n");
+  }
+  for (const group of report.groups) {
+    const records = `${group.sessionIds.length} record${group.sessionIds.length === 1 ? "" : "s"}`;
+    const detail = group.error
+      ? `error: ${group.error}`
+      : group.action === "blocked"
+        ? group.blockReasons.join(",")
+        : group.worktreePath || "(no worktree)";
+    lines.push(
+      `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
+    );
+    lines.push(dimText(`           ${group.sessionIds.join(" ")}`));
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${formatBytes(report.totals.freedBytes)} freed, ${report.totals.errors} error(s).`,
+  );
+  const restoreLoss = report.groups.flatMap((group) => group.restoreLossSessionIds);
+  if (restoreLoss.length > 0) {
+    lines.push(
+      dimText(
+        `${restoreLoss.length} stopped session(s) lose \`spur restore\` once collected: ${restoreLoss.join(" ")}`,
+      ),
+    );
+  }
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    throw new Error("--statuses must list at least one of completed,killed,stopped");
+  }
+  const statuses: SessionGcStatus[] = [];
+  for (const part of parts) {
+    if (part !== "completed" && part !== "killed" && part !== "stopped") {
+      throw new Error(`--statuses only accepts completed,killed,stopped (got ${part})`);
+    }
+    statuses.push(part);
+  }
+  return [...new Set(statuses)];
+}
+
+function parseNonNegativeIntegerOption(value: string, flag: string): number {
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(value.trim(), 10);
+}
+
+function parsePositiveIntegerOption(value: string, flag: string): number {
+  const parsed = parseNonNegativeIntegerOption(value, flag);
+  if (parsed === 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -813,7 +1106,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -825,10 +1118,18 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "doctor") {
     return [
-      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
-      "Run `spur init` if host checks report missing units, linger, or inactive services.",
-      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Read-only by default: checks npm/systemd host install, PATH, core deps, project config, and daemon/web health.",
+      "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
+      "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
+    ];
+  }
+  if (command.name() === "gc") {
+    return [
+      "Dry run by default: prints every group with its age, size, and the action it would take. Nothing is touched without `--execute`.",
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
+      "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
+      "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -1156,7 +1457,7 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const scTmuxSession = sidecarTmuxSession(session.id, scName);
+    const scTmuxSession = firstSidecar.tmuxSession;
     try {
       if (!firstSidecar.alive) {
         await postJson<SessionView>(
@@ -1442,22 +1743,30 @@ async function runInteractiveSessionList(
   });
 }
 
-async function outputResult<T>(args: {
+// Exported so the exit-code wiring (the only externally observable effect
+// besides stdout) can be unit-tested directly, without driving the full
+// commander parse + host/config seams doctor's action depends on.
+export async function outputResult<T>(args: {
   json: boolean;
   label: string;
   action: () => Promise<T>;
   render: (value: T) => string;
   success?: (value: T) => string;
+  exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
-    return;
+  } else {
+    if (args.success) {
+      writeStdout(brandLine(args.success(value)));
+    }
+    writeStdout(args.render(value));
   }
-  if (args.success) {
-    writeStdout(brandLine(args.success(value)));
+  const code = args.exitCode?.(value);
+  if (code !== undefined) {
+    process.exitCode = code;
   }
-  writeStdout(args.render(value));
 }
 
 function resolveCliSpawnOverrides(options: {
@@ -1483,6 +1792,84 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+function buildSubscriptionRequest(
+  targetSessionId: string,
+  rawStates: string[] | undefined,
+  rawMessage: string | undefined,
+  emptyStatesError: string,
+): SubscribeSessionStatesRequest {
+  const states = (rawStates ?? []).map(parseSubscriptionState);
+  if (states.length === 0) {
+    throw new Error(emptyStatesError);
+  }
+  const message = rawMessage?.trim();
+  return {
+    targetSessionId,
+    states,
+    ...(message ? { message } : {}),
+  };
+}
+
+function resolveCliSpawnSubscriptions(options: {
+  subscribeTo?: string;
+  subscribeState?: string[];
+  subscribeMessage?: string;
+}): SubscribeSessionStatesRequest[] | undefined {
+  if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
+    throw new Error("--subscribe-to must be a non-empty session id");
+  }
+  const target = options.subscribeTo?.trim();
+  if (!target) {
+    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
+      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    }
+    return undefined;
+  }
+  return [
+    buildSubscriptionRequest(
+      target,
+      options.subscribeState,
+      options.subscribeMessage,
+      "--subscribe-to requires at least one --subscribe-state",
+    ),
+  ];
+}
+
+// Spawn-time subscribe targets fail silently on the server (spawn stays
+// non-fatal so a typo'd target never blocks the new session — see
+// applyRequestedStateSubscriptions). Validate here instead, before any
+// spawn side effect (tmux/worktree), so a bad --subscribe-to id is a clear
+// CLI error rather than a session that never gets its wakeup.
+async function ensureCliSpawnSubscriptionTargetsExist(
+  cliEntrypoint: string,
+  configPath: string,
+  subscriptions: SubscribeSessionStatesRequest[] | undefined,
+): Promise<void> {
+  if (!subscriptions) {
+    return;
+  }
+  for (const entry of subscriptions) {
+    try {
+      await getJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(entry.targetSessionId)}`,
+        configPath,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/session not found/i.test(message)) {
+        // Not a 404 for this target — a daemon-start failure, 500, or
+        // transport error shouldn't be relabeled as an unknown target.
+        throw error;
+      }
+      throw new Error(
+        `--subscribe-to target session not found: ${entry.targetSessionId} (${message})`,
+        { cause: error },
+      );
+    }
+  }
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -1494,36 +1881,107 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version(version, "-V, --version", "Show version");
+    .version(getVersion(), "-V, --version", "Show version");
 
   program
     .command("init")
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
-    .option("--web-port <port>", "Web listen port (default 4311)")
+    .option("--web-port <port>", "Web listen port (default 5555)")
+    .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
+        tailscale: Boolean(options.tailscale),
       });
     });
 
   program
+    .command("update")
+    .description("Update Spur to a release and auto-roll-back if it fails to stabilize.")
+    .argument("[version]", "Pinned release version (default: latest)")
+    .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
+    .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
+      await runUpdate(cliEntrypoint, {
+        ...(versionArg !== undefined ? { version: versionArg } : {}),
+        force: Boolean(options.force),
+      });
+    });
+
+  program
+    .command("update-monitor", { hidden: true })
+    .description("Internal post-update health monitor and rollback executor.")
+    .action(async () => {
+      await runUpdateMonitor(cliEntrypoint);
+    });
+
+  program
+    .command("reinit", { hidden: true })
+    .description(
+      "Reinstall user systemd units preserving the live web port/exposure/Tailscale bind, then restart and health-check.",
+    )
+    .action(() => {
+      reinitUnits(cliEntrypoint);
+    });
+
+  program
     .command("doctor")
-    .description("Check host install and scaffold a local Spur project config.")
+    .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
+    .option("--scaffold", "Write spur.yaml when no project config is found")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = collectHostInstallChecks();
+          const hostChecks = await collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
+            try {
+              const projectConfig = loadProjectConfig(existingProjectConfigPath);
+              // Severity is the check's static importance if it fails (an
+              // invalid spur.yaml blocks connect/spawn — always "error"), not
+              // a flag that flips with the outcome; the renderer only
+              // surfaces it once `ok` is false.
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: true,
+                severity: "error",
+                detail: "spur.yaml parses and validates",
+              });
+              // D1-D3: per-project path/git/branch validation — only ever
+              // runs against the project(s) this repo's spur.yaml actually
+              // defines, config-conditional by construction (never fires on a
+              // bare host with no project config, since this whole branch is
+              // already gated on `existingProjectConfigPath`).
+              for (const [projectId, project] of Object.entries(projectConfig.projects)) {
+                hostChecks.push(
+                  ...(await checkProjectWorkspace({
+                    projectId,
+                    path: project.path,
+                    defaultBranch: project.defaultBranch,
+                    worktree: project.worktree,
+                  })),
+                );
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              hostChecks.push({
+                id: "project-config-valid",
+                ok: false,
+                severity: "error",
+                detail: message,
+                fix: "Fix the reported error in spur.yaml",
+              });
+            }
             return { hostChecks, existingProjectConfigPath };
+          }
+          if (!options.scaffold) {
+            return { hostChecks };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1543,8 +2001,67 @@ export function createProgram(cliEntrypoint: string): Command {
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
             : result.configPath
               ? `Created ${displayPathFromCwd(result.configPath)}.`
-              : "Created project config.",
+              : "Host and project checks complete.",
         render: renderDoctorResult,
+        exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("gc")
+    .description(
+      "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
+    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum groups to act on in one run")
+    .option("--no-sizes", "Skip `du` size measurement (no freed-byte reporting)")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const olderThanDays =
+        options.olderThan === undefined
+          ? config.sessionGc.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const statuses =
+        options.statuses === undefined
+          ? config.sessionGc.statuses
+          : parseSessionGcStatusesOption(String(options.statuses));
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      const sizes = options.sizes !== false;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning session gc" : "running session gc",
+        action: async () => {
+          const plan = planSessionGc({
+            sessions: listSessions(config.dataDir),
+            worktreeDir: config.worktreeDir,
+            now: new Date(),
+            olderThanDays,
+            statuses,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            pathExists: (path) => workspaceExists(path),
+          });
+          return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
+        },
+        render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });
 
@@ -1573,6 +2090,16 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--subscribe-to <sessionId>",
+      "Subscribe the new session to another session's state transitions",
+    )
+    .option(
+      "--subscribe-state <state>",
+      "State to watch for --subscribe-to; repeatable",
+      appendOptionValue,
+    )
+    .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1591,6 +2118,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
+      const subscriptions = resolveCliSpawnSubscriptions(options);
       const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
@@ -1599,6 +2127,7 @@ export function createProgram(cliEntrypoint: string): Command {
           `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
         );
       }
+      await ensureCliSpawnSubscriptionTargetsExist(cliEntrypoint, configPath, subscriptions);
 
       let branch: string | undefined = options.branch;
 
@@ -1637,6 +2166,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(subscriptions ? { subscriptions } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -1865,6 +2395,86 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("subscribe")
+    .description("Manage session state subscriptions.")
+    .argument("[targetSessionId]", "Session id to watch")
+    .option("--state <state>", "State to watch; repeatable", appendOptionValue)
+    .option("--message <message>", "Message sent when subscription fires")
+    .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
+    .option("--list", "List subscriptions for the subscriber")
+    .option("--remove <subscriptionId>", "Remove a subscription")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (targetSessionId: string | undefined, options: SubscribeCommandOptions, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const subscriberId = resolveSubscriberId(options);
+        if (options.list === true) {
+          if (targetSessionId || options.remove || options.state || options.message) {
+            throw new Error(
+              "--list cannot be combined with target, --remove, --state, or --message",
+            );
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "loading subscriptions",
+            action: () =>
+              getJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+                configPath,
+              ),
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        if (options.remove) {
+          if (targetSessionId || options.state || options.message) {
+            throw new Error("--remove cannot be combined with target, --state, or --message");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "removing subscription",
+            action: () =>
+              postJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions/${encodeURIComponent(
+                  options.remove ?? "",
+                )}/remove`,
+                {},
+                configPath,
+              ),
+            success: () => "Removed subscription.",
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        const target = targetSessionId?.trim();
+        if (!target) {
+          throw new Error("subscribe requires a targetSessionId, --list, or --remove");
+        }
+        const payload = buildSubscriptionRequest(
+          target,
+          options.state,
+          options.message,
+          "subscribe requires at least one --state",
+        );
+        await outputResult({
+          json: Boolean(options.json),
+          label: "subscribing",
+          action: () =>
+            postJson<SessionStateSubscriptionRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+              payload,
+              configPath,
+            ),
+          success: (response) => `Subscribed ${subscriberId} with ${response.record.id}.`,
+          render: (response) => renderStateSubscription(response.record),
+        });
+      },
+    );
+
+  program
     .command("pause")
     .description("Stop a session but keep its worktree.")
     .argument("<sessionId>", "Session id")
@@ -1964,6 +2574,22 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("reopen")
+    .description("Restart a completed session in place, keeping its id and history.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "reopening session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        success: (session) => `Reopened ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -2094,6 +2720,151 @@ export function createProgram(cliEntrypoint: string): Command {
       }
 
       throw new Error("session-memory action must be list, get, set, or resolve");
+    });
+
+  program
+    .command("memory")
+    .description("Manage shared markdown memory across task, project, and global scopes.")
+    .usage("<set|get|list|rm> [key] [body] --scope <task|project|global>")
+    .argument("<action>", "set, get, list, or rm")
+    .argument("[key]", "Memory key")
+    .argument("[body]", "Body for set (or use --file)")
+    .requiredOption("--scope <scope>", "task, project, or global")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--file <path>", "Read the set body from a file instead of the body argument")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        action: string,
+        key: string | undefined,
+        body: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const scope = parseSharedMemoryScope(options.scope);
+        const sessionId = options.session?.trim() || runningSessionId();
+        if (!sessionId) {
+          throw new Error("memory requires --session or SPUR_SESSION");
+        }
+
+        if (action === "list") {
+          if (key !== undefined || body !== undefined) {
+            throw new Error("memory list does not accept extra arguments");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading ${scope} memory`,
+            action: () =>
+              getJson<SharedMemoryListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}`,
+                configPath,
+              ),
+            render: (response) => renderSharedMemoryList(scope, response),
+          });
+          return;
+        }
+
+        if (!key) {
+          throw new Error(`memory ${action} requires a key`);
+        }
+
+        if (action === "get") {
+          if (body !== undefined) {
+            throw new Error("memory get accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading memory ${key}`,
+            action: () =>
+              getJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "set") {
+          const filePath = options.file?.trim();
+          if (body !== undefined && filePath) {
+            throw new Error("memory set accepts a body argument or --file, not both");
+          }
+          if (body === undefined && !filePath) {
+            throw new Error("memory set requires a body argument or --file");
+          }
+          const resolvedBody = filePath ? readFileSync(filePath, "utf-8") : (body as string);
+          const payload: SetSharedMemoryRequest = { body: resolvedBody };
+          await outputResult({
+            json: Boolean(options.json),
+            label: `saving memory ${key}`,
+            action: () =>
+              postJson<SharedMemoryEntryResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                payload,
+                configPath,
+              ),
+            success: (response) => `Saved ${response.entry.key}.`,
+            render: renderSharedMemoryEntryResponse,
+          });
+          return;
+        }
+
+        if (action === "rm") {
+          if (body !== undefined) {
+            throw new Error("memory rm accepts exactly one key");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `removing memory ${key}`,
+            action: () =>
+              deleteJson<SharedMemoryRemoveResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}/shared-memory/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`,
+                configPath,
+              ),
+            render: renderSharedMemoryRemoveResponse,
+          });
+          return;
+        }
+
+        throw new Error("memory action must be set, get, list, or rm");
+      },
+    );
+
+  program
+    .command("actions")
+    .description("Show logged user actions (mutating requests) for a session or globally.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--global", "Show the global user-action log across all sessions")
+    .option("--limit <number>", "Maximum number of entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const global = Boolean(options.global);
+      const sessionId = global ? undefined : options.session?.trim() || runningSessionId();
+      if (!global && !sessionId) {
+        throw new Error("actions requires --session, SPUR_SESSION, or --global");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: global ? "loading user actions" : `loading user actions for ${sessionId}`,
+        action: () =>
+          loadUserActions(
+            cliEntrypoint,
+            { ...(sessionId ? { sessionId } : {}), global, limit },
+            configPath,
+          ),
+        render: renderUserActionLines,
+      });
     });
 
   const service = program
@@ -2363,6 +3134,33 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  sidecar
+    .command("sweep")
+    .description("Report sidecar process trees no live session claims; --reap to kill them.")
+    .option("--reap", "Signal reapable leaked trees instead of only reporting them")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sweeping sidecar process trees",
+        action: () =>
+          postJson<SidecarSweepResult>(
+            cliEntrypoint,
+            "/sidecars/sweep",
+            { reap: Boolean(options.reap) },
+            configPath,
+          ),
+        success: (result) =>
+          result.leaked.length === 0
+            ? "No leaked sidecar process trees found."
+            : `Found ${result.leaked.length} leaked sidecar process tree(s).`,
+        render: renderSidecarSweepResult,
+      });
+    });
+
   const branch = program
     .command("branch", { hidden: true })
     .description("Internal branch policy helpers.");
@@ -2448,9 +3246,24 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // MUST FIX 1: a source-install / main-deploy host that never runs
+      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
+      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
+      // silently ignores a missing globalconfig file. Every real daemon boot
+      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // permissions error writing into `<home>/.spur/` must never abort
+      // daemon boot, so failures are reported and swallowed, not thrown.
+      try {
+        ensureNpmPinFile();
+      } catch (error) {
+        writeStderr(
+          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",
@@ -2476,6 +3289,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -2491,6 +3305,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -2498,6 +3313,75 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () => restartDaemonIfRunning(cliEntrypoint, configPath),
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
+      });
+    });
+
+  const agentIssue = program
+    .command("agent-issue")
+    .description("Log and review Spur-operation friction hit by agents in a session.");
+
+  agentIssue
+    .command("log")
+    .description("Log a Spur-operation friction hit while working in this session.")
+    .argument("<text...>", "Friction description")
+    .action((parts: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("agent-issue log: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`agent-issue log: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const sessionId = runningSessionId();
+      const record: AgentIssueRecord = {
+        ts: new Date().toISOString(),
+        text: parts.join(" "),
+        ...(sessionId ? { sessionId } : {}),
+        projectId,
+      };
+      try {
+        appendAgentIssue(dataDir, record);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderr(`agent-issue log: failed to write friction record: ${message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      writeStdout(brandLine("Logged agent issue."));
+    });
+
+  agentIssue
+    .command("list")
+    .description("Show logged agent issues, newest first.")
+    .option("--project <id>", "Filter by project id")
+    .option("--session <id>", "Filter by session id")
+    .option("--limit <number>", "Maximum entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const { dataDir } = loadConfig(configPath);
+      const project = options.project?.trim();
+      const session = options.session?.trim();
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading agent issues",
+        action: async () =>
+          readAgentIssueLog(dataDir, {
+            limit,
+            ...(project ? { projectId: project } : {}),
+            ...(session ? { sessionId: session } : {}),
+          }),
+        render: renderAgentIssueLines,
       });
     });
 

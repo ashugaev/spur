@@ -102,7 +102,7 @@ end_step "Step 5: Fresh repo created"
 
 # Step 6: Run doctor in the fresh repo
 start_step "Step 6: Run spur doctor"
-DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json)" || fail_step "Step 6: spur doctor failed"
+DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json --scaffold)" || fail_step "Step 6: spur doctor failed"
 PROJECT_ID="$(printf '%s' "$DOCTOR_OUTPUT" | jq -r '.projectId')"
 if [ "$PROJECT_ID" != "test-project" ]; then
     printf '%s\n' "$DOCTOR_OUTPUT"

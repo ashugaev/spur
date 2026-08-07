@@ -192,6 +192,23 @@ describe("Claude JSONL fixture classification", () => {
       Date.parse("2026-04-13T11:19:48.036Z"),
       "waiting",
     ],
+    // spur-abcd: agent received a subagent tool_result at 2026-05-27T15:01:17.689Z
+    // and never produced an assistant turn afterwards. Inside the window = working;
+    // past the window with stale mtime = needs_input (the agent stalled).
+    [
+      "needs-input-tool-result-stale-spur-abcd-tail.jsonl",
+      "inside the 60s window → working",
+      Date.parse("2026-05-27T15:01:17.689Z") + 10_000,
+      0,
+      "working",
+    ],
+    [
+      "needs-input-tool-result-stale-spur-abcd-tail.jsonl",
+      "past the 60s window with stale mtime → needs_input",
+      Date.parse("2026-05-27T15:01:17.689Z") + 120_000,
+      Date.parse("2026-05-27T15:01:17.689Z"),
+      "needs_input",
+    ],
   ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
     const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");
     const records = parseFixtureJsonl(content, nowMs);
@@ -327,6 +344,44 @@ describe("Codex hook state fixture classification", () => {
           expect(state.hookEvent).toBe(parsed.hookEvent);
         }
       }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a hook record whose updatedAt is not Date-parseable", async () => {
+    // updatedAt was only checked with `typeof === "string"`, so a garbage value
+    // passed the boundary and every consumer's `new Date(updatedAt).getTime()`
+    // became NaN. NaN then poisons Math.max silently: the codex hung-turn
+    // threshold never fires, the activity signal falls back to tmux, and the
+    // hookAge log prints NaN. Rejecting here keeps the guarantee in one place
+    // instead of making three call sites re-validate.
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const tmpDir = await mkdtemp(join(tmpdir(), "hook-bad-updatedat-"));
+    const stateDir = join(tmpDir, "session-agent-state");
+    mkdirSync(stateDir, { recursive: true });
+
+    try {
+      for (const updatedAt of ["not-a-date", "", "NaN"]) {
+        writeFileSync(
+          join(stateDir, "spur-bad.json"),
+          JSON.stringify({ state: "working", updatedAt, hookEvent: "PreToolUse" }),
+          "utf8",
+        );
+        expect(readAgentHookState(tmpDir, "spur-bad"), `updatedAt=${updatedAt}`).toBeNull();
+      }
+
+      // A valid timestamp still parses, and stays Date-parseable for consumers.
+      writeFileSync(
+        join(stateDir, "spur-good.json"),
+        JSON.stringify({ state: "working", updatedAt: "2026-04-14T19:20:00.000Z" }),
+        "utf8",
+      );
+      const good = readAgentHookState(tmpDir, "spur-good");
+      expect(good?.updatedAt).toBe("2026-04-14T19:20:00.000Z");
+      expect(Number.isFinite(new Date(good?.updatedAt ?? "").getTime())).toBe(true);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

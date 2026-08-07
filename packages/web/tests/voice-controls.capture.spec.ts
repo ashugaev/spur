@@ -138,13 +138,6 @@ test.describe("voice controls capture", () => {
     await mockSessionDetail(page, session);
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "Sample transcribed message for the screenshot");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();

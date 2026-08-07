@@ -11,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -19,25 +19,34 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
+import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { SpawnModal } from "@/components/SpawnModal";
+import { TagEditor } from "@/components/TagEditor";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
+import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { CloseIcon } from "@/components/icons/CloseIcon";
-import { INPUT_CLASS } from "@/design/classes";
+import { Spinner } from "@/components/icons/Spinner";
+import { IconCloseButton } from "@/components/IconCloseButton";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
+import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { ARTIFACT_HTML_SANDBOX, isHtmlMimeType } from "@/lib/artifact-html";
 import { parseSessionPromptView } from "@/lib/session-prompt";
-import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
+import { isReviewLinkLabel, isTrackerLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -45,11 +54,18 @@ import {
   withTerminalQuery,
 } from "@/lib/project-routes";
 import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import {
@@ -62,6 +78,7 @@ import {
   canHandoff,
   canPause,
   canRecover,
+  canReopen,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
@@ -81,6 +98,7 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+import { resolveActivityStatus } from "@/lib/terminal-status";
 
 function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
   const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
@@ -96,7 +114,7 @@ function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorab
 }
 
 function displayLinkLabel(label: string, url: string): string {
-  if (label === "github-pr") return "github pr";
+  if (label === "github-pr" || label === "github_pr") return "github pr";
   if (label === "gitlab-pr") return "gitlab mr";
   if (label === "pr") {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
@@ -116,7 +134,7 @@ function splitSessionLinks(
   const surfacedUrls = new Set<string>();
 
   for (const link of links) {
-    if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+    if (isTrackerLinkLabel(link.label) || isReviewLinkLabel(link.label)) {
       if (!surfacedUrls.has(link.url)) {
         surfacedLinks.push(link);
         surfacedUrls.add(link.url);
@@ -243,6 +261,25 @@ function ArtifactDownloadIcon() {
   );
 }
 
+function ArtifactOpenExternalIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M14 4h6v6" />
+      <path d="m20 4-8 8" />
+      <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+    </svg>
+  );
+}
+
 function ArtifactPreviewIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
@@ -268,21 +305,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ButtonSpinner() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="voice-spinner h-3 w-3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
     </svg>
   );
 }
@@ -383,7 +405,20 @@ const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
-const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
+
+// Reuses the shared `SPARK_GLYPH_PATH`, scaled and centered the same way as
+// `src/app/icon.tsx` (22px glyph, 5px margin, in a 32x32 tile) so the tab
+// favicon is pixel-identical to the static app icon apart from stroke color.
+function buildStatusFaviconHref(hex: string): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" fill="${BG_BASE_HEX}"/>` +
+    `<svg x="5" y="5" width="22" height="22" viewBox="0 0 24 24">` +
+    `<path d="${SPARK_GLYPH_PATH}" stroke="${hex}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+    `</svg>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
 
 interface LogEntry {
   timestamp: string;
@@ -426,6 +461,14 @@ function artifactExtension(name: string): string {
   return ext ? ext.toUpperCase() : "FILE";
 }
 
+function isMarkdownArtifact(artifact: SessionArtifact): boolean {
+  return artifact.mimeType.split(";")[0].trim().toLowerCase() === "text/markdown";
+}
+
+function isHtmlArtifact(artifact: SessionArtifact): boolean {
+  return isHtmlMimeType(artifact.mimeType);
+}
+
 function artifactKindLabel(artifact: SessionArtifact): string {
   if (artifact.addedByUser && artifact.kind === "image") return "Attached Image";
   if (artifact.addedByUser) return "Attached";
@@ -452,6 +495,73 @@ function overlayButtonClass(primary = false): string {
   ].join(" ");
 }
 
+function ArtifactHtmlFrame({
+  artifact,
+  artifactHref,
+  className,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  className: string;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  // An iframe fires onLoad for any delivered body, including an error page, so a
+  // failed artifact would otherwise read as a successful preview. Probe the status
+  // first and only frame the artifact once the response is good.
+  const [reachable, setReachable] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReachable(false);
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, {
+          method: "HEAD",
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!response.ok) {
+          onPreviewError(artifact.id);
+          return;
+        }
+        setReachable(true);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact.id, artifactHref]);
+
+  if (!reachable) {
+    return null;
+  }
+
+  return (
+    <iframe
+      className={className}
+      data-artifact-lightbox-interactive
+      loading="lazy"
+      onError={() => onPreviewError(artifact.id)}
+      onLoad={() => onPreviewReady(artifact.id)}
+      sandbox={ARTIFACT_HTML_SANDBOX}
+      src={artifactHref}
+      title={`${artifact.name} preview`}
+    />
+  );
+}
+
 function ArtifactCard({
   artifact,
   artifactHref,
@@ -469,10 +579,14 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const html = isHtmlArtifact(artifact);
+  // A grid thumbnail runs the artifact's own scripts, so oversized pages wait for an
+  // explicit preview click; the lightbox still frames them at full size.
+  const htmlThumbnail = html && artifact.size <= TEXT_ARTIFACT_MAX_BYTES;
   const PreviewIcon =
     artifact.kind === "video"
       ? ArtifactPreviewIcon
-      : artifact.kind === "image"
+      : artifact.kind === "image" || html
         ? ArtifactImagePreviewIcon
         : ArtifactFileIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
@@ -528,7 +642,23 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind !== "image" && artifact.kind !== "video" ? (
+        {htmlThumbnail ? (
+          <>
+            <ArtifactHtmlFrame
+              artifact={artifact}
+              artifactHref={artifactHref}
+              className={`pointer-events-none absolute left-0 top-0 h-[200%] w-[200%] origin-top-left scale-50 border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onPreviewError={onPreviewError}
+              onPreviewReady={onPreviewReady}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind !== "image" && artifact.kind !== "video" && !htmlThumbnail ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -560,6 +690,18 @@ function ArtifactCard({
           >
             <PreviewIcon />
           </button>
+          {html ? (
+            <a
+              aria-label={`Open ${artifact.name} in a new tab`}
+              className={overlayButtonClass(false)}
+              href={artifactHref}
+              onClick={(event) => event.stopPropagation()}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <ArtifactOpenExternalIcon />
+            </a>
+          ) : null}
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
@@ -845,7 +987,8 @@ function ArtifactLightbox({
     setTextPreviewState("loading");
     setCopyState("idle");
 
-    if (!artifact || !artifactHref || artifact.kind !== "text") {
+    // HTML renders in a sandboxed frame instead of a source dump, so it needs no fetch.
+    if (!artifact || !artifactHref || artifact.kind !== "text" || isHtmlArtifact(artifact)) {
       return;
     }
 
@@ -882,18 +1025,30 @@ function ArtifactLightbox({
     return () => {
       controller.abort();
     };
-  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+  }, [artifact?.id, artifact?.kind, artifact?.mimeType, artifact?.size, artifactHref]);
+
+  const isOpen = Boolean(artifact && artifactHref);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
 
   if (!artifact || !artifactHref) return null;
 
+  const html = isHtmlArtifact(artifact);
   const previewStatusMessage =
-    artifact.kind === "text"
+    artifact.kind === "text" && !html
       ? textPreviewState === "loading"
         ? "Loading preview"
         : textPreviewState === "error"
           ? "Preview unavailable"
           : null
-      : artifact.kind === "image" || artifact.kind === "video"
+      : artifact.kind === "image" || artifact.kind === "video" || html
         ? previewState !== "ready"
           ? previewState === "error"
             ? "Preview unavailable"
@@ -1006,6 +1161,18 @@ function ArtifactLightbox({
                 {COPY_TEXT_LABELS[copyState]}
               </button>
             ) : null}
+            {html ? (
+              <a
+                aria-label={`Open ${artifact.name} in a new tab`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                href={artifactHref}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <ArtifactOpenExternalIcon />
+                Open
+              </a>
+            ) : null}
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
@@ -1014,14 +1181,7 @@ function ArtifactLightbox({
             >
               <ArtifactDownloadIcon />
             </a>
-            <button
-              aria-label="Close artifact preview"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
+            <IconCloseButton label="Close artifact preview" onClick={onClose} />
           </div>
         </div>
 
@@ -1069,19 +1229,38 @@ function ArtifactLightbox({
                 preload="metadata"
                 src={artifactHref}
               />
+            ) : html ? (
+              <ArtifactHtmlFrame
+                artifact={artifact}
+                artifactHref={artifactHref}
+                className={`absolute inset-0 h-full w-full border-0 bg-white transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+              />
             ) : artifact.kind === "text" ? (
-              <>
+              <div
+                className={`absolute inset-0 overflow-auto overscroll-contain p-3 text-[var(--color-text-primary)] [-webkit-overflow-scrolling:touch] sm:p-4 ${
+                  textPreviewState === "ready" && textContent
+                    ? isMarkdownArtifact(artifact)
+                      ? "bg-[var(--color-bg-elevated)]"
+                      : ""
+                    : "pointer-events-none"
+                }`}
+                data-artifact-lightbox-interactive
+              >
                 {textPreviewState === "oversize" ? (
-                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                     File exceeds 1 MiB preview limit. Download to view the full content.
                   </div>
                 ) : null}
                 {textPreviewState === "ready" && textContent ? (
-                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                    {textContent}
-                  </pre>
+                  isMarkdownArtifact(artifact) ? (
+                    <MarkdownMessage text={textContent} />
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-mono">{textContent}</pre>
+                  )
                 ) : null}
-              </>
+              </div>
             ) : (
               <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
                 <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
@@ -1119,13 +1298,6 @@ function ArtifactLightbox({
       </div>
     </div>
   );
-}
-
-interface DialogMessage {
-  key: string;
-  role: "user" | "assistant";
-  text: string;
-  pending?: boolean;
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {
@@ -1166,8 +1338,29 @@ function readLogDetail(details: Record<string, unknown> | undefined, key: string
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function readLogAttachments(details: Record<string, unknown> | undefined): Array<{
+  id: string;
+  name: string;
+}> {
+  const value = details?.["attachments"];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      "name" in item &&
+      typeof item.id === "string" &&
+      typeof item.name === "string"
+    ) {
+      return [{ id: item.id, name: item.name }];
+    }
+    return [];
+  });
+}
+
 function formatLogEventLabel(event: string): string {
-  return event.replaceAll(".", " ");
+  return event.replaceAll(".", " ").replaceAll("_", " ");
 }
 
 function formatStateLabel(state: string): string {
@@ -1205,8 +1398,12 @@ function LogEntryRow({
   const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
   const serviceId = readLogDetail(entry.details, "serviceId");
   const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const inputKind = readLogDetail(entry.details, "inputKind");
+  const inputText = readLogDetail(entry.details, "text") ?? entry.message ?? "";
+  const inputAttachments = readLogAttachments(entry.details);
   const isStateTransition =
     entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const isUserInput = entry.event === "session.input.received";
   const runtimeLabel =
     entry.event === "service.output"
       ? serviceId
@@ -1239,9 +1436,6 @@ function LogEntryRow({
 
       {isStateTransition ? (
         <div className="flex flex-wrap items-center gap-3 px-3 py-3">
-          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-            Status transition
-          </div>
           <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
             <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
               {formatStateLabel(fromState ?? "")}
@@ -1261,6 +1455,36 @@ function LogEntryRow({
             </a>
           ) : null}
         </div>
+      ) : isUserInput ? (
+        <div className="px-3 py-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <span className="border border-[var(--color-status-working)] px-2 py-0.5 text-[var(--color-status-working)]">
+              User input
+            </span>
+            {inputKind ? (
+              <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+                {formatLogEventLabel(inputKind)}
+              </span>
+            ) : null}
+          </div>
+          {inputText ? (
+            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-[11px] leading-5 text-[var(--color-text-primary)]">
+              {inputText}
+            </pre>
+          ) : null}
+          {inputAttachments.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {inputAttachments.map((attachment) => (
+                <span
+                  className="border border-[var(--color-border-default)] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]"
+                  key={attachment.id}
+                >
+                  Attachment {attachment.name}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
       ) : (
         <div className="px-3 py-3">
           {entry.message ? (
@@ -1273,7 +1497,7 @@ function LogEntryRow({
               {entry.message}
             </pre>
           ) : (
-            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+            <div className="text-[var(--color-text-tertiary)]">No message.</div>
           )}
         </div>
       )}
@@ -1287,15 +1511,6 @@ const LOG_LEVEL_COLORS: Record<string, string> = {
   error: "var(--color-status-error)",
 };
 
-function formatDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSec / 3600);
-  const minutes = Math.floor((totalSec % 3600) / 60);
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return "<1m";
-}
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1305,27 +1520,6 @@ function formatBytes(bytes: number): string {
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
-}
-
-async function readApiError(response: Response, fallback: string): Promise<string> {
-  const text = await response.text();
-  if (!text) {
-    return fallback;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    try {
-      const payload = JSON.parse(text) as unknown;
-      if (typeof payload === "object" && payload !== null && "error" in payload) {
-        return String((payload as { error?: unknown }).error ?? fallback);
-      }
-    } catch {
-      return fallback;
-    }
-  }
-
-  return text;
 }
 
 function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
@@ -1389,6 +1583,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
+  const [switchAuthPending, setSwitchAuthPending] = useState(false);
+  const [switchAuthError, setSwitchAuthError] = useState<string | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
@@ -1437,9 +1634,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   currentSessionIdRef.current = sessionId;
   const loadRequestIdRef = useRef(0);
   const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const openedMarkerRef = useRef<string | null>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
   useEffect(() => {
@@ -1476,7 +1672,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         return;
       }
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to load session"));
+        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
       if (
@@ -1509,6 +1705,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
+  const tagCatalog = useTagCatalog();
+  const applyTags = useCallback(
+    async (targetSessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(targetSessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to update tags"));
+        }
+        await loadSession();
+      } catch (tagError) {
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
+      }
+    },
+    [loadSession, showErrorToast],
+  );
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags }),
+    [tagCatalog, applyTags],
+  );
+
   useEffect(() => {
     void loadSession();
     const timer = setInterval(() => {
@@ -1517,8 +1737,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadSession]);
 
+  useEffect(() => {
+    if (!session) return;
+    if (session.hasUnseenAttention !== true) return;
+    const marker = `${session.id}:${session.state}:${session.lastActivityAt}`;
+    if (openedMarkerRef.current === marker) return;
+    openedMarkerRef.current = marker;
+    void (async () => {
+      try {
+        await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+          method: "POST",
+          cache: "no-store",
+        });
+        await loadSession();
+      } catch {
+        openedMarkerRef.current = null;
+      }
+    })();
+  }, [
+    loadSession,
+    session?.hasUnseenAttention,
+    session?.id,
+    session?.lastActivityAt,
+    session?.state,
+    sessionId,
+  ]);
+
   const loadConversation = useCallback(async () => {
-    if (!session || session.agent !== "claude") {
+    if (!session) {
       setConversation(null);
       return;
     }
@@ -1542,26 +1788,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadConversation]);
 
-  useEffect(() => {
-    const lastMessage = conversation?.messages.at(-1);
-    const nextDialogTail =
-      conversation?.state === "working"
-        ? `pending:${lastMessage?.timestampMs ?? "none"}:${lastMessage?.role ?? "none"}:${lastMessage?.text ?? ""}`
-        : lastMessage?.role === "assistant"
-          ? `assistant:${lastMessage.timestampMs}:${lastMessage.text}`
-          : null;
-    if (!nextDialogTail || nextDialogTail === lastDialogTailRef.current) {
-      return;
-    }
-    lastDialogTailRef.current = nextDialogTail;
-    const el = dialogRef.current;
-    if (!el) return;
-    if (typeof el.scrollTo === "function") {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-      return;
-    }
-    el.scrollTop = el.scrollHeight;
-  }, [conversation]);
+  const handleAnswer = useCallback(
+    async (optionIndex: number) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/answer`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ optionIndex }),
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to submit answer: ${response.status}`);
+        }
+      } finally {
+        void loadConversation();
+      }
+    },
+    [loadConversation, sessionId],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1590,7 +1833,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [session]);
 
   const handleAction = async (
-    action: "send" | "pause" | "restore" | "complete" | "kill",
+    action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
@@ -1645,6 +1888,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return true;
     } catch (actionError) {
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      // The server may have already moved (e.g. reopen's rollback flips the
+      // record back to completed on a failed restore) — refetch so the page
+      // never shows a stale view after a failed action.
+      await loadSession();
       return false;
     } finally {
       setBusyAction(null);
@@ -1707,6 +1954,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeFileAttachments(respawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
@@ -1716,7 +1964,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to respawn session"));
+      }
       const data = (await response.json()) as SpurSessionView;
       respawnHistory.saveEntry(nextPrompt);
       setRespawnOpen(false);
@@ -1750,6 +2000,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const handleSwitchAuth = async (accountId: string, force: boolean) => {
+    setSwitchAuthPending(true);
+    setSwitchAuthError(null);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
+      }
+      const data = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(data));
+      setSwitchAuthOpen(false);
+    } catch (switchAuthErr) {
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
+    } finally {
+      setSwitchAuthPending(false);
+    }
+  };
+
   const openHandoffEditor = useCallback(() => {
     if (!session) return;
     setHandoffNotes("");
@@ -1774,7 +2046,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to hand off session"));
+        throw new Error(await readApiErrorMessage(response, "Failed to hand off session"));
       }
       const data = (await response.json()) as SpurSessionView;
       setHandoffOpen(false);
@@ -1807,6 +2079,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     deskSpawningRef.current = true;
     setDeskSpawning(true);
     try {
+      assertAttachmentsWithinLimit(encodedAttachments);
       const payload: Record<string, unknown> = {
         projectId: session.projectId,
         prompt: nextPrompt,
@@ -1825,7 +2098,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Failed to spawn desk agent"));
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn desk agent"));
       }
       const created = (await response.json()) as SpurSessionView;
       deskSpawnHistory.saveEntry(nextPrompt);
@@ -1867,7 +2140,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             return;
           }
         }
-        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+        throw new Error(
+          await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
+        );
       }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
@@ -1898,19 +2173,46 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const addFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addRespawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setRespawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
   const addDeskSpawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
-      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .then((entries) => {
+        if (entries.length === 0) return;
+        let rejectedMessage: string | null = null;
+        setDeskSpawnAttachments((prev) => {
+          const result = mergeAttachmentsWithinLimit(prev, entries);
+          rejectedMessage = result.rejectedMessage;
+          return result.attachments;
+        });
+        if (rejectedMessage) showErrorToast(rejectedMessage);
+      })
       .catch(() => {});
   };
 
@@ -1936,11 +2238,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sendingRef.current = true;
     try {
       const encoded = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encoded);
       const body: Record<string, unknown> = { message: trimmed };
       if (encoded.length > 0) body.attachments = encoded;
       if (options?.queue !== undefined) body.queue = options.queue;
       if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
       await handleAction("send", body);
+    } catch (sendError) {
+      showErrorToast(errorMessage(sendError, "Failed to send session message"));
     } finally {
       sendingRef.current = false;
     }
@@ -1967,6 +2272,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+
+  const hasSession = Boolean(session);
+  const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
+
+  useEffect(() => {
+    if (!hasSession) return undefined;
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/svg+xml";
+    document.head.appendChild(link);
+    faviconLinkRef.current = link;
+    return () => {
+      link.remove();
+      faviconLinkRef.current = null;
+    };
+  }, [hasSession]);
+
+  useEffect(() => {
+    const link = faviconLinkRef.current;
+    if (!link || displayState === undefined) return;
+    const { colorVar } = resolveActivityStatus(displayState);
+    const varName = colorVar.slice(4, -1);
+    const hex = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    link.href = buildStatusFaviconHref(hex || "#ffffff");
+  }, [displayState]);
+
   const wakeSummary = session ? getWakeSummary(session) : null;
   const wakeDueAt = wakeSummary?.dueAt;
   const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
@@ -1976,29 +2307,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => window.clearInterval(timer);
   }, [wakeDueAt]);
   const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
-  const dialogMessages = useMemo<DialogMessage[]>(
-    () =>
-      conversation
-        ? [
-            ...conversation.messages.map((msg) => ({
-              key: `${msg.timestampMs}:${msg.role}:${msg.text}`,
-              role: msg.role,
-              text: msg.text,
-            })),
-            ...(conversation.state === "working"
-              ? [
-                  {
-                    key: "pending-assistant-response",
-                    role: "assistant" as const,
-                    text: "...",
-                    pending: true,
-                  },
-                ]
-              : []),
-          ]
-        : [],
-    [conversation],
-  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -2122,7 +2430,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session &&
     (requestedTerminalSessionId === session.id ||
       (requestedTerminalSessionId !== null &&
-        requestedTerminalSessionId.startsWith(`${session.id}--`))),
+        requestedTerminalSessionId.startsWith(`${session.id}--`)) ||
+      (requestedTerminalSessionId !== null &&
+        session.sidecars.some((sc) => sc.tmuxSession === requestedTerminalSessionId))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
@@ -2222,12 +2532,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
               <span>{session.projectName}</span>
               <span>•</span>
-              <span>{session.agent}</span>
+              <span>{getAgentDisplayName(session.agent)}</span>
               <span>•</span>
               <span className="font-mono">{session.id}</span>
+              {session.model ? (
+                <>
+                  <span>•</span>
+                  <span>{session.model}</span>
+                </>
+              ) : null}
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
             {promptView &&
@@ -2245,7 +2561,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onCopy={copyLabeledValue}
                       />
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                    <p
+                      className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                    >
                       {promptView.task}
                     </p>
                   </div>
@@ -2343,55 +2661,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </nav>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {displayState ? <ActivityDot activity={displayState} /> : null}
-              {session.branch ? (
-                <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
-                  {session.branch}
-                </span>
-              ) : null}
-              {wakeSummary ? (
-                <span
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                  title={
-                    wakeSummary.kind === "interval"
-                      ? "Interval wake scheduled"
-                      : wakeSummary.kind === "daily"
-                        ? "Daily wake scheduled"
-                        : "Wake scheduled"
-                  }
-                >
-                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                  <span>{wakeSummary.label.toLowerCase()}</span>
-                  <span className="font-mono text-[var(--color-text-primary)]">
-                    {wakeCountdown}
+            <TagsContext.Provider value={tagsContextValue}>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {session.branch ? (
+                  <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
+                    {session.branch}
                   </span>
-                  {wakeSummary.intervalMs ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                ) : null}
+                {wakeSummary ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                    title={
+                      wakeSummary.kind === "interval"
+                        ? "Interval wake scheduled"
+                        : wakeSummary.kind === "daily"
+                          ? "Daily wake scheduled"
+                          : "Wake scheduled"
+                    }
+                  >
+                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                    <span>{wakeSummary.label.toLowerCase()}</span>
+                    <span className="font-mono text-[var(--color-text-primary)]">
+                      {wakeCountdown}
                     </span>
-                  ) : null}
-                  {wakeSummary.dailyAt ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      daily {wakeSummary.dailyAt.join(", ")}
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-              {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
-              ))}
-              {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
-                  offline
-                </span>
-              ) : null}
-              {hasServiceProblems(session) ? (
-                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
-                  service issue
-                </span>
-              ) : null}
-            </div>
+                    {wakeSummary.intervalMs ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        every {formatIntervalDuration(wakeSummary.intervalMs)}
+                      </span>
+                    ) : null}
+                    {wakeSummary.dailyAt ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        daily {wakeSummary.dailyAt.join(", ")}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+                {surfacedLinks.map((link) => (
+                  <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
+                ))}
+                {!session.runtimeAlive && !isTerminalSession(session) ? (
+                  <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                    offline
+                  </span>
+                ) : null}
+                {hasServiceProblems(session) ? (
+                  <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
+                    service issue
+                  </span>
+                ) : null}
+                <TagEditor session={session} variant="chips" />
+              </div>
+            </TagsContext.Provider>
           </header>
 
           {/* Actions bar */}
@@ -2431,6 +2752,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
+            {session.agent === "claude" &&
+            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={() => {
+                  setSwitchAuthError(null);
+                  setSwitchAuthOpen(true);
+                }}
+                title="Switch credentials in place — the live process rereads the new account on its next request"
+              >
+                Switch auth
+              </button>
+            ) : null}
             {canPause(session) ? (
               <button
                 type="button"
@@ -2449,6 +2785,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canReopen(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("reopen")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
+              >
+                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
               </button>
             ) : null}
             {canRecover(session) ? (
@@ -2501,50 +2848,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </div>
 
           {/* Content */}
-          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
+          <div className="mt-4 grid gap-4 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
-              {/* Conversation dialog - Claude only */}
-              {session.agent === "claude" && conversation?.messages.length ? (
-                <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                    Dialog
-                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
-                    {conversation.durationMs > 0 ? (
-                      <span className="font-normal normal-case tracking-normal">
-                        {formatDuration(conversation.durationMs)}
-                      </span>
-                    ) : null}
-                  </h2>
-                  <div
-                    ref={dialogRef}
-                    className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
-                  >
-                    {dialogMessages.map((msg) => (
-                      <div
-                        key={msg.key}
-                        aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
-                          msg.role === "user"
-                            ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
-                            : msg.pending
-                              ? "mr-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)]"
-                              : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
-                        }`}
-                      >
-                        <div
-                          className={`${HARD_WRAP_TEXT_CLASS} ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
-                        >
-                          {msg.pending
-                            ? msg.text
-                            : msg.text.length > 500
-                              ? msg.text.slice(0, 500) + "..."
-                              : msg.text}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              ) : null}
+              {/* Conversation dialog - all agents */}
+              <ConversationView
+                entries={conversation?.entries ?? []}
+                messages={conversation?.messages ?? []}
+                durationMs={conversation?.durationMs ?? 0}
+                isWorking={displayState === "working"}
+                agent={session.agent}
+                onAnswer={handleAnswer}
+              />
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
@@ -2575,8 +2889,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
                     <p className="mt-2 text-[var(--color-text-secondary)]">
-                      Awaiting agent prompt. Queued messages will send automatically when the agent
-                      is ready.
+                      Awaiting agent prompt — queued messages will send automatically.
                     </p>
                   ) : null}
                 </section>
@@ -2612,7 +2925,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           current.filter((_, currentIndex) => currentIndex !== index),
                         )
                       }
-                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
+                      placeholder={voicePlaceholder("Message...", voice)}
                       textareaRef={messageRef}
                       value={message}
                       voice={voice}
@@ -2651,7 +2964,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -2662,7 +2977,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span
@@ -2785,13 +3102,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       })}
                     </div>
                   ) : (
-                    <p className="py-2 text-[var(--color-text-secondary)]">
-                      {artifactCategory === "attached"
-                        ? "No attached artifacts yet."
-                        : artifactCategory === "system"
-                          ? "No system artifacts yet."
-                          : "No agent artifacts yet."}
-                    </p>
+                    <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}
                 </section>
               ) : null}
@@ -2980,7 +3291,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                                onClick={() => syncTerminalFilter(sc.tmuxSession)}
                               >
                                 Terminal
                               </button>
@@ -3031,9 +3342,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="font-bold uppercase text-[var(--color-text-primary)]">
                     Logs {session.id}
                   </div>
-                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Spur orchestrator events and runtime output
-                  </div>
                 </div>
                 <button
                   type="button"
@@ -3076,7 +3384,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               titleSuffix={
                 requestedTerminalSessionId !== session.id
-                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  ? // A workspace-shared sidecar's pane is named after the
+                    // workspace, not this session, so stripping this
+                    // session's own prefix would leave the whole name. The
+                    // sidecar view already carries both.
+                    (session.sidecars.find((sc) => sc.tmuxSession === requestedTerminalSessionId)
+                      ?.name ?? requestedTerminalSessionId?.replace(`${session.id}--`, ""))
                   : undefined
               }
             />
@@ -3088,6 +3401,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
               payload={recoverPayload}
+            />
+          ) : null}
+          {switchAuthOpen && session ? (
+            <SwitchAuthDialog
+              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
+              activeAccountId={session.activeClaudeAccountId ?? null}
+              status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
+              errorMessage={switchAuthError}
+              onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}
+              onCancel={() => setSwitchAuthOpen(false)}
             />
           ) : null}
           {openPrAction ? (
@@ -3170,6 +3493,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           value={candidate.port}
                         >
                           {candidate.portId}:{candidate.port}
+                          {candidate.owner ? ` — ${candidate.owner}` : ""}
                         </option>
                       ))}
                     </select>
@@ -3403,8 +3727,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[10rem]"
-              promptPlaceholder="Edit the initial message..."
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+              promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
@@ -3452,7 +3776,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel
@@ -3505,7 +3829,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
+        <p className="mt-5 text-[var(--color-text-secondary)]">Loading...</p>
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>

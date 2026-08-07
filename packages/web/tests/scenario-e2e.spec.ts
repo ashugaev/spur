@@ -39,9 +39,7 @@ async function openSpawnModal(page: Page) {
 }
 
 function spawnModal(page: Page) {
-  return page.locator("div").filter({
-    has: page.getByRole("heading", { name: /^spawn session$/i }),
-  });
+  return page.getByRole("dialog", { name: /^spawn session$/i });
 }
 
 function mockSessionDetail(page: Page, session: WorkingSession) {
@@ -282,9 +280,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await modal.getByRole("button", { name: /cancel voice recording/i }).click();
 
     await expect(modal.getByRole("button", { name: /start voice recording/i })).toBeVisible();
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue("");
     expect(transcribeCalls).toBe(0);
   });
 
@@ -300,7 +296,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await modal.getByRole("button", { name: /start voice recording/i }).click();
     await modal.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue(
       "Spawn prompt from voice",
     );
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
@@ -313,7 +309,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await openSpawnModal(page);
     const modal = spawnModal(page);
 
-    const textarea = page.getByLabel("Prompt for the new session...");
+    const textarea = page.getByLabel("Prompt...");
     await textarea.focus();
     await textarea.press("Meta+.");
     await expect(modal.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
@@ -350,7 +346,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     ).toBeVisible();
     await reopenedModal.getByRole("button", { name: /retry failed voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue(
       "Recovered spawn recording",
     );
   });
@@ -374,9 +370,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await expect(modal.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
       0,
     );
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue("");
   });
 });
 
@@ -394,7 +388,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue(
       "Message voice transcript",
     );
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
@@ -414,9 +408,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await page.getByRole("button", { name: /cancel voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue("");
     await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
     expect(transcribeCalls).toBe(0);
   });
@@ -439,7 +431,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
     await page.getByRole("button", { name: /retry failed voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue(
       "Recovered message recording",
     );
   });
@@ -467,9 +459,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await mockVoiceTranscribe(page, "Message hotkey transcript");
 
     await page.goto(`/sessions/${session.id}`);
-    await expect(
-      page.getByPlaceholder("Message to the running agent... Voice ⌘ + ."),
-    ).toBeVisible();
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toBeVisible();
     const textarea = page.locator("textarea").first();
     await textarea.focus();
     await textarea.press("Meta+.");

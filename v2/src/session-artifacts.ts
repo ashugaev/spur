@@ -15,6 +15,8 @@ const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
+  ".htm": "text/html; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
   ".imd": "text/plain; charset=utf-8",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
@@ -263,5 +265,6 @@ Session artifacts:
 - If you generate an artifact you want the user to inspect in Spur UI, always put it in \`$SPUR_SESSION_ARTIFACTS_DIR\`.
 - Files written there are not committed from the repo workspace and are tied to this Spur session.
 - Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
+- HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
 - Prefer direct child files with stable names and overwrite them when updating an artifact.`;
 }

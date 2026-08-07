@@ -58,6 +58,16 @@ export interface SpurTagDefinition {
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
+export interface SpurClaudeAccount {
+  id: string;
+  label?: string;
+  authenticated: boolean;
+}
+
+export interface ClaudeAccountSummary extends SpurClaudeAccount {
+  lastUsedAt?: string;
+}
+
 export interface SpurSessionArtifact {
   id: string;
   name: string;
@@ -84,10 +94,21 @@ export interface SpurSidecarPort {
   port: number;
 }
 
+// `tmuxSession` is the daemon's own name for the sidecar's pane — for a
+// desk-shared sidecar that is the desk anchor's, not this session's, so it
+// must never be reconstructed client-side.
+export interface SpurSessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports?: SpurSidecarPort[];
+  tmuxSession: string;
+}
+
 export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SpurSidecarPortConflict {
@@ -236,8 +257,10 @@ export interface SpurSessionView {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -251,7 +274,7 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars?: SpurSessionSidecarView[];
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
@@ -260,8 +283,14 @@ export interface SpurSessionView {
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  // The workspace (shared worktree) this session lives in; equals its own id
+  // when it shares with nobody. `deskId` is the legacy alias for the same
+  // fact, still sent for one release.
+  workspaceId?: string;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -281,7 +310,7 @@ export interface ProjectInfo {
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 
@@ -330,7 +359,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -345,11 +373,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
-}
-
-export interface TakeBacklogItemResponse {
-  item: AvailableBacklogItem;
-  session: SpurSessionView;
+  position: number;
 }
 
 export type AttentionLevel =
@@ -370,6 +394,29 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "stopped",
   "done",
 ];
+
+export interface AttentionLaneMeta {
+  label: string;
+  color: string;
+  dividerColor?: string;
+}
+
+// Single source of truth for lane label/color pairs — shared by the
+// AttentionZone section header and the Filters modal Status section so
+// renaming or recoloring a lane can't leave the two views disagreeing.
+export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
+  error: { label: "Errors", color: "var(--color-status-error)" },
+  rate_limited: { label: "Rate Limited", color: "var(--color-status-attention)" },
+  respond: { label: "Needs Input", color: "var(--color-status-error)" },
+  working: { label: "Working", color: "var(--color-status-working)" },
+  pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  stopped: {
+    label: "Stopped",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
+  done: { label: "Completed", color: "var(--color-status-ready)" },
+};
 
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
   let bestRank = ATTENTION_ZONE_ORDER.length;
@@ -404,8 +451,10 @@ export interface DashboardSession {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -419,7 +468,7 @@ export interface DashboardSession {
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
-  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars: SpurSessionSidecarView[];
   runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
@@ -428,6 +477,8 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -439,6 +490,8 @@ export interface SpawnOverrides {
   worktree?: boolean;
   defaultBranch?: string;
 }
+
+export type WorkspaceMode = "default" | "worktree" | "shared";
 
 export function toDashboardSession(
   session: SpurSessionView,
@@ -468,8 +521,10 @@ export function toDashboardSession(
     tmuxSession: session.tmuxSession ?? null,
     status: session.status,
     state: session.state,
+    hasUnseenAttention: session.hasUnseenAttention,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    lastOpenedAt: session.lastOpenedAt,
     lastActivityAt: session.lastActivityAt,
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
@@ -486,9 +541,15 @@ export function toDashboardSession(
     tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
-    deskKey: session.deskId?.trim() || session.id,
+    // `workspaceId` is the daemon's own name for the group; `deskId` is the
+    // legacy alias it still sends for one release.
+    deskKey: session.workspaceId?.trim() || session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
+    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
+    ...(session.activeClaudeAccountId
+      ? { activeClaudeAccountId: session.activeClaudeAccountId }
+      : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };
@@ -551,6 +612,10 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canReopen(session: DashboardSession): boolean {
+  return session.status === "completed" && !session.runtimeAlive;
+}
+
 export function canHandoff(session: DashboardSession): boolean {
   return (
     !isTerminalSession(session) &&
@@ -572,8 +637,29 @@ export interface ConversationMessage {
   timestampMs: number;
 }
 
+export type TranscriptEntry =
+  | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      inputSummary?: string;
+      output?: string;
+      timestampMs?: number;
+    }
+  | { kind: "reasoning"; text: string; timestampMs?: number }
+  | {
+      kind: "question";
+      header: string;
+      prompt: string;
+      options?: { label: string; index: number }[];
+      multiSelect?: boolean;
+      timestampMs?: number;
+    };
+
 export interface ConversationResponse {
   messages: ConversationMessage[];
+  entries: TranscriptEntry[];
   durationMs: number;
   state: SpurSessionState;
 }
@@ -652,7 +738,7 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
     if (!anchor) continue;
     rows.push({
       session: anchor,
-      deskMemberCount: members.length,
+      deskMemberCount: activeMembers.length,
       lane: worstAttentionLevel(members.map(getAttentionLevel)),
     });
   }

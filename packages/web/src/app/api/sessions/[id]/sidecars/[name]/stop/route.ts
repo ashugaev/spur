@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { SpurSessionView } from "@/lib/types";
 
 interface RouteContext {
@@ -15,7 +16,6 @@ export async function POST(_: Request, context: RouteContext) {
     );
     return NextResponse.json(session);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to stop Spur sidecar";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to stop Spur sidecar");
   }
 }

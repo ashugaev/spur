@@ -27,9 +27,11 @@ afterEach(() => {
 });
 
 describe("listAgentModels claude", () => {
-  it("returns the curated static list with sonnet first", async () => {
+  it("returns the curated static list with opus first and flagged as default", async () => {
     const models = await listAgentModels("claude");
-    expect(models.map((m) => m.id)).toEqual(["sonnet", "opus", "haiku", "fable"]);
+    expect(models.map((m) => m.id)).toEqual(["opus", "sonnet", "haiku", "fable"]);
+    expect(models.find((m) => m.id === "opus")?.isDefault).toBe(true);
+    expect(models.find((m) => m.id === "sonnet")?.isDefault).toBeUndefined();
   });
 });
 
@@ -40,7 +42,7 @@ describe("listAgentModels codex", () => {
       join(dir, "models_cache.json"),
       JSON.stringify({
         models: [
-          { slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list" },
+          { slug: "gpt-current", display_name: "Current GPT", visibility: "list" },
           { slug: "gpt-hidden", display_name: "Hidden", visibility: "hidden" },
           { slug: "no-name", visibility: "list" },
         ],
@@ -48,15 +50,15 @@ describe("listAgentModels codex", () => {
     );
     const models = await listAgentModels("codex", { codexHomePath: dir });
     expect(models).toEqual([
-      { id: "gpt-5.5", label: "GPT-5.5" },
+      { id: "gpt-current", label: "Current GPT" },
       { id: "no-name", label: "no-name" },
     ]);
   });
 
-  it("falls back to a static list when the cache is missing", async () => {
+  it("returns no rows when the cache is missing", async () => {
     const dir = await mkdtemp(join(tmpdir(), "spur-codex-nomodels-"));
     const models = await listAgentModels("codex", { codexHomePath: dir });
-    expect(models).toEqual([{ id: "gpt-5.5", label: "GPT-5.5" }]);
+    expect(models).toEqual([]);
   });
 });
 

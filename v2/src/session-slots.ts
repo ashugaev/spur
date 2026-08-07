@@ -95,6 +95,29 @@ function normalizeTitle(title: string): string {
   return normalized;
 }
 
+export function normalizeSlotLinks(links: unknown): SessionLink[] {
+  const linksRaw = links ?? [];
+  if (!Array.isArray(linksRaw)) {
+    throw new Error("links must be an array");
+  }
+  return linksRaw.map((link: unknown, index) => {
+    if (!link || typeof link !== "object") {
+      throw new Error(`links[${index}] must be an object`);
+    }
+    const linkRecord = link as { label?: unknown; url?: unknown };
+    if (typeof linkRecord.label !== "string") {
+      throw new Error(`links[${index}].label must be a string`);
+    }
+    if (typeof linkRecord.url !== "string") {
+      throw new Error(`links[${index}].url must be a string`);
+    }
+    return {
+      label: normalizeSlotLabel(linkRecord.label),
+      url: normalizeSlotUrl(linkRecord.url),
+    } satisfies SessionLink;
+  });
+}
+
 export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): NormalizedSlotsUpdate {
   if (request.title !== undefined && typeof request.title !== "string") {
     throw new Error("slot title must be a string");
@@ -112,26 +135,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     throw new Error("setTitleIfAbsent requires a title");
   }
 
-  const linksRaw: unknown = request.links ?? [];
-  if (!Array.isArray(linksRaw)) {
-    throw new Error("links must be an array");
-  }
-  const links = linksRaw.map((link: unknown, index) => {
-    if (!link || typeof link !== "object") {
-      throw new Error(`links[${index}] must be an object`);
-    }
-    const linkRecord = link as { label?: unknown; url?: unknown };
-    if (typeof linkRecord.label !== "string") {
-      throw new Error(`links[${index}].label must be a string`);
-    }
-    if (typeof linkRecord.url !== "string") {
-      throw new Error(`links[${index}].url must be a string`);
-    }
-    return {
-      label: normalizeSlotLabel(linkRecord.label),
-      url: normalizeSlotUrl(linkRecord.url),
-    } satisfies SessionLink;
-  });
+  const links = normalizeSlotLinks(request.links);
 
   const unlinkRaw: unknown = request.unlinkLabels ?? [];
   if (!Array.isArray(unlinkRaw)) {
@@ -239,7 +243,8 @@ Session metadata:
 - Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
 - Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.${renderTagInstructions(tags)}`;
+- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.
+- Log Spur-operation friction with \`spur agent-issue log "..."\` (examples: a sidecar won't start, it's unclear how to test, branch preflight rejected a commit). This is for Spur tooling only — not task-domain or product bugs.${renderTagInstructions(tags)}`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
@@ -514,13 +519,12 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 action="start"
 if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
   action="$1"
   shift
 fi
-exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

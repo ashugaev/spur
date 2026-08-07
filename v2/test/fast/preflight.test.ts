@@ -6,8 +6,9 @@ import type * as ModelsModule from "../../src/agents/models.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
-const { mockExecFileAsync } = vi.hoisted(() => ({
+const { mockExecFileAsync, mockStdinEnd } = vi.hoisted(() => ({
   mockExecFileAsync: vi.fn(),
+  mockStdinEnd: vi.fn(),
 }));
 const { mockRm } = vi.hoisted(() => ({
   mockRm: vi.fn<typeof FsPromises.rm>(),
@@ -17,9 +18,19 @@ const { mockReadFile } = vi.hoisted(() => ({
 }));
 
 vi.mock("node:child_process", () => {
-  const fn = Object.assign((..._args: unknown[]) => {}, {
-    [Symbol.for("nodejs.util.promisify.custom")]: mockExecFileAsync,
-  });
+  const fn = (
+    command: string,
+    args: string[],
+    options: unknown,
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
+  ) => {
+    void mockExecFileAsync(command, args, options).then(
+      ({ stdout, stderr }: { stdout: string; stderr: string }) => callback(null, stdout, stderr),
+      (error: Error & { stdout?: string; stderr?: string }) =>
+        callback(error, error.stdout ?? "", error.stderr ?? ""),
+    );
+    return { stdin: { end: mockStdinEnd } };
+  };
   return { execFile: fn };
 });
 
@@ -96,6 +107,7 @@ function getCodexOutputPath(args: string[]): string {
 describe("runSpawnPreflight", () => {
   beforeEach(() => {
     mockExecFileAsync.mockReset();
+    mockStdinEnd.mockReset();
     mockRm.mockReset();
     mockRm.mockResolvedValue(undefined);
     mockReadFile.mockReset();
@@ -123,6 +135,7 @@ describe("runSpawnPreflight", () => {
 
     expect(result).toEqual({ branch: "feature/login-rate-limit" });
     expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(mockStdinEnd).toHaveBeenCalledTimes(1);
     const [command, args, options] = mockExecFileAsync.mock.calls[0] ?? [];
     expect(command).toBe("/mock/bin/claude");
     expect(args).toEqual(

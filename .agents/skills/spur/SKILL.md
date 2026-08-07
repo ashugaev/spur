@@ -1,259 +1,54 @@
 ---
 name: spur
-description: Use when working on Spur — its CLI, daemon, tmux/worktree session flow, cron sources/triggers, config shape, and validation rules.
+description: Spur orchestrates AI coding agents (claude/codex/cursor) in detached tmux sessions inside git worktrees, driven by CLI, a local HTTP daemon, a web UI, or Telegram. Use when spawning, messaging, or automating Spur sessions, or when reading or writing Spur config. Don't use for driving an agent's own CLI directly, or for plain git worktree work.
 ---
 
-# Spur
+SPUR
 
-## Fixed facts
+  Sections through SAFETY describe Spur anywhere, no repo path needed. Sections after that reference this repo.
 
-- Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
-- Treat the Spur interface as fixed unless the user asks to change it.
-- Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
-- Supported agents are only `claude`, `codex`, and `cursor`.
-- Supported agents start with full access by default:
-  `claude --dangerously-skip-permissions`
-  `codex --dangerously-bypass-approvals-and-sandbox`
-  `agent --force --sandbox disabled`
-- Workspace setup is only:
-  `git worktree` + configured symlinks + detached `tmux` + agent launch.
-- `list` hides `completed` and `killed` sessions by default.
-- Minimal automation is only:
-  `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
-- Spur supports a lean sequential startup pipeline:
-  one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
-- Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
-- Later phases are sent only after the agent returns to its prompt.
-- `cron` emits `cron:tick`.
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`,
-  `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`.
-  `github:comment` covers top-level PR comments and review comments/replies.
-  Lifecycle events (`ready_for_review`, `approved`, `merged`, `closed`) fire on transition.
-  First poll per session sets baseline, no emit; pre-existing true state stays silent. Baseline
-  persists across daemon restarts. `github:merged` and `github:closed` fire only while owning
-  session runs; dropped if stopped (same as other github signals).
-- `github` with `query` emits `github:work_item.new` per open PR. First poll per repo records
-  backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
-- `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
-  spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
-- `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
-  to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
-  Agents reply to the same Telegram target with `spur source reply "message"`.
-  Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
-  The attention monitor pushes `needs_input`/`error`/`rate_limited` notices (with a tmux pane tail on
-  `needs_input`/`error`) to bound chats, skips the startup baseline, nudges once on a `working` to
-  `waiting` transition with no reply since the last inbound message, and sends a farewell plus closes
-  the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
-  never break the monitor tick, the nudge, or session cleanup.
-- `runOnStart` defaults to `false`.
+WHAT SPUR IS
 
-## Current config shape
+  CLI plus a local HTTP daemon, default `127.0.0.1:4310`, plus a web UI (default `5555`, no runtime logic of its own). "spawn an agent" means this, not the built-in Agent/Task tool.
+  Agents `claude`, `codex`, `cursor` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
 
-```yaml
-server:
-  port: 4310
+INTERFACES
 
-dataDir: ~/.spur
-worktreeDir: ~/.spur-worktrees
-defaultAgent: claude
+  CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
+  Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
+  Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH`: holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 
-tags:
-  bug:
-    description: Fixing a defect or regression
-  feature:
-    description: New user-facing capability
-  docs:
-    color: "#a371f7"
-    description: Documentation only
+CONFIG FOOTGUNS
 
-projects:
-  backend-api:
-    path: ~/backend-api
-    defaultBranch: main
-    sessionPrefix: api
-    defaultAgent: codex
-    defaultModels:
-      codex: gpt-5.5
-      cursor: auto
-    branchNaming:
-      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
-    spawn:
-      steps: [research, test]
-    symlinks: [.env, .claude]
-    sources:
-      weekday-review:
-        type: cron
-        schedule: "0 9 * * 1-5"
-        runOnStart: false
-    triggers:
-      weekday-review-spawn:
-        source: weekday-review
-        event: cron:tick
-        spawn:
-          prompt: "Review all open PRs"
-          agent: codex
-          model: gpt-5.5
-          restrictWrites: true
-          allowedTriggers: []
-          steps:
-            - "research"
-            - "develop"
-            - "run $code-simplifier"
-            - "test"
-```
+  Full field reference and example: `docs/configuration.md`. Cross-file invariants and footguns:
 
-Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
+  Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
+  Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
+  Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
+  Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
+  Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, and protect the instance path. One canonical problem path emits one warning per daemon lifetime.
+  A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
+  `emitExisting: true` on a work-item source (`github` with `query`, `sentry`, `github-ci`) emits the suppressed first-poll backlog once, capped at 10.
 
-### Sentry source
+SAFETY
 
-`authToken` resolves from env (`${VAR}`); load fails fast if unresolved. Defaults: `baseUrl`
-`https://sentry.io`, `query` `is:unresolved`, `intervalMs` 60000. `emitExisting: true` processes
-backlog once. Pair with `autoComplete` spawn trigger for short-lived per-issue agents.
+  A daemon on the default port is someone's production instance unless proven otherwise. Never `spur daemon start|stop`, kill, or issue direct HTTP calls against a daemon you did not start.
+  Do not repoint `--config` at the instance config `~/.spur/config.yaml` to widen reach; use the `spur` already on `PATH`. Do not kill processes or ports you did not start.
+  A config outside the default instance config path (`~/.spur/config.yaml`) may not claim port `4310` or dataDir `~/.spur`, explicit or inherited by omission; `daemon start|stop|restart` all refuse rather than let a non-default config bind or target the production slot. Same three verbs also refuse a non-existent `--config`/`SPUR_CONFIG` path unless it is that default, without bootstrapping one.
+  Never run `spur gc --execute` against a data dir you do not own. It removes worktrees and archives records. Point `--config` at a temp data dir for development; a bare `spur gc` is a dry run and the only safe form elsewhere.
+  The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on); `--expose-web` binds `0.0.0.0` and is public. Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user — treat each source (Telegram, GitHub comments, Jira) as untrusted input.
+  For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.
 
-```yaml
-sources:
-  sentry-issues:
-    type: sentry
-    authToken: ${SENTRY_TOKEN}
-    org: my-org
-    project: my-project
-    query: "is:unresolved"
-    emitExisting: false
-triggers:
-  sentry-issue-spawn:
-    source: sentry-issues
-    event: sentry:issue.new
-    spawn:
-      prompt: "Triage Sentry issue {{title}}: {{url}}"
-      autoComplete: true
-```
+IN THIS REPO
 
-GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs once.
+  Install from source: `docs/install-from-source.md`. HTTPS on a tailnet host, required for voice: `docs/https-tailscale.md`. Claude account rotation: `references/claude-auth-rotation.md`.
+  Admission and memory policy: `docs/configuration.md#admission-control`.
+  Validation: `pnpm --dir v2 test` (fast, each Spur code change), `pnpm --dir v2 test:runtime` (CLI, daemon start, transport, lifecycle, worktree, tmux), `pnpm --dir v2 test:smoke` (real agent launch or prompt delivery). `pnpm --dir v2 build` after changing Spur code.
+  Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. `scripts/spur-isolated-daemon.sh` is the sanctioned launcher — it assigns a non-default port/dataDir so it never trips the bind guard. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
 
-### Jira backlog
+UPDATING THIS SKILL
 
-`jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
-skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
-(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
-take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
-at `/backlog/available` and `/backlog/take`.
-
-Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
-
-```yaml
-sources:
-  jira:
-    type: jira
-    baseUrl: https://org.atlassian.net
-    email: ${JIRA_EMAIL}
-    token: ${JIRA_API_TOKEN}
-backlog:
-  features:
-    source: jira
-    query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
-    intervalMs: 60000
-    runOnStart: false
-    spawn:
-      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
-      agent: claude
-```
-
-## Main flow
-
-```text
-spawn
-  -> ensure daemon
-  -> POST /sessions
-  -> allocate session id
-  -> create worktree
-  -> apply symlinks
-  -> start tmux
-  -> launch agent
-  -> send task prompt or first staged phase
-  -> auto-send later phases after each prompt return
-  -> persist session metadata
-```
-
-## Cron flow
-
-```text
-cron source
-  -> emit cron:tick
-  -> matching trigger
-  -> normal Spur spawn
-```
-
-## Working rules
-
-- Keep Spur lean. One task, one interface, one code path.
-- Do not keep alternative command forms.
-- Do not add speculative fields or helper layers.
-- If code is not part of current Spur behavior, remove it.
-- Defaults belong at config parsing boundaries, not inside runtime hot paths.
-- Tags: instance-level catalog only (`name`, `description`, optional `color`; color auto-derived from name when omitted; project `spur.yaml` `tags:` is parsed but discarded — no runtime effect). `description` is the sole agent-facing instruction: conditions (e.g. request-only) live there, not in source. Agents tag only on clear description match, via `--tag`/`--untag`/`--list-tags` through `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
-- Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
-- Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
-
-## CLI Convention
-
-- Human-first output by default; structured commands expose `--json`.
-- Single theme object: brand accent `#f04c4c` (ids, tiny loading frames), brand mark `𖤓` (help headers, runtime summary, spinner). Status dots: green = `active|ready`, yellow = `idle|waiting_input|spawning`, red = `errored`, gray = `killed|exited`.
-- Visual primitives: accent, bold, dim, whitespace. No boxes, wide tables, rainbow status, or decorative state aliases.
-- `@clack/prompts` only for transient UI (spinner, select, log, note); data rendering stays custom and flat — `list` is the reference renderer.
-- Dense stacked cards: primary line = `id`, status dot, state, project, agent, branch; secondary line = `updated`, runtime/worktree facts, at most one short exceptional hint.
-- `list` is the only session UI. On TTY: runtime summary + live selector + selected details; `Enter` attaches, `p` pauses, `c` completes, `r` restores a restorable exited session, `k` kills, `Esc` quits. Non-TTY: one-shot runtime summary + session cards.
-- Never silently retarget keys after refresh — if the selected id disappears, require explicit reselection.
-- Empty states: one sentence + one dim next-step hint.
-- Animation: at most a one-line transient spinner during waits, cleared before final output.
-
-## Agent Isolation
-
-- The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.
-- Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
-- Do not override `--config` to point at `~/.spur/config.yaml` (root config).
-- Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
-- For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`). Do not rely on `spur-sidecar` being in `PATH`; use the helper from `$SPUR_SESSION_TOOL_DIR`.
-- Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
-- Isolated daemon configs inherit `voice` from user config; server, data, tmux stay isolated. Add new key branches in `v2/src/isolated-instance-config.ts` to propagate more.
-
-## Deployment (generic Ubuntu VM)
-
-- VM: Ubuntu host with private Tailscale IP such as `100.64.0.10`
-- Nothing binds to `0.0.0.0`. All services on loopback or Tailscale IP only.
-- Instance config: `~/.spur/config.yaml`
-- Project config: `~/projects/spur/spur.yaml`
-
-Port map:
-
-| Service | Bind address | Port |
-|---------|-------------|------|
-| Daemon API | `127.0.0.1` | 4310 |
-| Next.js (web) | `127.0.0.1` | 3012 |
-| Terminal WS | `127.0.0.1` | 14801 |
-| Nginx proxy | `127.0.0.1` + private Tailscale IP | 5555 |
-
-- Systemd units: `spur-daemon.service`, `spur-web.service`
-- Nginx config: `/etc/nginx/sites-enabled/spur`
-- Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
-- `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
-- Full deploy doc: `docs/ubuntu-vm-deploy.md`
-
-## Validation
-
-Three tiers; pick the cheapest that crosses the changed boundary:
-
-| Tier | Command | Triggers |
-|---|---|---|
-| `fast` | `pnpm --dir v2 test` | every Spur code change; queueing, dedupe, validation logic |
-| `runtime integration` | `pnpm --dir v2 test:runtime` | CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, automation runtime; source and process boundaries |
-| `real-agent smoke` | `pnpm --dir v2 test:smoke` | agent launch or prompt delivery; against this repo with real `claude`, `codex`, and `cursor` (never fake repos or agents). Auto-skips when `tmux`, binaries, or API keys are missing |
-
-- Always run `pnpm --dir v2 build` after changing Spur code.
-- Minimum per touched command: positive path, negative/error path, cleanup verification.
-- Daemon startup or client transport changes -> `runtime integration` must cover both direct daemon start and CLI auto-start.
-- Workspace or runtime behavior changes -> `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, teardown.
-- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change; rerun impacted ones. `tester` covers existing affected scenarios plus new ones.
-- `tester` also flags hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes in touched Spur code.
+  Update on any change to CLI commands/flags, daemon HTTP routes, config keys/defaults, source/event names, in-session tool/env contracts, or agent-facing safety rules. Update `docs/commands.md` and `docs/configuration.md` in the same change, and mirror `.agents/skills/spur/SKILL.md` and `.claude/skills/spur/SKILL.md`.
+  Skip: internal refactors, file moves, tests, UI styling. Sections through SAFETY stay repo-independent; repo-relative paths live only in IN THIS REPO.
+  Verify each stated default against source at edit time and name the file checked: daemon/config defaults `v2/src/config.ts`, web UI port default `v2/src/ports.ts`, source types/event names `v2/src/config.ts` and `v2/src/types.ts`, agent launch flags `v2/src/agents/`, project-config merge `v2/src/registry.ts`.

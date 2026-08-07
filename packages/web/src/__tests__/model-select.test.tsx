@@ -9,7 +9,7 @@ const CLAUDE_MODELS: AgentModel[] = [
   { id: "haiku", label: "Haiku" },
 ];
 
-const CODEX_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5" }];
+const CODEX_MODELS: AgentModel[] = [{ id: "codex-model-id", label: "Codex model" }];
 
 function mockModelsFetch(byAgent: Record<string, AgentModel[]>) {
   return vi.fn((input: RequestInfo | URL) => {
@@ -99,7 +99,7 @@ describe("ModelSelect", () => {
     // Switch to codex (its own persisted model), then back to claude with
     // "haiku" restored -- simulating the parent seeding value synchronously
     // on agent change, ahead of the new agent's models fetch resolving.
-    rerender(<ModelSelect agent="codex" value="gpt-5.5" onChange={onChange} />);
+    rerender(<ModelSelect agent="codex" value="codex-model-id" onChange={onChange} />);
     await waitFor(() => expect(onChange).not.toHaveBeenCalled());
 
     rerender(<ModelSelect agent="claude" value="haiku" onChange={onChange} />);

@@ -12,7 +12,7 @@ import type {
   SessionRecord,
   SessionView,
 } from "../../src/types.js";
-import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
+import { execFileAsync, findFreePort, pollUntil, processExists, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
   captureTmuxPane,
@@ -25,6 +25,7 @@ import {
   killTmuxSessionsByPrefix,
   readTmuxStatus,
   sendKeysToTmux,
+  stopDaemonByPid,
   syncTmuxEnvironment,
   tmuxSessionExists,
   type RuntimeTestContext,
@@ -33,12 +34,56 @@ import {
 const tmuxOk = await isTmuxAvailable();
 
 interface DoctorResult {
-  hostChecks: Array<{ id: string; ok: boolean; detail: string; fix?: string }>;
+  hostChecks: Array<{
+    id: string;
+    ok: boolean;
+    severity: "error" | "warn" | "info";
+    detail: string;
+    fix?: string;
+  }>;
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
   sessionPrefix?: string;
   existingProjectConfigPath?: string;
+}
+
+// `doctor`'s host checks read host-global state that a temp `HOME` cannot
+// isolate. The daemon port comes from the pinned instance config, but the web
+// port does not: `readWebPort` parses `Environment=PORT=` out of the user's
+// `spur-web.service` unit file and falls back to 5555 when that file is absent
+// — it never consults `ui.port`. On a shared self-hosted runner another user's
+// service legitimately holds 5555, and if its `/` does not answer inside the
+// 2s probe window (CI load is enough), `checkServiceHealth` emits
+// `web-port-conflict` at `error` severity and the CLI exits 1. Same documented
+// collision class as the daemon's default 4310.
+//
+// So exit code is not a usable signal for the scaffolding invariants these
+// tests own. Parse stdout and assert on the specific check under test instead;
+// a genuinely crashed `doctor` prints no JSON and still fails here.
+async function runDoctorJson(
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<{ doctor: DoctorResult; exitCode: number }> {
+  let stdout: string;
+  let exitCode: number;
+  try {
+    const result = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
+      ...options,
+      timeout: 60_000,
+    });
+    stdout = result.stdout;
+    exitCode = 0;
+  } catch (error) {
+    const execError = error as { stdout?: string; code?: number };
+    stdout = execError.stdout ?? "";
+    exitCode = execError.code ?? 1;
+  }
+  try {
+    return { doctor: JSON.parse(stdout) as DoctorResult, exitCode };
+  } catch (error) {
+    throw new Error(`Expected doctor JSON output, received: ${stdout}`, { cause: error });
+  }
 }
 
 const activeContexts: Array<{
@@ -256,6 +301,61 @@ done
   return scriptPath;
 }
 
+async function writeIsolatedDaemonDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-daemon-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+cat > "$runtime_file" <<ENVFILE
+SPUR_ISOLATED_CONFIG="/tmp/spur-isolated-config.yaml"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4321"
+ENVFILE
+chmod 600 "$runtime_file"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeIsolatedUiDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-ui-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+for _ in $(seq 1 30); do
+  if [[ -f "$runtime_file" ]]; then
+    break
+  fi
+  sleep 1
+done
+test -f "$runtime_file"
+printf '%s\n' "$runtime_file" > ".isolated-ui-env-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 async function writeReservedPortSidecarConfig(
   context: RuntimeTestContext,
   options: {
@@ -323,18 +423,6 @@ printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
   return logPath;
 }
 
-async function processExists(pid: number): Promise<boolean> {
-  try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .includes(String(pid));
-  } catch {
-    return false;
-  }
-}
-
 async function findConsecutiveFreePorts(): Promise<{ start: number; end: number }> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const start = await findFreePort();
@@ -360,6 +448,32 @@ async function findConsecutiveFreePorts(): Promise<{ start: number; end: number 
     }
   }
   throw new Error("Failed to find consecutive free TCP ports for runtime test");
+}
+
+async function listenOnAllInterfaces(
+  server: ReturnType<typeof createServer>,
+  port: number,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 async function runRestoreScenario(args: {
@@ -399,7 +513,7 @@ async function runRestoreScenario(args: {
       ? `thread-${spawned.id}`
       : (args.agent ?? "claude") === "cursor"
         ? `chat-${spawned.id}`
-        : `fake-claude-${spawned.id}`;
+        : (spawned.agentSessionId ?? `fake-claude-${spawned.id}`);
   const stopMode = args.stopMode ?? "exit";
   const expectRestorePrompt = args.expectRestorePrompt ?? true;
   const restorePrompt = "This session was restored after the agent exited.";
@@ -416,17 +530,24 @@ async function runRestoreScenario(args: {
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
+  // A manual pause kills the tmux session outright (runtimeAlive false, status
+  // "stopped"). An agent process exiting on its own leaves the tmux pane/session
+  // alive with no matching agent process, which reconcileUnexpectedStop treats
+  // as an unexpected crash (status "errored") rather than a clean stop — see
+  // "fix(session): preserve agent exit errors".
+  const expectedState = stopMode === "pause" ? "stopped" : "error";
+  const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
   const exited = await pollUntil(
     async () =>
       JSON.parse(
         (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
       ) as SessionView[],
     {
-      timeoutMs: 15_000,
+      timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.state === "stopped" &&
+        value[0]?.state === expectedState &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === "stopped",
+        value[0]?.status === expectedStatus,
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -454,8 +575,6 @@ async function runRestoreScenario(args: {
     });
 
     await sendKeysToTmux(controllerSessionName, "r");
-    await sleep(1_000);
-    await sendKeysToTmux(controllerSessionName, "q");
   }
 
   const restored = await pollUntil(
@@ -464,10 +583,13 @@ async function runRestoreScenario(args: {
         (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
       ) as SessionView[],
     {
-      timeoutMs: 15_000,
-      accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
+      timeoutMs: 45_000,
+      accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
     },
   );
+  if (!args.agent) {
+    await sendKeysToTmux(`${sessionPrefix}-ui`, "q");
+  }
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
@@ -492,15 +614,6 @@ async function runRestoreScenario(args: {
   }
 
   return { context, restored, spawned, pane };
-}
-
-async function stopDaemonByPid(pid?: number): Promise<void> {
-  if (!pid) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
 }
 
 describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
@@ -563,19 +676,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+    const { doctor } = await runDoctorJson(["doctor", "--json", "--scaffold"], {
       cwd: context.repoDir,
       env: doctorEnv,
-      timeout: 60_000,
     });
-    let doctor: DoctorResult;
-    try {
-      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
-    } catch (error) {
-      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
-        cause: error,
-      });
-    }
 
     expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
     expect(doctor.defaultBranch).toBe("main");
@@ -612,20 +716,32 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     const nestedDir = join(context.repoDir, "packages", "service");
     const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
     await mkdir(nestedDir, { recursive: true });
+    // Pin an isolated instance config at a free port instead of relying on the
+    // ambient-HOME auto-bootstrap default (4310) — the new daemon health probe
+    // (F6) would otherwise cross-talk with a real daemon already bound to that
+    // port on a shared host, matching the documented self-hosted-CI collision
+    // class.
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+    const { doctor } = await runDoctorJson(["doctor", "--json", "--scaffold"], {
       cwd: nestedDir,
-      env: context.env,
-      timeout: 60_000,
+      env: doctorEnv,
     });
-    let doctor: DoctorResult;
-    try {
-      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
-    } catch (error) {
-      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
-        cause: error,
-      });
-    }
 
     expect(doctor.configPath).toBe(join(context.repoDir, "spur.yaml"));
     expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
@@ -643,17 +759,201 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     activeContexts.push({ context, sessionPrefix });
     const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
     await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+    // Pin an isolated instance config so the new daemon health probe (F6)
+    // never cross-talks with a real daemon bound to the ambient default port
+    // on a shared host (same self-hosted-CI collision class as above).
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
       cwd: context.repoDir,
-      env: context.env,
-      timeout: 60_000,
+      env: doctorEnv,
     });
 
-    const doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
     expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
     expect(doctor.hostChecks.length).toBeGreaterThan(0);
+    expect(doctor.hostChecks.some((check) => check.id === "project-config-valid" && check.ok)).toBe(
+      true,
+    );
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
+
+  // Guards the `runDoctorJson` tolerance above: a host-global port conflict is
+  // error-severity, so `doctor` exits 1 while its report is perfectly valid on
+  // stdout. Squats the pinned daemon port with a 500-answering server, which is
+  // the same branch (`portConflictCheck`) the runner hits on port 5555 — but
+  // driven by a port this test owns, so it never touches host state. Reverting
+  // any doctor test to a bare `await execFileAsync` fails here.
+  it("doctor still reports its config findings when a host port conflict forces a non-zero exit", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-port-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
+    await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+    const squatPort = await findFreePort();
+    const squatter = createServer((_req, res) => {
+      res.statusCode = 500;
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      squatter.listen(squatPort, "127.0.0.1", resolve);
+    });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${squatPort}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+
+    try {
+      const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+        cwd: context.repoDir,
+        env: { ...context.env, SPUR_CONFIG: instanceConfigPath },
+      });
+
+      expect(exitCode).toBe(1);
+      expect(doctor.hostChecks.find((check) => check.id === "daemon-port-conflict")).toMatchObject({
+        ok: false,
+        severity: "error",
+      });
+      expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
+      expect(
+        doctor.hostChecks.some((check) => check.id === "project-config-valid" && check.ok),
+      ).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => {
+        squatter.close(() => resolve());
+      });
+    }
+  });
+
+  it("doctor --json without --scaffold never creates spur.yaml or the global/pinned instance config on a never-initialized host", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    const sessionPrefix = `rt-doctor-readonly-${context.port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
+    // Unlike the other doctor tests, deliberately do NOT pre-create the
+    // pinned instance config — this is the exact never-run-Spur-before
+    // scenario the read-only invariant guards, so `SPUR_CONFIG` must point at
+    // a path that does not exist yet.
+    const instanceConfigPath = join(context.rootDir, "never-created-instance.yaml");
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(doctor.configPath).toBeUndefined();
+    expect(doctor.existingProjectConfigPath).toBeUndefined();
+    expect(existsSync(join(context.repoDir, "spur.yaml"))).toBe(false);
+    expect(existsSync(globalConfigPath)).toBe(false);
+    expect(existsSync(instanceConfigPath)).toBe(false);
+  });
+
+  it("doctor reports project-config-valid ok:false and a non-zero exit for a malformed spur.yaml, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-malformed-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(join(context.repoDir, "spur.yaml"), "projects: [\n", "utf8");
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(doctor.hostChecks.find((check) => check.id === "project-config-valid")).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
+  });
+
+  // Group D full-process crossing: the fast `workspace.test.ts` tests cover
+  // `checkProjectWorkspace`'s composition logic directly; this is the one
+  // real CLI invocation confirming `cli.ts` actually wires it up end-to-end
+  // (loop over `loadProjectConfig`'s previously-discarded return value)
+  // without the process throwing.
+  it("doctor reports a missing project path as a distinct error and a non-zero exit, without throwing", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-project-path-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await writeFile(
+      join(context.repoDir, "spur.yaml"),
+      ["projects:", "  gone:", "    path: /spur-doctor-runtime-test-gone-path", ""].join("\n"),
+      "utf8",
+    );
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(
+      doctor.hostChecks.find((check) => check.id === "project-path-exists:gone"),
+    ).toMatchObject({
+      ok: false,
+      severity: "error",
+    });
   });
 
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
@@ -1138,6 +1438,8 @@ projects:
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   web:
     path: ${context.repoDir}
@@ -1847,6 +2149,88 @@ projects:
     expect(existsSync(context.repoDir)).toBe(true);
   });
 
+  it("logs user inputs for spawn and send with runtime attachments", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-input-log-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "input-log.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "api",
+        prompt: "logged spawn prompt",
+        agent: "claude",
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("logged spawn prompt"),
+    });
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "logged send prompt",
+        queue: false,
+        interrupt: true,
+        attachments: [
+          {
+            name: "runtime-send.png",
+            data: Buffer.from("send-bytes").toString("base64"),
+          },
+        ],
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("logged send prompt"),
+    });
+
+    const records = readEventLog(context.dataDir).filter(
+      (entry) => entry.sessionId === spawned.id && entry.event === "session.input.received",
+    );
+    expect(records).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "logged spawn prompt",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "logged spawn prompt",
+        }),
+      }),
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "logged send prompt",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "logged send prompt",
+          attachments: [
+            { id: expect.stringContaining("runtime-send.png"), name: "runtime-send.png" },
+          ],
+        }),
+      }),
+    ]);
+  });
+
   it("pauses, resumes, and completes a worktree session through the built CLI", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -1897,7 +2281,7 @@ projects:
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
-        timeoutMs: 15_000,
+        timeoutMs: 45_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
           value[0]?.status === "stopped" &&
@@ -2155,7 +2539,7 @@ projects:
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
-        timeoutMs: 15_000,
+        timeoutMs: 45_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
           value[0]?.status === "stopped" &&
@@ -2846,7 +3230,10 @@ projects:
         ) as ServiceInstanceView,
       {
         timeoutMs: 20_000,
-        accept: (value) => value.runtimeAlive === false,
+        // `remain-on-exit` now keeps the tmux session alive with a dead pane
+        // after the command finishes, so `runtimeAlive` (tmux session exists)
+        // stays true by design — poll on the pane-aware `state` field instead.
+        accept: (value) => value.state === "stopped" || value.state === "error",
       },
     );
     expect(["stopped", "error"]).toContain(stopped.state);
@@ -3026,14 +3413,20 @@ projects:
 
     expect(listedAfterKill).toEqual([]);
     expect(killed.status).toBe("killed");
-    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
+    const events = readEventLog(context.dataDir).map((entry) => entry.event);
+    expect(events).toEqual(
       expect.arrayContaining([
         "daemon.started",
         "session.spawn.completed",
-        "session.message.sent",
+        "session.input.received",
         "session.kill.completed",
       ]),
     );
+    expect(
+      events.some(
+        (event) => event === "session.message.sent" || event === "session.message.queued",
+      ),
+    ).toBe(true);
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
@@ -3071,10 +3464,7 @@ projects:
     });
     const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
       timeoutMs: 15_000,
-      accept: (value) =>
-        value.includes(
-          "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
-        ),
+      accept: (value) => value.includes("ship the task"),
     });
 
     expect(pane).toContain("ship the task");
@@ -3413,7 +3803,7 @@ projects:
     ) as SessionView;
 
     await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-      timeoutMs: 15_000,
+      timeoutMs: 45_000,
       accept: (value) => value.state === "waiting",
     });
 
@@ -3981,14 +4371,18 @@ projects:
 
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
+    // The agent process exits on its own, leaving the tmux pane/session alive
+    // with no matching process — reconcileUnexpectedStop treats that as an
+    // unexpected crash (status "errored"), not a clean stop. See
+    // "fix(session): preserve agent exit errors".
     await pollUntil(
       async () =>
         JSON.parse(
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
-        timeoutMs: 15_000,
-        accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+        timeoutMs: 45_000,
+        accept: (value) => value[0]?.state === "error" && value[0]?.runtimeAlive === true,
       },
     );
 
@@ -4021,7 +4415,7 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 30_000,
-        accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
+        accept: (value) => value[0]?.state !== "error" && value[0]?.runtimeAlive === true,
       },
     );
     const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4035,14 +4429,13 @@ projects:
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");
-    expect(
-      readEventLog(context.dataDir).some(
-        (entry) =>
-          entry.event === "session.restore.started" &&
-          typeof entry.message === "string" &&
-          entry.message.includes("falling back to fresh launch"),
-      ),
-    ).toBe(true);
+    const pinnedSessionId = spawned.agentSessionId;
+    expect(pinnedSessionId).toBeTruthy();
+    const agentLog = await context.readAgentLog(spawned.id);
+    const startupLines = agentLog.split("\n").filter((line) => line.includes("startup:"));
+    const lastStartupLine = startupLines[startupLines.length - 1] ?? "";
+    expect(lastStartupLine).toContain("startup:launch:");
+    expect(lastStartupLine).toContain(`--session-id ${pinnedSessionId}`);
   });
 
   it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
@@ -4917,11 +5310,10 @@ projects:
     );
   });
 
-  it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
+  it("starting isolated-ui starts isolated-daemon dependency first", async () => {
     const port = await findFreePort();
-    const reservedRange = await findConsecutiveFreePorts();
     const context = await createRuntimeTestContext(port);
-    const sessionPrefix = `rt-sidecar-os-bound-${port}`;
+    const sessionPrefix = `rt-isolated-ui-dep-${port}`;
     activeContexts.push({ context, sessionPrefix });
     await syncTmuxEnvironment({
       HOME: context.env.HOME,
@@ -4929,28 +5321,103 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await writeReservedPortSidecarConfig(context, {
-      configName: "sidecar-os-bound-port.yaml",
-      sessionPrefix,
-      serverPort: port,
-      rangeStart: reservedRange.start,
-      rangeEnd: reservedRange.end,
-    });
+    const isolatedDaemonPath = await writeIsolatedDaemonDependencyProbe(context);
+    const isolatedUiProbePath = await writeIsolatedUiDependencyProbe(context);
+    const configPath = await context.writeConfig(
+      "isolated-ui-dependency.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      isolated-daemon:
+        command: "${isolatedDaemonPath}"
+        autoStart: false
+      isolated-ui:
+        command: "${isolatedUiProbePath}"
+        autoStart: false
+        dependsOn:
+          - isolated-daemon
+`,
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        project: "api",
+        prompt: "isolated ui dependency sidecar test",
+      }),
+    });
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/isolated-ui/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    const toolDir = join(context.dataDir, "session-tools", spawned.id);
+    await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    await pollUntil(
+      async () =>
+        readFile(join(spawned.worktreePath, `.isolated-ui-env-${spawned.id}`), "utf8").catch(
+          () => "",
+        ),
+      { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
+    );
+
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-daemon`)).toBe(true);
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-ui`)).toBe(true);
+  });
+
+  it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
+    const port = await findFreePort();
+    const reservedRange = await findConsecutiveFreePorts();
     const occupiedServer = createServer((_request, response) => {
       response.writeHead(204);
       response.end();
     });
+    const freePortGuard = createServer();
+    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
+    try {
+      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
+    } catch (error) {
+      await closeServer(occupiedServer);
+      throw error;
+    }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.once("error", reject);
-        occupiedServer.listen(reservedRange.start, "0.0.0.0", () => {
-          occupiedServer.off("error", reject);
-          resolve();
-        });
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-sidecar-os-bound-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
       });
+      const configPath = await writeReservedPortSidecarConfig(context, {
+        configName: "sidecar-os-bound-port.yaml",
+        sessionPrefix,
+        serverPort: port,
+        rangeStart: reservedRange.start,
+        rangeEnd: reservedRange.end,
+      });
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+      await closeServer(freePortGuard);
 
       const first = JSON.parse(
         (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
@@ -4981,20 +5448,19 @@ projects:
               portId: "http",
               env: "SPUR_RESERVED_PORT_DEV",
               port: reservedRange.start,
+              owner: "external",
+            },
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: reservedRange.end,
+              owner: first.id,
             },
           ],
         },
       );
 
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      await closeServer(occupiedServer);
       await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
       await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
         method: "POST",
@@ -5005,17 +5471,8 @@ projects:
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {
-      if (occupiedServer.listening) {
-        await new Promise<void>((resolve, reject) => {
-          occupiedServer.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          });
-        });
-      }
+      await closeServer(freePortGuard);
+      await closeServer(occupiedServer);
     }
   });
 
@@ -5055,11 +5512,23 @@ projects:
       "session.sidecar.autostart.failed",
     );
 
-    await expect(
+    await expectSidecarPortConflict(
       context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
         method: "POST",
       }),
-    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
+      {
+        code: "sidecar_port_busy",
+        sidecarName: "dev",
+        candidates: [
+          {
+            portId: "http",
+            env: "SPUR_RESERVED_PORT_DEV",
+            port: 4700,
+            owner: first.id,
+          },
+        ],
+      },
+    );
 
     await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
     await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {

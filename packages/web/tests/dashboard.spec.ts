@@ -12,13 +12,45 @@ import {
   makeSessionWithTracker,
   mockGitHubStatus,
   mockGitLabStatus,
+  mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
 } from "./fixtures.js";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+// The Status lane cluster moved out of the header and into the Filters
+// modal — these helpers open it, act on a lane chip (which renders as
+// "{label}:{count}"), and close it again so the underlying list re-renders
+// unobstructed by the modal overlay.
+async function openFilters(page: Page) {
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Filters" })).toBeVisible();
+}
+
+async function closeFilters(page: Page) {
+  await page.getByRole("button", { name: "done", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Filters" })).toHaveCount(0);
+}
+
+function statusChip(page: Page, label: string) {
+  return page.getByRole("button", { name: new RegExp(`^${label}:`) });
+}
+
+async function selectStatus(page: Page, label: string) {
+  await openFilters(page);
+  await statusChip(page, label).click();
+  await closeFilters(page);
+}
+
+async function expectStatusCount(page: Page, label: string, count: number | string) {
+  await openFilters(page);
+  await expect(statusChip(page, label)).toContainText(String(count));
+  await closeFilters(page);
+}
 
 async function openSpawnModal(
   page: Page,
@@ -95,7 +127,7 @@ async function fillSpawnForm(
   }
 
   if (prompt !== undefined) {
-    await page.getByPlaceholder("Prompt for the new session...").fill(prompt);
+    await page.getByPlaceholder("Prompt...").fill(prompt);
   }
 }
 
@@ -107,10 +139,10 @@ function attentionZone(page: Page, label: string) {
 
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
-  test("𖤓 icon visible", async ({ page }) => {
+  test("brand glyph visible", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "d1-icon" })]);
     await page.goto("/");
-    await expect(page.locator("main > header").first()).toContainText("𖤓");
+    await expect(page.getByRole("img", { name: "Spur" })).toBeVisible();
   });
 
   test("project title menu visible with chevron indicator", async ({ page }) => {
@@ -309,6 +341,54 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
   });
 
+  test("dashboard search matches canonical tasks and work items while preserving desks", async ({
+    page,
+  }) => {
+    const telegramSuffix = `
+
+Source: telegram. The requester only sees messages you send with:
+spur source reply "<message>"
+Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
+    const root = makeWorkingSession({
+      id: "search-desk-root",
+      prompt: `Repair settlement export${telegramSuffix}`,
+      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      slots: {
+        title: "Settlement repair",
+        links: [{ label: "github-pr", url: "https://github.com/acme/payments/pull/742" }],
+      },
+    });
+    const child = makeWorkingSession({
+      id: "search-desk-child",
+      deskId: root.id,
+      prompt: "Validate downstream ledger",
+      slots: { title: "Ledger validation", links: [] },
+    });
+    const unrelated = makeWorkingSession({
+      id: "search-unrelated",
+      prompt: "Update dependency pins",
+    });
+    await mockSessions(page, [root, child, unrelated]);
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await searchInput.fill("settlement export");
+
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
+    await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
+
+    await searchInput.fill("#742");
+
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toBeVisible();
+    await expect(page.locator('[title="2 agents on this checkout"]')).toBeVisible();
+    await expect(page.getByText(unrelated.id, { exact: true })).toHaveCount(0);
+
+    await searchInput.fill("terminal output");
+    await expect(page.getByRole("link", { name: "Ledger validation" })).toHaveCount(0);
+    await expect(page.getByText("No sessions match this filter")).toBeVisible();
+  });
+
   test("dashboard search shows voice controls when voice is available", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
     await page.route("**/api/runtime/voice", (route) => {
@@ -321,7 +401,7 @@ test.describe("D1: Header renders correctly", () => {
 
     await page.goto("/");
 
-    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByPlaceholder("Filter... Voice ⌘ + .")).toBeVisible();
     await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
   });
 
@@ -363,23 +443,19 @@ test.describe("D1: Header renders correctly", () => {
   });
 });
 
-// D2: Header stats show correct counts
-test.describe("D2: Header stats show correct counts", () => {
-  test("stat buttons visible", async ({ page }) => {
+// D2: Filters modal status counts are correct
+test.describe("D2: Filters modal status counts are correct", () => {
+  test("Filters trigger visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // The stat buttons have label text but they're hidden on mobile; use broader selector
-    const header = page.locator("header").first();
-    await expect(header).toBeVisible();
+    await expect(page.getByRole("button", { name: "Filters" })).toBeVisible();
   });
 
   test("Needs Input shows 1 with one needs_input session", async ({ page }) => {
     const session = makeNeedsInputSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    // Find the stat button containing "Needs Input" label (hidden on small) and value 1
-    const needsInputBtn = page.getByRole("button").filter({ hasText: "1" }).first();
-    await expect(needsInputBtn).toBeVisible();
+    await expectStatusCount(page, "Needs Input", 1);
   });
 
   test("Errors stat appears only for error sessions and Needs Input excludes them", async ({
@@ -396,35 +472,37 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [errored, needsInput]);
     await page.goto("/");
 
-    await expect(page.getByRole("button", { name: /Errors:\s*1/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Errors", 1);
+    await expectStatusCount(page, "Needs Input", 1);
 
-    await page.getByRole("button", { name: /errors/i }).click();
+    await selectStatus(page, "Errors");
     await expect(page.getByText("Errored runtime session")).toBeVisible();
     await expect(page.getByText("Needs response session")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /errors/i }).click();
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Errors");
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Needs response session")).toBeVisible();
     await expect(page.getByText("Errored runtime session")).not.toBeVisible();
   });
 
-  test("Errors stat is hidden when there are no error sessions", async ({ page }) => {
+  test("Errors stat shows 0, dimmed but still selectable, when there are no error sessions", async ({
+    page,
+  }) => {
     const session = makeNeedsInputSession();
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.locator("header").getByRole("button", { name: /Errors/i })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+    await openFilters(page);
+    await expect(statusChip(page, "Errors")).toContainText("0");
+    await expect(statusChip(page, "Needs Input")).toContainText("1");
+    await closeFilters(page);
   });
 
   test("Working shows 1 with one working session", async ({ page }) => {
     const session = makeWorkingSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    // Working session → stats.working = 1
-    const header = page.locator("header").first();
-    await expect(header.getByText("1")).toBeVisible();
+    await expectStatusCount(page, "Working", 1);
   });
 
   test("spawning session stays in Working instead of Needs Input", async ({ page }) => {
@@ -435,13 +513,13 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.getByRole("button", { name: /Needs Input:\s*0/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Working:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Needs Input", 0);
+    await expectStatusCount(page, "Working", 1);
 
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Spawning startup session")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /working/i }).click();
+    await selectStatus(page, "Working");
     await expect(page.getByText("Spawning startup session")).toBeVisible();
   });
 
@@ -449,24 +527,21 @@ test.describe("D2: Header stats show correct counts", () => {
     const session = makeWaitingSession();
     await mockSessions(page, [session]);
     await page.goto("/");
-    const header = page.locator("header").first();
-    await expect(header.getByText("1")).toBeVisible();
+    await expectStatusCount(page, "Waiting", 1);
   });
 
   test("Stopped shows 1 with one stopped session", async ({ page }) => {
     const session = makeStoppedSession({ prompt: "Stopped session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expect(page.locator("header").getByRole("button", { name: /Stopped/i })).toContainText(
-      "1",
-    );
+    await expectStatusCount(page, "Stopped", 1);
   });
 
   test("Completed shows 1 with one completed session", async ({ page }) => {
     const session = makeCompletedSession({ prompt: "Completed session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expectStatusCount(page, "Completed", 1);
   });
 
   test("Completed count updates after polling when a session finishes", async ({ page }) => {
@@ -479,7 +554,7 @@ test.describe("D2: Header stats show correct counts", () => {
     await page.goto("/");
 
     await expect(page.getByText("Completes after poll")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("0");
+    await expectStatusCount(page, "Completed", 0);
 
     sessions = [
       {
@@ -493,10 +568,10 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await page.waitForTimeout(5500);
 
-    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expectStatusCount(page, "Completed", 1);
     await expect(page.getByText("Completes after poll")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Completes after poll")).toBeVisible();
   });
 
@@ -509,8 +584,7 @@ test.describe("D2: Header stats show correct counts", () => {
     // Wait for sessions to load
     await expect(page.getByText("Working session")).toBeVisible();
 
-    // Click the Needs Input stat button — accessible name comes from the visible label
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
 
     // After filtering, working session should be hidden
     await expect(page.getByText("Working section")).not.toBeVisible();
@@ -526,13 +600,12 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Working session two")).toBeVisible();
 
-    const needsInputStat = page.getByRole("button", { name: /needs input/i });
-    await needsInputStat.click();
+    await selectStatus(page, "Needs Input");
     // Now filtered - working hidden
     await expect(page.getByText("Working session two")).not.toBeVisible();
 
-    // Click again to unfilter
-    await needsInputStat.click();
+    // Select again to unfilter
+    await selectStatus(page, "Needs Input");
     await expect(page.getByText("Working session two")).toBeVisible();
   });
 
@@ -548,7 +621,7 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(page.getByText("Working still active")).toBeVisible();
     await expect(page.getByText("Completed and archived")).not.toBeVisible();
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
 
     await expect(page.getByText("Completed and archived")).toBeVisible();
     await expect(page.getByText("Working still active")).not.toBeVisible();
@@ -564,11 +637,10 @@ test.describe("D2: Header stats show correct counts", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    const completedToggle = page.getByRole("button", { name: /Completed/i });
-    await completedToggle.click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Completed hides again")).toBeVisible();
 
-    await completedToggle.click();
+    await selectStatus(page, "Completed");
 
     await expect(page.getByText("Working returns")).toBeVisible();
     await expect(page.getByText("Completed hides again")).not.toBeVisible();
@@ -583,14 +655,119 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Only working session")).toBeVisible();
 
-    await page.getByRole("button", { name: /needs input/i }).click();
+    await selectStatus(page, "Needs Input");
 
-    await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
+    await expect(
+      page.getByText("No sessions match this filter. Reset the filters, or spawn a new session."),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
 
     await page.getByRole("button", { name: "Reset Filters" }).click();
 
     await expect(page.getByText("Only working session")).toBeVisible();
+  });
+});
+
+test.describe("D2b: PR-ready filter", () => {
+  function prSession(prompt: string, id: string, prNumber: number): SpurSessionView {
+    return makeSessionWithPR({
+      id,
+      slots: {
+        title: prompt,
+        links: [{ label: "github-pr", url: `https://github.com/test/repo/pull/${prNumber}` }],
+      },
+    });
+  }
+
+  test("narrows to the ready session, restores on off, and Reset clears it", async ({ page }) => {
+    const ready = prSession("Ready session", "pr-ready-1", 501);
+    const changesRequested = prSession("Changes requested session", "pr-ready-2", 502);
+    const unresolvedThreads = prSession("Unresolved threads session", "pr-ready-3", 503);
+
+    await mockSessions(page, [ready, changesRequested, unresolvedThreads]);
+    await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/501": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/502": {
+        state: "open",
+        reviewDecision: "changes_requested",
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      },
+      "https://github.com/test/repo/pull/503": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 2,
+        unresolvedThreads: 2,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).not.toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+
+    await openFilters(page);
+    await statusChip(page, "Ready to merge").click();
+    await closeFilters(page);
+    await expect(page.getByText("Changes requested session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: "Reset all filters" }).click();
+
+    await expect(page.getByText("Ready session")).toBeVisible();
+    await expect(page.getByText("Changes requested session")).toBeVisible();
+    await expect(page.getByText("Unresolved threads session")).toBeVisible();
+  });
+
+  test("issues zero /api/pr-status/batch requests while the filter is off", async ({ page }) => {
+    const idle = prSession("Idle PR session", "pr-ready-idle-1", 601);
+    await mockSessions(page, [idle]);
+    const batch = await mockPrStatusBatch(page, {
+      "https://github.com/test/repo/pull/601": {
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: true,
+        mergeConflict: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      },
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Idle PR session")).toBeVisible();
+    await page.waitForTimeout(500);
+
+    expect(batch.count()).toBe(0);
   });
 });
 
@@ -602,6 +779,7 @@ test.describe("D3: Session rows render with correct columns", () => {
     await page.goto("/");
     const link = page.getByRole("link", { name: "Row test session" });
     await expect(link).toBeVisible();
+    await expect(link).toHaveCSS("opacity", "1");
     const href = await link.getAttribute("href");
     expect(href).toContain("row-test-1");
   });
@@ -731,6 +909,24 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel).toHaveCount(0);
     await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
     await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
+  });
+
+  test("attention row text dims when terminal opens", async ({ page }) => {
+    const session = makeNeedsInputSession({
+      id: "unopened-needs-input-1",
+      prompt: "Needs input for review",
+      hasUnseenAttention: true,
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const titleLink = page.getByRole("link", { name: "Needs input for review" });
+    await expect(titleLink).toHaveCSS("opacity", "1");
+    await page
+      .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })
+      .click();
+
+    await expect(titleLink).toHaveCSS("opacity", "0.7");
   });
 });
 
@@ -904,7 +1100,7 @@ test.describe("D4b: Merged-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return merged state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -939,7 +1135,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -975,9 +1171,9 @@ test.describe("D4b: Merged-PR done button", () => {
 
     await expect.poll(() => completeRequestSeen).toBe(true);
     await expect(page.getByText("Optimistic done row")).not.toBeVisible();
-    await expect(page.getByRole("button", { name: /Completed:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Completed", 1);
 
-    await page.getByRole("button", { name: /Completed/i }).click();
+    await selectStatus(page, "Completed");
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
@@ -995,7 +1191,7 @@ test.describe("D4b: Merged-PR done button", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1073,7 +1269,7 @@ test.describe("D4b: Merged-PR done button", () => {
       slots: { title: "Desk helper", links: [] },
     });
     await mockSessions(page, [session, subagent]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1183,7 +1379,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1213,7 +1409,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1242,7 +1438,7 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1267,7 +1463,7 @@ test.describe("D5: Tracker and PR links", () => {
   }) => {
     const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
+    await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1283,6 +1479,41 @@ test.describe("D5: Tracker and PR links", () => {
     await page.goto("/");
 
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
+  });
+
+  test("PR row keeps real status data when the payload also carries a soft error", async ({
+    page,
+  }) => {
+    const prUrl = "https://github.com/test/repo/pull/42002";
+    const session = makeSessionWithPR({
+      id: "pr-row-partial-error-1",
+      slots: {
+        title: "PR with partial error",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          mergeConflict: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          error: "Minor field error",
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.getByRole("img", { name: "CI passing" })).toBeVisible();
   });
 
   test("session without links has no tracker or PR icons", async ({ page }) => {
@@ -1353,7 +1584,7 @@ test.describe("D6: Attention zone sections", () => {
     expect(needsInputY).toBeGreaterThan(rateLimitedY);
 
     await expect(page.getByText("Rate limited zone session")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Rate Limited:\s*1/i })).toBeVisible();
+    await expectStatusCount(page, "Rate Limited", 1);
   });
 
   test("Rate Limited stat filter isolates rate_limited sessions", async ({ page }) => {
@@ -1364,7 +1595,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    await page.getByRole("button", { name: /Rate Limited:\s*1/i }).click();
+    await selectStatus(page, "Rate Limited");
     await expect(page.getByText("Filtered rate limited")).toBeVisible();
     await expect(page.getByText("Hidden while filtered")).toHaveCount(0);
     await expect(attentionZone(page, "Working")).toHaveCount(0);
@@ -1463,6 +1694,68 @@ test.describe("D6a: Backlog zone", () => {
     await page.goto("/");
 
     await expect(page.getByText("Backlog")).toHaveCount(0);
+  });
+
+  test("Take task opens a prefilled spawn modal without any network request", async ({ page }) => {
+    let backlogTakeHit = false;
+    let spawnHit = false;
+    await page.route("/api/backlog/take", (route) => {
+      backlogTakeHit = true;
+      void route.fulfill({ status: 404, body: "not found" });
+    });
+    await page.route("/api/spawn", (route) => {
+      spawnHit = true;
+      void route.fulfill({ status: 201, contentType: "application/json", body: "{}" });
+    });
+
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Take task" }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue(
+      "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+    );
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+    expect(backlogTakeHit).toBe(false);
+    expect(spawnHit).toBe(false);
+  });
+
+  test("hides a backlog row while an active session references its tracker link", async ({
+    page,
+  }) => {
+    const activeSession = makeSessionWithTracker({ state: "working", project: "my-project" });
+    await mockSessions(page, [activeSession], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEBDEV-4617",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEBDEV-4617",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    await page.goto("/");
+
+    await expect(page.getByRole("link", { name: "Session with tracker" })).toBeVisible();
+    await expect(page.getByText("Backlog")).toHaveCount(0);
+    await expect(page.getByText("Fix checkout")).toHaveCount(0);
   });
 });
 
@@ -1711,6 +2004,143 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.mouse.move(0, 0);
     await expect(page.getByText("System")).not.toBeVisible();
   });
+
+  test("footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [
+            { id: "acc-ready-01", label: "Work", authenticated: true },
+            { id: "acc-idle-02", label: "Home", authenticated: false },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const footer = page.locator("footer");
+    const trigger = footer.getByRole("button", { name: "Manage Claude accounts" });
+    const versionMenu = footer.getByRole("button", { name: "Show Spur version information" });
+    await expect(trigger).toBeVisible();
+    await expect(versionMenu).toBeVisible();
+
+    // Trigger renders an accounts icon (not the old plain-text label).
+    await expect(trigger.locator("svg")).toBeVisible();
+    await expect(trigger.getByText("Claude accounts", { exact: true })).toHaveCount(0);
+
+    // Trigger sits in the same right-aligned footer group as the version menu.
+    const rightGroup = footer.locator("div.ml-auto");
+    await expect(rightGroup.getByRole("button", { name: "Manage Claude accounts" })).toBeVisible();
+    await expect(
+      rightGroup.getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
+
+    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
+    await trigger.click();
+    await expect(page.getByText("1 ready")).toBeVisible();
+  });
+
+  test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [
+            { id: "acc-labelled-01", label: "Work", authenticated: true },
+            { id: "abcdef1234567890", authenticated: false },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+
+    // Labelled account renders its label with the "ready" badge, a disabled Use
+    // action, and a Remove action.
+    const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
+    await expect(labelledRow).toContainText("ready");
+    await expect(labelledRow.getByTestId("use-account-acc-labelled-01")).toBeDisabled();
+    await expect(
+      labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
+    ).toBeVisible();
+
+    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
+    const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
+    await expect(shortIdRow).toContainText("not logged in");
+    await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
+    await expect(
+      shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
+    ).toBeVisible();
+  });
+
+  test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+
+    let loginStatusCalls = 0;
+    let finishLoginCalled = false;
+
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accounts: [] }),
+      });
+    });
+    await page.route("/api/claude-accounts/add", (route) => {
+      void route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          account: { id: "new-1", label: "New", authenticated: false },
+          loginTmuxSession: "claude-login-x",
+        }),
+      });
+    });
+    await page.route("/api/claude-accounts/new-1/login-status", (route) => {
+      loginStatusCalls += 1;
+      // First poll is still pending; the next poll reports the account authenticated.
+      const authenticated = loginStatusCalls > 1;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
+      });
+    });
+    await page.route("/api/claude-accounts/new-1/finish-login", (route) => {
+      finishLoginCalled = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated: true }),
+      });
+    });
+
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+    await page.getByTestId("add-account").click();
+
+    // The login terminal opens on the returned tmux session (session id claude-login-new-1).
+    const loginTerminal = page.getByRole("dialog", { name: "Terminal claude-login-new-1" });
+    await expect(loginTerminal).toBeVisible();
+
+    // Polling login-status (every LOGIN_POLL_INTERVAL_MS = 3s) flips to authenticated,
+    // which finishes login and auto-closes the terminal.
+    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
+    expect(finishLoginCalled).toBe(true);
+  });
 });
 
 test.describe("D6c: Footer touch tooltip dismissal", () => {
@@ -1745,7 +2175,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
   test("touch tap outside tooltip closes it", async ({ page }) => {
     await page.getByRole("button", { name: "Show aggregated system status" }).tap();
     await expect(page.getByText("System")).toBeVisible();
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
   });
 
@@ -1764,7 +2194,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("GitHub")).toBeVisible();
     await expect(page.getByText(/Last request:/)).toBeVisible();
 
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("GitHub")).not.toBeVisible();
   });
 
@@ -1783,7 +2213,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("GitLab")).toBeVisible();
     await expect(page.getByText(/Last request:/)).toBeVisible();
 
-    await page.getByPlaceholder("Filter sessions...").tap();
+    await page.getByPlaceholder("Filter...").tap();
     await expect(page.getByText("GitLab")).not.toBeVisible();
   });
 });
@@ -1870,9 +2300,7 @@ test.describe("D7: Spawn modal", () => {
 
     await expect(page.getByText("2026-04-17 12:34 UTC")).toBeVisible();
     await page.getByRole("button", { name: /re-run the flaky deploy/i }).click();
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
-      "Re-run the flaky deploy",
-    );
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Re-run the flaky deploy");
   });
 
   test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
@@ -1930,7 +2358,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByText("Commands")).toBeVisible();
     await page.getByRole("menuitem", { name: /\/compact/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("/compact");
   });
 
   test("Spawn button disabled when project field is empty", async ({ page }) => {
@@ -1960,7 +2388,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 
-  test("✕ button closes modal", async ({ page }) => {
+  test("Close button closes modal", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "spawn-close-1", project: "my-project" })],
@@ -1971,8 +2399,8 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
 
-    // The ✕ close button
-    await page.getByRole("button", { name: "✕" }).click();
+    // The Close button
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 
@@ -2007,7 +2435,7 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
-    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    const textarea = page.getByPlaceholder("Prompt...");
     await textarea.fill("Prompt to clear");
     await page.getByRole("button", { name: "Clear spawn prompt" }).click();
 
@@ -2085,7 +2513,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toBeVisible();
   });
 
   test("spawn ack failure keeps modal open and preserves prompt", async ({ page }) => {
@@ -2145,7 +2573,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
-    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    const textarea = page.getByPlaceholder("Prompt...");
     await textarea.fill("Prompt with image");
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
@@ -2300,7 +2728,7 @@ test.describe("D7d: Branch name normalization", () => {
 
     await fillSpawnForm(page, { project: "my-project", prompt: "Spawn without branch" });
     await page.getByLabel("branch name").fill("!!!");
-    await page.getByPlaceholder("Prompt for the new session...").click();
+    await page.getByPlaceholder("Prompt...").click();
     await expect(page.getByLabel("branch name")).toHaveValue("");
 
     const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
@@ -2319,7 +2747,7 @@ test.describe("D7d: Branch name normalization", () => {
 
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     await page.getByLabel("branch name").fill("feature/X Y Z");
-    await page.getByPlaceholder("Prompt for the new session...").click();
+    await page.getByPlaceholder("Prompt...").click();
 
     await expect(page.getByLabel("branch name")).toHaveValue("feature/x-y-z");
   });
@@ -2520,7 +2948,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ]);
 
     await page.getByRole("button", { name: /spawn session/i }).click();
-    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("");
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
@@ -2530,6 +2958,56 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "other-project",
     );
+  });
+
+  test("self-destruct conditions textarea shows the default as a placeholder and omits it from the payload when left blank", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-self-destruct-default-1",
+      project: "my-project",
+      prompt: "Ship it",
+      tmuxSession: "spawn-self-destruct-default-1",
+      worktreePath: "/tmp/worktrees/spawn-self-destruct-default-1",
+    });
+    const requests: unknown[] = [];
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      requests.push(route.request().postDataJSON());
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {
+      project: "my-project",
+      prompt: placeholder.prompt,
+      selfDestruct: true,
+    });
+
+    const conditionsField = page.getByLabel("Self-destruct conditions");
+    await expect(conditionsField).toHaveValue("");
+    await expect(conditionsField).toHaveAttribute(
+      "placeholder",
+      `Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`,
+    );
+
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requests).toEqual([
+      {
+        projectId: "my-project",
+        prompt: placeholder.prompt,
+        agent: "claude",
+        selfDestruct: { enabled: true },
+      },
+    ]);
   });
 
   test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
@@ -2837,7 +3315,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
 
     const spawnButton = page.getByRole("button", { name: /^spawn$/i });
-    const promptField = page.getByPlaceholder("Prompt for the new session...");
+    const promptField = page.getByPlaceholder("Prompt...");
 
     await spawnButton.click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -2872,7 +3350,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     });
 
     await page.goto("/");
-    await expect(page.getByText("Loading sessions...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Loading...")).not.toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
 
     // Delay any subsequent /api/sessions call so that, if the dashboard were to
@@ -2886,9 +3364,9 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await page.getByRole("link", { name: session.prompt }).first().click();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
-    await page.getByRole("link", { name: /back/i }).click();
+    await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
-    await expect(page.getByText("Loading sessions...")).toHaveCount(0);
+    await expect(page.getByText("Loading...")).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });

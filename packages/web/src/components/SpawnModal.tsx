@@ -4,6 +4,8 @@ import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
+import { IconCloseButton } from "@/components/IconCloseButton";
+import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -18,6 +20,7 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
@@ -57,7 +60,7 @@ export type SpawnModalMode =
         onUserSelect?: (id: string | null) => void;
       };
       branch: FieldControl<string>;
-      workspaceMode: FieldControl<"default" | "worktree" | "shared">;
+      workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
@@ -197,9 +200,7 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
             <option value="default">Default</option>
@@ -314,13 +315,16 @@ export function SpawnModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      aria-labelledby="spawn-modal-title"
+      aria-modal="true"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      role="dialog"
       onClick={(event) => {
         if (event.target === event.currentTarget && canClose) onClose();
       }}
     >
       <div
-        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
         onKeyDown={(event) => {
           if (isVoiceToggleHotkey(event)) {
             event.preventDefault();
@@ -334,17 +338,13 @@ export function SpawnModal({
         }}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+          <h2
+            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            id="spawn-modal-title"
+          >
             {title}
           </h2>
-          <button
-            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!canClose}
-            onClick={onClose}
-            type="button"
-          >
-            ✕
-          </button>
+          <IconCloseButton label="Close" onClick={onClose} disabled={!canClose} />
         </div>
         {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -402,6 +402,7 @@ export function SpawnModal({
               onClick={onSubmit}
               type="button"
             >
+              {submitting ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
               <span>{submitting ? submitBusyLabel : submitLabel}</span>
               {!submitting ? (
                 <span

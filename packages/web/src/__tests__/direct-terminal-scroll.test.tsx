@@ -27,6 +27,7 @@ const mockTerminal = {
     registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
     registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
   },
+  options: {},
 };
 
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
@@ -163,9 +164,6 @@ beforeEach(() => {
   mockTerminal.open.mockClear();
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input.url;
-    if (url === "/api/runtime/terminal") {
-      return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-    }
     if (url === "/api/runtime/voice") {
       return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
     }
@@ -214,12 +212,14 @@ async function mountTerminal({
   sessionId = "test-session",
   agent = "claude",
   activity,
+  model,
   title,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  model?: string;
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -230,6 +230,7 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        model={model}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -242,16 +243,39 @@ async function mountTerminal({
   return result;
 }
 
+describe("buildDirectTerminalWsUrl", () => {
+  it("uses ws on plain HTTP and preserves the host port", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "localhost:5555" }, "abc")).toBe(
+      "ws://localhost:5555/ws?session=abc",
+    );
+  });
+
+  it("upgrades to wss when the page is served over HTTPS", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "https:", host: "spur.example.com" }, "abc")).toBe(
+      "wss://spur.example.com/ws?session=abc",
+    );
+  });
+
+  it("encodes session ids that contain URL-significant characters", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "h" }, "a b/c?d&e")).toBe(
+      "ws://h/ws?session=a%20b%2Fc%3Fd%26e",
+    );
+  });
+});
+
 describe("DirectTerminal scroll integration", () => {
-  it("uses the runtime terminal port when opening the websocket", async () => {
+  it("opens the websocket on the same origin at /ws", async () => {
     await mountTerminal({ sessionId: "port-test" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    expect(MockWebSocket).toHaveBeenCalledWith("ws://localhost:14801/ws?session=port-test");
-    expect(fetch).toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+    expect(MockWebSocket).toHaveBeenCalledWith(`ws://${window.location.host}/ws?session=port-test`);
+    expect(fetch).not.toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
   });
 
   it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
@@ -548,9 +572,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,
@@ -592,9 +613,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,
@@ -670,6 +688,25 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+    expect(titleElement.parentElement?.className).toContain("items-center");
+  });
+
+  it("keeps the agent label on the title row, right-aligned and never truncated", async () => {
+    await mountTerminal({
+      model: "claude-model-id",
+      onClose: vi.fn(),
+      title: "Very long terminal header title for isolated sidecar sessions",
+    });
+
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    const agentElement = screen.getByTestId("direct-terminal-header-agent");
+    // Same row as the title, pushed to the right edge next to the close button.
+    expect(agentElement.parentElement).toBe(titleElement.parentElement);
+    expect(agentElement.className).toContain("ml-auto");
+    // The title clamps instead; the agent label keeps its full width.
+    expect(agentElement.className).toContain("shrink-0");
+    expect(agentElement.className).toContain("whitespace-nowrap");
+    expect(agentElement.className).not.toContain("truncate");
+    expect(agentElement.className).toContain("text-[var(--color-text-tertiary)]");
   });
 });

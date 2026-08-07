@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import type { AgentName } from "../types.js";
 
@@ -11,17 +11,9 @@ const execFileAsync = promisify(execFile);
 export interface AgentModel {
   id: string;
   label: string;
+  isDefault?: boolean;
   isCurrent?: boolean;
 }
-
-const CLAUDE_MODELS: AgentModel[] = [
-  { id: "sonnet", label: "Sonnet" },
-  { id: "opus", label: "Opus" },
-  { id: "haiku", label: "Haiku" },
-  { id: "fable", label: "Fable" },
-];
-
-const CODEX_FALLBACK_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5" }];
 
 const CURSOR_FALLBACK_MODELS: AgentModel[] = [{ id: "auto", label: "Auto" }];
 
@@ -34,10 +26,6 @@ interface CursorCacheEntry {
 
 const cursorCache = new Map<string, CursorCacheEntry>();
 
-function codexHomeDir(opts?: { codexHomePath?: string }): string {
-  return opts?.codexHomePath ?? process.env["CODEX_HOME"] ?? join(homedir(), ".codex");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -47,10 +35,10 @@ function parseCodexModelsCache(raw: string): AgentModel[] {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   if (!isRecord(parsed) || !Array.isArray(parsed["models"])) {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   const models: AgentModel[] = [];
   for (const entry of parsed["models"]) {
@@ -68,16 +56,16 @@ function parseCodexModelsCache(raw: string): AgentModel[] {
     const label = typeof displayName === "string" && displayName.length > 0 ? displayName : slug;
     models.push({ id: slug, label });
   }
-  return models.length > 0 ? models : CODEX_FALLBACK_MODELS;
+  return models;
 }
 
-async function listCodexModels(opts?: { codexHomePath?: string }): Promise<AgentModel[]> {
-  const cachePath = join(codexHomeDir(opts), "models_cache.json");
+async function listCodexModels(codexHomePath: string): Promise<AgentModel[]> {
+  const cachePath = join(codexHomePath, "models_cache.json");
   let raw: string;
   try {
     raw = await readFile(cachePath, "utf8");
   } catch {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   return parseCodexModelsCache(raw);
 }
@@ -156,9 +144,9 @@ export async function listAgentModels(
 ): Promise<AgentModel[]> {
   switch (agent) {
     case "claude":
-      return CLAUDE_MODELS;
+      return listClaudeModels();
     case "codex":
-      return listCodexModels(opts);
+      return opts?.codexHomePath ? listCodexModels(opts.codexHomePath) : [];
     case "cursor":
       return listCursorModels();
   }

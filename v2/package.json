@@ -5,7 +5,16 @@
     "access": "public"
   },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashugaev/spur.git",
+    "directory": "v2"
+  },
+  "homepage": "https://github.com/ashugaev/spur#readme",
   "type": "module",
   "bin": {
     "spur": "dist/cli.js"
@@ -14,16 +23,16 @@
     "dist",
     "web",
     "deploy",
-    "README.md",
     "scripts/install-and-restart.sh",
     "scripts/npm-init.sh",
+    "NOTICE",
     "spur.yaml.example",
     "tmux.conf"
   ],
   "scripts": {
     "build": "tsc && node bin/restart-daemon-if-running.mjs",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "prepack": "pnpm build",
@@ -37,6 +46,7 @@
   "dependencies": {
     "@clack/prompts": "^1.1.0",
     "@grammyjs/runner": "2.0.3",
+    "@playwright/mcp": "0.0.76",
     "commander": "^13.0.0",
     "croner": "^10.0.1",
     "grammy": "1.44.0",
