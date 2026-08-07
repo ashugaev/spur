@@ -60,7 +60,7 @@ RULES
 CONTEXT HANDOFF
 
   - Pass structured artifacts between gates (spec, diff, each gate's structured output), never the raw conversation.
-  - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
+  - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun, or `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> architect -> spec-critic rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
   - Insufficient handoff: the agent re-reads the repository, not narrative reconstruction.
   - Tier 2/3: invoke `curator` between gates to append stable facts and a short reflection to `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` and refresh the compact handoff. Curator appends and reflects, never re-summarizes prior entries. Point each receiving gate at that file; it reads it when present.
   - `architect`, `developer`, `designer` read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` directly and honor its Approval status field, at any tier. Tier 2/3 curator can also note an "Accepted design" entry in `task-memory.md`, but the binding never depends on it.

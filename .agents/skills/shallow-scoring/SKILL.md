@@ -12,7 +12,7 @@ Pick a tier from the task description alone, no codebase exploration. Two axes, 
 
 TIERS
 
-  0  direct                    ambiguity low AND blast low. Developer only: smallest change, nearest pattern, targeted verification. No researcher/critic/architect.
+  0  direct                    ambiguity low AND blast low. Developer only: smallest change, nearest pattern, targeted verification. No researcher/critic/architect/spec-critic.
   1  self-plan                 moderate ambiguity, contained blast. Architect concise spec -> spec-critic -> developer, skip researcher/critic.
   2  strong-plan-cheap-exec    ambiguity high OR blast high. Researcher -> critic -> architect -> spec-critic -> developer -> review/test. Default for real features.
   3  strong-end-to-end         high complexity, continuous replanning (debug unknown cause, races, perf, deep type-level, large dynamic refactor). One strong agent does recon+plan+implement, never hand a spec to a cheap executor; run on a strong model override.

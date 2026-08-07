@@ -43,7 +43,7 @@ description = "Adversarial review gate. Try to falsify that the implementation s
 config_file = "agents/reviewer.toml"
 
 [agents.spec-critic]
-description = "Adversarially falsify the architect's spec before the developer builds — verify each cited fact, the change map, and every acceptance criterion's bound verification. Returns SPEC_APPROVED, SPEC_CHANGES_REQUESTED, or SPEC_REJECTED. Use after architect, before developer."
+description = "Adversarially falsify the architect's executable spec before the developer builds — verify each cited fact, the change map, and every acceptance criterion's bound verification. Returns SPEC_APPROVED, SPEC_CHANGES_REQUESTED, or SPEC_REJECTED. Use after architect, before developer. Skip Tier 0, which produces no spec."
 config_file = "agents/spec-critic.toml"
 
 [agents.tester]

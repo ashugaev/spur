@@ -1,6 +1,6 @@
 ---
 name: spec-critic
-description: Adversarially falsify the architect's executable spec before the developer builds — verify each cited fact, the change map, and every acceptance criterion's bound verification. Use after architect, before developer. Skip Tier 0, which produces no spec.
+description: Adversarially falsify the architect's executable spec before the developer builds — verify each cited fact, the change map, and every acceptance criterion's bound verification. Returns SPEC_APPROVED, SPEC_CHANGES_REQUESTED, or SPEC_REJECTED. Use after architect, before developer. Skip Tier 0, which produces no spec.
 model: opus
 tools: Read, Grep, Glob, Bash
 ---
