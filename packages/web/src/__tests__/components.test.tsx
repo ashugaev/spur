@@ -1597,6 +1597,39 @@ describe("Dashboard", () => {
         "codex",
       );
     });
+
+    it("does not freeze an auto-preselected model into the persisted draft, so favoriting later re-preselects it on reopen", async () => {
+      // Regression test: closing the modal used to persist whatever model
+      // ModelSelect's own empty-list preselect had picked (here "Sonnet",
+      // the first model with no favorites yet), even though the user never
+      // touched the model picker. Reopening then restored that frozen draft
+      // model, blocking ModelSelect's preselect effect from ever
+      // reconsidering the favorite the user picked in between.
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Add favorite Haiku" }));
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Remove favorite Haiku" })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
   });
 
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
@@ -1694,6 +1727,77 @@ describe("Dashboard", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
+        }),
+      );
+    });
+  });
+
+  it("omits an auto-preselected model from the spawn payload after switching to a project with no draft", async () => {
+    // Regression test: switching the spawn project used to restore the new
+    // project's model draft (null, since it has none) while ModelSelect's
+    // empty-list preselect effect -- still watching the same already-loaded
+    // claude model list -- immediately refilled it with its own auto-pick,
+    // which then rode along into the spawn payload as if the user had chosen
+    // it.
+    const projects = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+      { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+    ];
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ ...sessionsPayload(), projects }), { status: 200 });
+      }
+      if (url === "/api/models?agent=claude") {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "sonnet", label: "Sonnet" },
+              { id: "opus", label: "Opus" },
+              { id: "haiku", label: "Haiku" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/preflight") return new Response(JSON.stringify({ branch: null }));
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "sp" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Carry no model along" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          body: JSON.stringify({
+            projectId: "sp",
+            prompt: "Carry no model along",
+            agent: "claude",
+          }),
         }),
       );
     });
