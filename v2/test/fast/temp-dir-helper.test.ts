@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,10 +7,13 @@ import { cleanupTrackedTempDirs, createTempDir } from "../helpers/common.js";
 
 // node's os.tmpdir() falls back TMPDIR -> TMP -> TEMP -> "/tmp" on this
 // platform, so all three must be pinned/restored to keep the test hermetic.
+// HOME is included so the symlink tests below can point homedir() at a
+// fabricated ~/.spur without leaking into any other test in this file.
 const savedEnv = {
   TMPDIR: process.env.TMPDIR,
   TMP: process.env.TMP,
   TEMP: process.env.TEMP,
+  HOME: process.env.HOME,
 };
 
 function setTmpEnv(dir: string): void {
@@ -47,6 +50,11 @@ afterEach(async () => {
   } else {
     process.env.TEMP = savedEnv.TEMP;
   }
+  if (savedEnv.HOME === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = savedEnv.HOME;
+  }
   await cleanupTrackedTempDirs();
   await Promise.all(scratchRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -82,6 +90,33 @@ describe("createTempDir", () => {
     setTmpEnv(join(homedir(), ".spur", "worktrees"));
 
     await expect(createTempDir("spur-probe-")).rejects.toThrow(/\.spur/);
+  });
+
+  it("throws when TMPDIR is symlinked into a real ~/.spur/worktrees (resolveReal must follow it)", async () => {
+    const scratchRoot = newScratchRoot();
+    const fakeHome = join(scratchRoot, "home");
+    const realWorktrees = join(fakeHome, ".spur", "worktrees");
+    mkdirSync(realWorktrees, { recursive: true });
+    process.env.HOME = fakeHome;
+    const link = join(scratchRoot, "lnk");
+    symlinkSync(realWorktrees, link);
+    setTmpEnv(link);
+
+    await expect(createTempDir("spur-probe-")).rejects.toThrow(/\.spur/);
+  });
+
+  it("throws when TMPDIR is symlinked into a spur.yaml tree (resolveReal must follow it)", async () => {
+    const scratchRoot = newScratchRoot();
+    const realTree = join(scratchRoot, "real-tree");
+    mkdirSync(realTree, { recursive: true });
+    writeFileSync(join(realTree, "spur.yaml"), "projects: {}\n");
+    const nested = join(realTree, "nested");
+    mkdirSync(nested);
+    const link = join(scratchRoot, "lnk-yaml");
+    symlinkSync(nested, link);
+    setTmpEnv(link);
+
+    await expect(createTempDir("spur-probe-")).rejects.toThrow(/spur\.yaml/);
   });
 
   it("throws when TMPDIR is the filesystem root (root-as-ancestor-of-everything)", async () => {
