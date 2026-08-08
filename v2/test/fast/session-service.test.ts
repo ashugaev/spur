@@ -5174,6 +5174,94 @@ describe("SessionService", () => {
       expect(listAccountsMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
+
+    it("computes the sidecar-age ps snapshot once per listSessions batch, not once per session", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", sidecarNames: ["dev"] }));
+      sessions.set("api-2", runningSession({ id: "api-2", sidecarNames: ["dev"] }));
+      sessions.set("api-3", runningSession({ id: "api-3", sidecarNames: ["dev"] }));
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+      };
+      await internals.dashboardCacheReady;
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      // Dynamic import, like session-service.js itself: reap.js transitively
+      // imports "node:timers/promises", which this file mocks — a static
+      // top-level import would evaluate before that mock's own hoisted
+      // initialization and throw.
+      const sidecarReapModule = await import("../../src/sidecars/reap.js");
+      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
+      snapshotSpy.mockClear();
+
+      const views = await service.list();
+
+      expect(views).toHaveLength(3);
+      expect(snapshotSpy).toHaveBeenCalledTimes(1);
+      snapshotSpy.mockRestore();
+      service.dispose();
+    });
+
+    it("computes one sidecar-age ps snapshot per attention-monitor sweep, not one per session enrich", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", sidecarNames: ["dev"] }));
+      sessions.set("api-2", runningSession({ id: "api-2", sidecarNames: ["dev"] }));
+      sessions.set("api-3", runningSession({ id: "api-3", sidecarNames: ["dev"] }));
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+        pollAttentionStates(baseline: boolean): Promise<void>;
+      };
+      await internals.dashboardCacheReady;
+      // Real wait, not a microtask-flush loop: the constructor's own
+      // immediate baseline pass does real (non-fake-timer) child_process I/O
+      // via snapshotProcesses, which needs actual event-loop turns to
+      // settle, not just queued microtasks.
+      await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
+      const sidecarReapModule = await import("../../src/sidecars/reap.js");
+      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
+      snapshotSpy.mockClear();
+
+      // Direct call, not a timer advance: runAttentionMonitor fires from a
+      // fire-and-forgotten setInterval callback, and snapshotProcesses does
+      // real (non-fake-timer) child_process I/O that vi.advanceTimersByTimeAsync
+      // cannot reliably wait out through that indirection.
+      await internals.pollAttentionStates(false);
+
+      expect(snapshotSpy).toHaveBeenCalledTimes(1);
+      snapshotSpy.mockRestore();
+      service.dispose();
+    });
   });
 
   it("marks needs_input sessions opened, and a later hook event re-brightens even without a state transition", async () => {
@@ -15528,8 +15616,10 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  describe("REQ5: cross-workspace overlapping port range refusal", () => {
-    function overlappingRangeConfig() {
+  describe("REQ5: cross-workspace real port collision refusal", () => {
+    // Matches the measured host range (isolated-daemon: 4320-4399) — wide
+    // enough that 9 concurrent workspaces each land on a distinct port.
+    function sharedRangeConfig() {
       return {
         ...baseConfig(),
         projects: {
@@ -15539,18 +15629,14 @@ describe("SessionService", () => {
               "front-local": {
                 command: "pnpm dev:local",
                 autoStart: false,
-                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_LOCAL", start: 3000, end: 3004 } },
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_LOCAL", start: 4320, end: 4399 } },
               },
               "front-pp-tunnel": {
                 command: "pnpm dev:tunnel",
                 autoStart: false,
-                // Same declared range as front-local — the measured host shape.
-                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_TUNNEL", start: 3000, end: 3004 } },
-              },
-              "other-service": {
-                command: "pnpm other",
-                autoStart: false,
-                ports: { http: { env: "SPUR_RESERVED_PORT_OTHER", start: 5000, end: 5004 } },
+                // Same declared range as front-local, by design — a range
+                // exists precisely so N workspaces can each take one port.
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_TUNNEL", start: 4320, end: 4399 } },
               },
             },
           },
@@ -15558,16 +15644,65 @@ describe("SessionService", () => {
       };
     }
 
-    it("refuses a start when another workspace already has a live sidecar on an overlapping range, naming the holder", async () => {
-      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+    it("lets 9 workspaces each take a distinct fresh port from the same declared range — none refused", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
+      const sessions = createSessionStore();
+      for (let i = 1; i <= 9; i += 1) {
+        sessions.set(
+          `api-${i}`,
+          sessionRecord({ id: `api-${i}`, worktree: true, sidecarNames: ["front-local"] }),
+        );
+      }
+      // Matches the real host shape: every prior workspace's pane is a live,
+      // established server by the time the next workspace starts — not a
+      // dead/declared-only holder, which would let the aliveness gate alone
+      // (unrelated to this fix) mask a wrongly-refusing range-overlap check.
+      const startedIds = new Set<string>();
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => startedIds.has(id));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      for (let i = 1; i <= 9; i += 1) {
+        await service.startSidecar(`api-${i}`, "front-local");
+        startedIds.add(`api-${i}`);
+      }
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(9);
+      const assignedPorts = new Set(
+        Array.from(
+          { length: 9 },
+          (_, i) =>
+            sessions.get(`api-${i + 1}`)?.sidecarPorts?.["front-local"]?.[
+              "SPUR_RESERVED_PORT_FRONT_LOCAL"
+            ],
+        ),
+      );
+      expect(assignedPorts.size).toBe(9);
+    });
+
+    it("refuses only when this workspace's own recorded port collides with another live workspace's recorded port, naming the holder and the port", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
       const sessions = createSessionStore();
       sessions.set(
         "api-1",
-        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 } },
+        }),
       );
       sessions.set(
         "api-2",
-        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["front-pp-tunnel"] }),
+        sessionRecord({
+          id: "api-2",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+          // A genuine same-port collision: a different sidecar name, a
+          // different workspace, the identical recorded port.
+          sidecarPorts: { "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4330 } },
+        }),
       );
       sidecarTmuxAliveMock.mockImplementation(
         async (id: string, name: string) => id === "api-2" && name === "front-pp-tunnel",
@@ -15577,24 +15712,34 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(service.startSidecar("api-1", "front-local")).rejects.toThrow(
-        /workspace "api-2".*front-pp-tunnel/,
+        /port 4330.*workspace "api-2".*front-pp-tunnel/,
       );
       expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     });
 
-    it("allows a start when another workspace's live sidecar declares a non-overlapping range", async () => {
-      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+    it("allows a start when the other workspace's recorded port differs (no real collision)", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
       const sessions = createSessionStore();
       sessions.set(
         "api-1",
-        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 } },
+        }),
       );
       sessions.set(
         "api-2",
-        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["other-service"] }),
+        sessionRecord({
+          id: "api-2",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+          sidecarPorts: { "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4331 } },
+        }),
       );
       sidecarTmuxAliveMock.mockImplementation(
-        async (id: string, name: string) => id === "api-2" && name === "other-service",
+        async (id: string, name: string) => id === "api-2" && name === "front-pp-tunnel",
       );
 
       const { SessionService } = await loadSessionServiceModule();
@@ -15607,15 +15752,27 @@ describe("SessionService", () => {
       );
     });
 
-    it("does not self-refuse when the live overlapping-range sidecar belongs to the same workspace", async () => {
-      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+    it("does not self-refuse when the colliding recorded port belongs to a sibling in the same workspace", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
       const sessions = createSessionStore();
+      // Non-mcp sidecar ports record on the OWNER (workspace anchor) record,
+      // never on an individual sibling's own record — both front-local and
+      // front-pp-tunnel's reservations live on api-1 here, matching how
+      // ensureSidecarReservation actually writes a desk-shared reservation.
       sessions.set(
         "api-1",
-        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: {
+            "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 },
+            "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4330 },
+          },
+        }),
       );
-      // A desk sibling in the SAME workspace, with a live overlapping-range
-      // sidecar of its own — must never trip the cross-workspace guard.
+      // A desk sibling in the SAME workspace with its own live pane for the
+      // colliding-port sidecar — must never trip the cross-workspace guard.
       sessions.set(
         "api-1b",
         sessionRecord({
@@ -15639,24 +15796,69 @@ describe("SessionService", () => {
       );
     });
 
-    it("does not refuse when the other workspace's overlapping-range holder is dead", async () => {
-      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+    it("does not refuse when the other workspace's colliding-port holder is dead", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
       const sessions = createSessionStore();
       sessions.set(
         "api-1",
-        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 } },
+        }),
       );
       sessions.set(
         "api-2",
-        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["front-pp-tunnel"] }),
+        sessionRecord({
+          id: "api-2",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+          sidecarPorts: { "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4330 } },
+        }),
       );
-      // Declared but not alive anywhere — a dead/absent holder never blocks a start.
+      // Recorded but not alive anywhere — a dead/absent holder never blocks a start.
       sidecarTmuxAliveMock.mockResolvedValue(false);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.startSidecar("api-1", "front-local");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
+      );
+    });
+
+    it("skips the collision check entirely when the caller passes an explicit clearPort", async () => {
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 } },
+        }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({
+          id: "api-2",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+          sidecarPorts: { "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4330 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-2" && name === "front-pp-tunnel",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "front-local", { clearPort: 4330 });
 
       expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
@@ -15684,6 +15886,52 @@ describe("SessionService", () => {
       };
     }
 
+    it("does not call listSessions once per candidate (listDeskSessions must reuse the pass's own batch)", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+
+      async function runPassWithCandidateCount(count: number): Promise<number> {
+        const sessions = createSessionStore();
+        for (let i = 1; i <= count; i += 1) {
+          sessions.set(
+            `api-${i}`,
+            sessionRecord({
+              id: `api-${i}`,
+              status: "completed",
+              worktreePath: TEST_DATA_DIR,
+              sidecarNames: ["front-local"],
+              updatedAt: "2026-03-18T10:04:00.000Z",
+            }),
+          );
+        }
+        listTmuxSessionNamesMock.mockResolvedValue(
+          new Set(Array.from({ length: count }, (_, i) => `api-${i + 1}--front-local`)),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService(
+          "/tmp/spur.yaml",
+          "2026-03-18T10:00:00.000Z",
+        ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+        listSessionsMock.mockClear();
+
+        await service.reapDeadSessionSidecars();
+
+        const calls = listSessionsMock.mock.calls.length;
+        service.dispose();
+        return calls;
+      }
+
+      const callsWithOneCandidate = await runPassWithCandidateCount(1);
+      const callsWithFiveCandidates = await runPassWithCandidateCount(5);
+
+      // A per-candidate listSessions() (the bug: listDeskSessions called
+      // without its sessionBatch argument, re-running the default
+      // `listSessions(dataDir)` param on every call) would make this grow
+      // with the candidate count; reusing the pass's own batch keeps it flat.
+      expect(callsWithFiveCandidates).toBe(callsWithOneCandidate);
+    });
+
     it("AC3: never selects a --svc-- service pane as a reap candidate", async () => {
       loadConfigMock.mockReturnValue(frontLocalConfig());
       const sessions = createSessionStore();
@@ -15694,6 +15942,10 @@ describe("SessionService", () => {
           status: "completed",
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
+          // A recorded reservation: a live pane with no recorded reservation
+          // now reads "unknown" (kept, see AC7b) rather than "none" — this
+          // test wants a genuine "none" read so the reap fires on idle_ttl.
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
           // 10 hours idle against the 120-minute default TTL.
           updatedAt: "2026-03-18T00:00:00.000Z",
         }),
@@ -15778,6 +16030,10 @@ describe("SessionService", () => {
           status: "completed",
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
+          // Recorded reservation so the kept verdict below is proven to come
+          // from workspaceRunning (via the live sibling), not incidentally
+          // from the AC7b probe-blind "unknown" path on a bare reservation.
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
           updatedAt: "2026-03-18T00:00:00.000Z",
         }),
       );
@@ -15820,6 +16076,7 @@ describe("SessionService", () => {
           status: "errored",
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
           // Recent activity — reaped on ownership (workspace_not_running),
           // not on idle time, and without touching REAPABLE_SESSION_STATUSES
           // (errored is not in that set).
@@ -15857,6 +16114,7 @@ describe("SessionService", () => {
           stopReason: "manual_pause",
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
           updatedAt: "2026-03-18T10:04:59.000Z",
         }),
       );
@@ -15891,6 +16149,22 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T00:00:00.000Z",
         }),
       );
+      // A running desk sibling: without one, releasableSidecarPorts strips
+      // sidecarPorts wholesale on the anchor's own going-terminal write
+      // (hasRunningWorkspaceMembers false), so a "completed owner still
+      // carrying a recorded reservation" fixture is realistic only when a
+      // sibling is live — matching the actual measured host shape
+      // (intelas-8af9 completed, workspace sibling 8c6a running).
+      sessions.set(
+        "api-1b",
+        sessionRecord({
+          id: "api-1b",
+          deskId: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          updatedAt: "2026-03-18T10:04:00.000Z",
+        }),
+      );
       listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
       sidecarTmuxAliveMock.mockResolvedValue(true);
       tmuxSessionExistsMock.mockResolvedValue(false);
@@ -15909,6 +16183,83 @@ describe("SessionService", () => {
 
       expect(hasEstablishedConnectionsMock).toHaveBeenCalledWith(3002);
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC7b: never reaps a live pane whose reservation was stripped by a going-terminal write with no running member (probe-blind, not none)", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      // No sidecarPorts recorded at all — the exact shape
+      // sessionWithReleasedSidecarPorts/releasableSidecarPorts produce the
+      // moment the last workspace member goes terminal (or a same-transition
+      // teardown kill silently fails), which is also precisely the state
+      // that fires workspace_not_running below. The pane is still alive.
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      // Nothing recorded to probe — the veto fires on "we cannot prove
+      // there's no debugger attached", not on an actual established read.
+      expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("still reaps a portless sidecar's idle owner with no recorded reservation (connections stay none, not unknown)", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { "front-local": { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
       service.dispose();
     });
 
@@ -15960,6 +16311,7 @@ describe("SessionService", () => {
           status: "running",
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
           updatedAt: "2026-03-18T00:00:00.000Z",
         }),
       );
@@ -15989,6 +16341,169 @@ describe("SessionService", () => {
           survivors: expect.any(Array),
         }),
       );
+      service.dispose();
+    });
+
+    it("unlinks a published slot link when the reap pass kills its sidecar (isolated-ui/front-local shape)", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+          // A recorded reservation, matching a live sidecar with a
+          // published ports.*.url slot (isolated-ui, front-local) — without
+          // one, the AC7b probe-blind fix (item 4) correctly keeps instead.
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3002 } },
+          slots: { links: [{ label: "front-local", url: "https://preview.example.com/3002" }] },
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      hasEstablishedConnectionsMock.mockResolvedValue("none");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+      service.dispose();
+    });
+
+    it("sidecarGc.enabled: false skips candidate collection entirely (no ps snapshot, no probes)", async () => {
+      loadConfigMock.mockReturnValue({
+        ...frontLocalConfig(),
+        sidecarGc: { enabled: false, idleTtlMinutes: 120, maxAgeWarnMinutes: 360 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      const sidecarReapModule = await import("../../src/sidecars/reap.js");
+      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
+      snapshotSpy.mockClear();
+
+      await service.reapDeadSessionSidecars();
+
+      expect(snapshotSpy).not.toHaveBeenCalled();
+      expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      snapshotSpy.mockRestore();
+      service.dispose();
+    });
+
+    it("throttles session.sidecar.age_warning to once per sidecar per maxAgeWarnMinutes window, not once per tick", async () => {
+      loadConfigMock.mockReturnValue({
+        ...frontLocalConfig(),
+        sidecarGc: { enabled: true, idleTtlMinutes: 999_999, maxAgeWarnMinutes: 10 },
+      });
+      const sessions = createSessionStore();
+      const identityPid = 999_990;
+      // A session id unique to this test, not the "api-1" shared by dozens
+      // of sibling tests in this describe block: a stray writeSession from
+      // an unrelated test's still-in-flight (unawaited, real-I/O-bound)
+      // background loop lands on whatever id createSessionStore's current
+      // mock happens to be bound to, and "api-1" is exactly what most of
+      // those would target.
+      const ownerId = "api-throttle-1";
+      sessions.set(
+        ownerId,
+        sessionRecord({
+          id: ownerId,
+          // Own status "running": workspaceRunning true (self-inclusive), so
+          // this candidate reaches idle_ttl comparison instead of reaping on
+          // ownership (workspace_not_running) regardless of idle time.
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
+          // Recent activity: never reaches idle_ttl (idleTtlMinutes is huge),
+          // so this candidate is kept every tick — exactly the "aged, kept
+          // forever" shape the throttle targets.
+          updatedAt: "2026-03-18T10:04:00.000Z",
+          sidecarProcs: { "front-local": { pid: identityPid, pgid: identityPid, starttime: 1 } },
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set([`${ownerId}--front-local`]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      // Dynamic import AFTER loadSessionServiceModule(), which itself resets
+      // the module registry — an earlier import would resolve to a stale
+      // reap.js instance session-service.js is no longer using. A
+      // controlled ps snapshot, not this test process's own real (and
+      // unpredictably small) uptime: etimes far past the 10-minute (600s)
+      // maxAgeWarnMinutes threshold, deterministically.
+      const sidecarReapModule = await import("../../src/sidecars/reap.js");
+      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses").mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [
+            identityPid,
+            {
+              pid: identityPid,
+              ppid: 1,
+              pgid: identityPid,
+              rssKb: 1000,
+              etimes: 100_000,
+              args: "x",
+            },
+          ],
+        ]),
+        byPgid: new Map(),
+      });
+
+      const countWarnEvents = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.sidecar.age_warning" && entry.sessionId === ownerId,
+        ).length;
+
+      await service.reapDeadSessionSidecars();
+      const afterFirst = countWarnEvents();
+      await service.reapDeadSessionSidecars();
+      const afterSecond = countWarnEvents();
+
+      expect(afterFirst).toBe(1);
+      // A second tick within the same 10-minute throttle window (fake system
+      // time never advances between these two calls) must not warn again.
+      expect(afterSecond).toBe(1);
+      snapshotSpy.mockRestore();
       service.dispose();
     });
 
@@ -23653,7 +24168,14 @@ describe("SessionService", () => {
           },
         },
       });
-      const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+      const sessions = seedReaperSession({
+        status: "completed",
+        sidecarNames: ["daemon"],
+        // A recorded reservation: without one, a live pane with no
+        // recorded reservation now reads "unknown" (veto fires, kept)
+        // rather than "none" — see resolveSidecarConnections.
+        sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+      });
       // api-2 is a sibling of the api-1 desk, still running.
       sessions.set("api-2", {
         ...(sessions.get("api-1") as SessionRecord),
@@ -23699,7 +24221,14 @@ describe("SessionService", () => {
           },
         },
       });
-      const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+      const sessions = seedReaperSession({
+        status: "completed",
+        sidecarNames: ["daemon"],
+        // A recorded reservation: without one, a live pane with no
+        // recorded reservation now reads "unknown" (veto fires, kept)
+        // rather than "none" — see resolveSidecarConnections.
+        sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+      });
       // api-2 is a non-anchor desk sibling, also terminal (no running member
       // anywhere in the desk), so the loop must fall through to a probe for
       // BOTH sessions it processes.
@@ -23733,6 +24262,46 @@ describe("SessionService", () => {
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
       expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "daemon");
+      service.dispose();
+    });
+
+    it("never reaps a terminal owner's sidecar pane with an established connection (connection veto applies here too)", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+            },
+          },
+        },
+      });
+      seedReaperSession({
+        status: "completed",
+        sidecarNames: ["daemon"],
+        sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      hasEstablishedConnectionsMock.mockImplementation(async (port: number) =>
+        port === 4100 ? "established" : "none",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapOrphanedTmux(): Promise<void>; dispose(): void };
+
+      await service.reapOrphanedTmux();
+
+      expect(hasEstablishedConnectionsMock).toHaveBeenCalledWith(4100);
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
       service.dispose();
     });
 

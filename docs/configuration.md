@@ -321,9 +321,9 @@ Decision per sidecar, first match wins:
 
 Predicting a dev server: it survives a pass while something holds a connection to one of its reserved ports (rule 4), or while its workspace stays active (rule 8) with idle time under the TTL (rule 10). The probe reads recorded reservations only — a sidecar that reserved no port gets no rule-4 veto.
 
-Each pass logs `session.sidecar.reaped` per kill with the matched rule and the freed tree RSS, and `session.sidecar.age_warning` per kept sidecar whose process age reached `maxAgeWarnMinutes` — a connection-held idle sidecar warns every tick and stays.
+Each pass logs `session.sidecar.reaped` per kill with the matched rule and the freed tree RSS, and `session.sidecar.age_warning` per kept sidecar whose process age reached `maxAgeWarnMinutes` — throttled to once per sidecar per `maxAgeWarnMinutes` window, not once per tick, so a connection-held idle sidecar stays without repeating the warning every tick.
 
-Cross-workspace port overlap: a sidecar start refuses when another workspace of the same project already has a live pane for a non-MCP sidecar whose declared `ports` range overlaps this one's. The error names the holding workspace and its sidecar. Spur reuses no pane and reaps nothing across a workspace boundary — stop that sidecar or its owning session first. A same-workspace sidecar, and a declared holder with no live pane, refuse nothing.
+Cross-workspace port collision: a sidecar start refuses when this workspace's own recorded port reservation for this sidecar exactly matches another (live) workspace's recorded reservation for one of its non-MCP sidecars. A declared `ports` range shared by several sidecars (by design — each workspace draws a distinct free port from it) never triggers this on its own. The error names the holding workspace and its sidecar. Spur reuses no pane and reaps nothing across a workspace boundary — stop that sidecar or its owning session first. A same-workspace sidecar, and a holder with no live pane, refuse nothing.
 
 ## Events
 

@@ -70,8 +70,7 @@ export type SidecarKeepReason =
   | "connections_established"
   | "probe_unknown"
   | "activity_unknown"
-  | "within_idle_ttl"
-  | "workspace_running";
+  | "within_idle_ttl";
 
 export type SidecarWarnReason = "age_cap";
 

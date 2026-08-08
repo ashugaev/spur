@@ -203,11 +203,7 @@ describe("planSidecarReap: exhaustiveness and shape", () => {
   });
 
   it("every declared keep reason is reachable", () => {
-    // "workspace_running" is a declared union member never produced by
-    // decide() — the spec folds that case into "within_idle_ttl" (see
-    // policy.ts's decision-table comment) — so it is intentionally excluded
-    // here rather than asserted unreachable.
-    const reasons: Exclude<SidecarKeepReason, "workspace_running">[] = [
+    const reasons: SidecarKeepReason[] = [
       "disabled",
       "mcp",
       "no_pane_no_identity",
@@ -216,10 +212,7 @@ describe("planSidecarReap: exhaustiveness and shape", () => {
       "activity_unknown",
       "within_idle_ttl",
     ];
-    const overridesByReason: Record<
-      Exclude<SidecarKeepReason, "workspace_running">,
-      Partial<SidecarReapCandidate>
-    > = {
+    const overridesByReason: Record<SidecarKeepReason, Partial<SidecarReapCandidate>> = {
       disabled: {},
       mcp: { mcp: true },
       no_pane_no_identity: { paneAlive: false, hasRecordedIdentity: false },
