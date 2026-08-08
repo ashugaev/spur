@@ -3277,6 +3277,7 @@ export class SessionService {
         configured: true,
         prefix: project.sessionPrefix,
         path: project.path,
+        ...(project.modes !== undefined ? { modes: project.modes } : {}),
       }),
     );
     const unconfigured: ProjectListEntry[] = this.listUnconfiguredProjects().map((entry) => ({

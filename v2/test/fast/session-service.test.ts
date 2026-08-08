@@ -24092,6 +24092,29 @@ describe("SessionService", () => {
       expect(existsSync(`${dataDir}/shepherd`)).toBe(false);
     });
 
+    it("listProjects echoes modes for a project that configures them and omits the key otherwise", async () => {
+      seedUnconfigured([]);
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "list-projects-modes-data");
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        dataDir,
+        projects: {
+          ...config.projects,
+          api: {
+            ...config.projects.api,
+            modes: { manager: { skill: "manager", default: true } },
+          },
+        },
+      });
+      const service = await createDisposedSessionService();
+      const list = service.listProjects();
+      const apiEntry = list.find((entry) => entry.id === "api");
+      expect(apiEntry?.modes).toEqual({ manager: { skill: "manager", default: true } });
+      const shepherdEntry = list.find((entry) => entry.id === "spur-shepherd");
+      expect(shepherdEntry).not.toHaveProperty("modes");
+    });
+
     it("updateUnconfiguredProject persists editable project fields", async () => {
       seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
       const nextDir = resolve(projectDir, "next");

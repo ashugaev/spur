@@ -1123,6 +1123,7 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
 }
 
 export interface CreateProjectRequest {
