@@ -27,6 +27,8 @@ Completing or killing a session also runs a narrow unregister step for its workt
 
 `spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
 
+Daemon boot logs one `daemon.registry.count` event to `events.jsonl`: how many registry paths it read, and how many the worktree-internal filter dropped. Read-only — it never prunes or rewrites the registry file. Pair it with the `config-registry` doctor check above to tell whether a warn came from a growing registry or a one-off spike.
+
 ## Local project config
 
 `spur doctor --scaffold` writes the minimal shape:
