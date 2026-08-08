@@ -3,11 +3,10 @@ import { mkdirSync, realpathSync, statSync, symlinkSync, utimesSync } from "node
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  activeConfigPaths,
   addUnconfiguredProject,
   buildMergedConfig,
   ConfigRegistryScanner,
-  isExistingFile,
+  dropWorktreeInternalPaths,
   isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
@@ -177,26 +176,7 @@ describe("registry.buildMergedConfig", () => {
   });
 });
 
-describe("registry.activeConfigPaths", () => {
-  it("drops a missing file and a directory entry while readConfigRegistryFile returns the raw list", async () => {
-    const rootDir = await createTempDir("spur-registry-active-");
-    tempDirs.push(rootDir);
-    const dataDir = join(rootDir, "data");
-    const worktreeDir = join(rootDir, "worktrees");
-
-    const existingPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
-    const missingPath = join(rootDir, "missing.yaml");
-    const directoryPath = join(rootDir, "a-directory");
-    mkdirSync(directoryPath, { recursive: true });
-
-    writeConfigRegistry(dataDir, [existingPath, missingPath, directoryPath]);
-
-    const raw = readConfigRegistryFile(dataDir).configPaths;
-    expect(raw).toEqual([existingPath, missingPath, directoryPath]);
-
-    expect(activeConfigPaths(raw, worktreeDir)).toEqual([existingPath]);
-  });
-
+describe("registry.dropWorktreeInternalPaths", () => {
   it("refuses to register a config path inside worktreeDir", async () => {
     const rootDir = await createTempDir("spur-registry-worktree-guard-");
     tempDirs.push(rootDir);
@@ -206,46 +186,19 @@ describe("registry.activeConfigPaths", () => {
     await writeFile(worktreeConfigPath, "stub: true\n", "utf8");
 
     expect(isInsideWorktreeDir(worktreeConfigPath, worktreeDir)).toBe(true);
-    expect(activeConfigPaths([worktreeConfigPath], worktreeDir)).toEqual([]);
+    expect(dropWorktreeInternalPaths([worktreeConfigPath], worktreeDir)).toEqual([]);
   });
 
-  it("dedupes entries that resolve to the same realpath", async () => {
-    const rootDir = await createTempDir("spur-registry-dedupe-");
+  it("keeps a path outside worktreeDir untouched, dead or alive — pruning is the scanner's job", async () => {
+    const rootDir = await createTempDir("spur-registry-worktree-guard-keep-");
     tempDirs.push(rootDir);
     const worktreeDir = join(rootDir, "worktrees");
     const existingPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
-    const nonCanonicalForm = join(rootDir, ".", "exists.yaml");
-
-    expect(activeConfigPaths([existingPath, nonCanonicalForm], worktreeDir)).toEqual([
-      existingPath,
-    ]);
-  });
-
-  it("drops a path whose stat fails with an indeterminate errno by default", async () => {
-    const rootDir = await createTempDir("spur-registry-unknown-errno-");
-    tempDirs.push(rootDir);
-    const worktreeDir = join(rootDir, "worktrees");
-    const loopA = join(rootDir, "loopA");
-    const loopB = join(rootDir, "loopB");
-    symlinkSync(loopB, loopA);
-    symlinkSync(loopA, loopB);
-
-    expect(isExistingFile(loopA)).toBe(false);
-    expect(activeConfigPaths([loopA], worktreeDir)).toEqual([]);
-  });
-
-  it("keeps a path with an indeterminate stat errno when persistedPrune is set, so the boot write never drops a live project on a transient error", async () => {
-    const rootDir = await createTempDir("spur-registry-persisted-prune-");
-    tempDirs.push(rootDir);
-    const worktreeDir = join(rootDir, "worktrees");
-    const loopA = join(rootDir, "loopA");
-    const loopB = join(rootDir, "loopB");
-    symlinkSync(loopB, loopA);
-    symlinkSync(loopA, loopB);
     const missingPath = join(rootDir, "missing.yaml");
 
-    expect(activeConfigPaths([loopA, missingPath], worktreeDir, { persistedPrune: true })).toEqual([
-      loopA,
+    expect(dropWorktreeInternalPaths([existingPath, missingPath], worktreeDir)).toEqual([
+      existingPath,
+      missingPath,
     ]);
   });
 });

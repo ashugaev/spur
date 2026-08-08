@@ -8,7 +8,6 @@ import {
   readFileSync,
   rmSync,
   utimesSync,
-  watch,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -1253,60 +1252,7 @@ describe("SessionService", () => {
   });
 
   describe("config registry lifecycle", () => {
-    it("prunes a dead registry path on boot, persists once, and never parses it", async () => {
-      vi.useRealTimers();
-      const liveProjectDir = join(TEST_DATA_DIR, "live-project");
-      const livePath = join(liveProjectDir, "spur.yaml");
-      mkdirSync(liveProjectDir, { recursive: true });
-      writeFileSync(livePath, "stub: true\n", "utf8");
-      const missingPath = join(TEST_DATA_DIR, "missing-project", "spur.yaml");
-
-      readConfigRegistryFileMock.mockReset().mockReturnValue({
-        configPaths: [livePath, missingPath],
-        unconfiguredProjects: [],
-      });
-      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
-
-      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
-      const tmpRenamesSeen = new Set<string>();
-      const watcher = watch(TEST_DATA_DIR, (eventType, filename) => {
-        if (!filename || eventType !== "rename") return;
-        if (!filename.startsWith("config-registry.json.tmp.")) return;
-        tmpRenamesSeen.add(filename);
-      });
-
-      try {
-        const { SessionService } = await loadSessionServiceModule();
-        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-        await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-        service.dispose();
-
-        const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
-          configPaths: string[];
-        };
-        // Not a `toEqual`/exact-count match: `/tmp/spur.yaml` (the bootstrap
-        // path baked into these tests) is a documented recurring host hazard
-        // — a stray file there changes whether it itself survives the same
-        // prune filter, which would flip both an exact array and an exact
-        // "N -> M" count. Assert only what this test actually exercises: the
-        // live path survives, the dead one never does.
-        expect(persisted.configPaths).toContain(livePath);
-        expect(persisted.configPaths).not.toContain(missingPath);
-        expect(tmpRenamesSeen.size).toBe(1);
-
-        const prunedEvent = logSpurEventMock.mock.calls.find(
-          ([, entry]) => entry.event === "daemon.registry.pruned",
-        );
-        expect(prunedEvent?.[1]).toMatchObject({ level: "info" });
-        expect(prunedEvent?.[1]?.["message"]).toMatch(/^registry paths \d+ -> \d+$/);
-
-        expect(loadProjectConfigMock).not.toHaveBeenCalledWith(missingPath, expect.anything());
-      } finally {
-        watcher.close();
-      }
-    });
-
-    it("boot prune filter drops a worktree-internal registry entry so it is never persisted", async () => {
+    it("boot worktree-internal filter keeps a worktree config out of the merged registry and its next persisted write", async () => {
       vi.useRealTimers();
       const worktreeDir = join(TEST_DATA_DIR, "worktrees");
       const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
@@ -1314,30 +1260,35 @@ describe("SessionService", () => {
       writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
 
       loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
-      readConfigRegistryFileMock.mockReset().mockReturnValue({
-        configPaths: [worktreeConfigPath],
-        unconfiguredProjects: [],
-      });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
 
       expect(service.getRegistryPaths()).not.toContain(worktreeConfigPath);
-      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
-      const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+      // The filter itself never writes the registry file — it only keeps the
+      // worktree-internal path out of what `applyConfig` hands to the
+      // existing `mutateConfigRegistry` write a few lines later in the
+      // constructor, so the next persisted write excludes it too.
+      const persist = mutateConfigRegistryMock.mock.calls.at(-1)?.[1] as (current: {
         configPaths: string[];
-      };
-      expect(persisted.configPaths).not.toContain(worktreeConfigPath);
+        unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
+      }) => { configPaths: string[] };
+      expect(persist({ configPaths: [], unconfiguredProjects: [] }).configPaths).not.toContain(
+        worktreeConfigPath,
+      );
 
       service.dispose();
     });
 
-    it("unregisters a worktree config that outlived boot pruning because it sits outside the current worktreeDir (a worktreeDir-migration leftover)", async () => {
+    it("unregisters a worktree config that outlived the boot filter because it sits outside the current worktreeDir (a worktreeDir-migration leftover)", async () => {
       vi.useRealTimers();
       // The only production path that reaches `unregisterWorktreeConfig`'s
       // `isRegistered` guard: `this.registryPaths` never contains an entry
-      // inside the CURRENT worktreeDir (the boot/preview prune always drops
+      // inside the CURRENT worktreeDir (the boot/preview filter always drops
       // those), so the guard can only be true for an entry that was
       // registered under a worktreeDir the host has since reconfigured away
       // from.
@@ -1351,10 +1302,9 @@ describe("SessionService", () => {
       loadConfigMock
         .mockReset()
         .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
-      readConfigRegistryFileMock.mockReset().mockReturnValue({
-        configPaths: [oldWorktreeConfigPath],
-        unconfiguredProjects: [],
-      });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
       loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
 
       const { SessionService } = await loadSessionServiceModule();
@@ -1408,10 +1358,9 @@ describe("SessionService", () => {
       loadConfigMock
         .mockReset()
         .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
-      readConfigRegistryFileMock.mockReset().mockReturnValue({
-        configPaths: [oldWorktreeConfigPath],
-        unconfiguredProjects: [],
-      });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
       loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
 
       const { SessionService } = await loadSessionServiceModule();
@@ -1534,7 +1483,7 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls
         .map(([, entry]) => entry.event)
-        .filter((e) => e !== "session.state.classified" && e !== "daemon.registry.pruned"),
+        .filter((e) => e !== "session.state.classified"),
     ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
@@ -9006,9 +8955,8 @@ describe("SessionService", () => {
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
       ) as unknown as MemoryShedService;
-      // The constructor itself always logs one "daemon.registry.pruned" event;
-      // clear it so the calls counted below are only the memory-shed ones
-      // under test, not an incidental count of construction-time logging.
+      // Clear any construction-time logging so the calls counted below are
+      // only the memory-shed ones under test.
       logSpurEventMock.mockClear();
 
       readHostMemoryMock.mockReturnValue({

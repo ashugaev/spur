@@ -71,12 +71,11 @@ describe("startServer", () => {
     const events = readEventLog(dataDir).filter(
       (entry) => entry.event !== "daemon.memory.unbounded",
     );
-    expect(events.find((entry) => entry.event === "gh.poll_cycle")).toMatchObject({
+    expect(events[0]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
     });
     expect(events.map((entry) => entry.event)).toEqual([
-      "daemon.registry.pruned",
       "gh.poll_cycle",
       "daemon.startup.reconciled",
       "daemon.admission.startup",
@@ -3168,21 +3167,10 @@ describe("startServer", () => {
     });
 
     try {
-      // The SessionService boot path runs `activeConfigPaths` (persistedPrune)
-      // ahead of every `ConfigRegistryScanner.scan()` call, so a confirmed
-      // ENOENT on the registered file itself drops the entry here regardless
-      // of whether its parent directory still exists — the scanner's own
-      // parent-alive retention (see the "keeps a parent-alive missing path"
-      // case in test/fast/registry.test.ts) only fires for a scan() call that
-      // is not preceded by that filter. Boot also always logs
-      // `daemon.registry.pruned` with a before/after count, even when nothing
-      // was dropped.
       const bootRegistry = readConfigRegistryFile(dataDir);
       expect(bootRegistry.configPaths).not.toContain(orphanConfigPath);
-      expect(bootRegistry.configPaths).not.toContain(missingParentAlivePath);
-      expect(readEventLog(dataDir).some((entry) => entry.event === "daemon.registry.pruned")).toBe(
-        true,
-      );
+      expect(bootRegistry.configPaths).toContain(missingParentAlivePath);
+      expect(readEventLog(dataDir).some((entry) => entry.event.endsWith(".pruned"))).toBe(false);
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
@@ -3193,21 +3181,14 @@ describe("startServer", () => {
         expect(response.status).toBe(200);
       }
 
-      // Only 1, not 2: the scanner's own "file not found" diagnostic for
-      // missingParentAlivePath never fires here because activeConfigPaths
-      // already dropped that path before boot's scan() call ever saw it
-      // (see the boot-registry assertions above). The 1 warning left is
-      // reportOnce's single report of the duplicateConfigPath project-id
-      // collision — the second connect attempt reuses the same canonical
-      // path and is deduped.
       const registryWarnings = readEventLog(dataDir).filter(
         (entry) => entry.event === "daemon.registry.warning",
       );
-      expect(registryWarnings).toHaveLength(1);
+      expect(registryWarnings).toHaveLength(2);
 
       const finalRegistry = readConfigRegistryFile(dataDir);
       expect(finalRegistry.configPaths).not.toContain(orphanConfigPath);
-      expect(finalRegistry.configPaths).not.toContain(missingParentAlivePath);
+      expect(finalRegistry.configPaths).toContain(missingParentAlivePath);
       expect(finalRegistry.configPaths).toContain(fs.realpathSync(duplicateConfigPath));
     } finally {
       await server.stop();
