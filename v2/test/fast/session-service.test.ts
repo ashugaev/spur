@@ -23,6 +23,8 @@ import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
+import type * as reapModule from "../../src/sidecars/reap.js";
+import type { ProcSnapshot } from "../../src/sidecars/reap.js";
 import type {
   AgentName,
   AppConfig,
@@ -44,6 +46,7 @@ const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
+type SnapshotProcesses = () => Promise<ProcSnapshot>;
 
 const upsertConfigRegistryPathMock = vi.fn();
 const addUnconfiguredProjectMock = vi.fn();
@@ -108,6 +111,16 @@ const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undef
 // that a probe failure keeps rather than reaps) or "established" (which
 // would mask the opposite).
 const hasEstablishedConnectionsMock = vi.fn<HasEstablishedConnections>().mockResolvedValue("none");
+// Default: no real `ps` fork in the fast tier. A real subprocess spawn here
+// (the pre-fix default) is slow and non-fake-timer-bound, and every
+// SessionService construction fires one unawaited via the attention
+// monitor's immediate baseline pass — under a 700+ test file that leaves a
+// window for one test's still-in-flight fork to resolve during a later
+// test's turn and write through that later test's own session-store mock.
+// Tests that need a specific pid to resolve set this explicitly.
+const snapshotProcessesMock = vi
+  .fn<SnapshotProcesses>()
+  .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
@@ -484,6 +497,16 @@ vi.mock("../../src/port-probe.js", () => ({
   isHostPortFree: isHostPortFreeMock,
   hasEstablishedConnections: hasEstablishedConnectionsMock,
 }));
+
+// Only snapshotProcesses is mocked (a real `ps` fork, the thing the fast
+// tier must never do) — every other export (confirmReaps, reapSidecarPane,
+// signalSidecarPane, reapRecordedIdentity, sweepSidecars, ...) stays the
+// real implementation so reap-confirmation/survivor logic is still
+// exercised for real, just against a controlled snapshot.
+vi.mock("../../src/sidecars/reap.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof reapModule>();
+  return { ...actual, snapshotProcesses: snapshotProcessesMock };
+});
 
 vi.mock("../../src/runtime-tmux.js", () => ({
   captureTmuxPane: captureTmuxPaneMock,
@@ -1135,6 +1158,9 @@ describe("SessionService", () => {
     clearPortListenerMock.mockReset().mockResolvedValue(undefined);
     isHostPortFreeMock.mockReset().mockResolvedValue(true);
     hasEstablishedConnectionsMock.mockReset().mockResolvedValue("none");
+    snapshotProcessesMock
+      .mockReset()
+      .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
     sidecarTmuxSessionMock
       .mockReset()
@@ -5202,19 +5228,33 @@ describe("SessionService", () => {
       for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
         await Promise.resolve();
       }
-      // Dynamic import, like session-service.js itself: reap.js transitively
-      // imports "node:timers/promises", which this file mocks — a static
-      // top-level import would evaluate before that mock's own hoisted
-      // initialization and throw.
-      const sidecarReapModule = await import("../../src/sidecars/reap.js");
-      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
-      snapshotSpy.mockClear();
+      snapshotProcessesMock.mockClear();
 
       const views = await service.list();
 
       expect(views).toHaveLength(3);
-      expect(snapshotSpy).toHaveBeenCalledTimes(1);
-      snapshotSpy.mockRestore();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("takes no sidecar-age ps snapshot on a list() batch with no sidecars declared", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { dashboardCacheReady: Promise<void> | null; dispose(): void };
+      await service.dashboardCacheReady;
+      snapshotProcessesMock.mockClear();
+
+      const views = await (service as unknown as { list(): Promise<unknown[]> }).list();
+
+      expect(views).toHaveLength(2);
+      expect(snapshotProcessesMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -5243,23 +5283,18 @@ describe("SessionService", () => {
         pollAttentionStates(baseline: boolean): Promise<void>;
       };
       await internals.dashboardCacheReady;
-      // Real wait, not a microtask-flush loop: the constructor's own
-      // immediate baseline pass does real (non-fake-timer) child_process I/O
-      // via snapshotProcesses, which needs actual event-loop turns to
-      // settle, not just queued microtasks.
+      // vi.waitFor rather than a timer advance: runAttentionMonitor's
+      // baseline pass runs from an unawaited fire-and-forget constructor
+      // call, not a timer callback this suite's fake clock can drive.
       await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
-      const sidecarReapModule = await import("../../src/sidecars/reap.js");
-      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
-      snapshotSpy.mockClear();
+      snapshotProcessesMock.mockClear();
 
       // Direct call, not a timer advance: runAttentionMonitor fires from a
-      // fire-and-forgotten setInterval callback, and snapshotProcesses does
-      // real (non-fake-timer) child_process I/O that vi.advanceTimersByTimeAsync
-      // cannot reliably wait out through that indirection.
+      // fire-and-forgotten setInterval callback vi.advanceTimersByTimeAsync
+      // cannot reliably await through.
       await internals.pollAttentionStates(false);
 
-      expect(snapshotSpy).toHaveBeenCalledTimes(1);
-      snapshotSpy.mockRestore();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
   });
@@ -8253,10 +8288,13 @@ describe("SessionService", () => {
       mockClaudeJsonlState("waiting");
 
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService(
-        "/tmp/spur.yaml",
-        "2026-03-18T10:00:00.000Z",
-      ) as unknown as {
+      // Deferred: this test exercises runMemoryShed() only, called directly
+      // below — an undeferred construction's own unawaited attention-monitor
+      // baseline pass would otherwise race the assertions on enrich/
+      // refreshDashboardCacheEntry below with a call of its own.
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
         runMemoryShed(): Promise<void>;
         enrich(session: SessionRecord): Promise<unknown>;
         refreshDashboardCacheEntry(session: SessionRecord): Promise<void>;
@@ -13045,18 +13083,27 @@ describe("SessionService", () => {
         },
       });
       const sessions = createSessionStore();
+      const identityPid = 999_991;
       sessions.set(
         "api-1",
         sessionRecord({
           id: "api-1",
           sidecarNames: ["dev"],
-          // This test's own pid is guaranteed resolvable in a real ps
-          // snapshot (snapshotProcesses is unmocked in this file).
-          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+          sidecarProcs: { dev: { pid: identityPid, pgid: identityPid, starttime: 1 } },
         }),
       );
       sidecarTmuxAliveMock.mockResolvedValue(true);
       workspaceExistsMock.mockReturnValue(true);
+      snapshotProcessesMock.mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [
+            identityPid,
+            { pid: identityPid, ppid: 1, pgid: identityPid, rssKb: 1000, etimes: 42, args: "x" },
+          ],
+        ]),
+        byPgid: new Map(),
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -13112,16 +13159,27 @@ describe("SessionService", () => {
         },
       });
       const sessions = createSessionStore();
+      const identityPid = 999_992;
       sessions.set(
         "api-1",
         sessionRecord({
           id: "api-1",
           sidecarNames: ["dev"],
-          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+          sidecarProcs: { dev: { pid: identityPid, pgid: identityPid, starttime: 1 } },
         }),
       );
       sidecarTmuxAliveMock.mockResolvedValue(true);
       workspaceExistsMock.mockReturnValue(true);
+      snapshotProcessesMock.mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [
+            identityPid,
+            { pid: identityPid, ppid: 1, pgid: identityPid, rssKb: 1000, etimes: 42, args: "x" },
+          ],
+        ]),
+        byPgid: new Map(),
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -13145,16 +13203,27 @@ describe("SessionService", () => {
         },
       });
       const sessions = createSessionStore();
+      const identityPid = 999_993;
       sessions.set(
         "api-1",
         sessionRecord({
           id: "api-1",
           sidecarNames: ["dev"],
-          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+          sidecarProcs: { dev: { pid: identityPid, pgid: identityPid, starttime: 1 } },
         }),
       );
       sidecarTmuxAliveMock.mockResolvedValue(true);
       workspaceExistsMock.mockReturnValue(true);
+      snapshotProcessesMock.mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [
+            identityPid,
+            { pid: identityPid, ppid: 1, pgid: identityPid, rssKb: 1000, etimes: 42, args: "x" },
+          ],
+        ]),
+        byPgid: new Map(),
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -15717,6 +15786,53 @@ describe("SessionService", () => {
       expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     });
 
+    it("allows a reopen with a stale duplicate recorded port when that port is actually occupied (self-heals onto a new one)", async () => {
+      // The measured host shape: a completed session's own recorded port
+      // still numerically matches a currently live workspace's recorded
+      // port for its own sidecar (a stale duplicate, never cleared), and
+      // that port is genuinely occupied right now — by the live workspace's
+      // own server. Reopening the completed one must self-heal onto a fresh
+      // port via ensureSidecarReservation's own range scan, never refuse.
+      loadConfigMock.mockReturnValue(sharedRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 4330 } },
+        }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({
+          id: "api-2",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+          sidecarPorts: { "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 4330 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-2" && name === "front-pp-tunnel",
+      );
+      // Occupied: matches ensureSidecarReservation's own reuse gate, which
+      // declines to reuse an occupied existingPort and scans for a free one.
+      isHostPortFreeMock.mockImplementation(async (port: number) => port !== 4330);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "front-local");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
+      );
+      expect(
+        sessions.get("api-1")?.sidecarPorts?.["front-local"]?.["SPUR_RESERVED_PORT_FRONT_LOCAL"],
+      ).not.toBe(4330);
+    });
+
     it("allows a start when the other workspace's recorded port differs (no real collision)", async () => {
       loadConfigMock.mockReturnValue(sharedRangeConfig());
       const sessions = createSessionStore();
@@ -16154,7 +16270,12 @@ describe("SessionService", () => {
       // (hasRunningWorkspaceMembers false), so a "completed owner still
       // carrying a recorded reservation" fixture is realistic only when a
       // sibling is live — matching the actual measured host shape
-      // (intelas-8af9 completed, workspace sibling 8c6a running).
+      // (intelas-8af9 completed, workspace sibling 8c6a running). Its own
+      // updatedAt is past the idle TTL too (not a recent 10:04:00) — this
+      // must be the one candidate in the file whose only possible keep
+      // reason is the connection veto (rule 4), not idle recency (rule 11):
+      // a recent sibling would make within_idle_ttl a second, confounding
+      // reason to keep, leaving the veto itself unproven by this test.
       sessions.set(
         "api-1b",
         sessionRecord({
@@ -16162,7 +16283,7 @@ describe("SessionService", () => {
           deskId: "api-1",
           status: "running",
           worktreePath: TEST_DATA_DIR,
-          updatedAt: "2026-03-18T10:04:00.000Z",
+          updatedAt: "2026-03-18T00:00:00.000Z",
         }),
       );
       listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
@@ -16407,16 +16528,13 @@ describe("SessionService", () => {
         "2026-03-18T10:00:00.000Z",
       ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
 
-      const sidecarReapModule = await import("../../src/sidecars/reap.js");
-      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses");
-      snapshotSpy.mockClear();
+      snapshotProcessesMock.mockClear();
 
       await service.reapDeadSessionSidecars();
 
-      expect(snapshotSpy).not.toHaveBeenCalled();
+      expect(snapshotProcessesMock).not.toHaveBeenCalled();
       expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
-      snapshotSpy.mockRestore();
       service.dispose();
     });
 
@@ -16463,14 +16581,10 @@ describe("SessionService", () => {
         "2026-03-18T10:00:00.000Z",
       ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
 
-      // Dynamic import AFTER loadSessionServiceModule(), which itself resets
-      // the module registry — an earlier import would resolve to a stale
-      // reap.js instance session-service.js is no longer using. A
-      // controlled ps snapshot, not this test process's own real (and
+      // A controlled ps snapshot, not this test process's own real (and
       // unpredictably small) uptime: etimes far past the 10-minute (600s)
       // maxAgeWarnMinutes threshold, deterministically.
-      const sidecarReapModule = await import("../../src/sidecars/reap.js");
-      const snapshotSpy = vi.spyOn(sidecarReapModule, "snapshotProcesses").mockResolvedValue({
+      snapshotProcessesMock.mockResolvedValue({
         ok: true,
         byPid: new Map([
           [
@@ -16503,7 +16617,82 @@ describe("SessionService", () => {
       // A second tick within the same 10-minute throttle window (fake system
       // time never advances between these two calls) must not warn again.
       expect(afterSecond).toBe(1);
-      snapshotSpy.mockRestore();
+      service.dispose();
+    });
+
+    it("reaping one sidecar does not reset the workspace idle clock for a sibling sidecar on the same owner", async () => {
+      // Two non-mcp sidecars on the same owner, distinct per-sidecar
+      // idleTtlMinutes: front-local reaps first (60min TTL); front-pp-tunnel
+      // (180min TTL) must still reap on its own schedule afterward, off the
+      // ORIGINAL updatedAt — not off a fresh clock front-local's reap
+      // incorrectly bumped by touching updatedAt on kill.
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        sidecarGc: { enabled: true, idleTtlMinutes: 999_999, maxAgeWarnMinutes: 999_999 },
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              "front-local": {
+                command: "pnpm dev:local",
+                autoStart: false,
+                idleTtlMinutes: 60,
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_LOCAL", start: 3000, end: 3099 } },
+              },
+              "front-pp-tunnel": {
+                command: "pnpm dev:tunnel",
+                autoStart: false,
+                idleTtlMinutes: 180,
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_TUNNEL", start: 3100, end: 3199 } },
+              },
+            },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local", "front-pp-tunnel"],
+          sidecarPorts: {
+            "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 },
+            "front-pp-tunnel": { SPUR_RESERVED_PORT_FRONT_TUNNEL: 3100 },
+          },
+          // 90 minutes idle at construction time (10:05): past front-local's
+          // 60min TTL, within front-pp-tunnel's 180min TTL.
+          updatedAt: "2026-03-18T08:35:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(
+        new Set(["api-1--front-local", "api-1--front-pp-tunnel"]),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      // Tick 1: only front-local is past its own TTL.
+      await service.reapDeadSessionSidecars();
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-pp-tunnel");
+
+      // Real elapsed time from the ORIGINAL updatedAt is now 190 minutes —
+      // past front-pp-tunnel's 180min TTL too, regardless of tick 1's kill.
+      vi.setSystemTime(new Date("2026-03-18T11:45:00.000Z"));
+      killTmuxSessionMock.mockClear();
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-pp-tunnel"]));
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-pp-tunnel");
       service.dispose();
     });
 

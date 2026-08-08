@@ -297,7 +297,7 @@ RAM pressure closes at the admission floor. Cgroup-high pressure closes below it
 
 `sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars declared under `projects.<id>.sidecars`. A built-in MCP sidecar (`playwright`) is never a candidate. The pass runs on the daemon's sidecar-reaper tick and once at boot.
 
-A reap kills the sidecar's tmux pane process tree and drops its recorded process. Session record, worktree, and port reservation survive; a restart is a normal sidecar start ([Sidecars](commands.md#sidecars)).
+A reap kills the sidecar's tmux pane process tree, drops its recorded process, and unlinks its published slot link (a stale reap would otherwise leave a slot pointing at a dead server). Session record, worktree, and port reservation survive; a restart is a normal sidecar start ([Sidecars](commands.md#sidecars)).
 
 A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads that workspace, not one session.
 
@@ -319,7 +319,7 @@ Decision per sidecar, first match wins:
 10. Idle time at or past the sidecar's `idleTtlMinutes` — reap.
 11. Otherwise — keep.
 
-Predicting a dev server: it survives a pass while something holds a connection to one of its reserved ports (rule 4), or while its workspace stays active (rule 8) with idle time under the TTL (rule 10). The probe reads recorded reservations only — a sidecar that reserved no port gets no rule-4 veto.
+Predicting a dev server: it survives a pass while something holds a connection to one of its reserved ports (rule 4), or while its workspace stays active (rule 8) with idle time under the TTL (rule 10). The probe reads recorded reservations only — a sidecar that reserved no port and has no live pane gets no rule-4/5 veto at all. A live pane whose sidecar declares ports but has no recorded reservation still keeps under rule 5 (an unprovable probe, not a clean "no connection" read) rather than falling through to the idle rules.
 
 Each pass logs `session.sidecar.reaped` per kill with the matched rule and the freed tree RSS, and `session.sidecar.age_warning` per kept sidecar whose process age reached `maxAgeWarnMinutes` — throttled to once per sidecar per `maxAgeWarnMinutes` window, not once per tick, so a connection-held idle sidecar stays without repeating the warning every tick.
 

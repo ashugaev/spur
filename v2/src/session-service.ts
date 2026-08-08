@@ -2833,7 +2833,12 @@ export class SessionService {
       // uses (stopSidecar) instead of a third hand-rolled one: a reaped
       // sidecar with a ports.*.url slot (isolated-ui, front-local) would
       // otherwise leave that slot link pointing at a dead server.
-      const outcome = await this.killSidecarAndUnlinkSlot(entry.ownerId, entry.sidecarName);
+      // touchUpdatedAt: false — a reap is the opposite of activity; bumping
+      // it here would reset the workspace idle clock and buy every other
+      // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
+      const outcome = await this.killSidecarAndUnlinkSlot(entry.ownerId, entry.sidecarName, {
+        touchUpdatedAt: false,
+      });
       this.logEvent("session.sidecar.reaped", {
         level: "info",
         sessionId: entry.ownerId,
@@ -4780,30 +4785,40 @@ export class SessionService {
     });
   }
 
-  // REQ5: refuses only a REAL port collision — this workspace's own
-  // recorded reservation (owner.sidecarPorts, from a prior instance) for
-  // this sidecar exactly equal to another (live) workspace's recorded
-  // reservation for one of its own sidecars. NOT a declared-range overlap:
-  // a range exists precisely so N workspaces can each take a distinct port
-  // from it — this project's front-preprod/front-pp-tunnel/front-local (and
-  // the isolated-daemon/isolated-ui built-ins) all share one declared range
-  // by design, and ensureSidecarReservation's own free-port scan (unions
-  // every session's recorded ports into "unavailable") already hands each
+  // REQ5: refuses only a REAL, currently-live port collision — this
+  // workspace's own recorded reservation (owner.sidecarPorts, from a prior
+  // instance) for this sidecar exactly equal to another (live) workspace's
+  // recorded reservation for one of its own sidecars, AND that port is
+  // actually free right now. NOT a declared-range overlap: a range exists
+  // precisely so N workspaces can each take a distinct port from it — this
+  // project's front-preprod/front-pp-tunnel/front-local (and the
+  // isolated-daemon/isolated-ui built-ins) all share one declared range by
+  // design, and ensureSidecarReservation's own free-port scan (unions every
+  // session's recorded ports into "unavailable") already hands each
   // workspace a distinct port from it. A brand-new reservation has no fixed
   // port yet at this point, so it can never collide here — only a restart
-  // reusing a previously-recorded port can. Never reuses or auto-reaps the
-  // other workspace's pane: ports reserve on the owner record and
-  // killSidecarAndUnlinkSlot/teardown gate on hasRunningWorkspaceMembers
-  // (same-workspace siblings only), so doing either across a workspace
-  // boundary would let one workspace's teardown kill another's server, or
-  // kill a pane a user has an established connection to right now (recon
-  // measured exactly that on 3001/3002). Enumerated from records only —
-  // sessionSidecarNames -> sidecarOwnerIdForName -> sidecarTmuxSession,
-  // exactly the construction the reap pass above uses — never by parsing a
-  // tmux name. Scoped to non-mcp (desk-shared) sidecars: an mcp sidecar is
-  // always per-session and not the shape this guards against. Skipped
-  // entirely when the caller passed an explicit clearPort — that is itself
-  // an intentional, user-driven override of a conflicting reservation.
+  // reusing a previously-recorded port can. The free-right-now condition
+  // matters: a completed session's stale duplicate recording of a port a
+  // live workspace also records needs no refusal when that port is actually
+  // occupied — ensureSidecarReservation's own reuse gate
+  // (isHostPortFree(existingPort)) already declines to reuse an occupied
+  // port and self-heals onto a free one from the range scan. Refusing
+  // unconditionally on the recorded-port match alone (an earlier version of
+  // this check) broke exactly that self-heal, measured on this host as 29
+  // stale cross-desk port duplicates across 1811 records — refusing to
+  // reopen any of them. Never reuses or auto-reaps the other workspace's
+  // pane: ports reserve on the owner record and killSidecarAndUnlinkSlot/
+  // teardown gate on hasRunningWorkspaceMembers (same-workspace siblings
+  // only), so doing either across a workspace boundary would let one
+  // workspace's teardown kill another's server, or kill a pane a user has
+  // an established connection to right now (recon measured exactly that on
+  // 3001/3002). Enumerated from records only — sessionSidecarNames ->
+  // sidecarOwnerIdForName -> sidecarTmuxSession, exactly the construction
+  // the reap pass above uses — never by parsing a tmux name. Scoped to
+  // non-mcp (desk-shared) sidecars: an mcp sidecar is always per-session and
+  // not the shape this guards against. Skipped entirely when the caller
+  // passed an explicit clearPort — that is itself an intentional,
+  // user-driven override of a conflicting reservation.
   private async refuseOverlappingCrossWorkspaceSidecar(
     owner: SessionRecord,
     sidecarName: string,
@@ -4859,6 +4874,21 @@ export class SessionService {
         }
         // A dead/absent holder never blocks a start — only a live pane does.
         if (!(await sidecarTmuxAlive(otherOwnerId, otherSidecarName))) {
+          continue;
+        }
+        // A stale duplicate recording (this workspace's own reservation and
+        // the other's happen to name the same numeric port, e.g. from a
+        // completed run that never released it) needs no refusal when the
+        // port is actually occupied right now: ensureSidecarReservation's
+        // own reuse gate (isHostPortFree(existingPort)) already declines to
+        // reuse an occupied port and falls through to the range scan for a
+        // free one, so the start self-heals without ever touching the other
+        // workspace's port. Refusing unconditionally here broke exactly that
+        // self-heal for every stale cross-desk duplicate on this host. Only
+        // refuse when the port is genuinely free: that is the one case where
+        // a naive reuse would silently hand this workspace the same port the
+        // other (live) workspace still records as its own.
+        if (!(await isHostPortFree(collidingPort))) {
           continue;
         }
         throw new Error(
@@ -5744,8 +5774,12 @@ export class SessionService {
     const claudeAccounts = this.computeClaudeAccountsView();
     // Same batching for the sidecar-age `ps` snapshot: one fork for the
     // whole list instead of one per session under this Promise.all (was a
-    // concurrent fork per live session on every list call).
-    const sidecarProcSnapshot = await snapshotProcesses();
+    // concurrent fork per live session on every list call) — and skipped
+    // entirely, like the attention-monitor sweep, when nothing in the batch
+    // declares a sidecar.
+    const sidecarProcSnapshot = sessions.some((session) => (session.sidecarNames?.length ?? 0) > 0)
+      ? await snapshotProcesses()
+      : undefined;
     const views = await Promise.all(
       sessions.map((session) =>
         this.enrich(session, claudeAccounts, allSessions, sidecarProcSnapshot),
@@ -9075,6 +9109,13 @@ export class SessionService {
   private async killSidecarAndUnlinkSlot(
     ownerId: string,
     sidecarName: string,
+    // stopSidecar is a user-driven action on this workspace and keeps the
+    // default (touch): the reap pass is the opposite of activity and passes
+    // false, so reaping one sidecar in a multi-sidecar workspace does not
+    // reset lastActivityAtMs (falls back to updatedAt for a workspace absent
+    // from dashboardCache) and buy the remaining sidecars a fresh idleTtl
+    // window.
+    { touchUpdatedAt = true }: { touchUpdatedAt?: boolean } = {},
   ): Promise<ReapOutcome | null> {
     this.abortSidecarUrlProbe(ownerId, sidecarName);
     let outcome: ReapOutcome | null;
@@ -9102,9 +9143,9 @@ export class SessionService {
           ...(nextSlots ? { slots: nextSlots } : {}),
           ...(resolved.pr ? { pr: resolved.pr } : {}),
         },
-        { touchUpdatedAt: true },
+        { touchUpdatedAt },
       );
-    } else {
+    } else if (touchUpdatedAt) {
       writeSession(this.config.dataDir, { ...afterKill, updatedAt: nowIso() });
     }
     this.clearSidecarProcEntry(ownerId, sidecarName);
