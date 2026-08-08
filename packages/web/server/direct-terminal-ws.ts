@@ -1,6 +1,7 @@
-import { spawn, execFileSync } from "node:child_process";
-import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
+import type { IncomingMessage, Server } from "node:http";
 import { homedir, userInfo } from "node:os";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { findTmux, tmuxSessionExists, tmuxSocketArgs, validateSessionId } from "./tmux-utils.js";
 
@@ -37,16 +38,19 @@ interface TerminalSession {
   sessionId: string;
   pty: Pty;
   ws: WebSocket;
+  seenInputIds: Set<string>;
 }
 
-function parsePort(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
+interface ResizeMessage {
+  type: "resize";
+  cols?: number;
+  rows?: number;
 }
 
-function readHost(value: string | undefined, fallback: string): string {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : fallback;
+interface InputMessage {
+  type: "input";
+  id?: string;
+  data?: string;
 }
 
 function readSessionId(urlValue: string | undefined): string | null {
@@ -67,34 +71,56 @@ function createTerminalEnvironment(): Record<string, string> {
   };
 }
 
-export function createDirectTerminalServer(tmuxPath = findTmux()) {
-  const server = createServer((request, response) => {
-    if (request.url === "/health") {
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true }) + "\n");
+export const DIRECT_TERMINAL_WS_PATH = "/ws";
+
+type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+interface AttachOptions {
+  tmuxPath?: string;
+  /** Handles upgrades on paths other than `/ws` (e.g. Next HMR in dev). */
+  fallbackUpgrade?: UpgradeHandler;
+}
+
+export function attachDirectTerminalWebSocket(server: Server, options: AttachOptions = {}) {
+  const tmuxPath = options.tmuxPath ?? findTmux();
+  const wss = new WebSocketServer({ noServer: true });
+  const sessions = new Map<string, TerminalSession>();
+
+  // Single dispatcher owns all upgrade routing on this server: terminal traffic
+  // goes to the WS server, everything else is forwarded (dev HMR) or destroyed
+  // so stray Upgrade requests never leak a hanging socket.
+  const handleUpgrade: UpgradeHandler = (request, socket, head) => {
+    const { pathname } = new URL(request.url ?? "/", "ws://127.0.0.1");
+    if (pathname === DIRECT_TERMINAL_WS_PATH) {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+      });
       return;
     }
-
-    response.writeHead(404);
-    response.end("Not found");
-  });
-
-  const wss = new WebSocketServer({ server, path: "/ws" });
-  const sessions = new Map<string, TerminalSession>();
+    if (options.fallbackUpgrade) {
+      options.fallbackUpgrade(request, socket, head);
+      return;
+    }
+    socket.destroy();
+  };
+  server.on("upgrade", handleUpgrade);
 
   wss.on("connection", (ws, request) => {
     if (!ptySpawn) {
+      console.warn("[direct-terminal] close: node-pty not installed");
       ws.close(1011, "node-pty is not installed");
       return;
     }
 
     const sessionId = readSessionId(request.url);
     if (!sessionId || !validateSessionId(sessionId)) {
+      console.warn("[direct-terminal] close: invalid session id:", sessionId ?? "(none)");
       ws.close(1008, "Invalid session id");
       return;
     }
 
     if (!tmuxSessionExists(tmuxPath, sessionId)) {
+      console.warn("[direct-terminal] close: tmux session not found:", sessionId);
       ws.close(4004, "Session not found");
       return;
     }
@@ -102,8 +128,22 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
     // Ensure mouse mode is enabled for the session before attaching.
     // This allows xterm.js to correctly handle wheel scrolling as mouse sequences.
     try {
-      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
-      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "status", "off"]);
+      const socketArgs = tmuxSocketArgs();
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+      // Bind scroll-up to enter copy mode so wheel scrolls through history.
+      execFileSync(tmuxPath, [
+        ...socketArgs,
+        "bind-key",
+        "-n",
+        "WheelUpPane",
+        "if-shell",
+        "-F",
+        "-t",
+        "=",
+        "#{mouse_any_flag}",
+        "send-keys -M",
+        "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e; send-keys -M'",
+      ]);
     } catch {
       // Best effort only.
     }
@@ -116,7 +156,8 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       env: createTerminalEnvironment(),
     });
 
-    sessions.set(sessionId, { sessionId, pty, ws });
+    sessions.set(sessionId, { sessionId, pty, ws, seenInputIds: new Set() });
+    console.log("[direct-terminal] attached:", sessionId);
 
     pty.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -137,9 +178,27 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       const message = data.toString("utf8");
       if (message.startsWith("{")) {
         try {
-          const parsed = JSON.parse(message) as { type?: string; cols?: number; rows?: number };
+          const parsed = JSON.parse(message) as ResizeMessage | InputMessage;
           if (parsed.type === "resize" && parsed.cols && parsed.rows) {
             pty.resize(parsed.cols, parsed.rows);
+            return;
+          }
+          if (
+            parsed.type === "input" &&
+            typeof parsed.id === "string" &&
+            typeof parsed.data === "string"
+          ) {
+            const session = sessions.get(sessionId);
+            if (!session) {
+              return;
+            }
+            if (!session.seenInputIds.has(parsed.id)) {
+              session.seenInputIds.add(parsed.id);
+              pty.write(parsed.data);
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ack", id: parsed.id }));
+            }
             return;
           }
         } catch {
@@ -165,30 +224,15 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
   });
 
   return {
-    server,
     wss,
     close() {
+      server.off("upgrade", handleUpgrade);
       for (const session of sessions.values()) {
         session.ws.close();
         session.pty.kill();
       }
       sessions.clear();
       wss.close();
-      server.close();
     },
   };
-}
-
-const port = parsePort(
-  process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
-  14801,
-);
-const host = readHost(process.env["DIRECT_TERMINAL_BIND_HOST"], "127.0.0.1");
-const shouldListen = import.meta.url === new URL(`file://${process.argv[1]}`).href;
-
-if (shouldListen) {
-  const { server } = createDirectTerminalServer();
-  server.listen(port, host, () => {
-    process.stdout.write(`[direct-terminal] listening on ${host}:${port}\n`);
-  });
 }

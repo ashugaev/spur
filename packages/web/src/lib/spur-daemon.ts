@@ -50,11 +50,26 @@ function jsonHeaders(): Record<string, string> {
   return { "content-type": "application/json" };
 }
 
+export class SpurDaemonError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SpurDaemonError";
+    this.status = status;
+  }
+}
+
+export function isSpurDaemonError(error: unknown): error is SpurDaemonError {
+  return error instanceof SpurDaemonError;
+}
+
 export async function spurRequest(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${daemonBaseUrl()}${path}`, {
     ...init,
     headers: {
       ...(init?.headers ?? {}),
+      "x-spur-origin": "ui",
     },
     cache: "no-store",
   });
@@ -63,20 +78,30 @@ export async function spurRequest(path: string, init?: RequestInit): Promise<Res
 export async function spurRequestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await spurRequest(path, init);
   const text = await response.text();
-  const payload = text ? (JSON.parse(text) as unknown) : {};
+  let payload: unknown = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text) as unknown;
+    } catch {
+      if (response.ok) {
+        throw new Error("Spur daemon returned invalid JSON");
+      }
+      payload = { error: text };
+    }
+  }
 
   if (!response.ok) {
     const message =
       typeof payload === "object" && payload !== null && "error" in payload
         ? String((payload as { error?: unknown }).error ?? "Spur daemon request failed")
         : `Spur daemon request failed (${response.status})`;
-    throw new Error(message);
+    throw new SpurDaemonError(message, response.status);
   }
 
   return payload as T;
 }
 
-export function spurJsonInit(method: "POST", body?: unknown): RequestInit {
+export function spurJsonInit(method: "PATCH" | "POST", body?: unknown): RequestInit {
   return {
     method,
     headers: jsonHeaders(),

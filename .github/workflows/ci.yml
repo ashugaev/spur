@@ -14,35 +14,83 @@ concurrency:
 jobs:
   quality:
     name: Quality
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
-          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+      - run: pnpm test:deploy
+      - run: bash v2/test/npm-init.test.sh
 
-  runtime-integration:
-    name: Runtime Integration
-    runs-on: ubuntu-latest
+  playwright:
+    name: Playwright E2E
+    runs-on: self-hosted
+    needs: quality
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: pnpm
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/web exec playwright install chromium
+      - run: pnpm --dir packages/web build
+      - name: Select Playwright port
+        run: |
+          PORT="$(node -e 'const net = require("node:net"); const server = net.createServer(); server.listen(0, "127.0.0.1", () => { const address = server.address(); if (!address || typeof address === "string") process.exit(1); console.log(address.port); server.close(); });')"
+          echo "PLAYWRIGHT_PORT=$PORT" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BASE_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+      - name: Start Next.js
+        run: pnpm --dir packages/web exec next start -p "$PLAYWRIGHT_PORT" &
+      - name: Wait for server
+        run: npx wait-on "$PLAYWRIGHT_BASE_URL" --timeout 30000
+      - run: pnpm --dir packages/web exec playwright test
+
+  runtime-integration:
+    name: Runtime Integration
+    runs-on: self-hosted
+    needs: playwright
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir v2 build
-      - run: pnpm test:integration
+      - run: pnpm --dir v2 exec vitest run --config vitest.runtime.config.ts --reporter=verbose
+
+  real-agent-smoke:
+    name: Real-Agent Smoke
+    runs-on: self-hosted
+    needs: runtime-integration
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Start tmux server
+        run: tmux start-server
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir v2 build
+      - run: pnpm --dir v2 test:smoke

@@ -6,6 +6,7 @@ function session(overrides: Partial<SessionView>): SessionView {
   return {
     id: "api-1",
     project: "api",
+    workspaceId: "api-1",
     agent: "claude",
     prompt: "test",
     branch: "api-1",
@@ -20,8 +21,9 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    artifacts: [],
     services: [],
-    devServerAlive: false,
+    sidecars: [],
     ...overrides,
   };
 }

@@ -5,21 +5,25 @@ model: inherit
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
-# GitHub Operations via `gh`
+GITHUB OPERATIONS VIA gh
 
-## Default Close-Out
+CLOSE-OUT GATE, mandatory after any code change
 
-- If the current branch already has an open PR, commit local changes and push to that branch.
-- If the current branch has no PR, create one after local validation unless the user explicitly opts out.
+  1  Branch main/master/empty -> SKIPPED.
+  2  Uncommitted files -> route to developer for commit. Never auto-commit here.
+  3  git push -u origin "$(git branch --show-current)"
+  4  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE DRAFT PR below.
+  5  Return PR url.
 
-## Create Draft PR
+PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-```bash
-git push -u origin HEAD
+CREATE DRAFT PR
 
-gh pr create --draft \
-  --title "<type>: <description>" \
-  --body "$(cat <<'EOF'
+  git push -u origin HEAD
+
+  gh pr create --draft \
+    --title "<type>: <description>" \
+    --body "$(cat <<'EOF'
 ## Summary
 <what changed and why — 2-3 sentences>
 
@@ -34,74 +38,3 @@ gh pr create --draft \
 Closes #<issue-number>
 EOF
 )"
-```
-
-## PR Title Convention
-
-Format: `<type>: <description>`
-
-Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`
-
-If `AO_ISSUE_ID` is set, prefix with it: `<ISSUE-ID>: <type>: <description>`
-
-## Self-review
-
-```bash
-gh pr diff
-```
-
-Check for leftover debug code, missing error handling, unintended changes.
-
-## Check CI
-
-```bash
-gh pr checks
-```
-
-## View PR
-
-```bash
-gh pr view --json url,state,title,checks -q .
-```
-
-## List PRs
-
-```bash
-gh pr list
-```
-
-## Merge PR
-
-```bash
-gh pr merge --squash --auto
-```
-
-## Issues
-
-```bash
-gh issue list
-gh issue view <number>
-gh issue create --title "<title>" --body "<body>"
-```
-
-## Review
-
-```bash
-gh pr review --approve
-gh pr review --request-changes --body "<feedback>"
-gh pr review --comment --body "<comment>"
-```
-
-## Output Format (for PR creation)
-
-```
-## PR Created
-
-URL: <pr-url>
-Title: <title>
-Status: draft
-
-Checks:
-- self-review: OK | found issues: <list>
-- typecheck: OK | fixed and pushed
-```

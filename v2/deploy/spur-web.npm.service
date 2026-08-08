@@ -1,0 +1,29 @@
+# Spur web UI systemd user unit for the npm-installed layout.
+#
+# Pairs with spur-daemon.npm.service. The web bundle ships inside the
+# npm tarball under `<prefix>/lib/node_modules/@shugaev/spur/web` and serves
+# on 127.0.0.1. Runs the custom production server (dist-server/web-server.js),
+# which attaches the terminal WebSocket in-process on `/ws` (same port as the
+# web UI) — no separate direct-terminal unit or port. Install to
+# ~/.config/systemd/user/spur-web.service.
+
+[Unit]
+Description=Spur web UI (npm install)
+After=network.target spur-daemon.service
+Requires=spur-daemon.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PORT=5555
+Environment=WEB_HOST=127.0.0.1
+Environment=NODE_ENV=production
+EnvironmentFile=-%h/.spur/daemon.env
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/dist-server/web-server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

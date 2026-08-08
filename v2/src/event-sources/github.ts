@@ -1,260 +1,184 @@
 import { existsSync } from "node:fs";
-import { setInterval as startInterval, clearInterval } from "node:timers";
-import { gh } from "../gh.js";
+import { clearInterval, setInterval as startInterval } from "node:timers";
+import { logSpurEvent } from "../event-log.js";
+import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
 import {
-  deleteGitHubSourceSnapshot,
-  listSessions,
-  readGitHubSourceSnapshots,
-  writeGitHubSourceSnapshot,
-} from "../metadata.js";
-import type {
-  GitHubEventData,
-  GitHubSignalKind,
-  GitHubReviewDecision,
-  GitHubSignal,
-  GitHubSourceConfig,
-  SessionRecord,
+  GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  reviewSnapshotBaseline,
+  type GitHubCheck,
+  type GitHubPrSummary,
+  type GitHubSourceConfig,
+  type ReviewEventData,
+  type ReviewSignal,
+  type ReviewSnapshot,
+  type WorkItemEventData,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
+import {
+  clearGitHubMergeConflictRestoreReplay,
+  deleteReviewSourceSnapshot,
+  hasGitHubMergeConflictRestoreReplay,
+  listSessions,
+  readLifecycleBaselinedSessions,
+  readReviewSourceSnapshots,
+  readWorkItemRegistry,
+  recordLifecycleBaselinedSession,
+  removeLifecycleBaselinedSession,
+  writeReviewSourceSnapshot,
+} from "../metadata.js";
+import { hasRecentSessionUserAction } from "../user-action-log.js";
+import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
+import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
-export interface GitHubPrSummary {
+export {
+  shortText,
+  parseRepoFromUrl,
+  normalizeReviewDecision,
+  summarizeFailingCi,
+  hasMergeConflict,
+  resolvePrSummary,
+  resolveTrackedBranch,
+} from "../review-providers/github.js";
+
+export type { GitHubCheck, GitHubPrSummary };
+
+const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
+const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
+// After this many consecutive poll failures for the same session, its failures stop
+// counting toward the CI-active hysteresis flag (see consecutiveSessionPollErrors).
+const CI_HYSTERESIS_ERROR_TOLERANCE = 3;
+
+interface GitHubSearchPrItem {
   number: number;
   title: string;
   url: string;
-  reviewDecision: GitHubReviewDecision;
-  repo: string;
-  mergeable: string;
-  mergeStateStatus: string;
+  repository: { nameWithOwner: string };
 }
 
-export interface GitHubCheck {
-  name: string;
-  state: string;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type IssueComment = {
-  id: number;
-  body: string;
-  user?: { login?: string | null } | null;
-};
-
-type PullRequestReviewComment = {
-  id: number;
-  body: string;
-  path?: string | null;
-  line?: number | null;
-  user?: { login?: string | null } | null;
-};
-
-export function shortText(value: string, limit = 140): string {
-  const clean = value.replace(/\s+/g, " ").trim();
-  if (clean.length <= limit) return clean;
-  return `${clean.slice(0, limit - 1).trimEnd()}…`;
-}
-
-export function parseRepoFromUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/\d+/);
-    if (!match) return "";
-    return `${match[1]}/${match[2]}`;
-  } catch {
-    return "";
-  }
-}
-
-export function normalizeReviewDecision(value: string | null | undefined): GitHubReviewDecision {
-  const normalized = (value ?? "").trim().toUpperCase();
-  if (normalized === "APPROVED") return "approved";
-  if (normalized === "CHANGES_REQUESTED") return "changes_requested";
-  if (normalized === "REVIEW_REQUIRED") return "pending";
-  return "none";
-}
-
-export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
-  const failing = checks.filter((check) =>
-    ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(
-      check.state.toUpperCase(),
-    ),
-  );
-  return failing.length > 0
-    ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
-    : null;
-}
-
-function normalizeGitHubState(value: string | null | undefined): string {
-  return (value ?? "").trim().toUpperCase();
-}
-
-export function hasMergeConflict(pr: GitHubPrSummary): boolean {
+function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
+  if (!isRecord(value) || !isRecord(value.repository)) return false;
   return (
-    normalizeGitHubState(pr.mergeable) === "CONFLICTING" ||
-    normalizeGitHubState(pr.mergeStateStatus) === "DIRTY"
+    Number.isInteger(value.number) &&
+    typeof value.title === "string" &&
+    typeof value.url === "string" &&
+    typeof value.repository.nameWithOwner === "string"
   );
 }
 
-async function resolvePrSummary(
-  worktreePath: string,
-  branch: string,
-): Promise<GitHubPrSummary | null> {
-  const raw = await gh(
-    worktreePath,
-    "pr",
-    "list",
-    "--head",
-    branch,
-    "--state",
-    "all",
-    "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
-  );
-  const prs: Array<{
-    number: number;
-    title: string;
-    url: string;
-    reviewDecision?: string | null;
-    mergeable?: string | null;
-    mergeStateStatus?: string | null;
-  }> = JSON.parse(raw);
-  const pr = prs[0];
-  if (!pr) return null;
-  return {
-    number: pr.number,
-    title: pr.title,
-    url: pr.url,
-    reviewDecision: normalizeReviewDecision(pr.reviewDecision),
-    repo: parseRepoFromUrl(pr.url),
-    mergeable: pr.mergeable ?? "",
-    mergeStateStatus: pr.mergeStateStatus ?? "",
-  };
-}
-
-async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
+function parseGitHubSearchPrItems(raw: string): GitHubSearchPrItem[] {
+  let parsed: unknown;
   try {
-    const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
-    return JSON.parse(raw) as GitHubCheck[];
-  } catch {
-    return [];
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid GitHub search PR JSON: ${message}`, { cause: error });
   }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid GitHub search PR JSON: expected an array");
+  }
+
+  return parsed.map((item, index) => {
+    if (!isGitHubSearchPrItem(item)) {
+      throw new Error(`Invalid GitHub search PR item at index ${index}`);
+    }
+    return item;
+  });
 }
 
-async function fetchPagedArray<T>(
-  cwd: string,
-  pathBuilder: (page: number) => string,
-): Promise<T[]> {
-  const items: T[] = [];
-  for (let page = 1; ; page += 1) {
-    const raw = await gh(cwd, "api", pathBuilder(page));
-    const next = JSON.parse(raw) as T[];
-    items.push(...next);
-    if (next.length < 100) return items;
-  }
+function isGitHubBadCredentialsError(text: string): boolean {
+  return text.toLowerCase().includes("bad credentials");
 }
 
-async function fetchReviewSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<GitHubSignal[]> {
-  const comments = await fetchPagedArray<PullRequestReviewComment>(
-    worktreePath,
-    (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
-  );
-  const signals: GitHubSignal[] = [];
-  for (const comment of comments) {
-    const author = comment.user?.login ?? "unknown";
-    const location = comment.path
-      ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
-      : "";
-    signals.push({
-      key: `review-comment:${String(comment.id)}`,
-      kind: "comment",
-      text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
+function parseEpochResetMs(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value < 10_000_000_000 ? value * 1000 : value;
 }
 
-async function fetchIssueCommentSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<GitHubSignal[]> {
-  const comments = await fetchPagedArray<IssueComment>(
-    worktreePath,
-    (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
-  );
-  const signals: GitHubSignal[] = [];
-  for (const comment of comments) {
-    const author = comment.user?.login ?? "unknown";
-    signals.push({
-      key: `comment:${comment.id}`,
-      kind: "comment",
-      text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
+function parseStringResetMs(value: string): number | null {
+  const numeric = Number(value);
+  const fromEpoch = parseEpochResetMs(numeric);
+  if (fromEpoch !== null) return fromEpoch;
+  const fromDate = Date.parse(value);
+  return Number.isNaN(fromDate) ? null : fromDate;
 }
 
-async function collectSignals(
-  session: SessionRecord,
-): Promise<{ data: GitHubEventData; snapshot: Map<string, GitHubSignal> } | null> {
-  const pr = await resolvePrSummary(session.worktreePath, session.branch);
-  if (!pr) return null;
-
-  const [checks, reviewSignals, commentSignals] = await Promise.all([
-    fetchChecks(session.worktreePath, pr.number),
-    pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
-    pr.repo
-      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
-      : Promise.resolve([]),
-  ]);
-
-  const ciText = summarizeFailingCi(checks);
-  const snapshot = new Map<string, GitHubSignal>();
-  if (pr.reviewDecision === "changes_requested") {
-    snapshot.set("changes_requested", {
-      key: "changes_requested",
-      kind: "changes_requested",
-      text: "Changes requested in review.",
-    });
+function findResetMs(value: unknown): number | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const resetMs = findResetMs(item);
+      if (resetMs !== null) return resetMs;
+    }
+    return null;
   }
-  if (ciText) {
-    snapshot.set("ci_failed", {
-      key: "ci_failed",
-      kind: "ci_failed",
-      text: ciText,
-    });
-  }
-  if (hasMergeConflict(pr)) {
-    snapshot.set("merge_conflict", {
-      key: "merge_conflict",
-      kind: "merge_conflict",
-      text: "Merge conflicts are blocking this PR.",
-    });
+  if (typeof value !== "object" || value === null) {
+    return null;
   }
 
-  for (const signal of [...reviewSignals, ...commentSignals]) {
-    snapshot.set(signal.key, signal);
+  if ("resetAt" in value && typeof value.resetAt === "string") {
+    const resetMs = parseStringResetMs(value.resetAt);
+    if (resetMs !== null) return resetMs;
+  }
+  if ("reset_at" in value && typeof value.reset_at === "string") {
+    const resetMs = parseStringResetMs(value.reset_at);
+    if (resetMs !== null) return resetMs;
+  }
+  if ("reset" in value) {
+    if (typeof value.reset === "number") {
+      const resetMs = parseEpochResetMs(value.reset);
+      if (resetMs !== null) return resetMs;
+    }
+    if (typeof value.reset === "string") {
+      const resetMs = parseStringResetMs(value.reset);
+      if (resetMs !== null) return resetMs;
+    }
+  }
+  if ("x-ratelimit-reset" in value && typeof value["x-ratelimit-reset"] === "string") {
+    const resetMs = parseStringResetMs(value["x-ratelimit-reset"]);
+    if (resetMs !== null) return resetMs;
   }
 
-  return {
-    data: {
-      sessionId: session.id,
-      prNumber: pr.number,
-      prTitle: pr.title,
-      signals: [],
-    },
-    snapshot,
-  };
+  for (const item of Object.values(value)) {
+    const resetMs = findResetMs(item);
+    if (resetMs !== null) return resetMs;
+  }
+  return null;
+}
+
+function parseResetDeadlineMs(text: string, nowMs: number): number | null {
+  const candidates = [
+    text.trim(),
+    ...text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("{") || line.startsWith("[")),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("{") && !candidate.startsWith("[")) continue;
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const resetMs = findResetMs(parsed);
+      if (resetMs !== null && resetMs > nowMs) return resetMs;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
-  data: Omit<GitHubEventData, "signals">,
-  signals: GitHubSignal[],
+  data: Omit<ReviewEventData, "signals">,
+  signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<GitHubSignalKind, GitHubSignal[]>();
+  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {
@@ -265,87 +189,459 @@ function emitSignalsByKind(
   }
 
   for (const [kind, items] of grouped) {
-    deps.emit<GitHubEventData>(`github:${kind}`, {
+    deps.emit<ReviewEventData>(`github:${kind}`, {
       ...data,
       signals: items,
     });
   }
 }
+export function tokenizeSearchQuery(query: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let hasContent = false;
+  for (const char of query) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      hasContent = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(char)) {
+      if (hasContent) {
+        tokens.push(current);
+        current = "";
+        hasContent = false;
+      }
+      continue;
+    }
+    current += char;
+    hasContent = true;
+  }
+  if (hasContent) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
+async function pollWorkItems(
+  deps: SourceStartDeps<GitHubSourceConfig>,
+  query: string,
+  seenWorkItems: Set<string>,
+) {
+  const raw = await gh(
+    process.cwd(),
+    "search",
+    "prs",
+    ...tokenizeSearchQuery(query),
+    "--state",
+    "open",
+    deps.config.draft === true ? "--draft=true" : "--draft=false",
+    "--json",
+    "number,title,url,repository",
+    "--limit",
+    "100",
+  );
+  const items = parseGitHubSearchPrItems(raw);
+  const candidates = items.map((item) => {
+    const repo = item.repository.nameWithOwner;
+    const data: WorkItemEventData = {
+      externalId: `${repo}#${item.number}`,
+      url: item.url,
+      number: item.number,
+      title: item.title,
+      repo,
+    };
+    return { repo, externalId: data.externalId, data };
+  });
+  emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
+}
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
-  const snapshots = readGitHubSourceSnapshots(deps.dataDir, deps.projectId, deps.sourceId);
+  const snapshots = readReviewSourceSnapshots(
+    deps.dataDir,
+    "github",
+    deps.projectId,
+    deps.sourceId,
+  );
+  const seenWorkItems = deps.config.query
+    ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
+    : null;
+  const lifecycleBaselined = readLifecycleBaselinedSessions(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+  );
+  const adaptive = deps.config.adaptivePoll;
+  const attemptedSessionIds = new Set<string>();
+  // Tracks consecutive poll failures per session (catch-block errors or a failed CI
+  // checks fetch). A session erroring on *every* cycle (persistent 404/permission
+  // issue, not rate-limit/bad-creds — those are handled separately) would otherwise
+  // never produce a "clean" cycle, latching lastCycleCiActive true forever and
+  // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
+  // stop counting toward the hysteresis flag (still logged, just excluded from it).
+  const consecutiveSessionPollErrors = new Map<string, number>();
+  let nextEligiblePollAtMs = 0;
+  let lastCycleCiActive = false;
   let stopped = false;
   let polling = false;
+  let pollingWorkItems = false;
+  let pollingCycle = false;
+  let cooldownUntilMs = 0;
+  let rateLimitFailures = 0;
+  let authDisabled = false;
+  let authWarned = false;
 
-  const poll = async (emitInitial: boolean): Promise<void> => {
-    if (stopped || deps.signal.aborted || polling) return;
+  const shouldSkipGitHubCalls = (): boolean => authDisabled || Date.now() < cooldownUntilMs;
+
+  // Records a poll failure for a session and reports whether it should still count
+  // toward this cycle's CI-active hysteresis flag. Returns false once the session has
+  // failed more than CI_HYSTERESIS_ERROR_TOLERANCE cycles in a row, so a persistently
+  // erroring session can't wedge the flag true forever.
+  const countsTowardCiHysteresis = (sessionId: string): boolean => {
+    const count = (consecutiveSessionPollErrors.get(sessionId) ?? 0) + 1;
+    consecutiveSessionPollErrors.set(sessionId, count);
+    return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
+  };
+
+  const listPollableSessions = () =>
+    listSessions(deps.dataDir).filter(
+      (session) =>
+        session.project === deps.projectId &&
+        session.status === "running" &&
+        Boolean(session.worktreePath) &&
+        existsSync(session.worktreePath),
+    );
+
+  const shouldPollThisTick = (): boolean => {
+    if (!adaptive) return true;
+    if (Date.now() >= nextEligiblePollAtMs) return true;
+    if (lastCycleCiActive) return true;
+    for (const session of listPollableSessions()) {
+      const existing = snapshots.get(session.id);
+      if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
+        continue;
+      if (!attemptedSessionIds.has(session.id)) return true;
+      if (
+        hasRecentSessionUserAction(
+          deps.dataDir,
+          session.id,
+          ADAPTIVE_ACTIVITY_ACTIONS,
+          Date.now() - adaptive.activeGraceMs,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const handleGitHubSuppressionError = (error: unknown): boolean => {
+    const message = extractGithubErrorText(error);
+    if (isGitHubBadCredentialsError(message)) {
+      authDisabled = true;
+      if (!authWarned) {
+        authWarned = true;
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] GitHub polling disabled: Bad credentials`,
+        );
+        logSpurEvent(deps.dataDir, {
+          event: "source.auth.disabled",
+          level: "error",
+          projectId: deps.projectId,
+          sourceId: deps.sourceId,
+          message: `GitHub polling disabled for ${deps.projectId}/${deps.sourceId}: Bad credentials`,
+        });
+      }
+      return true;
+    }
+    if (!isGitHubRateLimitError(message)) {
+      return false;
+    }
+
+    rateLimitFailures += 1;
+    const nowMs = Date.now();
+    const resetMs = parseResetDeadlineMs(message, nowMs);
+    const fallbackMs = Math.min(
+      RATE_LIMIT_BACKOFF_BASE_MS * 2 ** (rateLimitFailures - 1),
+      RATE_LIMIT_BACKOFF_MAX_MS,
+    );
+    cooldownUntilMs = resetMs ?? nowMs + fallbackMs;
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] GitHub rate limit hit; polling paused until ${new Date(
+        cooldownUntilMs,
+      ).toISOString()}`,
+    );
+    return true;
+  };
+
+  const pollSignals = async (emitInitial: boolean): Promise<void> => {
+    if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
-      const sessions = listSessions(deps.dataDir).filter(
-        (session) =>
-          session.project === deps.projectId &&
-          session.status === "running" &&
-          Boolean(session.worktreePath) &&
-          existsSync(session.worktreePath),
-      );
-      const currentSessionIds = new Set<string>();
+      const sessions = listPollableSessions();
+      const currentSessionIds = new Set(sessions.map((session) => session.id));
+      let cycleCiActive = false;
+      let cycleHadPollError = false;
+      const pollableSessions = [];
 
       for (const session of sessions) {
-        currentSessionIds.add(session.id);
+        // Skip only when the session is bound to a PR and the snapshot's terminal
+        // signal is *for that PR*: terminal state, no new signals possible, and
+        // re-polling burns the shared gh rate limit. Scoped by PR number so a
+        // rebind to a new PR (`spur slots --link pr=...`) is always polled again —
+        // a stale terminal snapshot from the PR the session used to be bound to
+        // must never mute it. Unbound sessions are always polled (the only local
+        // authority for "the current PR" is `session.pr`; see decision 2).
+        // The snapshot persists to disk and reloads at startup, so the skip is
+        // sticky across restarts: a CLOSED PR later reopened won't be re-detected
+        // while the session stays bound to that PR number (no `reopened` lifecycle
+        // kind exists). MERGED is unconditionally terminal.
+        const existing = snapshots.get(session.id);
+        if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
+          continue;
+        }
+        pollableSessions.push(session);
+      }
+
+      const collectedBySession = await collectGitHubSignalsBatch(
+        pollableSessions,
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+      );
+      for (const session of pollableSessions) {
         try {
-          const collected = await collectSignals(session);
+          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+          );
+          const batchResult = collectedBySession.get(session.id);
+          if (batchResult?.status !== "skipped" || batchResult.reason !== "capacity") {
+            attemptedSessionIds.add(session.id);
+          }
+          if (!batchResult || batchResult.status === "skipped") continue;
+          if (batchResult.status === "error") throw batchResult.error;
+          const collected = batchResult.collected;
+          if (collected?.ciActive) {
+            cycleCiActive = true;
+          }
+          // A failed CI-check fetch is not a clean observation: it must not count
+          // toward letting this cycle lower the CI-active hysteresis flag (see the
+          // cycleHadPollError comment below), even though collectSignals itself
+          // returned successfully. `!collected` (PR genuinely gone/not found) is a
+          // clean observation, not a failure — only a failed checks fetch resets the
+          // session's error streak below.
+          if (collected?.ciCheckFetchFailed) {
+            if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
+          } else {
+            consecutiveSessionPollErrors.delete(session.id);
+          }
           if (!collected) {
             snapshots.delete(session.id);
-            deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id);
+            deleteReviewSourceSnapshot(
+              deps.dataDir,
+              "github",
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            if (restoreReplayRequested) {
+              clearGitHubMergeConflictRestoreReplay(
+                deps.dataDir,
+                deps.projectId,
+                deps.sourceId,
+                session.id,
+              );
+            }
             continue;
           }
 
-          const previous = snapshots.get(session.id);
+          const previous = reviewSnapshotBaseline(
+            snapshots.get(session.id),
+            collected.data.prNumber,
+          );
           const next = collected.snapshot;
           const changed = [...next.values()].filter((signal) => {
             const prior = previous?.get(signal.key);
             return !prior || prior.text !== signal.text;
           });
 
-          snapshots.set(session.id, next);
-          writeGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id, next);
-          if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
-            emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
+          // Built once, handed to both the in-memory map and the on-disk write so
+          // the two copies cannot desync.
+          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          snapshots.set(session.id, nextSnapshot);
+          writeReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+            nextSnapshot,
+          );
+
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (mergeConflictSignal) {
+              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
+            }
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            continue;
+          }
+
+          const baselined = lifecycleBaselined.has(session.id);
+          if (!baselined) {
+            recordLifecycleBaselinedSession(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            lifecycleBaselined.add(session.id);
+          }
+          const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
+          const toEmit = baselined
+            ? candidates
+            : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
+          if (toEmit.length > 0) {
+            emitSignalsByKind(deps, collected.data, toEmit);
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          if (handleGitHubSuppressionError(error)) return;
+          if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
+          const message = extractGithubErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
+          logSpurEvent(deps.dataDir, {
+            event: "source.poll.error",
+            level: "error",
+            projectId: deps.projectId,
+            sourceId: deps.sourceId,
+            sessionId: session.id,
+            message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
+          });
         }
       }
+
+      // A per-session poll error means this cycle's CI observation is incomplete, not
+      // that CI stopped: only let the cycle *lower* the hysteresis flag to false when
+      // every session was actually observed cleanly. A freshly observed active check
+      // still raises it regardless.
+      lastCycleCiActive = cycleCiActive || (cycleHadPollError && lastCycleCiActive);
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
-          deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+          deleteReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
+          clearGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
+          removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+          lifecycleBaselined.delete(sessionId);
         }
+      }
+
+      for (const sessionId of [...attemptedSessionIds]) {
+        if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);
+      }
+
+      for (const sessionId of [...consecutiveSessionPollErrors.keys()]) {
+        if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
       }
     } finally {
       polling = false;
     }
   };
 
+  const syncWorkItems = async (): Promise<void> => {
+    if (
+      !deps.config.query ||
+      !seenWorkItems ||
+      stopped ||
+      deps.signal.aborted ||
+      pollingWorkItems ||
+      shouldSkipGitHubCalls()
+    ) {
+      return;
+    }
+    pollingWorkItems = true;
+    try {
+      await pollWorkItems(deps, deps.config.query, seenWorkItems);
+    } catch (error) {
+      if (handleGitHubSuppressionError(error)) return;
+      const message = extractGithubErrorText(error);
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
+      );
+      logSpurEvent(deps.dataDir, {
+        event: "source.work_item_poll.error",
+        level: "error",
+        projectId: deps.projectId,
+        sourceId: deps.sourceId,
+        message: `Work-item poll failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+      });
+    } finally {
+      pollingWorkItems = false;
+    }
+  };
+
+  const pollCycle = async (emitInitial: boolean): Promise<void> => {
+    if (pollingCycle) return;
+    pollingCycle = true;
+    // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
+    // already active going into this cycle, no real polling happened, so the
+    // adaptive deadline must not move — otherwise it silently consumes the
+    // slow window during an outage instead of resuming promptly once it lifts.
+    const skippedByCooldown = shouldSkipGitHubCalls();
+    const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
+    try {
+      await runGhPollCycle(
+        { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
+        async () => {
+          await pollSignals(emitInitial);
+          if (shouldSkipGitHubCalls()) return;
+          await syncWorkItems();
+          if (!shouldSkipGitHubCalls()) {
+            rateLimitFailures = 0;
+          }
+        },
+      );
+    } finally {
+      if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
+        nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+      }
+      pollingCycle = false;
+    }
+  };
+
   const timer = startInterval(() => {
-    void poll(false);
+    if (!shouldPollThisTick()) return;
+    void pollCycle(false);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void poll(false);
+      void pollCycle(false);
     } else {
-      await poll(false);
+      await pollCycle(false);
     }
   }
-
-  deps.logger.info?.(
-    `[source:${deps.projectId}/${deps.sourceId}] github started: intervalMs=${deps.config.intervalMs}, events="github:*", runOnStart=${deps.config.runOnStart}`,
-  );
 
   return {
     stop(): void {
@@ -355,14 +651,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void poll(true);
+            void pollCycle(true);
           },
         }
       : {}),
   };
 }
 
-export const githubSourceModule: SourceModule = {
+export const githubSourceModule: SourceModule<GitHubSourceConfig> = {
   type: "github",
   start: startGitHubSource,
 };

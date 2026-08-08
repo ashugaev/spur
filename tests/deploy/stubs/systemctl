@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Deterministic systemctl stub for deploy tests.
+#
+# Records every restart/start/stop verb against a unit as a line
+# "<verb> <unit>" appended to $SPUR_DEPLOY_STATE. `is-active --quiet <unit>`
+# replays the log and exits 0 iff the last verb seen for that unit is
+# start or restart (i.e. the unit is "active"); 1 otherwise.
+set -euo pipefail
+
+state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
+
+verb="$1"
+shift || true
+
+case "$verb" in
+restart | start | stop)
+  for unit in "$@"; do
+    printf '%s %s\n' "$verb" "$unit" >>"$state"
+  done
+  ;;
+is-active)
+  # Skip the --quiet flag if present.
+  [[ "${1:-}" == "--quiet" ]] && shift
+  unit="$1"
+  last=""
+  if [[ -f "$state" ]]; then
+    last=$(grep -E " ${unit}$" "$state" | tail -n1 | cut -d' ' -f1) || true
+  fi
+  [[ "$last" == "start" || "$last" == "restart" ]] && exit 0
+  exit 1
+  ;;
+show)
+  # Only ever invoked as: show -p MainPID --value <unit>
+  if [[ "$1" == "-p" && "$2" == "MainPID" && "$4" == "spur-daemon.service" ]]; then
+    printf '%s\n' "${SPUR_DEPLOY_DAEMON_MAIN_PID:-0}"
+  fi
+  ;;
+daemon-reload)
+  : # no-op
+  ;;
+*)
+  : # ignore other verbs
+  ;;
+esac

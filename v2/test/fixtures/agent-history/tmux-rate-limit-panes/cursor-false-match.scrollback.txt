@@ -1,0 +1,12 @@
+    Edited cursor-jsonl-state.test.ts +5 -1
+
+    ▎        limited: true,
+    ▎        reason: "cursor out of usage",
+    ▎      });
+    ▎-     expect(classifyCursorJsonlState([record!], NOW)).toBe("waiting");
+    ▎+     expect(record).toBeDefined();
+    ▎+     if (!record) {
+    ▎+       return;
+    ▎+     }
+    ▎+     expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
+    ▎    });

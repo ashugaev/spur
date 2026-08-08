@@ -1,124 +1,163 @@
 ---
-name: ao-skill-writer
+name: skill-writer
 description: Write and review agent content — skills, agent definitions, prompts, workflow docs. Optimized for token economy, precision, and zero filler. Use when creating or editing SKILL.md, agent .md files, or orchestrator instructions.
 ---
 
-# Agent Content Writer
+AGENT CONTENT WRITER
 
-Write content that agents consume — skills, agent definitions, prompts, workflow configs.
-Every token competes for context window space. Treat each line as code, not prose.
+Every line costs context. Treat each as code.
 
-## Principles
 
-### 1. Token cost justification
-Challenge every sentence: "Does this justify its token cost?"
-If the agent already knows it — delete it. If it's obvious from context — delete it.
+FORMAT
 
-### 2. Imperative, third-person
-Write commands, not descriptions.
-- "Extract the schema" — not "You should extract the schema"
-- "Run lint" — not "Please run the linting tool"
+Markdown file, minimal markdown. Frontmatter is yaml, machinery not style.
 
-### 3. No filler
-Remove: "please", "kindly", "if you could", "in order to", "make sure to", "it is important to".
-Collapse: "thorough and comprehensive" → "thorough". "Each and every" → "each".
+  Body is blank lines, two-space indent, UPPERCASE labels.
+  Banned in a body: # heading, ** bold, | table, ``` fence, emoji.
+  Data needing shape: align columns with spaces.
+  One screen per file. Longer, split to references/.
 
-### 4. One term per concept
-Pick a single term for each concept and use it everywhere. Never alternate between synonyms.
+Lists use `-`. Number a list only when the number carries meaning: an
+ordered procedure, or a rank a later line refers back to. Unordered set
+of rules or options takes `-`, never 1 2 3.
 
-### 5. Specificity over explanation
-Show the exact command, format, or template. Don't explain what it does — the agent will figure it out.
+NEVER DUPLICATE WHAT THE AGENT CAN LOOK UP
 
-### 6. Degrees of freedom
-Match instruction detail to task fragility:
+  An external tool's help is not skill content. Name the tool, state the
+  project-specific decision, and stop. The agent runs `<tool> --help`.
+  No command catalogue for `gh`, `git`, `aws`, `docker`, `pnpm`.
+  A rule file is not a store for code constants. Point at the file that
+  defines them. Copy a value in only when no file defines it.
+  Same for config keys, schemas, and route lists: reference the doc or the
+  source, never restate it. A restated value goes stale silently.
+  Keep the overview: what this repo is, where things live, which decision
+  is non-obvious. Cut what the agent derives by reading.
 
-| Freedom | When | Format |
-|---------|------|--------|
-| High | Multiple valid approaches | Text instructions |
-| Medium | Preferred pattern exists | Pseudocode with parameters |
-| Low | Variation causes bugs | Exact script/command |
 
-## SKILL.md structure
+Command text is data, not prose. The format law stops at it.
 
-```
-skill-name/
-├── SKILL.md              # < 500 lines. Navigation + procedures only
-├── scripts/              # Deterministic operations. Tiny CLIs
-├── references/           # Schemas, cheatsheets. One level deep
-└── assets/               # Templates, static files
-```
+  One command per line. Never join two commands with a separator.
+  Copy-pasteable block keeps its own whitespace. A heredoc terminator
+  sits at column 0 and stays there, unindented, fence or no fence.
+  Reformatting a command is a defect even when the prose around it improves.
 
-### Frontmatter
-```yaml
----
-name: kebab-case-name        # must match directory name
-description: <capability in third person>. Use when <trigger>. Don't use for <negative trigger>.
----
-```
 
-Description is the routing signal — agents decide to load based on it alone. Be specific. Include negative triggers.
+CAVEMAN, HARD
 
-### Body rules
-- Step-by-step numbering for procedures
-- Decision trees with explicit branches ("If X → step N. Otherwise → step M")
-- Templates in `assets/`, not inline (unless < 5 lines)
-- Relative paths with forward slashes
-- No README.md, CHANGELOG.md, or documentation files
+Verb first. Number over adjective. One rule per line.
 
-## Agent definition structure
+  Drop articles a, an, the wherever sense survives.
+  Drop copulas where a colon or a column carries the meaning.
+  Say the number, not the adjective. "under 200 lines", never "large".
+  Name the command, never describe the command.
 
-```yaml
----
-name: agent-name
-description: <what it does>. <when to use>.
-model: inherit | opus | sonnet
-tools: Read, Grep, Glob, Bash
----
-```
+Banned outright:
 
-### Body rules
-- Open with one-line role statement
-- Constraints section — non-negotiable rules
-- Process section — numbered steps
-- Output section — exact format template
-- Hard rules — list of rejection criteria
-- No "Your Role" bullet lists restating the description
-- No explanations of why rules exist
+  hedges       might, may, could, generally, typically, usually, often,
+               tends to, in most cases, as needed, where appropriate
+  degree       very, quite, fairly, rather, really, simply, just
+  meta         note that, keep in mind, remember, be aware, it is worth,
+               this means, in other words
+  justifying   because, since, in order to, so that, this allows, which
+               enables, the reason
+  transitions  however, moreover, additionally, furthermore, overall
+  courtesy     please, kindly, make sure to, it is important to
 
-## Writing checklist
+Deletion test, apply to every sentence: cut it, reread the file. No
+instruction changed, it stays cut.
 
-Before finalizing any agent content:
+Grep before returning:
 
-- [ ] Every paragraph justifies its token cost
-- [ ] No filler words or politeness markers
-- [ ] Commands in imperative form
-- [ ] Consistent terminology throughout
-- [ ] Output format is a concrete template, not a description
-- [ ] No explanation of concepts the agent already knows
-- [ ] SKILL.md < 500 lines
-- [ ] Subdirectories one level deep only
-- [ ] Frontmatter description includes positive and negative triggers
+  grep -niE 'because|in order to|note that|keep in mind|it is important|might|may |could |generally|typically|usually|simply|just |very |really' <file>
 
-## Anti-patterns
 
-| Pattern | Fix |
-|---------|-----|
-| "You are a senior X specializing in Y" | Skip — set role in one line or description |
-| "It is important to ensure that..." | Delete — just state the rule |
-| Explaining what a tool does | Delete — agent knows its tools |
-| Listing obvious steps ("Read the file, then...") | Skip obvious steps |
-| Inline templates > 5 lines | Move to `assets/` |
-| Multiple paragraphs before first actionable step | Lead with the procedure |
-| "Please", "kindly", "if possible" | Delete |
-| Synonym rotation (file/document, create/generate) | Pick one term |
+PRINCIPLES
 
-## Compression techniques
+  Token cost    every sentence justifies itself. Delete what the agent
+                already knows or reads from context.
+  One term      never alternate synonyms.
+  Specificity   show the exact command or format, not a description of it.
 
-When editing existing content:
+Detail matches fragility:
 
-1. Remove politeness markers and qualifiers
-2. Collapse redundant phrases ("in order to" → "to")
-3. Replace paragraphs with tables where structure is uniform
-4. Replace descriptions with templates/examples
-5. Merge related short sections
-6. Delete sections that restate the frontmatter description
+  many valid approaches    text
+  preferred pattern        pseudocode with parameters
+  variation causes bugs    exact script or command
+
+
+SKILL LAYOUT
+
+  SKILL.md      under 500 lines. Navigation and procedure only.
+  scripts/      deterministic operations, tiny CLIs
+  references/   schemas, cheatsheets. One level deep.
+  assets/       templates, static files
+
+  No README, CHANGELOG, or doc file beside SKILL.md.
+  Repo-root paths only, never ../../
+  Template over 5 lines goes to assets/
+
+Frontmatter, the only yaml:
+
+  name          kebab-case, matches the directory name
+  description   capability in third person. Use when <trigger>.
+                Don't use for <negative trigger>.
+
+Description is the routing signal. Agents load on it alone.
+
+
+AGENT DEFINITION
+
+Frontmatter adds:
+
+  model   inherit | opus | sonnet
+  tools   Read, Grep, Glob, Bash
+
+Body order: one-line role, constraints, numbered process, output template,
+hard rules. No "Your Role" list, no rationale prose.
+
+
+ANTI-PATTERNS
+
+  "You are a senior X..."               one-line role, or just the description
+  "It is important to ensure that..."   delete, state the rule
+  Explaining what a tool does           delete, the agent knows its tools
+  Listing obvious steps                 skip
+  Inline template over 5 lines          move to assets/
+  Paragraphs before the first action    lead with the procedure
+  Synonym rotation                      pick one term
+  Section restating the description     delete
+  Bold label                            Label: rest
+  Heading, table, or fence in a body    UPPERCASE label, aligned columns
+
+
+CHECKLIST
+
+  Every sentence survives the deletion test
+  Verb first, no banned word from CAVEMAN, HARD
+  Consistent terminology
+  Output is a concrete template, not a description
+  Nothing explained that the agent already knows
+  Under 500 lines, subdirs one level deep
+  Description carries positive and negative triggers
+  FORMAT law obeyed, grep clean
+
+
+CAVEMAN GATE
+
+Invoked by manager when a diff touches skills, agents, AGENTS.md,
+CLAUDE.md, or .cursor/BUGBOT.md.
+
+  1  Read the diff for changed prose only. Code and identifiers untouched.
+  2  Run the CAVEMAN, HARD grep on every changed file.
+  3  Apply the checklist.
+  4  Return APPROVED or CHANGES_REQUESTED with file:line findings.
+
+Never APPROVE:
+
+- a banned word from CAVEMAN, HARD
+- a sentence that passes the deletion test
+- duplication of a rule already in AGENTS.md always-on rules
+- an external tool's help text, or a code constant a source file defines
+- a heading, bold, pipe table, or fence in a body
+
+One grep hit is CHANGES_REQUESTED. No taste calls, no warnings-only pass.

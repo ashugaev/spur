@@ -1,0 +1,477 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  assertAttachmentsWithinLimit,
+  ATTACHMENTS_TOO_LARGE_MESSAGE,
+  computeScaledDimensions,
+  DOWNSCALE_BYTE_THRESHOLD,
+  DOWNSCALE_MAX_DIMENSION,
+  fileAttachmentsFromFiles,
+  filesFromDataTransfer,
+  imageFilesFromDataTransfer,
+  MAX_ATTACHMENT_COUNT,
+  MAX_ATTACHMENT_DECODED_BYTES,
+  mergeAttachmentsWithinLimit,
+  shouldDownscaleImage,
+  type FileAttachment,
+} from "@/lib/file-attachments";
+
+function attachment(name: string, dataLength: number): FileAttachment {
+  return {
+    file: new File([name], name, { type: "image/png" }),
+    preview: `data:image/png;base64,${"a".repeat(dataLength)}`,
+  };
+}
+
+type TestDataTransferItem = {
+  getAsFile: () => File | null;
+  kind: string;
+  type: string;
+};
+
+function dataTransfer(files: File[], items: TestDataTransferItem[] = []): DataTransfer {
+  return { files, items } as unknown as DataTransfer;
+}
+
+describe("image attachments", () => {
+  it("reads pasted images from clipboard items when files is empty", () => {
+    const image = new File(["PNG"], "clipboard.png", { type: "image/png" });
+
+    const files = imageFilesFromDataTransfer(
+      dataTransfer(
+        [],
+        [
+          { getAsFile: () => image, kind: "file", type: "image/png" },
+          { getAsFile: () => null, kind: "string", type: "text/plain" },
+        ],
+      ),
+    );
+
+    expect(files).toEqual([image]);
+  });
+
+  it("ignores text-only clipboard items", () => {
+    const files = imageFilesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => null, kind: "string", type: "text/plain" }]),
+    );
+
+    expect(files).toEqual([]);
+  });
+
+  it("deduplicates images exposed through both files and items", () => {
+    const image = new File(["PNG"], "clipboard.png", { type: "image/png" });
+
+    const files = imageFilesFromDataTransfer(
+      dataTransfer([image], [{ getAsFile: () => image, kind: "file", type: "image/png" }]),
+    );
+
+    expect(files).toEqual([image]);
+  });
+
+  it("names unnamed clipboard images", () => {
+    const image = new File(["PNG"], "", { type: "image/png" });
+
+    const files = imageFilesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => image, kind: "file", type: "image/png" }]),
+    );
+
+    expect(files[0]?.name).toBe("clipboard-image-1.png");
+  });
+});
+
+describe("file attachments", () => {
+  it("accepts a pdf clipboard item", () => {
+    const pdf = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+
+    const files = filesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => pdf, kind: "file", type: "application/pdf" }]),
+    );
+
+    expect(files).toEqual([pdf]);
+  });
+
+  it("accepts a text/plain clipboard item", () => {
+    const text = new File(["hello"], "notes.txt", { type: "text/plain" });
+
+    const files = filesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => text, kind: "file", type: "text/plain" }]),
+    );
+
+    expect(files).toEqual([text]);
+  });
+
+  it("ignores non-file (string) clipboard items", () => {
+    const files = filesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => null, kind: "string", type: "text/plain" }]),
+    );
+
+    expect(files).toEqual([]);
+  });
+
+  it("deduplicates files exposed through both files and items", () => {
+    const pdf = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+
+    const files = filesFromDataTransfer(
+      dataTransfer([pdf], [{ getAsFile: () => pdf, kind: "file", type: "application/pdf" }]),
+    );
+
+    expect(files).toEqual([pdf]);
+  });
+
+  it("auto-names a nameless clipboard blob with no usable extension as .bin", () => {
+    const blob = new File(["data"], "", { type: "" });
+
+    const files = filesFromDataTransfer(
+      dataTransfer([], [{ getAsFile: () => blob, kind: "file", type: "" }]),
+    );
+
+    expect(files[0]?.name).toBe("clipboard-file-1.bin");
+  });
+});
+
+describe("shouldDownscaleImage", () => {
+  it("skips images within both the dimension and byte budget", () => {
+    expect(shouldDownscaleImage("image/png", 800, 600, 100_000)).toBe(false);
+  });
+
+  it("downscales when width exceeds the max dimension", () => {
+    expect(shouldDownscaleImage("image/jpeg", DOWNSCALE_MAX_DIMENSION + 1, 600, 100_000)).toBe(
+      true,
+    );
+  });
+
+  it("downscales when height exceeds the max dimension", () => {
+    expect(shouldDownscaleImage("image/webp", 600, DOWNSCALE_MAX_DIMENSION + 1, 100_000)).toBe(
+      true,
+    );
+  });
+
+  it("downscales when byte size exceeds the threshold even if dimensions are small", () => {
+    expect(shouldDownscaleImage("image/png", 400, 400, DOWNSCALE_BYTE_THRESHOLD + 1)).toBe(true);
+  });
+
+  it("never downscales animated gifs", () => {
+    expect(
+      shouldDownscaleImage(
+        "image/gif",
+        DOWNSCALE_MAX_DIMENSION * 4,
+        DOWNSCALE_MAX_DIMENSION * 4,
+        DOWNSCALE_BYTE_THRESHOLD * 4,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("computeScaledDimensions", () => {
+  it("leaves dimensions untouched when already within bounds", () => {
+    expect(computeScaledDimensions(1200, 800, 1600)).toEqual({ width: 1200, height: 800 });
+  });
+
+  it("scales a landscape image down to fit the max dimension", () => {
+    expect(computeScaledDimensions(3200, 1600, 1600)).toEqual({ width: 1600, height: 800 });
+  });
+
+  it("scales a portrait image down to fit the max dimension", () => {
+    expect(computeScaledDimensions(1600, 3200, 1600)).toEqual({ width: 800, height: 1600 });
+  });
+
+  it("never scales a dimension down to zero", () => {
+    expect(computeScaledDimensions(1, 10_000, 1600)).toEqual({ width: 1, height: 1600 });
+  });
+});
+
+describe("assertAttachmentsWithinLimit", () => {
+  it("does not throw when the encoded payload is within the limit", () => {
+    expect(() =>
+      assertAttachmentsWithinLimit([{ name: "a.png", data: "a".repeat(100) }]),
+    ).not.toThrow();
+  });
+
+  // Each attachment below stays at or under the per-file decoded cap (item 4)
+  // so these tests isolate the aggregate check; sizing one attachment past
+  // the aggregate cap alone would also trip the per-file cap first.
+  const AT_CAP_BASE64_LENGTH = Math.floor((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3);
+
+  it("throws the shared oversize message when the aggregate exceeds the limit though every attachment is within the per-file cap", () => {
+    const encoded = [
+      { name: "a.png", data: "a".repeat(AT_CAP_BASE64_LENGTH) },
+      { name: "b.png", data: "b".repeat(AT_CAP_BASE64_LENGTH) },
+      { name: "c.png", data: "c".repeat(AT_CAP_BASE64_LENGTH) },
+    ];
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  });
+
+  it("sums bytes across multiple attachments", () => {
+    const each = 4_000_000; // safely under the per-file cap on its own
+    const encoded = [
+      { name: "a.png", data: "a".repeat(each) },
+      { name: "b.png", data: "b".repeat(each) },
+      { name: "c.png", data: "c".repeat(each) },
+      { name: "d.png", data: "d".repeat(each) },
+    ];
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  });
+
+  it("throws naming the offending file when one attachment's decoded size exceeds the per-file cap", () => {
+    // v2/src/session-service.ts rejects a single attachment whose decoded
+    // bytes exceed 5 MB even if the aggregate request is small.
+    const oversizedBase64Length = Math.ceil((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3) + 100;
+    const encoded = [
+      { name: "small.png", data: "a".repeat(100) },
+      { name: "huge-screenshot.gif", data: "b".repeat(oversizedBase64Length) },
+    ];
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(/huge-screenshot\.gif/);
+  });
+
+  it("does not throw when a single attachment's decoded size is exactly at the per-file cap", () => {
+    const atCapBase64Length = Math.floor((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3);
+    const encoded = [{ name: "a.png", data: "a".repeat(atCapBase64Length) }];
+    expect(() => assertAttachmentsWithinLimit(encoded)).not.toThrow();
+  });
+
+  it("throws when the attachment count exceeds the server's per-request cap", () => {
+    const encoded = Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, i) => ({
+      name: `a${i}.png`,
+      data: "a".repeat(10),
+    }));
+    expect(() => assertAttachmentsWithinLimit(encoded)).toThrow(/too many attachments/i);
+  });
+
+  it("does not throw at exactly the attachment count cap", () => {
+    const encoded = Array.from({ length: MAX_ATTACHMENT_COUNT }, (_, i) => ({
+      name: `a${i}.png`,
+      data: "a".repeat(10),
+    }));
+    expect(() => assertAttachmentsWithinLimit(encoded)).not.toThrow();
+  });
+});
+
+describe("mergeAttachmentsWithinLimit", () => {
+  it("commits the merge and reports no rejection when within the limit", () => {
+    const current = [attachment("a.png", 100)];
+    const incoming = [attachment("b.png", 100)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toEqual([...current, ...incoming]);
+    expect(result.rejectedMessage).toBeNull();
+  });
+
+  it("rejects the merge and keeps the current selection when the count cap would be exceeded", () => {
+    const current = Array.from({ length: MAX_ATTACHMENT_COUNT }, (_, i) =>
+      attachment(`a${i}.png`, 10),
+    );
+    const incoming = [attachment("one-too-many.png", 10)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toMatch(/too many attachments/i);
+  });
+
+  it("rejects the merge and keeps the current selection when a single incoming file exceeds the per-file cap", () => {
+    const current: FileAttachment[] = [];
+    const oversizedBase64Length = Math.ceil((MAX_ATTACHMENT_DECODED_BYTES * 4) / 3) + 100;
+    const incoming = [attachment("huge.gif", oversizedBase64Length)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toMatch(/huge\.gif/);
+  });
+
+  it("rejects the merge and keeps the current selection when the aggregate cap would be exceeded", () => {
+    const each = 4_000_000; // safely under the per-file cap on its own
+    const current = [attachment("a.png", each), attachment("b.png", each)];
+    const incoming = [attachment("c.png", each), attachment("d.png", each)];
+
+    const result = mergeAttachmentsWithinLimit(current, incoming);
+
+    expect(result.attachments).toBe(current);
+    expect(result.rejectedMessage).toBe(ATTACHMENTS_TOO_LARGE_MESSAGE);
+  });
+});
+
+// jsdom has no canvas backend (no native `canvas` package installed), so
+// HTMLCanvasElement.prototype.getContext/toBlob and Image decoding are
+// stubbed here to exercise the re-encode path. Without these stubs,
+// downscaleImageFile always hits its own decode-failure fallback (confirmed:
+// URL.createObjectURL is undefined in this jsdom setup), which only proves
+// the fallback branch, not the actual re-encode/rename behavior.
+class FakeImage {
+  static nextWidth = 100;
+  static nextHeight = 100;
+  static shouldFail = false;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  naturalWidth = 0;
+  naturalHeight = 0;
+
+  set src(_value: string) {
+    queueMicrotask(() => {
+      if (FakeImage.shouldFail) {
+        this.onerror?.();
+        return;
+      }
+      this.naturalWidth = FakeImage.nextWidth;
+      this.naturalHeight = FakeImage.nextHeight;
+      this.onload?.();
+    });
+  }
+}
+
+function stubCanvasEncoding(resultForType: (type: string) => Blob | null): void {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    drawImage: () => undefined,
+    fillRect: () => undefined,
+    set fillStyle(_value: string) {},
+  } as unknown as CanvasRenderingContext2D);
+  vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function (
+    callback: BlobCallback,
+    type?: string,
+  ) {
+    callback(resultForType(type ?? ""));
+  });
+}
+
+describe("fileAttachmentsFromFiles (canvas boundary stubbed)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("Image", FakeImage as unknown as typeof Image);
+    URL.createObjectURL = vi.fn(() => "blob:fake-url");
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
+    FakeImage.shouldFail = false;
+    FakeImage.nextWidth = 100;
+    FakeImage.nextHeight = 100;
+  });
+
+  // Larger than any stubbed re-encoded blob in these tests, so the
+  // smaller-of-the-two-wins check (item 2) doesn't mask the re-encode itself.
+  const LARGE_ORIGINAL_BYTES = "x".repeat(5000);
+
+  it("re-encodes an oversized image to webp and renames the extension to match", async () => {
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    stubCanvasEncoding((type) =>
+      type === "image/webp" ? new Blob(["webp-bytes"], { type: "image/webp" }) : null,
+    );
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file.name).toBe("screenshot.webp");
+    expect(attachment?.file.type).toBe("image/webp");
+    expect(attachment?.file).not.toBe(original);
+  });
+
+  it("falls back to jpeg and a .jpg extension when the browser silently downgrades webp encoding", async () => {
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    stubCanvasEncoding((type) => {
+      // A browser without webp encoding support silently returns a png blob
+      // instead of the requested type per the canvas spec.
+      if (type === "image/webp") return new Blob(["png-bytes"], { type: "image/png" });
+      if (type === "image/jpeg") return new Blob(["jpeg-bytes"], { type: "image/jpeg" });
+      return null;
+    });
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file.name).toBe("screenshot.jpg");
+    expect(attachment?.file.type).toBe("image/jpeg");
+  });
+
+  it("keeps the original file when the re-encoded blob is not smaller", async () => {
+    // A flat, small screenshot can come out bigger after lossy re-encoding —
+    // the original must win rather than adopting a larger/blurrier result.
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    stubCanvasEncoding((type) =>
+      type === "image/webp" ? new Blob(["a".repeat(200)], { type: "image/webp" }) : null,
+    );
+    const original = new File(["small"], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+  });
+
+  it("fills a white background before the jpeg fallback but not before the webp attempt", async () => {
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    const fillRectCallsByCanvas: boolean[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function () {
+      const callIndex = fillRectCallsByCanvas.push(false) - 1;
+      return {
+        drawImage: () => undefined,
+        fillRect: () => {
+          fillRectCallsByCanvas[callIndex] = true;
+        },
+        set fillStyle(_value: string) {},
+      } as unknown as CanvasRenderingContext2D;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function (
+      callback: BlobCallback,
+      type?: string,
+    ) {
+      // Simulate no webp support (silently returns png on the unfilled
+      // webp-attempt canvas) so the jpeg fallback canvas gets exercised too.
+      if (type === "image/webp") return callback(new Blob(["png"], { type: "image/png" }));
+      callback(new Blob(["jpeg-bytes"], { type: "image/jpeg" }));
+    });
+    const original = new File([LARGE_ORIGINAL_BYTES], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file.type).toBe("image/jpeg");
+    // First canvas (webp attempt) must stay transparent; only the second
+    // (jpeg fallback) is filled white before drawing.
+    expect(fillRectCallsByCanvas).toEqual([false, true]);
+  });
+
+  it("falls back to the original file when the canvas 2d context is unavailable", async () => {
+    FakeImage.nextWidth = DOWNSCALE_MAX_DIMENSION * 2;
+    FakeImage.nextHeight = DOWNSCALE_MAX_DIMENSION;
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const original = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+  });
+
+  it("falls back to the original file when image decoding fails", async () => {
+    FakeImage.shouldFail = true;
+    const original = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+  });
+
+  it("leaves an image within bounds untouched and never touches the canvas", async () => {
+    FakeImage.nextWidth = 800;
+    FakeImage.nextHeight = 600;
+    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, "getContext");
+    const original = new File(["small"], "avatar.png", { type: "image/png" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+    expect(getContextSpy).not.toHaveBeenCalled();
+  });
+
+  it("leaves a non-image file untouched", async () => {
+    const original = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+
+    const [attachment] = await fileAttachmentsFromFiles([original]);
+
+    expect(attachment?.file).toBe(original);
+  });
+});

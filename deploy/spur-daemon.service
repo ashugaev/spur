@@ -1,0 +1,45 @@
+# Spur daemon systemd unit template
+#
+# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
+# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-daemon.service.
+# Store secrets in /etc/spur/daemon.env (mode 0600, owner root:root).
+# Required: AZURE_OPENAI_API_KEY=<value>
+
+[Unit]
+Description=Spur daemon
+After=network.target
+
+[Service]
+Type=simple
+User={{SPUR_SERVICE_USER}}
+WorkingDirectory={{SPUR_ROOT}}
+Environment=HOME={{SPUR_SERVICE_HOME}}
+Environment=PATH={{SPUR_SERVICE_HOME}}/.local/bin:{{SPUR_SERVICE_HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPUR_TMUX_SYSTEMD_SCOPE=auto
+EnvironmentFile=/etc/spur/daemon.env
+ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
+Restart=always
+RestartSec=3
+
+# Daemon cgroup guardrails. Direct-fallback tmux processes share these limits;
+# auto user scopes live outside this unit's cgroup. Host-memory sampling remains
+# the fleet-wide pressure signal. The High/Max gap preserves daemon control-path
+# room, and the swap limit bounds direct-fallback swap use.
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=2G
+
+# The daemon spawns tmux sessions that must outlive daemon restarts.
+# KillMode=process is the actual guarantee: a daemon restart stops only the
+# daemon node process, never the tmux sessions or agents running inside it.
+# SPUR_TMUX_SYSTEMD_SCOPE=auto is a best-effort addition on top of that: it
+# launches new tmux sessions through `systemd-run --user --scope` so they also
+# live outside this unit's cgroup, but only engages when a per-user systemd
+# manager is available for the service user (loginctl enable-linger); absent
+# that, it falls back to direct tmux inside the cgroup and KillMode=process is
+# what protects sessions. After restart the daemon re-discovers sessions via
+# applyConfig() -> resumeSessionDelivery().
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

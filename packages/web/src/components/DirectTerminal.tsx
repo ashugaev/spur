@@ -1,91 +1,526 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type ClipboardEvent as ReactClipboardEvent,
+} from "react";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { useInputHistory } from "@/hooks/useInputHistory";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
-import type { ITheme, Terminal as TerminalType } from "xterm";
+import type { Terminal as TerminalType } from "xterm";
+import { getTerminalTheme } from "@/design/colors";
 import { cn } from "@/lib/cn";
+import { getAgentHotkeys } from "@/lib/agent-hotkeys";
+import { getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  assertAttachmentsWithinLimit,
+  encodeFileAttachments,
+  imageFilesFromDataTransfer,
+  fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
+  type FileAttachment,
+} from "@/lib/file-attachments";
+import { TerminalStatusDot } from "@/components/TerminalStatusDot";
+import { ToastViewport } from "@/components/Toast";
+import { useToasts } from "@/hooks/useToasts";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { useTheme } from "@/lib/theme-context";
+import type { SpurSessionState } from "@/lib/types";
 
 interface DirectTerminalProps {
   sessionId: string;
-  label?: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
+  agent?: AgentName;
+  model?: string;
+  activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
 }
 
 interface TerminalLocation {
   protocol: string;
-  hostname: string;
+  host: string;
 }
 
-interface RuntimeTerminalConfig {
-  directTerminalPort?: unknown;
+/** Pixels of touch movement that count as one scroll line. */
+const TOUCH_SCROLL_THRESHOLD = 20;
+const RECONNECT_DELAY_MS = 1_000;
+const INPUT_ACK_TIMEOUT_MS = 600;
+const INPUT_RETRY_DELAY_MS = 200;
+const INPUT_MAX_ATTEMPTS = 4;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
+const TERMINAL_ARROW_CONTROLS = [
+  { label: "Arrow Left", iconPath: "M15 19l-7-7 7-7", sequence: "\x1b[D" },
+  { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
+  { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
+  { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
+
+function isRetryableClose(code: number): boolean {
+  return code !== 1000 && code !== 1008 && code !== 4004;
 }
 
-const terminalTheme: ITheme = {
-  background: "#0a0a0f",
-  foreground: "#d4d4d8",
-  cursor: "#5b7ef8",
-  cursorAccent: "#0a0a0f",
-  selectionBackground: "rgba(91, 126, 248, 0.3)",
-  selectionInactiveBackground: "rgba(128, 128, 128, 0.2)",
-  black: "#1a1a24",
-  red: "#ef4444",
-  green: "#22c55e",
-  yellow: "#f59e0b",
-  blue: "#5b7ef8",
-  magenta: "#a371f7",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#50506a",
-  brightRed: "#f87171",
-  brightGreen: "#4ade80",
-  brightYellow: "#fbbf24",
-  brightBlue: "#7b9cfb",
-  brightMagenta: "#c084fc",
-  brightCyan: "#67e8f9",
-  brightWhite: "#eeeef5",
-};
-
-function normalizePortValue(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65_535) return undefined;
-  return String(parsed);
+function PencilIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M4 20h4l10-10-4-4L4 16v4z" />
+      <path d="M14 6l4 4" />
+    </svg>
+  );
 }
 
-async function readTerminalPort(): Promise<string> {
-  try {
-    const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = (await response.json()) as RuntimeTerminalConfig;
-    return normalizePortValue(payload.directTerminalPort) ?? "14801";
-  } catch {
-    return "14801";
-  }
+function CancelIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
 }
 
-export function buildDirectTerminalWsUrl(
-  location: TerminalLocation,
-  port: string,
-  sessionId: string,
-): string {
+function QueueIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M5 7h8" />
+      <path d="M5 12h8" />
+      <path d="M5 17h5" />
+      <path d="M17 9v8" />
+      <path d="M14 14l3 3 3-3" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ path }: { path: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d={path} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FourDirectionArrowIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 5v14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 12h14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 9l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 15l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 8l-4 4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M15 8l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function buildSubmittedTextPayloads(text: string): string[] {
+  return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
+}
+
+export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: string): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.hostname}:${port}/ws?session=${encodeURIComponent(sessionId)}`;
+  return `${protocol}//${location.host}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
-export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const websocketRef = useRef<WebSocket | null>(null);
-  const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Build an SGR mouse scroll sequence.
+ * Button 64 = scroll up, 65 = scroll down.  Position (1,1) is fine — tmux
+ * only cares about the button for WheelUpPane / WheelDownPane.
+ */
+function sgrScroll(up: boolean): string {
+  const button = up ? 64 : 65;
+  return `\x1b[<${button};1;1M`;
+}
 
-  const sendTerminalInput = (data: string) => {
-    if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+interface InputAckMessage {
+  type: "ack";
+  id?: string;
+}
+
+interface PendingInputAck {
+  attempts: number;
+  data: string;
+  id: string;
+  ackTimer: number | null;
+  retryTimer: number | null;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+export function DirectTerminal({
+  sessionId,
+  apiSessionId,
+  agentInputEnabled = true,
+  agent = "claude",
+  model,
+  activity,
+  title,
+  onClose,
+}: DirectTerminalProps) {
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const terminalInstanceRef = useRef<TerminalType | null>(null);
+  const hotkeyMenuRef = useRef<HTMLDivElement>(null);
+  const arrowMenuRef = useRef<HTMLDivElement>(null);
+  const websocketRef = useRef<WebSocket | null>(null);
+  const inputSeqRef = useRef(0);
+  const pendingAckRef = useRef<PendingInputAck | null>(null);
+  const hotkeys = getAgentHotkeys(agent);
+  const { theme } = useTheme();
+  // Always holds the latest theme so the async terminal construction below
+  // reads the current value even if the user toggled while `import("xterm")`
+  // was still pending (the mount effect closes over a possibly-stale `theme`).
+  const themeRef = useRef(theme);
+  const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">(
+    "connecting",
+  );
+  const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [arrowsOpen, setArrowsOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
+  const { toasts, showErrorToast, dismissToast } = useToasts();
+  const sessionApiId = apiSessionId ?? sessionId;
+
+  const sendTerminalInput = useCallback((data: string): boolean => {
+    if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
     websocketRef.current.send(data);
-  };
+    return true;
+  }, []);
+  const clearPendingAckTimers = useCallback((pending: PendingInputAck) => {
+    if (pending.ackTimer !== null) {
+      window.clearTimeout(pending.ackTimer);
+      pending.ackTimer = null;
+    }
+    if (pending.retryTimer !== null) {
+      window.clearTimeout(pending.retryTimer);
+      pending.retryTimer = null;
+    }
+  }, []);
+
+  const rejectPendingAck = useCallback(
+    (pending: PendingInputAck, message: string) => {
+      clearPendingAckTimers(pending);
+      if (pendingAckRef.current?.id === pending.id) {
+        pendingAckRef.current = null;
+      }
+      pending.reject(new Error(message));
+    },
+    [clearPendingAckTimers],
+  );
+
+  const sendWithAck = useCallback(
+    (data: string): Promise<void> => {
+      const id = `${Date.now()}-${inputSeqRef.current++}`;
+
+      return new Promise<void>((resolve, reject) => {
+        const existing = pendingAckRef.current;
+        if (existing) {
+          reject(new Error("Failed to insert transcription"));
+          return;
+        }
+        const pending: PendingInputAck = {
+          attempts: 0,
+          data,
+          id,
+          ackTimer: null,
+          retryTimer: null,
+          resolve,
+          reject,
+        };
+
+        const trySend = () => {
+          pending.attempts += 1;
+          if (pending.attempts > INPUT_MAX_ATTEMPTS) {
+            rejectPendingAck(pending, "Failed to insert transcription");
+            return;
+          }
+          const socket = websocketRef.current;
+          if (
+            !socket ||
+            socket.readyState === WebSocket.CLOSED ||
+            socket.readyState === WebSocket.CLOSING
+          ) {
+            rejectPendingAck(pending, "Failed to insert transcription");
+            return;
+          }
+
+          if (socket.readyState !== WebSocket.OPEN) {
+            pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+            return;
+          }
+
+          socket.send(JSON.stringify({ type: "input", id: pending.id, data: pending.data }));
+          pending.ackTimer = window.setTimeout(() => {
+            pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+          }, INPUT_ACK_TIMEOUT_MS);
+        };
+
+        pendingAckRef.current = pending;
+        trySend();
+      });
+    },
+    [rejectPendingAck],
+  );
+
+  const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
+  const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
+
+  const addVoiceImageFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
+
+  const sendSessionMessage = useCallback(
+    async (
+      text: string,
+      attachments: FileAttachment[],
+      options: { queue: boolean; interrupt?: boolean },
+    ) => {
+      const encodedAttachments = encodeFileAttachments(attachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
+      const message = text.trim();
+      if (!message && encodedAttachments.length === 0) return;
+      const body: Record<string, unknown> = {
+        message,
+        queue: options.queue,
+      };
+      if (encodedAttachments.length > 0) {
+        body.attachments = encodedAttachments;
+      }
+      if (options.interrupt !== undefined) {
+        body.interrupt = options.interrupt;
+      }
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const payload = await readResponsePayload(response);
+        if (response.status === 409) {
+          showErrorToast("Message not sent — this session is currently rate limited");
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to send session message"));
+      }
+      setSubmitError(null);
+    },
+    [sessionApiId, showErrorToast],
+  );
+
+  const openAttachmentDraft = useCallback(
+    (files: File[]) => {
+      if (!agentInputEnabled) return;
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setVoiceAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) {
+            showErrorToast(rejectedMessage);
+            return;
+          }
+          voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
+        })
+        .catch(() => {});
+    },
+    [agentInputEnabled, showErrorToast, voice],
+  );
+
+  const handleTerminalPaste = useCallback(
+    (event: ReactClipboardEvent<HTMLDivElement>) => {
+      if (!agentInputEnabled) return;
+      const files = imageFilesFromDataTransfer(event.clipboardData);
+      if (files.length === 0) return;
+      event.preventDefault();
+      openAttachmentDraft(files);
+    },
+    [agentInputEnabled, openAttachmentDraft],
+  );
+
+  useEffect(() => {
+    const target = terminalRef.current;
+    if (!target || !agentInputEnabled) return;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!(event.target instanceof Node) || !target.contains(event.target)) return;
+      const dataTransfer = event.clipboardData;
+      const files = imageFilesFromDataTransfer(dataTransfer);
+      if (files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAttachmentDraft(files);
+    };
+    target.addEventListener("paste", onPaste, { capture: true });
+    document.addEventListener("paste", onPaste, { capture: true });
+    return () => {
+      target.removeEventListener("paste", onPaste, { capture: true });
+      document.removeEventListener("paste", onPaste, { capture: true });
+    };
+  }, [agentInputEnabled, openAttachmentDraft]);
+
+  const submitVoiceDraft = useCallback(
+    async (text: string) => {
+      if (voiceAttachments.length > 0) {
+        await sendSessionMessage(text, voiceAttachments, { queue: false, interrupt: true });
+        setVoiceAttachments([]);
+        if (text.trim()) {
+          draftHistory.saveEntry(text);
+        }
+        return;
+      }
+      const socket = websocketRef.current;
+      if (
+        !socket ||
+        socket.readyState === WebSocket.CLOSING ||
+        socket.readyState === WebSocket.CLOSED
+      ) {
+        throw new Error("Failed to insert transcription");
+      }
+      setError(null);
+      setSubmitError(null);
+      for (const payload of buildSubmittedTextPayloads(text)) {
+        await sendWithAck(payload);
+      }
+      draftHistory.saveEntry(text);
+    },
+    [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+  );
+
+  const queueVoiceDraft = useCallback(
+    async (text: string) => {
+      await sendSessionMessage(text, voiceAttachments, { queue: true });
+      setVoiceAttachments([]);
+      if (text.trim()) {
+        draftHistory.saveEntry(text);
+      }
+    },
+    [draftHistory, sendSessionMessage, voiceAttachments],
+  );
+
+  const sendHotkey = useCallback(
+    async (hotkey: (typeof hotkeys)[number]) => {
+      try {
+        if (hotkey.submit) {
+          setSubmitError(null);
+          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
+            await sendWithAck(payload);
+          }
+          return;
+        }
+        sendTerminalInput(hotkey.sequence);
+      } catch (hotkeyError) {
+        setSubmitError(
+          hotkeyError instanceof Error ? hotkeyError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [sendTerminalInput, sendWithAck],
+  );
+
+  const submitSlash = useCallback(
+    async (text: string) => {
+      try {
+        setSubmitError(null);
+        for (const payload of buildSubmittedTextPayloads(text)) {
+          await sendWithAck(payload);
+        }
+      } catch (slashError) {
+        setSubmitError(
+          slashError instanceof Error ? slashError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [sendWithAck],
+  );
+
+  useEffect(() => {
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (hotkeysOpen && !hotkeyMenuRef.current?.contains(event.target)) {
+        setHotkeysOpen(false);
+      }
+      if (arrowsOpen && !arrowMenuRef.current?.contains(event.target)) {
+        setArrowsOpen(false);
+      }
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (hotkeysOpen) setHotkeysOpen(false);
+      if (arrowsOpen) setArrowsOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [arrowsOpen, hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -94,24 +529,31 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let terminal: TerminalType | null = null;
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
+    let binaryDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
+    let touchCleanup: (() => void) | null = null;
+    let reconnectTimer: number | null = null;
+    let websocket: WebSocket | null = null;
+    let closingForUnmount = false;
+
     Promise.all([
       import("xterm").then((module) => module.Terminal),
       import("@xterm/addon-fit").then((module) => module.FitAddon),
     ])
-      .then(async ([Terminal, FitAddon]) => {
+      .then(([Terminal, FitAddon]) => {
         if (!mounted || !terminalRef.current) return;
 
         terminal = new Terminal({
           cursorBlink: true,
-          fontSize: 13,
+          fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
-          theme: terminalTheme,
+          theme: getTerminalTheme(themeRef.current),
           minimumContrastRatio: 1,
           scrollback: 10_000,
           allowProposedApi: true,
         });
+        terminalInstanceRef.current = terminal;
 
         fit = new FitAddon();
         terminal.loadAddon(fit);
@@ -141,52 +583,50 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         terminal.focus();
         fit.fit();
 
-        const port = await readTerminalPort();
-        if (!mounted) return;
+        // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
+        // using native drag semantics, so finger movement matches terminal content movement.
+        const touchTarget =
+          terminalRef.current.querySelector(".xterm-screen") ?? terminalRef.current;
+        let touchStartY = 0;
+        let touchAccum = 0;
 
-        const wsUrl = buildDirectTerminalWsUrl(window.location, port, sessionId);
-        const websocket = new WebSocket(wsUrl);
-        websocketRef.current = websocket;
-        websocket.binaryType = "arraybuffer";
-
-        websocket.onopen = () => {
-          if (!terminal) return;
-          setStatus("connected");
-          setError(null);
-          websocket.send(
-            JSON.stringify({
-              type: "resize",
-              cols: terminal.cols,
-              rows: terminal.rows,
-            }),
-          );
+        const onTouchStart = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          touchStartY = te.touches[0].clientY;
+          touchAccum = 0;
         };
 
-        websocket.onmessage = (event) => {
-          const data =
-            typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
-          terminal?.write(data);
-        };
+        const onTouchMove = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          const dy = touchStartY - te.touches[0].clientY;
+          touchAccum += dy;
+          touchStartY = te.touches[0].clientY;
 
-        websocket.onerror = () => {
-          setStatus("error");
-          setError("Terminal connection failed");
-        };
+          const lines = Math.trunc(touchAccum / TOUCH_SCROLL_THRESHOLD);
+          if (lines === 0) return;
+          touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
 
-        websocket.onclose = (event) => {
-          if (!mounted) return;
-          setStatus("error");
-          setError(event.reason || "Terminal disconnected");
-        };
-
-        inputDisposable = terminal.onData((data) => {
-          if (websocket.readyState === WebSocket.OPEN) {
-            websocket.send(data);
+          const up = lines < 0;
+          const seq = sgrScroll(up);
+          const count = Math.abs(lines);
+          for (let i = 0; i < count; i++) {
+            sendTerminalInput(seq);
           }
-        });
+          te.preventDefault();
+        };
 
-        resizeHandler = () => {
-          if (!terminal || !fit || websocket.readyState !== WebSocket.OPEN) return;
+        touchTarget.addEventListener("touchstart", onTouchStart, { passive: true });
+        touchTarget.addEventListener("touchmove", onTouchMove, { passive: false });
+
+        touchCleanup = () => {
+          touchTarget.removeEventListener("touchstart", onTouchStart);
+          touchTarget.removeEventListener("touchmove", onTouchMove);
+        };
+
+        const sendResize = () => {
+          if (!terminal || !fit || websocket?.readyState !== WebSocket.OPEN) return;
           fit.fit();
           websocket.send(
             JSON.stringify({
@@ -197,7 +637,127 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           );
         };
 
+        const clearReconnectTimer = () => {
+          if (reconnectTimer === null) return;
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        };
+
+        const scheduleReconnect = (message: string) => {
+          if (!mounted || reconnectTimer !== null || closingForUnmount) return;
+          setStatus("reconnecting");
+          setError(message);
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, RECONNECT_DELAY_MS);
+        };
+
+        const connect = () => {
+          if (!mounted || !terminal) return;
+          const readyState = websocket?.readyState;
+          if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
+          clearReconnectTimer();
+
+          setStatus((current) =>
+            current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
+          );
+
+          const nextSocket = new WebSocket(buildDirectTerminalWsUrl(window.location, sessionId));
+          websocket = nextSocket;
+          websocketRef.current = nextSocket;
+          nextSocket.binaryType = "arraybuffer";
+
+          nextSocket.onopen = () => {
+            if (websocket !== nextSocket || !terminal) return;
+            setStatus("connected");
+            setError(null);
+            terminal.focus();
+            sendResize();
+          };
+
+          nextSocket.onmessage = (event) => {
+            if (websocket !== nextSocket) return;
+            const data =
+              typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+            if (typeof data === "string" && data.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(data) as InputAckMessage;
+                if (parsed.type === "ack" && typeof parsed.id === "string") {
+                  const pending = pendingAckRef.current;
+                  if (pending?.id === parsed.id) {
+                    clearPendingAckTimers(pending);
+                    pendingAckRef.current = null;
+                    pending.resolve();
+                  }
+                  return;
+                }
+              } catch {
+                // Fall through to terminal output.
+              }
+            }
+            terminal?.write(data);
+          };
+
+          nextSocket.onerror = () => {
+            if (websocket !== nextSocket || !mounted) return;
+            setStatus("reconnecting");
+            setError("Terminal connection failed. Retrying…");
+          };
+
+          nextSocket.onclose = (event) => {
+            if (websocket === nextSocket) {
+              websocket = null;
+              websocketRef.current = null;
+            }
+            if (!mounted || closingForUnmount) return;
+
+            const message = event.reason || "Terminal disconnected";
+            if (isRetryableClose(event.code)) {
+              scheduleReconnect(`${message}. Retrying…`);
+              return;
+            }
+
+            setStatus("error");
+            setError(message);
+          };
+        };
+
+        connect();
+
+        resizeHandler = () => {
+          sendResize();
+        };
+
+        const maybeRefreshConnection = () => {
+          if (document.visibilityState === "hidden") return;
+          connect();
+        };
+
+        inputDisposable = terminal.onData((data) => {
+          if (websocket?.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
+        binaryDisposable = terminal.onBinary((data) => {
+          if (websocket?.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
         window.addEventListener("resize", resizeHandler);
+        window.addEventListener("focus", maybeRefreshConnection);
+        window.addEventListener("online", maybeRefreshConnection);
+        document.addEventListener("visibilitychange", maybeRefreshConnection);
+
+        touchCleanup = () => {
+          touchTarget.removeEventListener("touchstart", onTouchStart);
+          touchTarget.removeEventListener("touchmove", onTouchMove);
+          window.removeEventListener("focus", maybeRefreshConnection);
+          window.removeEventListener("online", maybeRefreshConnection);
+          document.removeEventListener("visibilitychange", maybeRefreshConnection);
+        };
       })
       .catch(() => {
         setStatus("error");
@@ -206,48 +766,80 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
 
     return () => {
       mounted = false;
+      closingForUnmount = true;
+      const pending = pendingAckRef.current;
+      if (pending) {
+        rejectPendingAck(pending, "Failed to insert transcription");
+      }
+      pendingAckRef.current = null;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
+      touchCleanup?.();
       inputDisposable?.dispose();
+      binaryDisposable?.dispose();
       websocketRef.current?.close();
+      websocketRef.current = null;
       terminal?.dispose();
+      terminalInstanceRef.current = null;
     };
-  }, [sessionId]);
+  }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
 
-  const statusDotClass =
-    status === "connected"
-      ? "bg-[var(--color-status-ready)]"
-      : status === "error"
-        ? "bg-[var(--color-status-error)]"
-        : "bg-[var(--color-status-attention)] animate-[pulse_1.5s_ease-in-out_infinite]";
+  // Swap the live xterm theme when the UI theme changes, without tearing
+  // down the websocket connection (that effect intentionally excludes `theme`).
+  useEffect(() => {
+    themeRef.current = theme;
+    const instance = terminalInstanceRef.current;
+    if (!instance) return;
+    instance.options.theme = getTerminalTheme(theme);
+  }, [theme]);
 
-  const statusText =
-    status === "connected" ? "Connected" : status === "error" ? (error ?? "Error") : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
-    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+  const terminalFloatingControlIconButtonClass = cn(
+    terminalControlIconButtonClass,
+    "bg-[var(--color-bg-base)]",
+  );
+  const terminalFloatingVoiceButtonClass = cn(
+    terminalFloatingControlIconButtonClass,
+    "border-[var(--color-status-error)] text-[var(--color-status-error)]",
+  );
+  const terminalActiveVoiceButtonClass =
+    "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[#0a0a0f]">
-      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
-        <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
-        <div className="min-w-0">
-          <div className="truncate font-mono text-[11px] text-[var(--color-accent)]">
-            {label ?? sessionId}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
+      <div
+        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
+        data-testid="direct-terminal-header"
+      >
+        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+        {title ? (
+          <div
+            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+            data-testid="direct-terminal-header-title"
+            title={title}
+          >
+            {title}
           </div>
-          {title ? (
-            <div className="truncate text-[11px] text-[var(--color-text-secondary)]">{title}</div>
-          ) : null}
-        </div>
-        <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-          {statusText}
+        ) : null}
+        {/* Never truncates: the title yields space, this label just butts against it. */}
+        <div
+          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+          data-testid="direct-terminal-header-agent"
+        >
+          {getAgentDisplayName(agent)}
+          {model ? ` • ${model}` : null}
         </div>
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >
@@ -265,19 +857,82 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 p-1.5">
+      <div
+        className="min-h-0 flex-1 p-1.5"
+        data-testid="direct-terminal-surface"
+        onPasteCapture={handleTerminalPaste}
+      >
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
+      {(voice.voiceError ?? submitError) ? (
+        <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
+          {voice.voiceError ?? submitError}
+        </div>
+      ) : null}
 
-      <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        <div className="flex items-center gap-1">
-          <button
-            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
-            onClick={() => sendTerminalInput("\x1b")}
-            type="button"
-          >
-            Esc
-          </button>
+      <div
+        className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] py-1.5 pl-[max(0.5rem,env(safe-area-inset-left),env(safe-area-inset-bottom))] pr-[max(0.5rem,env(safe-area-inset-right),env(safe-area-inset-bottom))]"
+        data-testid="direct-terminal-controls"
+      >
+        <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
+          <div className="relative" ref={hotkeyMenuRef}>
+            <button
+              aria-expanded={hotkeysOpen}
+              aria-haspopup="menu"
+              aria-label={`Open ${agent} shortcuts`}
+              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
+              onClick={() => setHotkeysOpen((current) => !current)}
+              type="button"
+            >
+              ...
+            </button>
+            {hotkeysOpen ? (
+              <div
+                aria-label={`${agent} shortcuts`}
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                role="menu"
+              >
+                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {getAgentDisplayName(agent)}
+                </div>
+                {hotkeys.map((hotkey) => (
+                  <button
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
+                    key={hotkey.id}
+                    onClick={() => {
+                      void sendHotkey(hotkey);
+                      setHotkeysOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
+                        {hotkey.label}
+                      </span>
+                      <span className="block text-[10px] text-[var(--color-text-secondary)]">
+                        {hotkey.detail}
+                      </span>
+                    </span>
+                    {hotkey.shortcut ? (
+                      <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
+                        {hotkey.shortcut}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <SlashSuggestions
+            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            endpoint={
+              agentInputEnabled
+                ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
+                : null
+            }
+            onSelect={(entry) => void submitSlash(entry.insertText)}
+          />
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}
@@ -285,74 +940,113 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           >
             Enter
           </button>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="relative ml-auto" ref={arrowMenuRef}>
             <button
-              aria-label="Arrow Left"
+              aria-expanded={arrowsOpen}
+              aria-haspopup="menu"
+              aria-label="Open arrow controls"
               className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[D")}
+              onClick={() => setArrowsOpen((current) => !current)}
               type="button"
             >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <FourDirectionArrowIcon />
             </button>
-            <button
-              aria-label="Arrow Up"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[A")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
+            {arrowsOpen ? (
+              <div
+                aria-label="Arrow controls"
+                className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1"
+                role="menu"
               >
-                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Down"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[B")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
+                {TERMINAL_ARROW_CONTROLS.map((arrow) => (
+                  <button
+                    aria-label={arrow.label}
+                    className={terminalFloatingControlIconButtonClass}
+                    key={arrow.label}
+                    onClick={() => sendTerminalInput(arrow.sequence)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <ArrowIcon path={arrow.iconPath} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="relative ml-2">
+            {voice.recording && !voice.voiceModalOpen ? (
+              <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
+                <button
+                  aria-label="Edit voice transcript"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={voice.toggleRecording}
+                  type="button"
+                >
+                  <PencilIcon />
+                </button>
+                <button
+                  aria-label="Send voice to queue"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
+                  type="button"
+                >
+                  <QueueIcon />
+                </button>
+                <button
+                  aria-label="Stop and send voice"
+                  aria-keyshortcuts="Meta+."
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  title="Stop and send voice"
+                  type="button"
+                >
+                  <StopSquareIcon />
+                </button>
+              </div>
+            ) : null}
+            {voice.recording && !voice.voiceModalOpen ? (
+              <button
+                aria-label="Cancel voice recording"
+                aria-keyshortcuts="Meta+."
+                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                onClick={() => {
+                  setVoiceAttachments([]);
+                  voice.cancelRecording();
+                }}
+                title="Cancel voice recording"
+                type="button"
               >
-                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Right"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[C")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+                <CancelIcon />
+              </button>
+            ) : voice.recording && voice.voiceModalOpen ? null : (
+              <VoiceControls
+                voice={voice}
+                className={cn(
+                  terminalControlIconButtonClass,
+                  voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
+                )}
+                groupClassName="absolute bottom-0 right-0 z-20 flex flex-col items-end gap-1"
+                onRetrySend={submitVoiceDraft}
+                slotClassName="relative h-8 w-8 sm:w-10"
+              />
+            )}
           </div>
         </div>
       </div>
+      <VoiceConfirmModal
+        attachments={voiceAttachments}
+        historyEntries={draftHistory.entries}
+        onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
+        onDismiss={() => setVoiceAttachments([])}
+        onInsert={submitVoiceDraft}
+        onQueue={queueVoiceDraft}
+        onRemoveAttachment={(index) =>
+          setVoiceAttachments((current) =>
+            current.filter((_, currentIndex) => currentIndex !== index),
+          )
+        }
+        voice={voice}
+      />
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

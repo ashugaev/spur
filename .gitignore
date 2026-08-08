@@ -4,11 +4,14 @@ dist/
 dist-server/
 .pnpm-store/
 .next/
+.next-sidecars/
 *.tsbuildinfo
 coverage/
 *.patch
 *-context.md
 packages/web/screenshots/
+packages/web/test-results/
+v2/web/
 
 # Environment files (secrets)
 .env
@@ -57,9 +60,19 @@ id_ed25519
 .claude/settings.json
 .claude/metadata-updater.sh
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Optional local Spur config overrides
 spur.local.yaml
 spur.*.local.yaml
 
 .idea/
+.playwright-mcp/
+
+# Cursor per-machine workspace trust state (local only)
+.cursor/.workspace-trusted
+
+# Local-only planning docs (not shipped / not public)
+docs/workflow-technical-updates.md
+docs/context-engineering-backlog.md
+.scratch/

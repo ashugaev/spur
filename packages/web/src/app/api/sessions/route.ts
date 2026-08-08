@@ -1,23 +1,27 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView, SpurSessionsResponse } from "@/lib/types";
+import { spurErrorResponse } from "@/lib/spur-error-response";
+import type {
+  AvailableBacklogItem,
+  ProjectInfo,
+  SpurSessionView,
+  SpurSessionsResponse,
+} from "@/lib/types";
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const projectId = request.nextUrl.searchParams.get("project")?.trim();
-    const [sessions, projects] = await Promise.all([
-      spurRequestJson<SpurSessionView[]>("/sessions"),
-      spurRequestJson<Array<{ id: string; name: string }>>("/projects"),
+    const [sessions, projects, backlog] = await Promise.all([
+      spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1&view=dashboard"),
+      spurRequestJson<ProjectInfo[]>("/projects"),
+      spurRequestJson<AvailableBacklogItem[]>("/backlog/available"),
     ]);
-    const filtered = projectId
-      ? sessions.filter((session) => session.project === projectId)
-      : sessions;
     return NextResponse.json({
-      sessions: filtered,
+      sessions,
       projects,
+      backlog,
+      daemonAlive: true,
     } satisfies SpurSessionsResponse);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to list Spur sessions";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to list Spur sessions");
   }
 }

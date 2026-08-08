@@ -1,7 +1,7 @@
-# Gitleaks configuration for Agent Orchestrator
+# Gitleaks configuration for Spur
 # Prevents accidental commits of secrets, API keys, tokens, etc.
 
-title = "Agent Orchestrator Secret Scanning"
+title = "Spur Secret Scanning"
 
 # Use all default gitleaks rules
 [extend]
@@ -27,4 +27,7 @@ regexes = [
   "your-api-key-here",
   "your-token-here",
   "example\\.com",
+
+  # RFC 6455 example WebSocket handshake nonce (docs handshake sample, not a secret)
+  "dGhlIHNhbXBsZSBub25jZQ==",
 ]

@@ -1,0 +1,36 @@
+# Spur daemon systemd user unit for the npm-installed layout.
+#
+# Use this when Spur is installed via `npm install -g @shugaev/spur` into a
+# user prefix (for example `npm config set prefix ~/.local`). Install to
+# ~/.config/systemd/user/spur-daemon.service and manage with `systemctl --user`.
+# Run `loginctl enable-linger $USER` once so the unit survives logout and the
+# daemon can restart itself during version switches.
+# Store secrets in ~/.spur/daemon.env (mode 0600).
+
+[Unit]
+Description=Spur daemon (npm install)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=-%h/.spur/daemon.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/dist/cli.js daemon start
+Restart=always
+RestartSec=3
+
+# Fleet cgroup guardrails. On a 62 GiB host, MemoryHigh starts reclaim near
+# 46.5 GiB and MemoryMax caps the fleet near 52.7 GiB, leaving about 15.5 GiB
+# and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure
+# may throttle admission/shedding work; the gap between High and Max preserves
+# room for that control path. Limit fleet swap to avoid global swap thrash.
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=2G
+
+# Keep tmux sessions alive across daemon restarts (see spur-daemon.service).
+KillMode=process
+
+[Install]
+WantedBy=default.target

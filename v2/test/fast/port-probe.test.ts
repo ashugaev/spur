@@ -1,0 +1,82 @@
+import type * as ChildProcess from "node:child_process";
+import { createServer, type Server } from "node:net";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }));
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
+  return { ...actual, execFile: execFileMock };
+});
+
+const { findListenerPids, isHostPortFree } = await import("../../src/port-probe.js");
+
+const openServers: Server[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    openServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    ),
+  );
+});
+
+describe("isHostPortFree", () => {
+  it("returns true when no process is bound to the port", async () => {
+    // Grab an ephemeral port, release it, then probe it.
+    const probe = createServer();
+    const port = await new Promise<number>((resolve, reject) => {
+      probe.once("error", reject);
+      probe.listen(0, "0.0.0.0", () => {
+        const addr = probe.address();
+        if (typeof addr === "object" && addr) resolve(addr.port);
+        else reject(new Error("no address"));
+      });
+    });
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    expect(await isHostPortFree(port)).toBe(true);
+  });
+
+  it("returns false when the host already has a listener on the port", async () => {
+    const probe = createServer();
+    const port = await new Promise<number>((resolve, reject) => {
+      probe.once("error", reject);
+      probe.listen(0, "0.0.0.0", () => {
+        const addr = probe.address();
+        if (typeof addr === "object" && addr) resolve(addr.port);
+        else reject(new Error("no address"));
+      });
+    });
+    openServers.push(probe);
+    expect(await isHostPortFree(port)).toBe(false);
+  });
+});
+
+describe("findListenerPids", () => {
+  it("bounds the lsof/ss listener lookup with a timeout so a hung tool can never hang doctor", async () => {
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        _args: string[],
+        options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(null, "", "");
+        return {};
+      },
+    );
+
+    await findListenerPids(4310);
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "lsof",
+      expect.any(Array),
+      expect.objectContaining({ timeout: expect.any(Number) }),
+      expect.any(Function),
+    );
+  });
+});

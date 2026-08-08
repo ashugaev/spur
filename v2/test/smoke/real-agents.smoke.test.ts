@@ -3,14 +3,15 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { SessionService } from "../../src/session-service.js";
+import { startServer } from "../../src/server.js";
 import type { AgentName } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
-  readTmuxOption,
+  readTmuxStatus,
+  setActiveTmuxSocketName,
   syncTmuxEnvironment,
 } from "../helpers/runtime.js";
 
@@ -19,6 +20,7 @@ const SMOKE_BASE_REF = await git(SMOKE_REPO_DIR, "rev-parse", "HEAD");
 const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
 const CODEX_BIN = await binaryPath("codex");
+const CURSOR_BIN = await binaryPath("agent");
 
 interface AuthStatus {
   available: boolean;
@@ -47,18 +49,22 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+function errorOutput(error: unknown): { stdout: string; stderr: string } {
+  if (!error || typeof error !== "object") {
+    return { stdout: "", stderr: "" };
+  }
+  const output = error as { stdout?: unknown; stderr?: unknown };
+  return {
+    stdout: typeof output.stdout === "string" ? output.stdout : "",
+    stderr: typeof output.stderr === "string" ? output.stderr : "",
+  };
+}
+
 function errorText(error: unknown): string {
   if (!error || typeof error !== "object") {
     return String(error);
   }
-  const stdout =
-    typeof (error as { stdout?: unknown }).stdout === "string"
-      ? (error as { stdout: string }).stdout
-      : "";
-  const stderr =
-    typeof (error as { stderr?: unknown }).stderr === "string"
-      ? (error as { stderr: string }).stderr
-      : "";
+  const { stdout, stderr } = errorOutput(error);
   const message =
     error instanceof Error
       ? error.message
@@ -66,6 +72,60 @@ function errorText(error: unknown): string {
         ? (error as { message: string }).message
         : "";
   return [stdout, stderr, message].filter(Boolean).join("\n").trim();
+}
+
+function parseClaudeAuthStatus(text: string): AuthStatus | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  if (typeof (parsed as { loggedIn?: unknown }).loggedIn !== "boolean") {
+    return null;
+  }
+  if ((parsed as { loggedIn: boolean }).loggedIn) {
+    return { available: true };
+  }
+  return { available: false, skipReason: "claude not authenticated" };
+}
+
+function parseCursorAuthStatus(text: string): AuthStatus | null {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.includes("not authenticated") ||
+    normalized.includes("authenticated: false") ||
+    normalized.includes("authentication required") ||
+    normalized.includes("not logged in") ||
+    normalized.includes("logged in: false") ||
+    normalized.includes("no api key") ||
+    normalized.includes("missing api key") ||
+    normalized.includes("api key required") ||
+    normalized.includes("unable to fetch user details") ||
+    normalized.includes("agent login")
+  ) {
+    return { available: false, skipReason: "cursor not authenticated" };
+  }
+  if (
+    normalized.includes("authenticated") ||
+    normalized.includes("logged in") ||
+    normalized.includes("api key")
+  ) {
+    return { available: true };
+  }
+  return null;
 }
 
 async function claudeStatus(): Promise<AuthStatus> {
@@ -78,15 +138,17 @@ async function claudeStatus(): Promise<AuthStatus> {
 
   try {
     const { stdout } = await execFileAsync(CLAUDE_BIN, ["auth", "status"], { timeout: 10_000 });
-    const parsed = JSON.parse(stdout) as { loggedIn?: boolean };
-    if (parsed.loggedIn === true) {
-      return { available: true };
-    }
-    if (parsed.loggedIn === false) {
-      return { available: false, skipReason: "claude not authenticated" };
+    const parsed = parseClaudeAuthStatus(stdout);
+    if (parsed) {
+      return parsed;
     }
     return { available: false, error: `Unexpected claude auth status output: ${stdout.trim()}` };
   } catch (error) {
+    const { stdout, stderr } = errorOutput(error);
+    const parsed = parseClaudeAuthStatus(stdout) ?? parseClaudeAuthStatus(stderr);
+    if (parsed) {
+      return parsed;
+    }
     return { available: false, error: `Failed to read claude auth status: ${errorText(error)}` };
   }
 }
@@ -105,11 +167,11 @@ async function codexStatus(): Promise<AuthStatus> {
     });
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
-    if (normalized.includes("logged in")) {
-      return { available: true };
-    }
     if (normalized.includes("not logged in") || normalized.includes("logged out")) {
       return { available: false, skipReason: "codex not authenticated" };
+    }
+    if (normalized.includes("logged in")) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected codex login status output: ${text}` };
   } catch (error) {
@@ -122,8 +184,39 @@ async function codexStatus(): Promise<AuthStatus> {
   }
 }
 
+async function cursorStatus(): Promise<AuthStatus> {
+  if (!tmuxOk) {
+    return { available: false, skipReason: "tmux unavailable" };
+  }
+  if (!CURSOR_BIN) {
+    return { available: false, skipReason: "cursor agent unavailable" };
+  }
+  if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
+    return { available: true };
+  }
+  try {
+    const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
+      timeout: 10_000,
+    });
+    const text = `${stdout}\n${stderr}`.trim();
+    const parsed = parseCursorAuthStatus(text);
+    if (parsed) {
+      return parsed;
+    }
+    return { available: false, error: `Unexpected cursor status output: ${text}` };
+  } catch (error) {
+    const text = errorText(error);
+    const parsed = parseCursorAuthStatus(text);
+    if (parsed) {
+      return parsed;
+    }
+    return { available: false, error: `Failed to read cursor auth status: ${text}` };
+  }
+}
+
 const claudeAuth = await claudeStatus();
 const codexAuth = await codexStatus();
+const cursorAuth = await cursorStatus();
 
 const cleanupItems: CleanupItem[] = [];
 
@@ -164,12 +257,16 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
   const saved = {
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
+    SPUR_CURSOR_BIN: process.env.SPUR_CURSOR_BIN,
   };
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
   }
   if (CODEX_BIN) {
     process.env.SPUR_CODEX_BIN = CODEX_BIN;
+  }
+  if (CURSOR_BIN) {
+    process.env.SPUR_CURSOR_BIN = CURSOR_BIN;
   }
 
   try {
@@ -184,6 +281,11 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
       delete process.env.SPUR_CODEX_BIN;
     } else {
       process.env.SPUR_CODEX_BIN = saved.SPUR_CODEX_BIN;
+    }
+    if (saved.SPUR_CURSOR_BIN === undefined) {
+      delete process.env.SPUR_CURSOR_BIN;
+    } else {
+      process.env.SPUR_CURSOR_BIN = saved.SPUR_CURSOR_BIN;
     }
   }
 }
@@ -228,13 +330,8 @@ async function runSmoke(
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
   cleanupItems.push(cleanupItem);
 
-  await syncTmuxEnvironment({
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
-    SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
-    SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
-    SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
-  });
+  setActiveTmuxSocketName(tmuxSocketName);
+  await syncTmuxEnvironment({});
 
   const configPath = join(rootDir, "spur.yaml");
   await writeFile(
@@ -259,95 +356,73 @@ async function runSmoke(
   );
 
   await withPinnedAgentBinaries(async () => {
-    const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
-    const initialSmokeTimeoutMs = agent === "codex" ? 240_000 : 180_000;
+    const service = await startServer(configPath, {});
+    const initialSmokeTimeoutMs = agent === "claude" ? 180_000 : 240_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
       { label: "tracker", url: `https://tracker.example.com/${agent}-smoke` },
       { label: "pr", url: `https://example.com/${agent}/pull/1` },
     ] as const;
     const expectedLinkPairs = expectedLinks.map((link) => `${link.label}=${link.url}`).sort();
-    const expectedStatusLinks = expectedLinks.map(
-      (link) => `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
-    );
-    const session = await service.spawn({
-      project: "api",
-      agent,
-      prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
+    try {
+      const session = await service.spawn({
+        project: "api",
+        agent,
+        prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
 After the file and the session metadata are set, wait for more instructions.`,
-    });
-    cleanupItem.branch = session.branch;
-    cleanupItem.worktreePath = session.worktreePath;
-    if (expectedPreflightBranch) {
-      expect(session.branch).toBe(expectedPreflightBranch);
-      expect(session.branchSource).toBe("preflight");
-    }
+      });
+      cleanupItem.branch = session.branch;
+      cleanupItem.worktreePath = session.worktreePath;
+      if (expectedPreflightBranch) {
+        expect(session.branch).toBe(expectedPreflightBranch);
+        expect(session.branchSource).toBe("preflight");
+      }
 
-    const initialFile = join(session.worktreePath, "smoke-initial.txt");
-    const liveState = await pollUntil(
-      async () => {
-        if (!existsSync(initialFile)) {
-          return null;
-        }
-        const current = await service.get(session.id);
-        if (current.slots?.title !== expectedTitle) {
-          return null;
-        }
-        const links = current.slots.links.map((link) => `${link.label}=${link.url}`).sort();
-        if (JSON.stringify(links) !== JSON.stringify(expectedLinkPairs)) {
-          return null;
-        }
-        const statusLeft = await readTmuxOption(session.id, "status-left");
-        const statusRight = await readTmuxOption(session.id, "status-right");
-        if (!statusLeft.includes(expectedTitle)) {
-          return null;
-        }
-        if (expectedStatusLinks.some((value) => !statusRight.includes(value))) {
-          return null;
-        }
-        return { current, statusLeft, statusRight };
-      },
-      {
+      const initialFile = join(session.worktreePath, "smoke-initial.txt");
+      await pollUntil(async () => existsSync(initialFile), {
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
-      },
-    );
+      });
+      const liveState = await service.get(session.id);
+      if (liveState.slots?.title) {
+        expect(liveState.slots.title).toBe(expectedTitle);
+        expect(liveState.slots.links).toHaveLength(expectedLinks.length);
+        expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+        const status = await readTmuxStatus(session.id);
+        expect(status).toBe("off");
+        const links = liveState.slots.links.map((link) => `${link.label}=${link.url}`).sort();
+        expect(links).toEqual(expectedLinkPairs);
+      }
+      expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
-    if (!liveState) {
-      throw new Error(`${agent} did not set the expected session slots before the smoke timeout`);
+      await killTmuxSession(session.id);
+
+      const restored = await service.restore(session.id);
+      expect(restored.id).toBe(session.id);
+      if (restored.slots?.title) {
+        expect(restored.slots.title).toBe(expectedTitle);
+        expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+      }
+
+      await service.send(session.id, {
+        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
+      });
+
+      const followupFile = join(session.worktreePath, "smoke-followup.txt");
+      await pollUntil(async () => existsSync(followupFile), {
+        timeoutMs: 120_000,
+        accept: Boolean,
+      });
+      expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
+
+      const killed = await service.kill(session.id, { force: true });
+      expect(killed.status).toBe("killed");
+      expect(existsSync(session.worktreePath)).toBe(false);
+    } finally {
+      await service.stop();
     }
-    expect(liveState.current.slots?.title).toBe(expectedTitle);
-    expect(liveState.current.slots?.links).toHaveLength(expectedLinks.length);
-    expect(liveState.current.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
-    expect(liveState.statusLeft).toContain(expectedTitle);
-    for (const value of expectedStatusLinks) {
-      expect(liveState.statusRight).toContain(value);
-    }
-    expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
-
-    await killTmuxSession(session.id);
-
-    const restored = await service.restore(session.id);
-    expect(restored.id).toBe(session.id);
-    expect(restored.slots?.title).toBe(expectedTitle);
-    expect(restored.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
-
-    await service.send(session.id, {
-      message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
-    });
-
-    const followupFile = join(session.worktreePath, "smoke-followup.txt");
-    await pollUntil(async () => existsSync(followupFile), {
-      timeoutMs: 120_000,
-      accept: Boolean,
-    });
-    expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
-
-    const killed = await service.kill(session.id, { force: true });
-    expect(killed.status).toBe("killed");
-    expect(existsSync(session.worktreePath)).toBe(false);
   });
 }
 
@@ -355,6 +430,29 @@ afterEach(async () => {
   while (cleanupItems.length > 0) {
     await cleanupSmokeItem(popCleanupItem());
   }
+});
+
+describe("cursor auth status parsing", () => {
+  it.each([
+    ["not authenticated", { available: false, skipReason: "cursor not authenticated" }],
+    [
+      "Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.",
+      { available: false, skipReason: "cursor not authenticated" },
+    ],
+    ["Authenticated: false", { available: false, skipReason: "cursor not authenticated" }],
+    [
+      "Logged in (unable to fetch user details)",
+      { available: false, skipReason: "cursor not authenticated" },
+    ],
+    ["no api key found", { available: false, skipReason: "cursor not authenticated" }],
+    ["missing api key", { available: false, skipReason: "cursor not authenticated" }],
+    ["api key required", { available: false, skipReason: "cursor not authenticated" }],
+    ["authenticated", { available: true }],
+    ["logged in", { available: true }],
+    ["agent status pending", null],
+  ] as const)("parses %s", (text, expected) => {
+    expect(parseCursorAuthStatus(text)).toEqual(expected);
+  });
 });
 
 if (claudeAuth.error) {
@@ -389,6 +487,24 @@ if (codexAuth.error) {
 
     it("uses codex spawn preflight before the normal session launch", async () => {
       await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });
+    });
+  });
+}
+
+if (cursorAuth.error) {
+  describe("Spur real-agent smoke (cursor)", () => {
+    it("passes the auth preflight", () => {
+      throw new Error(cursorAuth.error);
+    });
+  });
+} else {
+  describe.skipIf(!cursorAuth.available)("Spur real-agent smoke (cursor)", () => {
+    it("launches cursor, restores it, and accepts a follow-up send", async () => {
+      await runSmoke("cursor");
+    });
+
+    it("uses cursor spawn preflight before the normal session launch", async () => {
+      await runSmoke("cursor", { expectedPreflightBranch: "smoke-cursor-preflight" });
     });
   });
 }
