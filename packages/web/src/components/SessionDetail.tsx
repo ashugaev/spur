@@ -41,6 +41,7 @@ import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
+  formatSidecarAge,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
@@ -454,18 +455,6 @@ type SessionArtifact = DashboardSession["artifacts"][number];
 
 function artifactUrl(sessionId: string, artifactId: string): string {
   return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
-}
-
-// Single largest unit, no rounding-up — matches the sidecar row's other
-// tokens (name, port) in being a terse glance value, not a precise duration.
-function formatSidecarAge(ageSeconds: number): string {
-  if (ageSeconds < 60) return `${ageSeconds}s`;
-  const minutes = Math.floor(ageSeconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
 }
 
 function artifactExtension(name: string): string {

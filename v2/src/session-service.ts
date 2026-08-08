@@ -3960,7 +3960,7 @@ export class SessionService {
       // interval-driven sweep for the (overwhelmingly common) no-sidecar
       // case would otherwise make every test that drives it via
       // vi.advanceTimersByTimeAsync racy against real subprocess timing.
-      const sidecarProcSnapshot = sessions.some(
+      const sidecarProcSnapshot = liveSessions.some(
         (session) => (session.sidecarNames?.length ?? 0) > 0,
       )
         ? await snapshotProcesses()

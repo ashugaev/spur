@@ -769,7 +769,12 @@ function createSessionStore() {
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
-    return session ? clone(session) : undefined;
+    // null, not undefined — matches metadata.ts's real readSession contract
+    // (SessionRecord | null). A mock returning undefined here would make
+    // ownerExists: owner !== null in collectSidecarReapCandidates
+    // untestable: undefined !== null is true, so a missing owner would
+    // always read as "exists".
+    return session ? clone(session) : null;
   });
   writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
     sessions.set(session.id, clone(session));
@@ -13568,7 +13573,11 @@ describe("SessionService", () => {
       const result = await service.get("api-1");
 
       const dev = result.sidecars.find((sc) => sc.name === "dev");
-      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+      // Pins the actual derivation (SessionSidecarView.ageSeconds ===
+      // the matched process's ps etimes), not just presence: a broken
+      // derivation that always resolved to some other Number would still
+      // pass an expect.any(Number) assertion.
+      expect(dev?.ageSeconds).toBe(42);
     });
 
     it("AC11: omits ageSeconds when the recorded identity's pid is not in the process snapshot", async () => {
@@ -13644,7 +13653,7 @@ describe("SessionService", () => {
       const result = await service.get("api-1");
 
       const dev = result.sidecars.find((sc) => sc.name === "dev");
-      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+      expect(dev?.ageSeconds).toBe(42);
       expect(dev?.ageWarn).toBe(true);
     });
 
@@ -13688,7 +13697,7 @@ describe("SessionService", () => {
       const result = await service.get("api-1");
 
       const dev = result.sidecars.find((sc) => sc.name === "dev");
-      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+      expect(dev?.ageSeconds).toBe(42);
       expect(dev?.ageWarn).toBeUndefined();
     });
 
@@ -15938,6 +15947,43 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
+  it("REQ6: reconcileStoppedSessions also runs the project-sidecar idle-TTL reap pass once at boot", async () => {
+    // Pinned separately from the SIDECAR_REAPER_INTERVAL_MS tick's own test
+    // coverage — only a 180s tmux-gated runtime test exercised this boot
+    // call before; deleting it broke no fast test.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { "front-local": { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        status: "completed",
+        worktreePath: TEST_DATA_DIR,
+        sidecarNames: ["front-local"],
+        updatedAt: "2026-03-18T00:00:00.000Z",
+      }),
+    );
+    listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.reconcileStoppedSessions();
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+  });
+
   it("reaps a playwright sidecar tmux session whose owning record is terminal or missing, but not a live one", async () => {
     const sessions = createSessionStore();
     sessions.set("term-1", {
@@ -16636,6 +16682,105 @@ describe("SessionService", () => {
       await service.reapDeadSessionSidecars();
 
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("REQ1: reaps a desk-shared sidecar whose anchor record is gone (owner_missing), pinned by reason", async () => {
+      // No sessions.set("api-1", ...) at all — the anchor that would own
+      // this desk-shared sidecar has been removed from the store entirely
+      // (e.g. session-gc), while sibling api-2 still declares it. A portless
+      // sidecar so the probe-blind veto (declares ports + live pane + no
+      // recorded reservation -> "unknown", see AC7b) cannot shadow the
+      // owner_missing verdict this test pins.
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { "front-local": { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-2",
+        sessionRecord({
+          id: "api-2",
+          deskId: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T10:04:30.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      const reapedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.sidecar.reaped" && entry.sessionId === "api-1",
+      );
+      expect(reapedEvent?.[1].details).toEqual(
+        expect.objectContaining({ sidecarName: "front-local", reason: "owner_missing" }),
+      );
+      service.dispose();
+    });
+
+    it("REQ1: reaps a sidecar whose owner's worktree is gone (worktree_missing), pinned by reason", async () => {
+      // A running owner (workspaceRunning true, so step 8 does not fire
+      // first) whose worktree no longer exists on disk — distinct from the
+      // idle_ttl path AC8 already pins, and from owner_missing above.
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { "front-local": { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T10:04:30.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      const reapedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.sidecar.reaped" && entry.sessionId === "api-1",
+      );
+      expect(reapedEvent?.[1].details).toEqual(
+        expect.objectContaining({ sidecarName: "front-local", reason: "worktree_missing" }),
+      );
       service.dispose();
     });
 
