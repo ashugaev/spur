@@ -271,46 +271,44 @@ projects:
     }
   });
 
-  it(
-    "the boot-time idle-TTL reap pass leaves a setsid grandchild with zero survivors",
-    async () => {
-      const port = await findFreePort();
-      const context = await createRuntimeTestContext(port);
-      const sessionPrefix = `rt-sidecar-idle-${port}`;
-      activeContexts.push({ context, sessionPrefix });
-      await syncTmuxEnvironment({
-        HOME: context.env.HOME,
-        PATH: context.env.PATH,
-        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-      });
+  it("the boot-time idle-TTL reap pass leaves a setsid grandchild with zero survivors", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-idle-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
 
-      const knownGrandchildPids = new Set<number>();
+    const knownGrandchildPids = new Set<number>();
 
-      try {
-        // Same hostile-sidecar shape as the setsid-grandchild test above
-        // (the fork-ts-checker analogue): a bare pane-group signal can never
-        // reach the grandchild's own process group.
-        const sidecarPath = join(context.repoDir, "idle-reap-sidecar.sh");
-        await writeFile(
-          sidecarPath,
-          `#!/usr/bin/env bash
+    try {
+      // Same hostile-sidecar shape as the setsid-grandchild test above
+      // (the fork-ts-checker analogue): a bare pane-group signal can never
+      // reach the grandchild's own process group.
+      const sidecarPath = join(context.repoDir, "idle-reap-sidecar.sh");
+      await writeFile(
+        sidecarPath,
+        `#!/usr/bin/env bash
 set -euo pipefail
 setsid bash -c 'exec -a "reap-grandchild-'"$$"'" sleep 3600' &
 GRANDCHILD_PID=$!
 printf '%s\\n%s\\n' "$$" "$GRANDCHILD_PID" > ".idle-reap-pids-\${SPUR_SESSION:?}"
 exec tail -f /dev/null
 `,
-          "utf8",
-        );
-        await chmod(sidecarPath, 0o755);
+        "utf8",
+      );
+      await chmod(sidecarPath, 0o755);
 
-        // idleTtlMinutes: 1 keeps this test's real-wall-clock wait bounded;
-        // the sidecar declares no ports, so connections resolve to "none"
-        // without any `ss` probe.
-        const configPath = await context.writeConfig(
-          "sidecar-idle-reap.yaml",
-          `server:
+      // idleTtlMinutes: 1 keeps this test's real-wall-clock wait bounded;
+      // the sidecar declares no ports, so connections resolve to "none"
+      // without any `ss` probe.
+      const configPath = await context.writeConfig(
+        "sidecar-idle-reap.yaml",
+        `server:
   host: 127.0.0.1
   port: ${context.port}
 dataDir: ${context.dataDir}
@@ -332,75 +330,73 @@ projects:
         command: "${sidecarPath}"
         autoStart: true
 `,
-        );
-        let daemon = await context.startDaemon(configPath);
-        const active = activeContexts.at(-1);
-        if (!active) {
-          throw new Error("Expected an active runtime context");
-        }
-        active.daemonPid = daemon.info.pid;
+      );
+      let daemon = await context.startDaemon(configPath);
+      const active = activeContexts.at(-1);
+      if (!active) {
+        throw new Error("Expected an active runtime context");
+      }
+      active.daemonPid = daemon.info.pid;
 
-        const spawned = JSON.parse(
-          (
-            await context.execCli([
-              "--config",
-              configPath,
-              "spawn",
-              "api",
-              "sidecar idle reap test",
-              "--json",
-            ])
-          ).stdout,
-        ) as SessionView;
-        const idleReapTmuxSession = `${spawned.id}--idlereap`;
-        await pollUntil(() => tmuxSessionExists(idleReapTmuxSession), {
-          timeoutMs: 15_000,
-          accept: (value) => value === true,
-        });
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            "sidecar idle reap test",
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+      const idleReapTmuxSession = `${spawned.id}--idlereap`;
+      await pollUntil(() => tmuxSessionExists(idleReapTmuxSession), {
+        timeoutMs: 15_000,
+        accept: (value) => value === true,
+      });
 
-        const pidsPath = join(spawned.worktreePath, `.idle-reap-pids-${spawned.id}`);
-        const instance = (await pollUntil(() => readReapPids(pidsPath), {
-          timeoutMs: 15_000,
-          accept: (value): value is ReapPids => value !== null,
-        })) as ReapPids;
-        knownGrandchildPids.add(instance.grandchildPid);
-        expect(await processAlive(instance.scriptPid)).toBe(true);
-        expect(await processAlive(instance.grandchildPid)).toBe(true);
+      const pidsPath = join(spawned.worktreePath, `.idle-reap-pids-${spawned.id}`);
+      const instance = (await pollUntil(() => readReapPids(pidsPath), {
+        timeoutMs: 15_000,
+        accept: (value): value is ReapPids => value !== null,
+      })) as ReapPids;
+      knownGrandchildPids.add(instance.grandchildPid);
+      expect(await processAlive(instance.scriptPid)).toBe(true);
+      expect(await processAlive(instance.grandchildPid)).toBe(true);
 
-        // Real wall-clock wait past the 1-minute idleTtlMinutes: no further
-        // activity on this session after spawn, so its dashboard/updatedAt
-        // clock genuinely ages past the TTL — no fake-timer shortcut exists
-        // for a real daemon subprocess.
-        await new Promise((resolve) => setTimeout(resolve, 70_000));
+      // Real wall-clock wait past the 1-minute idleTtlMinutes: no further
+      // activity on this session after spawn, so its dashboard/updatedAt
+      // clock genuinely ages past the TTL — no fake-timer shortcut exists
+      // for a real daemon subprocess.
+      await new Promise((resolve) => setTimeout(resolve, 70_000));
 
-        // Restart the daemon process (tmux and the sidecar tree are
-        // untouched by this — only the daemon's own process exits) to drive
-        // the boot-time plan/execute pass without waiting a further 5
-        // minutes for the interval tick.
-        await stopDaemonByPid(active.daemonPid);
-        daemon = await context.startDaemon(configPath);
-        active.daemonPid = daemon.info.pid;
+      // Restart the daemon process (tmux and the sidecar tree are
+      // untouched by this — only the daemon's own process exits) to drive
+      // the boot-time plan/execute pass without waiting a further 5
+      // minutes for the interval tick.
+      await stopDaemonByPid(active.daemonPid);
+      daemon = await context.startDaemon(configPath);
+      active.daemonPid = daemon.info.pid;
 
-        await pollUntil(() => processAlive(instance.grandchildPid), {
-          timeoutMs: 30_000,
-          accept: (value) => value === false,
-        });
-        expect(await processAlive(instance.scriptPid)).toBe(false);
-        expect(await processAlive(instance.grandchildPid)).toBe(false);
+      await pollUntil(() => processAlive(instance.grandchildPid), {
+        timeoutMs: 30_000,
+        accept: (value) => value === false,
+      });
+      expect(await processAlive(instance.scriptPid)).toBe(false);
+      expect(await processAlive(instance.grandchildPid)).toBe(false);
 
-        const snapshotAfter = await psSnapshot();
-        const markerRows = snapshotAfter.filter((row) => row.args.includes(instance.marker));
-        expect(markerRows).toEqual([]);
-      } finally {
-        for (const pid of knownGrandchildPids) {
-          try {
-            process.kill(pid, "SIGKILL");
-          } catch {
-            // already gone
-          }
+      const snapshotAfter = await psSnapshot();
+      const markerRows = snapshotAfter.filter((row) => row.args.includes(instance.marker));
+      expect(markerRows).toEqual([]);
+    } finally {
+      for (const pid of knownGrandchildPids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
         }
       }
-    },
-    180_000,
-  );
+    }
+  }, 180_000);
 });

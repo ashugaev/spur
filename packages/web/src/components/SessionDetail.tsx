@@ -3297,7 +3297,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 :{port.port}
                               </span>
                             ))}
-                            {sc.ageSeconds != null ? (
+                            {sc.ageSeconds !== undefined ? (
                               <span
                                 className="shrink-0 text-[var(--color-text-tertiary)]"
                                 data-testid={`sidecar-age-${sc.name}`}

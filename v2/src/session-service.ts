@@ -2752,7 +2752,7 @@ export class SessionService {
           tmuxName,
           paneAlive,
           mcp: Boolean(sidecar.mcp),
-          ownerExists: owner !== undefined,
+          ownerExists: owner !== null,
           worktreeExists: owner ? workspaceExists(owner.worktreePath) : false,
           workspaceRunning,
           hasRecordedIdentity: identity !== undefined,
@@ -2783,7 +2783,9 @@ export class SessionService {
     // descendants reparent immediately after and a later snapshot could
     // never attribute them back to this pass.
     const preSignalSnapshot: ProcSnapshot =
-      plan.reap.length > 0 ? await snapshotProcesses() : { ok: false, byPid: new Map(), byPgid: new Map() };
+      plan.reap.length > 0
+        ? await snapshotProcesses()
+        : { ok: false, byPid: new Map(), byPgid: new Map() };
     for (const entry of plan.reap) {
       const owner = readSession(this.config.dataDir, entry.ownerId);
       const identity = owner?.sidecarProcs?.[entry.sidecarName];
@@ -12308,17 +12310,14 @@ export class SessionService {
     // One snapshot for the whole enrich pass, not one per sidecar — and only
     // taken at all when there is a sidecar to report an age for, so a
     // sidecar-less session's enrich never pays for a `ps` fork.
-    const sidecarAgeSnapshot =
-      sidecarNamesForView.length > 0 ? await snapshotProcesses() : null;
+    const sidecarAgeSnapshot = sidecarNamesForView.length > 0 ? await snapshotProcesses() : null;
     const sidecars: SessionSidecarView[] = [];
     for (const name of sidecarNamesForView) {
       const sidecar = project?.sidecars[name];
       const ownerId = this.sidecarOwnerIdForName(session, project, name);
       const ownerRecord = ownerId === session.id ? session : anchorRecord;
       const identity = ownerRecord.sidecarProcs?.[name];
-      const ageSeconds = identity
-        ? sidecarAgeSnapshot?.byPid.get(identity.pid)?.etimes
-        : undefined;
+      const ageSeconds = identity ? sidecarAgeSnapshot?.byPid.get(identity.pid)?.etimes : undefined;
       sidecars.push({
         name,
         alive: await sidecarTmuxAlive(ownerId, name),

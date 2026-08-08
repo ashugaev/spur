@@ -53,7 +53,12 @@ describe("planSidecarReap: decision table", () => {
       { ...DEFAULT_CONFIG, enabled: false },
     );
     expect(plan.keep).toEqual([
-      { ownerId: "owner-1", sidecarName: "front-local", tmuxName: "owner-1--front-local", reason: "disabled" },
+      {
+        ownerId: "owner-1",
+        sidecarName: "front-local",
+        tmuxName: "owner-1--front-local",
+        reason: "disabled",
+      },
     ]);
     expect(plan.reap).toEqual([]);
   });
@@ -139,7 +144,12 @@ describe("planSidecarReap: age_cap warn", () => {
     const plan = planOne({ ageSeconds: 361 * 60 });
     expect(plan.keep[0]?.reason).toBe("within_idle_ttl");
     expect(plan.warn).toEqual([
-      { ownerId: "owner-1", sidecarName: "front-local", tmuxName: "owner-1--front-local", reason: "age_cap" },
+      {
+        ownerId: "owner-1",
+        sidecarName: "front-local",
+        tmuxName: "owner-1--front-local",
+        reason: "age_cap",
+      },
     ]);
   });
 

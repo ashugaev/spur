@@ -26,15 +26,13 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
-const { findListenerPids, isHostPortFree, hasEstablishedConnections } = await import(
-  "../../src/port-probe.js"
-);
+const { findListenerPids, isHostPortFree, hasEstablishedConnections } =
+  await import("../../src/port-probe.js");
 
 const openServers: Server[] = [];
 
 afterEach(async () => {
   execFileAsyncMock.mockReset();
-  execFileMock.mockReset();
   await Promise.all(
     openServers.splice(0).map(
       (server) =>
@@ -112,7 +110,9 @@ describe("hasEstablishedConnections", () => {
   });
 
   it("returns unknown, not none, when ss is missing (ENOENT)", async () => {
-    execFileAsyncMock.mockRejectedValue(Object.assign(new Error("spawn ss ENOENT"), { code: "ENOENT" }));
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("spawn ss ENOENT"), { code: "ENOENT" }),
+    );
 
     expect(await hasEstablishedConnections(3004)).toBe("unknown");
   });

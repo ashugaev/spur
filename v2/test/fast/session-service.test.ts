@@ -23515,7 +23515,10 @@ describe("SessionService", () => {
         async (id: string, name: string) => id === "api-1" && name === "daemon",
       );
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
         reapOrphanedTmux(): Promise<void>;
         dispose(): void;
       };
@@ -23569,7 +23572,10 @@ describe("SessionService", () => {
       // No pane anywhere: the tmux route is fully exhausted for every id.
       sidecarTmuxAliveMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
         reapOrphanedTmux(): Promise<void>;
         dispose(): void;
       };

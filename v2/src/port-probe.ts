@@ -129,7 +129,14 @@ export async function hasEstablishedConnections(
   if (!isValidPort(port)) {
     return "unknown";
   }
-  const result = await execFileTriState("ss", ["-tn", "state", "established", "sport", "=", `:${port}`]);
+  const result = await execFileTriState("ss", [
+    "-tn",
+    "state",
+    "established",
+    "sport",
+    "=",
+    `:${port}`,
+  ]);
   if (!result.ok) {
     return "unknown";
   }
