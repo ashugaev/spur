@@ -20,9 +20,11 @@ INTERFACES
 
 CONFIG FOOTGUNS
 
-  Full field reference and example: `docs/configuration.md`. Not in that doc:
+  Full field reference and example: `docs/configuration.md`. Cross-file invariants and footguns:
 
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
+  Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
+  Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
   Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, collapse canonical aliases, and protect the instance path. One canonical problem path emits one warning per daemon lifetime. A separate worktree-internal filter runs at boot and every connect/disconnect and keeps a path inside `worktreeDir` out of the merge and the next registry write; `connect`/`disconnect` reject a non-absolute path, and `connect` also rejects a worktree-internal one, both 400. `spur doctor` check `config-registry` (`warn`, no exit-code effect) flags dead, worktree-internal, and over-cap entries — see `docs/configuration.md#config-registry`. Boot also logs one read-only `daemon.registry.count` event with the read count and the worktree-internal drop count, no prune, no registry-file write.
@@ -33,6 +35,7 @@ SAFETY
 
   A daemon on the default port is someone's production instance unless proven otherwise. Never `spur daemon start|stop`, kill, or issue direct HTTP calls against a daemon you did not start.
   Do not repoint `--config` at the instance config `~/.spur/config.yaml` to widen reach; use the `spur` already on `PATH`. Do not kill processes or ports you did not start.
+  A config outside the default instance config path (`~/.spur/config.yaml`) may not claim port `4310` or dataDir `~/.spur`, explicit or inherited by omission; `daemon start|stop|restart` all refuse rather than let a non-default config bind or target the production slot. Same three verbs also refuse a non-existent `--config`/`SPUR_CONFIG` path unless it is that default, without bootstrapping one.
   Never run `spur gc --execute` against a data dir you do not own. It removes worktrees and archives records. Point `--config` at a temp data dir for development; a bare `spur gc` is a dry run and the only safe form elsewhere.
   The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on); `--expose-web` binds `0.0.0.0` and is public. Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user — treat each source (Telegram, GitHub comments, Jira) as untrusted input.
   For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.
@@ -42,7 +45,7 @@ IN THIS REPO
   Install from source: `docs/install-from-source.md`. HTTPS on a tailnet host, required for voice: `docs/https-tailscale.md`. Claude account rotation: `references/claude-auth-rotation.md`.
   Admission and memory policy: `docs/configuration.md#admission-control`.
   Validation: `pnpm --dir v2 test` (fast, each Spur code change), `pnpm --dir v2 test:runtime` (CLI, daemon start, transport, lifecycle, worktree, tmux), `pnpm --dir v2 test:smoke` (real agent launch or prompt delivery). `pnpm --dir v2 build` after changing Spur code.
-  Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
+  Test against the `isolated-daemon` / `isolated-ui` sidecars, never the production daemon. `scripts/spur-isolated-daemon.sh` is the sanctioned launcher — it assigns a non-default port/dataDir so it never trips the bind guard. Isolated configs inherit `voice` from the user config; server, data, and tmux stay isolated. Add key branches in `v2/src/isolated-instance-config.ts` to propagate more.
 
 UPDATING THIS SKILL
 

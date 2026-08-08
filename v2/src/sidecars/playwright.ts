@@ -5,7 +5,9 @@ import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
 import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
 
-export type { ProcessInfo } from "../process-tree.js";
+// Re-exported for callers/tests that import the shared process-info shape
+// through this module.
+export type { ProcessInfo };
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -169,8 +171,14 @@ export function isLeakedManagedPlaywright(
 
 /**
  * Find leaked managed playwright servers (orphaned, our bin, port not owned by
- * a live session) and kill their process trees. Returns the count of leaked
- * roots killed.
+ * a live session) and kill their process trees. Takes ONE shared `ps`
+ * snapshot for the whole sweep and passes it into every `killProcessTree`
+ * call (`../process-tree.js`) via its `list` override, instead of forking a
+ * fresh `ps` per leaked root. `killProcessTree` re-reads each target's
+ * `/proc/<pid>/stat` starttime right before SIGKILL and only signals pids
+ * whose starttime is unchanged, so a pid reused for something else after
+ * SIGTERM is never signaled a second time.
+ * Returns the count of leaked roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
   // Nothing this daemon started can be running if the package cannot be
@@ -186,7 +194,7 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
-    await killProcessTree(proc.pid);
+    await killProcessTree(proc.pid, { list: async () => processes });
   }
   return leaked.length;
 }

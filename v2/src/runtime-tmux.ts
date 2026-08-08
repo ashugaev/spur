@@ -448,7 +448,16 @@ export function _capturePaneCacheSizeForTests(): number {
 
 // Pid of the session's pane process (the shell hosting the agent). Used to
 // bind ambiguous agent status files to the process actually in this pane.
-export async function getTmuxPanePid(sessionName: string): Promise<number | null> {
+// `fresh` busts the shared fleet-pane cache before reading — same rationale
+// as tmuxPaneDead's `fresh`: a reap's signal target must be the CURRENT pane
+// pid, never one from a stale TTL window.
+export async function getTmuxPanePid(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<number | null> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
   const panes = await getFleetPaneSnapshot();
   return panes.get(sessionName)?.activePanePid ?? null;
 }
@@ -913,8 +922,4 @@ export async function createTmuxSidecarSession(input: {
 
 export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
   return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
-}
-
-export async function killSidecarTmux(sessionId: string, sidecarName: string): Promise<void> {
-  await killTmuxSession(sidecarTmuxSession(sessionId, sidecarName));
 }

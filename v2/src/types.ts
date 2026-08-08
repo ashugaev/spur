@@ -547,6 +547,7 @@ export interface ProjectConfig {
   restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
+  reasoningEffort?: AgentReasoningEffortConfig;
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
@@ -559,6 +560,11 @@ export interface ProjectConfig {
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
 }
+
+export type ProviderReasoningEffort = "low" | "medium" | "high";
+export type AgentReasoningEffortConfig = Partial<
+  Record<"claude" | "codex", ProviderReasoningEffort>
+>;
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
@@ -635,6 +641,9 @@ export interface AppConfig {
   };
   ui: {
     port: number;
+  };
+  models: {
+    codexHome: string;
   };
   voice:
     | {
@@ -756,6 +765,18 @@ export interface SessionStateSubscriptionRecordResponse {
   record: SessionStateSubscription;
 }
 
+export interface SidecarProcessIdentity {
+  /** tmux pane pid at start. On Linux this is also the pane's pgid and sid. */
+  pid: number;
+  /** Process group id of the pane at start. Signal target for a leaked tree. */
+  pgid: number;
+  /**
+   * /proc/<pid>/stat field 22 (starttime, clock ticks since boot). The only
+   * pid-reuse guard: a wall-clock timestamp cannot distinguish a reused pid.
+   */
+  starttime: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -801,6 +822,12 @@ export interface SessionRecord {
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
+  /**
+   * Pane identity of each sidecar's CURRENT instance, keyed by sidecar name.
+   * Written on the sidecar OWNER's record (the workspace anchor for a
+   * desk-shared sidecar, the session itself for an mcp sidecar).
+   */
+  sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
@@ -810,6 +837,14 @@ export interface SessionRecord {
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+}
+
+// Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
+// and reap.ts's sidecar-claims sweep — one definition, never two copies.
+export function isTerminalSessionStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
 }
 
 export interface ServiceInstanceRecord {

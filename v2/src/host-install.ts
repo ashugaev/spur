@@ -5,8 +5,16 @@ import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
+import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
+import {
+  assembleSidecarSweepClaims,
+  findLeakedSidecarTrees,
+  snapshotProcesses,
+  SWEEP_DETAIL_MAX_TREES,
+} from "./sidecars/reap.js";
+import type { AppConfig } from "./types.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
@@ -1066,6 +1074,8 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
           }
         : {}),
     });
+
+    checks.push(await checkLeakedSidecars(instanceConfig.config));
   }
 
   const daemonHost =
@@ -1082,6 +1092,75 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   if (drift) checks.push(drift);
 
   return checks;
+}
+
+function formatSweepTreeLine(tree: {
+  rootPid: number;
+  pgid: number;
+  treeRssKb: number;
+  ageSeconds: number;
+  worktreePath: string;
+  sidecarName: string | null;
+}): string {
+  const ageMinutes = Math.floor(tree.ageSeconds / 60);
+  const hours = Math.floor(ageMinutes / 60);
+  const minutes = ageMinutes % 60;
+  // Tree total, not the root pid's own rss — the root alone understated the
+  // measured 863333/863351 leak by 17x.
+  const rssMb = Math.round(tree.treeRssKb / 1024);
+  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  age ${hours}h${minutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
+}
+
+// Read-only doctor check: calls findLeakedSidecarTrees only, never
+// sweepSidecars(reap: true) — doctor performs zero writes and zero signals.
+async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck> {
+  const sessions = listSessions(config.dataDir);
+  const assembled = assembleSidecarSweepClaims(sessions, config.worktreeDir);
+  if (!assembled) {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    };
+  }
+  const snapshot = await snapshotProcesses();
+  const { supported, leaked } = await findLeakedSidecarTrees({
+    snapshot,
+    claims: assembled.claims,
+    worktreePaths: assembled.worktreePaths,
+    worktreeDirRealpath: assembled.worktreeDirRealpath,
+  });
+  if (!supported) {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: process table unreadable, sweep skipped",
+    };
+  }
+  if (leaked.length === 0) {
+    return {
+      id: "sidecar-orphans",
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: none found",
+    };
+  }
+  const shown = leaked.slice(0, SWEEP_DETAIL_MAX_TREES);
+  const remaining = leaked.length - shown.length;
+  const detail = [
+    `sidecar-orphans: ${leaked.length} leaked sidecar process tree(s) found`,
+    ...shown.map(formatSweepTreeLine),
+    ...(remaining > 0 ? [`  +${remaining} more`] : []),
+  ].join("\n");
+  return {
+    id: "sidecar-orphans",
+    ok: false,
+    severity: "warn",
+    detail,
+    fix: "spur sidecar sweep --reap",
+  };
 }
 
 export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
