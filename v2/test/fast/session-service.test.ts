@@ -20286,7 +20286,7 @@ describe("SessionService", () => {
     createTmuxSidecarSessionMock.mockImplementation(async () => {
       sidecarAlive = true;
     });
-    killSidecarTmuxMock.mockImplementation(async () => {
+    killTmuxSessionMock.mockImplementation(async () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
