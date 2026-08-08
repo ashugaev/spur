@@ -274,17 +274,17 @@ import {
   readPrLookupEntry,
 } from "./pr-lookup-cache.js";
 import {
-  activeConfigPaths,
   addUnconfiguredProject,
   buildMergedConfig,
   canonicalConfigKey,
   ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
   isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
   removeConfigRegistryPath,
   removeUnconfiguredProject,
-  writeConfigRegistry,
+  upsertConfigRegistryPath,
   type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
@@ -2053,23 +2053,21 @@ export class SessionService {
     this.startedAt = startedAt;
     mkdirSync(bootstrap.config.dataDir, { recursive: true });
     mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
-    const rawConfigPaths = readConfigRegistryFile(bootstrap.config.dataDir).configPaths;
-    const bootstrapKey = canonicalConfigKey(bootstrap.config.configPath);
-    const nextConfigPaths = rawConfigPaths.some((path) => canonicalConfigKey(path) === bootstrapKey)
-      ? rawConfigPaths
-      : [...rawConfigPaths, bootstrap.config.configPath];
-    this.registryPaths = activeConfigPaths(nextConfigPaths, bootstrap.config.worktreeDir, {
-      persistedPrune: true,
-    });
-    writeConfigRegistry(bootstrap.config.dataDir, this.registryPaths);
-    logSpurEvent(bootstrap.config.dataDir, {
-      event: "daemon.registry.pruned",
-      level: "info",
-      message: `registry paths ${nextConfigPaths.length} -> ${this.registryPaths.length}`,
-    });
+    this.registryPaths = upsertConfigRegistryPath(
+      bootstrap.config.dataDir,
+      bootstrap.config.configPath,
+    );
+    // Worktree-internal filter only: dead/duplicate-alias entries are the
+    // scanner's job now (see ConfigRegistryScanner.scan below). This filter
+    // is applied in-memory only, ahead of scan() — it is never written back
+    // to the registry file directly. It still ends up persisted, though:
+    // applyConfig() unconditionally rewrites the registry file from
+    // scan.configPaths a few lines down, and a worktree-internal path that
+    // never reached scan() cannot appear in that output. That keeps the
+    // scanner the single owner of registry-file removal.
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: this.registryPaths,
+      configPaths: dropWorktreeInternalPaths(this.registryPaths, bootstrap.config.worktreeDir),
       protectedPaths: [bootstrap.config.configPath],
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
@@ -3111,7 +3109,7 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
-    const paths = activeConfigPaths(nextRegistryPaths, this.config.worktreeDir);
+    const paths = dropWorktreeInternalPaths(nextRegistryPaths, this.config.worktreeDir);
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
       configPaths: paths,
@@ -3184,13 +3182,13 @@ export class SessionService {
   // registry file and this.registryPaths are touched.
   //
   // Defense-in-depth, not dead code: `this.registryPaths` never contains an
-  // entry inside the CURRENT worktreeDir (the boot/preview prune in
-  // `activeConfigPaths` always drops those first), so the `isRegistered`
-  // guard below is only ever true for a worktree config that was registered
-  // under a worktreeDir the host has since reconfigured away from, or a
-  // pre-existing registry written before this prune shipped. Both are real,
-  // if narrow, production states — see
-  // "worktreeDir-migration leftover" in test/fast/session-service.test.ts.
+  // entry inside the CURRENT worktreeDir (the boot/preview filter in
+  // `dropWorktreeInternalPaths` always drops those first), so the
+  // `isRegistered` guard below is only ever true for a worktree config that
+  // was registered under a worktreeDir the host has since reconfigured away
+  // from, or a pre-existing registry written before this filter shipped. Both
+  // are real, if narrow, production states — see "worktreeDir-migration
+  // leftover" in test/fast/session-service.test.ts.
   private unregisterWorktreeConfig(worktreePath: string): void {
     if (!worktreePath) return;
     for (const name of DEFAULT_PROJECT_CONFIG_FILES) {

@@ -66,8 +66,8 @@ import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
 import {
-  activeConfigPaths,
   buildMergedConfig,
+  dropWorktreeInternalPaths,
   isInsideWorktreeDir,
   readConfigRegistryFile,
 } from "./registry.js";
@@ -388,7 +388,7 @@ function getConfigPath(program: Command): string | undefined {
 export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
-  const paths = activeConfigPaths(registry.configPaths, base.worktreeDir);
+  const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
   const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
   const project = config.projects[projectId];
   if (!project) {

@@ -150,64 +150,32 @@ export function isInsideWorktreeDir(configPath: string, worktreeDir: string): bo
   return key === wt || key.startsWith(wt + sep);
 }
 
-function isMissingErrno(error: unknown): boolean {
-  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
-// "file": exists and is a regular file. "absent": confirmed unusable — a
-// directory, or a definitive ENOENT/ENOTDIR. "unknown": any other stat
-// failure (EACCES, EIO, ELOOP, an autofs mount not yet up, ...) — existence
-// could not be determined, so it must not be treated the same as "gone".
-function statOutcome(path: string): "file" | "absent" | "unknown" {
+// Shared existing-file check for read-only/in-memory reporting (doctor's
+// report). A non-file (missing, a directory, or any other stat failure)
+// reads as not-existing — dead-file removal itself belongs to
+// `ConfigRegistryScanner`, this is only for surfacing the fact.
+export function isExistingFile(path: string): boolean {
   try {
-    return statSync(path).isFile() ? "file" : "absent";
-  } catch (error) {
-    return isMissingErrno(error) ? "absent" : "unknown";
+    return statSync(path).isFile();
+  } catch {
+    return false;
   }
 }
 
-// Shared existing-file check for read-only/in-memory filtering (doctor's
-// report, previews, CLI reads). Treating an "unknown" stat failure the same
-// as "missing" only skips the path for this round — nothing is persisted.
-export function isExistingFile(path: string): boolean {
-  return statOutcome(path) === "file";
-}
-
-// Pure, read-only filter: drops blank entries, entries that are not an
-// existing FILE (a nonexistent path or a directory, e.g. a bare project dir
-// `existsSync` would keep but `parseConfigFile` would only reject later),
-// and entries inside `worktreeDir`. Dedupes by `canonicalConfigKey`, keeping
-// the original string in first-seen order. Never touches the filesystem for
-// writes.
-//
-// `persistedPrune`: set only by the boot path, whose result is written back
-// to the registry file. There, a stat failure with an "unknown" outcome (see
-// `statOutcome`) is NOT dropped — a transient EACCES/EIO/ELOOP, or an autofs
-// mount not yet up when the daemon starts, must not permanently unregister a
-// live project. Read-only callers (previews, CLI) leave this off and keep
-// the strict any-failure-means-drop behavior, since nothing they compute is
-// persisted.
-export function activeConfigPaths(
-  paths: string[],
-  worktreeDir: string,
-  options: { persistedPrune?: boolean } = {},
-): string[] {
-  const seen = new Set<string>();
-  const active: string[] = [];
+// Pure, read-only filter: drops blank entries and entries inside
+// `worktreeDir`. Dead-file pruning and canonical-alias dedupe belong to
+// `ConfigRegistryScanner` now — this filter only keeps a worktree-internal
+// config from ever being registered or merged; it never touches the
+// filesystem for writes.
+export function dropWorktreeInternalPaths(paths: string[], worktreeDir: string): string[] {
+  const filtered: string[] = [];
   for (const raw of paths) {
     const trimmed = raw.trim();
     if (!trimmed) continue;
-    const outcome = statOutcome(trimmed);
-    if (outcome === "absent") continue;
-    if (outcome === "unknown" && !options.persistedPrune) continue;
     if (isInsideWorktreeDir(trimmed, worktreeDir)) continue;
-    const key = canonicalConfigKey(trimmed);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    active.push(trimmed);
+    filtered.push(trimmed);
   }
-  return active;
+  return filtered;
 }
 
 export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
