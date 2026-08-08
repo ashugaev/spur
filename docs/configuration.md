@@ -7,13 +7,27 @@ Two layers:
 - Global instance config: `~/.spur/config.yaml` by default. Owns daemon host/port, data dirs, tmux socket, default agent, UI port, and `voice:` (see [voice.md](voice.md)).
 - Local project config: nearest `spur.yaml` / `spur.yml`. Owns only `projects:`.
 
-`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present.
+`spur list` and `spur spawn` auto-initialize the global config when missing and auto-connect the nearest local project config when present — except a config inside `worktreeDir`, which is never registered (see [Config registry](#config-registry)).
 
 The daemon merges the instance config first, then connected project configs in registry order. The first config claiming a project id or `sessionPrefix` wins. A later config colliding on either value is skipped whole for that scan and reconsidered after the earlier owner changes, disconnects, or moves later in order.
 
-Registry scans canonicalize registered paths and persist the cleaned order. A missing config is removed only when its parent directory is also gone. Live-parent misses stay registered and retry after the parent directory changes; lookup errors stay registered and retry on each scan. The instance config is never removed. A canonical problem path emits at most one `daemon.registry.warning` per daemon lifetime.
+Registry scans canonicalize registered paths, cache each merge result by file `stat` (size/mtime), and invalidate a path's cache entry on content or removal change. A path leaves the registry either through the scan's own dead-entry removal or the worktree-internal filter (see [Config registry](#config-registry)); a scan-time lookup or parse error instead leaves it registered and retries on the next scan. The instance config is never removed. A canonical problem path emits at most one `daemon.registry.warning` per daemon lifetime.
 
 A running session reads only the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one the session uses the project as the daemon has it.
+
+## Config registry
+
+Registered project config paths persist in `config-registry.json` under `dataDir`. Daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers.
+
+A config inside `worktreeDir` is never registered — a worktree's own `spur.yaml` copy would otherwise add an entry per session. Auto-connect skips such a path; `POST /projects/connect` and `POST /projects/disconnect` both reject a non-absolute `configPath`, and `connect` additionally rejects one inside `worktreeDir` — both with 400. At boot and at every connect/disconnect, this same worktree-internal filter also runs in memory over a pre-existing registry file, so a legacy worktree-internal entry stops being merged and drops off the registry on the next write, even though nothing rewrites the file just for that filter.
+
+Dead-entry removal (a path that is not an existing file — deleted, or now a directory) and duplicate-alias collapsing (two entries resolving to the same real path) belong to the registry scan itself, not the worktree filter. A stat failure that cannot confirm the file is gone (a permission error, a not-yet-mounted path) is not treated as deleted, so it survives instead of being dropped on a guess; a missing path whose parent directory is still alive is retained for the same reason.
+
+Completing or killing a session also runs a narrow unregister step for its worktree's config path. In the common case that path is already excluded by the worktree-internal filter above (it sits inside the current `worktreeDir`), so the step is a no-op; it only removes a registry entry that outlived the filter because it was registered under a `worktreeDir` the host has since reconfigured away from.
+
+`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
+
+Daemon boot logs one `daemon.registry.count` event to `events.jsonl`: how many registry paths it read, and how many the worktree-internal filter dropped. Read-only — it never prunes or rewrites the registry file. Pair it with the `config-registry` doctor check above to tell whether a warn came from a growing registry or a one-off spike.
 
 ## Local project config
 

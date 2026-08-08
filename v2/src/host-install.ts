@@ -15,6 +15,7 @@ import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
 import {
   assembleSidecarSweepClaims,
   findLeakedSidecarTrees,
@@ -571,6 +572,71 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
 }
 
+// A healthy host registers one instance config plus one per real repo
+// (single digits). 24 is ~3x headroom over any plausible fleet and far under
+// the observed 92-entry pathological state (worktree spur.yaml copies
+// auto-registered and never unregistered).
+const CONFIG_REGISTRY_MAX_PATHS = 24;
+
+// Pure over the file it reads: fast-tier testable without a running daemon.
+// `warn` only — never changes hasErrorSeverity or the process exit code.
+// Note: doctor resolves the instance config from SPUR_CONFIG/default and
+// ignores --config, so this check reflects that same instance, not
+// necessarily the one passed via --config.
+export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostInstallCheck {
+  const configPaths = readConfigRegistryFile(dataDir).configPaths;
+  const deadPaths: string[] = [];
+  const worktreeInternalPaths: string[] = [];
+  for (const path of configPaths) {
+    if (!isExistingFile(path)) {
+      deadPaths.push(path);
+      continue;
+    }
+    if (isInsideWorktreeDir(path, worktreeDir)) {
+      worktreeInternalPaths.push(path);
+    }
+  }
+  const overCap = configPaths.length > CONFIG_REGISTRY_MAX_PATHS;
+  const ok = deadPaths.length === 0 && worktreeInternalPaths.length === 0 && !overCap;
+  if (ok) {
+    return {
+      id: "config-registry",
+      ok: true,
+      severity: "warn",
+      detail: `${configPaths.length} registered config path(s), all live and outside worktreeDir`,
+    };
+  }
+  const offending = [...deadPaths, ...worktreeInternalPaths].slice(0, 3);
+  const facts: string[] = [`${configPaths.length} registered config path(s)`];
+  if (deadPaths.length > 0) facts.push(`${deadPaths.length} dead`);
+  if (worktreeInternalPaths.length > 0)
+    facts.push(`${worktreeInternalPaths.length} worktree-internal`);
+  if (overCap) facts.push(`over the ${CONFIG_REGISTRY_MAX_PATHS}-path cap`);
+  const detail =
+    offending.length > 0
+      ? `${facts.join(", ")}: ${offending.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`
+      : `${facts.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`;
+  // `spur disconnect` only helps a dead entry — it filters `this.registryPaths`,
+  // which never contains a worktree-internal path (the boot/preview prune
+  // already dropped it), so pointing that fix at one is a silent no-op that
+  // keeps this check red forever. Worktree-internal entries only clear on the
+  // next daemon restart, which re-runs the boot prune.
+  const fixParts: string[] = [];
+  if (deadPaths.length > 0) {
+    fixParts.push(`spur disconnect <path> for a dead entry, e.g. spur disconnect ${deadPaths[0]}`);
+  }
+  if (worktreeInternalPaths.length > 0) {
+    fixParts.push("restart the daemon to prune worktree-internal entries at boot");
+  }
+  return {
+    id: "config-registry",
+    ok: false,
+    severity: "warn",
+    detail,
+    ...(fixParts.length > 0 ? { fix: fixParts.join("; ") } : {}),
+  };
+}
+
 // `du -sk <dir>` first line, first whitespace-delimited field (KB total).
 function parseDuKb(output: string | undefined): number | undefined {
   if (!output) return undefined;
@@ -1079,6 +1145,9 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
     checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
     checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+    checks.push(
+      checkConfigRegistry(instanceConfig.config.dataDir, instanceConfig.config.worktreeDir),
+    );
     checks.push(checkLogBytes("data-dir-log-bytes", instanceConfig.config.dataDir));
 
     const actualWebPort = readWebPort(scope);

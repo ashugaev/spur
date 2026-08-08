@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -106,6 +106,7 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
+  DEFAULT_PROJECT_CONFIG_FILES,
   deriveProjectIdFromDisplayName,
   expandHome,
   findProjectConfigPathInDirectory,
@@ -294,9 +295,13 @@ import {
 import {
   addUnconfiguredProject,
   buildMergedConfig,
+  canonicalConfigKey,
   ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
   type RegistryScanResult,
@@ -628,6 +633,10 @@ export class SessionResourceNotFoundError extends Error {
 }
 
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidConfigPathError extends Error {
   readonly statusCode = 400;
 }
 
@@ -2126,9 +2135,36 @@ export class SessionService {
       bootstrap.config.dataDir,
       bootstrap.config.configPath,
     );
+    // Worktree-internal filter only: dead/duplicate-alias entries are the
+    // scanner's job now (see ConfigRegistryScanner.scan below). This filter
+    // is applied in-memory only, ahead of scan() — it is never written back
+    // to the registry file directly. It still ends up persisted, though:
+    // applyConfig() unconditionally rewrites the registry file from
+    // scan.configPaths a few lines down, and a worktree-internal path that
+    // never reached scan() cannot appear in that output. That keeps the
+    // scanner the single owner of registry-file removal.
+    const filteredRegistryPaths = dropWorktreeInternalPaths(
+      this.registryPaths,
+      bootstrap.config.worktreeDir,
+    );
+    // Read-only observability, not a prune: this never touches the registry
+    // file (the scanner's applyConfig write below is the only writer). It
+    // records what the boot filter saw so a host can attribute a doctor
+    // config-registry warning to a real, growing count rather than guessing.
+    logSpurEvent(bootstrap.config.dataDir, {
+      event: "daemon.registry.count",
+      level: "info",
+      message: `registry paths ${this.registryPaths.length} read, ${
+        this.registryPaths.length - filteredRegistryPaths.length
+      } worktree-internal dropped`,
+      details: {
+        read: this.registryPaths.length,
+        worktreeInternalDropped: this.registryPaths.length - filteredRegistryPaths.length,
+      },
+    });
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: this.registryPaths,
+      configPaths: filteredRegistryPaths,
       protectedPaths: [bootstrap.config.configPath],
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
@@ -3144,6 +3180,12 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
+    if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
+      throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
+    }
     const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
       this.registryPaths.includes(canonicalPath)
@@ -3158,6 +3200,9 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
     const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== canonicalPath));
   }
@@ -3168,9 +3213,10 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    const paths = dropWorktreeInternalPaths(nextRegistryPaths, this.config.worktreeDir);
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: nextRegistryPaths,
+      configPaths: paths,
       protectedPaths: [this.bootstrapConfigPath],
     });
     this.emitRegistryScan(this.config.dataDir, scan);
@@ -3229,6 +3275,35 @@ export class SessionService {
 
   getRegistryPaths(): string[] {
     return [...this.registryPaths];
+  }
+
+  // Called beside every removeWorktree() so the registry shrinks on the same
+  // event that deletes the worktree, rather than only on an explicit
+  // /projects/disconnect that may never run (session killed, worktree
+  // deleted, host rebooted mid-teardown). A duplicate-projectId worktree
+  // config never contributed a project (mergeProjects throws on it, and the
+  // daemon skips it via skipInvalid), so no reload is needed here — only the
+  // registry file and this.registryPaths are touched.
+  //
+  // Defense-in-depth, not dead code: `this.registryPaths` never contains an
+  // entry inside the CURRENT worktreeDir (the boot/preview filter in
+  // `dropWorktreeInternalPaths` always drops those first), so the
+  // `isRegistered` guard below is only ever true for a worktree config that
+  // was registered under a worktreeDir the host has since reconfigured away
+  // from, or a pre-existing registry written before this filter shipped. Both
+  // are real, if narrow, production states — see "worktreeDir-migration
+  // leftover" in test/fast/session-service.test.ts.
+  private unregisterWorktreeConfig(worktreePath: string): void {
+    if (!worktreePath) return;
+    for (const name of DEFAULT_PROJECT_CONFIG_FILES) {
+      const candidate = join(worktreePath, name);
+      const candidateKey = canonicalConfigKey(candidate);
+      const isRegistered = this.registryPaths.some(
+        (path) => canonicalConfigKey(path) === candidateKey,
+      );
+      if (!isRegistered) continue;
+      this.registryPaths = removeConfigRegistryPath(this.config.dataDir, candidate);
+    }
   }
 
   listProjects(): ProjectListEntry[] {
@@ -6760,6 +6835,7 @@ export class SessionService {
         );
         if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
+          this.unregisterWorktreeConfig(workspacePath);
         }
 
         const message = error instanceof Error ? error.message : String(error);
@@ -6861,6 +6937,7 @@ export class SessionService {
     }
     if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
+      this.unregisterWorktreeConfig(workspacePath);
     }
   }
 
@@ -9088,6 +9165,7 @@ export class SessionService {
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     if (!options?.skipEnrichment) await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
@@ -9204,6 +9282,12 @@ export class SessionService {
           details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
         });
       }
+      // Runs even when the removal above only warned: this session reached a
+      // terminal state either way, and a warn-only removal failure still
+      // means Spur no longer manages this worktree going forward — a
+      // migration-leftover config entry pointing at it should not survive
+      // the session that owned it.
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {

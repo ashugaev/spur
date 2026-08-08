@@ -59,6 +59,7 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
@@ -174,9 +175,14 @@ vi.mock("../../src/registry.js", () => ({
     mutate({ configPaths: [], unconfiguredProjects: [] }),
   ),
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
+  dropWorktreeInternalPaths: vi.fn((paths: string[]) => paths),
+  canonicalConfigKey: vi.fn((path: string) => path),
+  isInsideWorktreeDir: vi.fn(() => false),
+  removeConfigRegistryPath: vi.fn(() => []),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
   ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
     invalidateRemovedPaths: vi.fn(),
+    canonicalizePath: vi.fn((path: string) => path),
     scan: () => {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {

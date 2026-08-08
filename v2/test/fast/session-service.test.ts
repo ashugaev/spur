@@ -369,6 +369,7 @@ vi.mock("../../src/config.js", () => ({
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
   deriveProjectIdFromDisplayName: (value: string) =>
     value
       .trim()
@@ -1273,6 +1274,187 @@ describe("SessionService", () => {
     vi.restoreAllMocks();
   });
 
+  describe("config registry lifecycle", () => {
+    it("boot worktree-internal filter keeps a worktree config out of the merged registry and its next persisted write", async () => {
+      vi.useRealTimers();
+      const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
+      mkdirSync(dirname(worktreeConfigPath), { recursive: true });
+      writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      expect(service.getRegistryPaths()).not.toContain(worktreeConfigPath);
+      // The filter itself never writes the registry file — it only keeps the
+      // worktree-internal path out of what `applyConfig` hands to the
+      // existing `mutateConfigRegistry` write a few lines later in the
+      // constructor, so the next persisted write excludes it too.
+      const persist = mutateConfigRegistryMock.mock.calls.at(-1)?.[1] as (current: {
+        configPaths: string[];
+        unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
+      }) => { configPaths: string[] };
+      expect(persist({ configPaths: [], unconfiguredProjects: [] }).configPaths).not.toContain(
+        worktreeConfigPath,
+      );
+
+      service.dispose();
+    });
+
+    it("logs a daemon.registry.count event at boot with the raw read count and the worktree-internal drop count", async () => {
+      vi.useRealTimers();
+      const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
+      mkdirSync(dirname(worktreeConfigPath), { recursive: true });
+      writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "daemon.registry.count",
+          details: { read: 2, worktreeInternalDropped: 1 },
+        }),
+      );
+
+      service.dispose();
+    });
+
+    it("unregisters a worktree config that outlived the boot filter because it sits outside the current worktreeDir (a worktreeDir-migration leftover)", async () => {
+      vi.useRealTimers();
+      // The only production path that reaches `unregisterWorktreeConfig`'s
+      // `isRegistered` guard: `this.registryPaths` never contains an entry
+      // inside the CURRENT worktreeDir (the boot/preview filter always drops
+      // those), so the guard can only be true for an entry that was
+      // registered under a worktreeDir the host has since reconfigured away
+      // from.
+      const oldWorktreeDir = join(TEST_DATA_DIR, "old-worktrees");
+      const currentWorktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const oldWorktreePath = join(oldWorktreeDir, "api", "api-1");
+      const oldWorktreeConfigPath = join(oldWorktreePath, "spur.yaml");
+      mkdirSync(oldWorktreePath, { recursive: true });
+      writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
+      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      // Legitimately survives the boot prune: it is outside the CURRENT
+      // worktreeDir, so the boot filter has no reason to drop it.
+      expect(service.getRegistryPaths()).toContain(oldWorktreeConfigPath);
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: oldWorktreePath,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      removeWorktreeMock.mockReset().mockResolvedValue(undefined);
+
+      await service.complete("api-1");
+
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", oldWorktreePath);
+      expect(service.getRegistryPaths()).not.toContain(oldWorktreeConfigPath);
+      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
+      const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+        configPaths: string[];
+      };
+      expect(persisted.configPaths).not.toContain(oldWorktreeConfigPath);
+
+      service.dispose();
+    });
+
+    it("unregisters a migration-leftover worktree config on kill even when the worktree removal itself only warns", async () => {
+      vi.useRealTimers();
+      const oldWorktreeDir = join(TEST_DATA_DIR, "old-worktrees");
+      const currentWorktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const oldWorktreePath = join(oldWorktreeDir, "api", "api-1");
+      const oldWorktreeConfigPath = join(oldWorktreePath, "spur.yaml");
+      mkdirSync(oldWorktreePath, { recursive: true });
+      writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
+      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      expect(service.getRegistryPaths()).toContain(oldWorktreeConfigPath);
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: oldWorktreePath,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      removeWorktreeMock.mockReset().mockRejectedValue(new Error("worktree locked"));
+
+      const result = await service.kill("api-1");
+
+      expect(result.status).toBe("killed");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.kill.worktree_remove_failed" }),
+      );
+      // The registry entry is dropped despite the warn-only removal failure:
+      // the session reached a terminal state, so Spur no longer manages this
+      // worktree going forward either way.
+      expect(service.getRegistryPaths()).not.toContain(oldWorktreeConfigPath);
+      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
+      const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+        configPaths: string[];
+      };
+      expect(persisted.configPaths).not.toContain(oldWorktreeConfigPath);
+
+      service.dispose();
+    });
+  });
+
   it("spawns a session through one clear path and returns the enriched view", async () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
@@ -1353,6 +1535,7 @@ describe("SessionService", () => {
         .map(([, entry]) => entry.event)
         .filter((e) => e !== "session.state.classified"),
     ).toEqual([
+      "daemon.registry.count",
       "session.spawn.started",
       "session.spawn.worktree_created",
       "session.input.received",
@@ -9190,6 +9373,9 @@ describe("SessionService", () => {
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
       ) as unknown as MemoryShedService;
+      // Clear any construction-time logging so the calls counted below are
+      // only the memory-shed ones under test.
+      logSpurEventMock.mockClear();
 
       readHostMemoryMock.mockReturnValue({
         ...swapOnly,
@@ -20607,7 +20793,7 @@ describe("SessionService", () => {
     createTmuxSidecarSessionMock.mockImplementation(async () => {
       sidecarAlive = true;
     });
-    killTmuxSessionTreeMock.mockImplementation(async () => {
+    killTmuxSessionMock.mockImplementation(async () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);

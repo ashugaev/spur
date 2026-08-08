@@ -62,7 +62,7 @@ import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
-const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;

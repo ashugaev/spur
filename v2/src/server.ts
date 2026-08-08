@@ -32,6 +32,7 @@ import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
+  InvalidConfigPathError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
@@ -1406,6 +1407,7 @@ export async function startServer(
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
+        error instanceof InvalidConfigPathError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
