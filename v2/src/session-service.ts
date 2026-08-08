@@ -1006,6 +1006,7 @@ async function setupSessionAgentHooks(args: {
   restrictWrites: boolean;
   modelsCacheHome: string;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
   // .claude.json instead of the host ~/.claude.json when merging MCP
@@ -1021,6 +1022,7 @@ async function setupSessionAgentHooks(args: {
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
+    ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -6634,6 +6636,7 @@ export class SessionService {
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -7608,6 +7611,7 @@ export class SessionService {
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
@@ -9539,6 +9543,7 @@ export class SessionService {
       restrictWrites: resolveRestrictWrites(session),
       modelsCacheHome: this.config.models.codexHome,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+      ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
@@ -9779,6 +9784,9 @@ export class SessionService {
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(restoreProjectConfig.mcp?.exclude.length
+          ? { mcpExclude: restoreProjectConfig.mcp.exclude }
+          : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);

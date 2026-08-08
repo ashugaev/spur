@@ -3447,6 +3447,72 @@ projects:
     );
   });
 
+  it("parses projects.<id>.mcp.exclude", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      exclude: [playwright, digitalocean]
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toEqual({ exclude: ["playwright", "digitalocean"] });
+  });
+
+  it("leaves mcp unset when the project does not declare it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toBeUndefined();
+  });
+
+  it("defaults mcp.exclude to an empty list when mcp is present but empty", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toEqual({ exclude: [] });
+  });
+
+  it("rejects unknown keys under projects.<id>.mcp", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      inherit: false
+      exclude: [playwright]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.mcp only supports "exclude" (got: inherit)',
+    );
+  });
+
+  it("rejects a non-array mcp.exclude", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      exclude: playwright
+`);
+
+    expect(() => loadConfig(configPath)).toThrow("projects.api.mcp.exclude");
+  });
+
   it("rejects non-string project preflight prompts", async () => {
     const configPath = await writeConfig(`
 projects:
