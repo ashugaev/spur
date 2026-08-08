@@ -12,6 +12,7 @@ import {
   makeSessionWithTracker,
   mockGitHubStatus,
   mockGitLabStatus,
+  mockPrState,
   mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
@@ -1090,8 +1091,8 @@ test.describe("D4: Terminal button state", () => {
   });
 });
 
-// D4b: Merged-PR done button
-test.describe("D4b: Merged-PR done button", () => {
+// D4b: Merged/closed-PR done button
+test.describe("D4b: Merged/closed-PR done button", () => {
   test("done button visible when PR is merged and session is completable", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "done-btn-1",
@@ -1100,19 +1101,26 @@ test.describe("D4b: Merged-PR done button", () => {
     });
     await mockSessions(page, [session]);
     // Mock pr-status to return merged state (called as /api/pr-status?url=...)
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          ciStatus: null,
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
+    await mockPrState(page, "merged");
+
+    await page.goto("/");
+
+    // The done button has aria-label "Mark <id> as done"
+    const doneBtn = page.getByRole("button", {
+      name: new RegExp(`Mark ${session.id} as done`, "i"),
     });
+    await expect(doneBtn).toBeVisible({ timeout: 8000 });
+  });
+
+  test("done button visible when PR is closed and session is completable", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "done-btn-closed-1",
+      status: "running",
+      state: "needs_input",
+    });
+    await mockSessions(page, [session]);
+    // Mock pr-status to return closed state (called as /api/pr-status?url=...)
+    await mockPrState(page, "closed");
 
     await page.goto("/");
 
