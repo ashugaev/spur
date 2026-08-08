@@ -40,16 +40,25 @@ import {
 } from "./sidecars/index.js";
 import {
   assembleSidecarSweepClaims,
+  collectTree,
   confirmReaps,
   reapRecordedIdentity,
   reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
+  snapshotProcesses,
   sweepSidecars,
   type PendingReap,
+  type ProcSnapshot,
   type ReapOutcome,
   type SidecarSweepResult,
 } from "./sidecars/reap.js";
+import {
+  planSidecarReap,
+  resolveSidecarIdleTtlMinutes,
+  type SidecarReapCandidate,
+  type SidecarReapPlan,
+} from "./sidecars/policy.js";
 import {
   deleteAgentHookState,
   readAgentHookState,
@@ -138,7 +147,7 @@ import {
   NPM_GLOBALCONFIG_ENV_LOWER,
   npmPinConfigPath,
 } from "./npm-prefix.js";
-import { clearPortListener, isHostPortFree } from "./port-probe.js";
+import { clearPortListener, hasEstablishedConnections, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
@@ -2573,27 +2582,17 @@ export class SessionService {
       // already have started its sidecar tmux pane (see restore() and
       // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
       // call for exactly this gap).
-      const liveSessions = listSessions(this.config.dataDir).filter((session) =>
-        this.isLiveSessionRecord(session),
-      );
+      const allSessions = listSessions(this.config.dataDir);
+      const liveSessions = allSessions.filter((session) => this.isLiveSessionRecord(session));
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
       // the raw `${id}--` prefix as a belt-and-suspenders guard against
       // config drift where a live session's sidecar name isn't enumerated by
       // sessionSidecarNames.
-      const protectedTmux = new Set<string>();
+      const protectedTmux = this.buildProtectedSidecarTmux(liveSessions);
       const liveIdPrefixes = new Set<string>();
       for (const session of liveSessions) {
         liveIdPrefixes.add(`${session.id}--`);
-        let project: ProjectConfig | undefined;
-        try {
-          project = this.resolveProjectForSession(session);
-        } catch {
-          project = undefined;
-        }
-        for (const scName of sessionSidecarNames(session, project)) {
-          protectedTmux.add(sidecarTmuxSession(session.id, scName));
-        }
       }
 
       const names = await listTmuxSessionNames();
@@ -2619,10 +2618,223 @@ export class SessionService {
         await this.reapSidecarByName(sessionId, builtinName);
         this.clearSidecarProcEntry(sessionId, builtinName);
       }
+      // Built-in (always mcp, per-session) sidecars are fully handled above
+      // and by sweepLeakedBuiltinSidecars below; this second pass is scoped
+      // to project (non-builtin) sidecars — the desk-shared shape the
+      // builtin-name loop above can never see (it walks tmux names, not
+      // records, and only ever matches a `--${builtinName}` suffix).
+      await this.collectAndExecuteSidecarReapPass(allSessions, names);
       await this.sweepLeakedBuiltinSidecars("reaper");
     } finally {
       this.sidecarReaperRunning = false;
     }
+  }
+
+  // Every sidecar tmux name a live session is entitled to (agent built-in
+  // sidecars plus any project-declared user sidecar), keyed on the SESSION's
+  // own id rather than its sidecar owner id. That makes this an effective
+  // guard for a per-session (mcp/builtin) sidecar or a non-desk session
+  // (ownerId === session.id); a desk-shared sidecar's real owner-keyed pane
+  // name is protected instead by planSidecarReap's own workspaceRunning +
+  // idle-TTL + connection-veto rules, not by this set.
+  private buildProtectedSidecarTmux(liveSessions: readonly SessionRecord[]): Set<string> {
+    const protectedTmux = new Set<string>();
+    for (const session of liveSessions) {
+      let project: ProjectConfig | undefined;
+      try {
+        project = this.resolveProjectForSession(session);
+      } catch {
+        project = undefined;
+      }
+      for (const scName of sessionSidecarNames(session, project)) {
+        protectedTmux.add(sidecarTmuxSession(session.id, scName));
+      }
+    }
+    return protectedTmux;
+  }
+
+  // Records-driven candidate enumeration for the project-sidecar reap pass.
+  // Built-in sidecars are always mcp and per-session, and already have their
+  // own dedicated reap path (the builtin-name tmux loop plus
+  // sweepLeakedBuiltinSidecars); this scopes to exactly the leak's shape —
+  // non-builtin, desk-shareable project sidecars — never by parsing a tmux
+  // name (a `--svc--` service pane can never be produced by this
+  // construction: `name` only ever comes from sessionSidecarNames).
+  private async collectSidecarReapCandidates(
+    tmuxNames: ReadonlySet<string>,
+    protectedTmux: ReadonlySet<string>,
+    sessions: readonly SessionRecord[],
+  ): Promise<SidecarReapCandidate[]> {
+    const psSnapshot = await snapshotProcesses();
+    const seenTmuxNames = new Set<string>();
+    const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
+    const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
+      let pending = connectionCache.get(port);
+      if (!pending) {
+        pending = hasEstablishedConnections(port);
+        connectionCache.set(port, pending);
+      }
+      return pending;
+    };
+
+    const candidates: SidecarReapCandidate[] = [];
+    for (const session of sessions) {
+      let project: ProjectConfig | undefined;
+      try {
+        project = this.resolveProjectForSession(session);
+      } catch {
+        project = undefined;
+      }
+      for (const sidecarName of sessionSidecarNames(session, project)) {
+        const sidecar = project?.sidecars[sidecarName];
+        if (!sidecar || Object.hasOwn(BUILTIN_SIDECARS, sidecarName)) {
+          continue;
+        }
+        const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
+        const tmuxName = sidecarTmuxSession(ownerId, sidecarName);
+        if (seenTmuxNames.has(tmuxName) || protectedTmux.has(tmuxName)) {
+          continue;
+        }
+        seenTmuxNames.add(tmuxName);
+
+        const owner = ownerId === session.id ? session : readSession(this.config.dataDir, ownerId);
+        const identity = owner?.sidecarProcs?.[sidecarName];
+        const paneAlive = tmuxNames.has(tmuxName);
+
+        // No reservation recorded at all reads as "none" without a probe —
+        // there is no live socket for a debugger to be attached to. When
+        // more than one port is reserved, any single "unknown" outranks
+        // every other result (never authorize a reap on a partial read) and
+        // any single "established" outranks "none".
+        const reservedPorts = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
+        let connections: "established" | "none" | "unknown" = "none";
+        if (reservedPorts.length > 0) {
+          const results = await Promise.all(reservedPorts.map((port) => probeConnections(port)));
+          connections = results.includes("unknown")
+            ? "unknown"
+            : results.includes("established")
+              ? "established"
+              : "none";
+        }
+
+        // Inclusive of the owner itself, unlike hasRunningWorkspaceMembers
+        // (which excludes the passed-in session by design, for its own
+        // sibling-only call sites) — a single-member workspace whose sole
+        // session is itself running must read as workspace-running here.
+        const workspaceMembers = owner ? this.listDeskSessions(owner) : [];
+        const workspaceRunning =
+          workspaceMembers.some((m) => m.status === "running" || m.status === "spawning") ||
+          workspaceMembers.some((m) => this.isInRestoreWarmup(m.id));
+
+        let lastActivityAtMs: number | null = null;
+        for (const member of workspaceMembers) {
+          const iso = this.dashboardCache.get(member.id)?.lastActivityAt ?? member.updatedAt;
+          const ms = Date.parse(iso);
+          if (Number.isFinite(ms) && (lastActivityAtMs === null || ms > lastActivityAtMs)) {
+            lastActivityAtMs = ms;
+          }
+        }
+
+        candidates.push({
+          ownerId,
+          sidecarName,
+          tmuxName,
+          paneAlive,
+          mcp: Boolean(sidecar.mcp),
+          ownerExists: owner !== undefined,
+          worktreeExists: owner ? workspaceExists(owner.worktreePath) : false,
+          workspaceRunning,
+          hasRecordedIdentity: identity !== undefined,
+          lastActivityAtMs,
+          idleTtlMinutes: resolveSidecarIdleTtlMinutes(
+            sidecar.idleTtlMinutes,
+            this.config.sidecarGc.idleTtlMinutes,
+          ),
+          connections,
+          ageSeconds: identity ? (psSnapshot.byPid.get(identity.pid)?.etimes ?? null) : null,
+        });
+      }
+    }
+    return candidates;
+  }
+
+  // Signals every `reap` entry (pane-alive routes through reapSidecarByName;
+  // pane-gone falls back to the recorded identity, mirroring
+  // killSidecarAndUnlinkSlot) and logs a warn-only event for every `age_cap`
+  // entry. Never throws — reapSidecarByName/reapRecordedIdentity already
+  // degrade a survivor to a log, not a rejected promise.
+  private async executeSidecarReapPlan(plan: SidecarReapPlan): Promise<void> {
+    if (plan.reap.length === 0 && plan.warn.length === 0) {
+      return;
+    }
+    // ONE pre-signal snapshot for the whole pass's treeRssKb accounting —
+    // taken before any entry is signaled, since a signaled tree's
+    // descendants reparent immediately after and a later snapshot could
+    // never attribute them back to this pass.
+    const preSignalSnapshot: ProcSnapshot =
+      plan.reap.length > 0 ? await snapshotProcesses() : { ok: false, byPid: new Map(), byPgid: new Map() };
+    for (const entry of plan.reap) {
+      const owner = readSession(this.config.dataDir, entry.ownerId);
+      const identity = owner?.sidecarProcs?.[entry.sidecarName];
+      const treeRssKb =
+        identity && preSignalSnapshot.ok
+          ? collectTree(identity.pid, preSignalSnapshot).reduce(
+              (sum, pid) => sum + (preSignalSnapshot.byPid.get(pid)?.rssKb ?? 0),
+              0,
+            )
+          : 0;
+
+      let outcome: ReapOutcome | null;
+      if (await sidecarTmuxAlive(entry.ownerId, entry.sidecarName)) {
+        outcome = await this.reapSidecarByName(entry.ownerId, entry.sidecarName);
+      } else if (owner && identity) {
+        outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        this.logSidecarReapSurvivors(entry.ownerId, entry.sidecarName, outcome);
+      } else {
+        outcome = null;
+      }
+      this.clearSidecarProcEntry(entry.ownerId, entry.sidecarName);
+      this.logEvent("session.sidecar.reaped", {
+        level: "info",
+        sessionId: entry.ownerId,
+        message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} reaped (${entry.reason}).`,
+        details: {
+          sidecarName: entry.sidecarName,
+          reason: entry.reason,
+          treeRssKb,
+          survivors: outcome?.survivors ?? [],
+        },
+      });
+    }
+    for (const entry of plan.warn) {
+      this.logEvent("session.sidecar.age_warning", {
+        level: "warn",
+        sessionId: entry.ownerId,
+        message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} is past the age-warning threshold; still kept (${entry.reason} never kills).`,
+        details: { sidecarName: entry.sidecarName, reason: entry.reason },
+      });
+    }
+  }
+
+  // Shared by the 5-minute reaper tick and boot: records-driven candidate
+  // collection, the pure policy, then execution. Callers pass in the
+  // sessions/tmux-name snapshots they already hold to avoid a second listing
+  // pass in the reaper tick, which runs this right next to the builtin-name
+  // loop above.
+  private async collectAndExecuteSidecarReapPass(
+    sessions: readonly SessionRecord[],
+    tmuxNames: ReadonlySet<string>,
+  ): Promise<SidecarReapPlan> {
+    const liveSessions = sessions.filter((session) => this.isLiveSessionRecord(session));
+    const protectedTmux = this.buildProtectedSidecarTmux(liveSessions);
+    const candidates = await this.collectSidecarReapCandidates(tmuxNames, protectedTmux, sessions);
+    const plan = planSidecarReap({
+      nowMs: Date.now(),
+      config: this.config.sidecarGc,
+      candidates,
+    });
+    await this.executeSidecarReapPlan(plan);
+    return plan;
   }
 
   private startScheduledWakeMonitor(): void {
@@ -5824,6 +6036,14 @@ export class SessionService {
     }
 
     await this.sweepLeakedBuiltinSidecars("boot");
+    // Run the same project-sidecar reap pass the 5-minute reaper tick runs,
+    // once at boot: a host that stays up for weeks between restarts would
+    // otherwise wait a full tick after every restart before an idle leak
+    // from before the restart gets swept.
+    await this.collectAndExecuteSidecarReapPass(
+      listSessions(this.config.dataDir),
+      await listTmuxSessionNames(),
+    );
 
     return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
