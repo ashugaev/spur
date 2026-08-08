@@ -66,6 +66,16 @@ export interface HostInstallCheck {
   severity: "error" | "warn" | "info";
   detail: string;
   fix?: string;
+  // Only ever set on the "config-registry" check — the full per-path
+  // classification behind that check's aggregate counts/samples, carried on
+  // the check object itself so callers (cli.ts) can surface it without a
+  // second registry read or config re-parse.
+  configRegistryPaths?: ConfigRegistryPathEntry[];
+}
+
+export interface ConfigRegistryPathEntry {
+  path: string;
+  state: "alive" | "dead" | "worktree-internal";
 }
 
 export interface SystemdScope {
@@ -587,14 +597,19 @@ export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostI
   const configPaths = readConfigRegistryFile(dataDir).configPaths;
   const deadPaths: string[] = [];
   const worktreeInternalPaths: string[] = [];
+  const pathEntries: ConfigRegistryPathEntry[] = [];
   for (const path of configPaths) {
     if (!isExistingFile(path)) {
       deadPaths.push(path);
+      pathEntries.push({ path, state: "dead" });
       continue;
     }
     if (isInsideWorktreeDir(path, worktreeDir)) {
       worktreeInternalPaths.push(path);
+      pathEntries.push({ path, state: "worktree-internal" });
+      continue;
     }
+    pathEntries.push({ path, state: "alive" });
   }
   const overCap = configPaths.length > CONFIG_REGISTRY_MAX_PATHS;
   const ok = deadPaths.length === 0 && worktreeInternalPaths.length === 0 && !overCap;
@@ -604,6 +619,7 @@ export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostI
       ok: true,
       severity: "warn",
       detail: `${configPaths.length} registered config path(s), all live and outside worktreeDir`,
+      configRegistryPaths: pathEntries,
     };
   }
   const offending = [...deadPaths, ...worktreeInternalPaths].slice(0, 3);
@@ -634,6 +650,7 @@ export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostI
     severity: "warn",
     detail,
     ...(fixParts.length > 0 ? { fix: fixParts.join("; ") } : {}),
+    configRegistryPaths: pathEntries,
   };
 }
 

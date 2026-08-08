@@ -5,6 +5,7 @@ import {
   hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
+  type ConfigRegistryPathEntry,
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
@@ -856,6 +857,7 @@ interface HelpRow {
 
 interface DoctorResult {
   hostChecks: HostInstallCheck[];
+  configRegistryPaths: ConfigRegistryPathEntry[];
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -883,8 +885,23 @@ function displayPathFromCwd(path: string): string {
   return rendered.startsWith(".") ? rendered : `./${rendered}`;
 }
 
+function renderConfigRegistryPaths(paths: ConfigRegistryPathEntry[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    dimText("Registered config paths:"),
+    ...paths.map((entry) =>
+      dimText(`  ${entry.state.padEnd("worktree-internal".length)}  ${entry.path}`),
+    ),
+    "",
+  ];
+}
+
 function renderDoctorResult(result: DoctorResult): string {
-  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  const lines = [
+    renderHostInstallChecks(result.hostChecks),
+    "",
+    ...renderConfigRegistryPaths(result.configRegistryPaths),
+  ];
   if (result.existingProjectConfigPath) {
     lines.push(
       dimText(
@@ -2028,6 +2045,8 @@ export function createProgram(cliEntrypoint: string): Command {
           if (instanceConfig.status === "ok") {
             hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }
+          const configRegistryPaths =
+            hostChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ?? [];
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
@@ -2068,10 +2087,10 @@ export function createProgram(cliEntrypoint: string): Command {
                 fix: "Fix the reported error in spur.yaml",
               });
             }
-            return { hostChecks, existingProjectConfigPath };
+            return { hostChecks, configRegistryPaths, existingProjectConfigPath };
           }
           if (!options.scaffold) {
-            return { hostChecks };
+            return { hostChecks, configRegistryPaths };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -2080,6 +2099,7 @@ export function createProgram(cliEntrypoint: string): Command {
           writeProjectConfigScaffold(scaffold);
           return {
             hostChecks,
+            configRegistryPaths,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
