@@ -3,7 +3,6 @@
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
-import { SessionModeSelect } from "@/components/SessionModeSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { Spinner } from "@/components/icons/Spinner";
@@ -165,7 +164,7 @@ function ModeFields({
   if (mode.kind === "spawn") {
     return (
       <>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <select
             aria-label="Spawn project"
             className={`flex-1 ${INPUT_CLASS}`}
@@ -188,6 +187,20 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
+          {mode.sessionMode ? (
+            <select
+              aria-label="Spawn session mode"
+              className={`min-w-24 flex-1 ${INPUT_CLASS}`}
+              onChange={(event) => mode.sessionMode?.onChange(event.target.value)}
+              value={mode.sessionMode.value}
+            >
+              {mode.sessionMode.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <input
@@ -198,14 +211,6 @@ function ModeFields({
             placeholder="Branch name"
             value={mode.branch.value}
           />
-          {mode.sessionMode ? (
-            <SessionModeSelect
-              ariaLabel="Spawn session mode"
-              onChange={mode.sessionMode.onChange}
-              options={mode.sessionMode.options}
-              value={mode.sessionMode.value}
-            />
-          ) : null}
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
