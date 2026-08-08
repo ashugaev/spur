@@ -140,9 +140,7 @@ test.describe("spawn modal capture", () => {
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
-    await page
-      .getByRole("combobox", { name: "Spawn project" })
-      .selectOption("council-project");
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("council-project");
 
     const modeSelect = page.getByRole("combobox", { name: "Spawn session mode" });
     await expect(modeSelect).toHaveValue("manager");

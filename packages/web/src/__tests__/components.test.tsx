@@ -3096,7 +3096,9 @@ describe("Dashboard", () => {
         target: { value: "api" },
       });
 
-      expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("combobox", { name: "Spawn session mode" }),
+      ).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
@@ -3124,7 +3126,9 @@ describe("Dashboard", () => {
       fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
         target: { value: "api" },
       });
-      expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("combobox", { name: "Spawn session mode" }),
+      ).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
