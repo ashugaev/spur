@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { constants, existsSync } from "node:fs";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 export const execFileAsync = promisify(execFile);
@@ -22,43 +22,62 @@ function hasAncestorProjectConfig(startDir: string): boolean {
   }
 }
 
-function tempRootCandidates(): string[] {
-  const roots = [tmpdir()];
-  let current = dirname(process.cwd());
-  for (;;) {
-    if (!roots.includes(current)) {
-      roots.push(current);
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      return roots;
-    }
-    current = parent;
+// true if `root` equals, sits inside, or is an ancestor of `target`.
+function isSameOrAncestorOrDescendant(root: string, target: string): boolean {
+  const a = resolve(root);
+  const b = resolve(target);
+  if (a === b) {
+    return true;
   }
+  return a.startsWith(b + sep) || b.startsWith(a + sep);
 }
 
-async function createTempDirInRoot(root: string, prefix: string): Promise<string | undefined> {
-  try {
-    await access(root, constants.W_OK);
-    return await mkdtemp(join(root, prefix));
-  } catch {
-    return undefined;
+// tracks every dir this process handed out, so a per-file safety net (see
+// test/setup/temp-dirs.ts) can sweep up whatever the test itself didn't.
+const trackedTempDirs = new Set<string>();
+
+export async function cleanupTrackedTempDirs(): Promise<void> {
+  const dirs = [...trackedTempDirs];
+  trackedTempDirs.clear();
+  for (const dir of dirs) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      // best-effort cleanup net; report and move on, never throw out of a teardown hook.
+      // eslint-disable-next-line no-console
+      console.warn(`cleanupTrackedTempDirs: failed to remove ${dir}: ${String(error)}`);
+    }
   }
 }
 
 export async function createTempDir(prefix: string): Promise<string> {
-  for (const root of tempRootCandidates()) {
-    const dir = await createTempDirInRoot(root, prefix);
-    if (!dir) {
-      continue;
-    }
-    if (!hasAncestorProjectConfig(dir)) {
-      return dir;
-    }
-    await rm(dir, { recursive: true, force: true });
+  const root = tmpdir();
+
+  const homeSpurDir = join(homedir(), ".spur");
+  if (isSameOrAncestorOrDescendant(root, homeSpurDir)) {
+    throw new Error(
+      `Refusing to create a temp dir under TMPDIR=${root}: it is inside, equal to, or an ` +
+        `ancestor of ${homeSpurDir}. Set TMPDIR to a writable directory outside ~/.spur.`,
+    );
+  }
+  if (hasAncestorProjectConfig(root)) {
+    throw new Error(
+      `Refusing to create a temp dir under TMPDIR=${root}: an ancestor has a spur.yaml/spur.yml. ` +
+        `Set TMPDIR to a writable directory outside any spur.yaml tree.`,
+    );
   }
 
-  throw new Error("Failed to create temp dir without ancestor spur.yaml or spur.yml");
+  try {
+    const dir = await mkdtemp(join(root, prefix));
+    trackedTempDirs.add(dir);
+    return dir;
+  } catch (cause) {
+    throw new Error(
+      `Failed to create a temp dir under TMPDIR=${root} with prefix "${prefix}": ${String(cause)}. ` +
+        `Set TMPDIR to a writable directory.`,
+      { cause },
+    );
+  }
 }
 
 export async function findFreePort(): Promise<number> {

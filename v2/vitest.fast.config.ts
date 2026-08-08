@@ -7,5 +7,6 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     pool: "forks",
+    setupFiles: ["./test/setup/temp-dirs.ts"],
   },
 });
