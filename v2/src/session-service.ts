@@ -12304,16 +12304,27 @@ export class SessionService {
     // pay for a second read of the same anchor record when there's no
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
+    const sidecarNamesForView = sessionSidecarNames(session, project);
+    // One snapshot for the whole enrich pass, not one per sidecar — and only
+    // taken at all when there is a sidecar to report an age for, so a
+    // sidecar-less session's enrich never pays for a `ps` fork.
+    const sidecarAgeSnapshot =
+      sidecarNamesForView.length > 0 ? await snapshotProcesses() : null;
     const sidecars: SessionSidecarView[] = [];
-    for (const name of sessionSidecarNames(session, project)) {
+    for (const name of sidecarNamesForView) {
       const sidecar = project?.sidecars[name];
       const ownerId = this.sidecarOwnerIdForName(session, project, name);
       const ownerRecord = ownerId === session.id ? session : anchorRecord;
+      const identity = ownerRecord.sidecarProcs?.[name];
+      const ageSeconds = identity
+        ? sidecarAgeSnapshot?.byPid.get(identity.pid)?.etimes
+        : undefined;
       sidecars.push({
         name,
         alive: await sidecarTmuxAlive(ownerId, name),
         ports: sidecarViewPorts(ownerRecord, name, sidecar),
         tmuxSession: sidecarTmuxSession(ownerId, name),
+        ...(ageSeconds !== undefined ? { ageSeconds } : {}),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);

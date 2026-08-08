@@ -12946,6 +12946,71 @@ describe("SessionService", () => {
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-2", "playwright");
     });
 
+    it("AC11: adds ageSeconds to a sidecar view from a live recorded identity", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          sidecarNames: ["dev"],
+          // This test's own pid is guaranteed resolvable in a real ps
+          // snapshot (snapshotProcesses is unmocked in this file).
+          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+    });
+
+    it("AC11: omits ageSeconds when the recorded identity's pid is not in the process snapshot", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          sidecarNames: ["dev"],
+          sidecarProcs: { dev: { pid: 999_999_999, pgid: 999_999_999, starttime: 1 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev).toBeDefined();
+      expect(dev?.ageSeconds).toBeUndefined();
+    });
+
     it("lists a desk-shared sidecar as running for every member in the dashboard view", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
