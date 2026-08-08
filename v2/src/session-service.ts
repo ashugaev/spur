@@ -4097,22 +4097,38 @@ export class SessionService {
         // last running member releases it.
         const deskSiblingsAlive =
           (session.sidecarNames?.length ?? 0) > 0 && this.hasRunningWorkspaceMembers(session);
+        // Resolved unconditionally (not only when deskSiblingsAlive): every
+        // sidecar's owner id below needs it, since a desk-shared sidecar's
+        // pane is named after the desk anchor/owner, never this session's
+        // own id.
         let reapProject: ProjectConfig | undefined;
-        if (deskSiblingsAlive) {
-          try {
-            reapProject = this.resolveProjectForSession(session);
-          } catch {
-            reapProject = undefined;
-          }
+        try {
+          reapProject = this.resolveProjectForSession(session);
+        } catch {
+          reapProject = undefined;
         }
         for (const sidecarName of session.sidecarNames ?? []) {
           const reapSidecar = reapProject?.sidecars[sidecarName];
           if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
             continue;
           }
-          if (await sidecarTmuxAlive(session.id, sidecarName)) {
-            await this.reapSidecarByName(session.id, sidecarName);
-            this.clearSidecarProcEntry(session.id, sidecarName);
+          const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
+          if (await sidecarTmuxAlive(ownerId, sidecarName)) {
+            await this.reapSidecarByName(ownerId, sidecarName);
+            this.clearSidecarProcEntry(ownerId, sidecarName);
+            reaped += 1;
+            continue;
+          }
+          // The owner's pane is already gone (e.g. a desk-shared pane a
+          // sibling's own probe id could never see under the old
+          // session.id-only probe); fall through to the recorded identity,
+          // mirroring killSidecarAndUnlinkSlot.
+          const owner = readSession(this.config.dataDir, ownerId);
+          const identity = owner?.sidecarProcs?.[sidecarName];
+          if (owner && identity) {
+            const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+            this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+            this.clearSidecarProcEntry(ownerId, sidecarName);
             reaped += 1;
           }
         }

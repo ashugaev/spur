@@ -23035,6 +23035,119 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("AC12: resolves a desk sibling's sidecar pane by the desk owner id, not the sibling's own id", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+            },
+          },
+        },
+      });
+      const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+      // api-2 is a non-anchor desk sibling, also terminal (no running member
+      // anywhere in the desk), so the loop must fall through to a probe for
+      // BOTH sessions it processes.
+      sessions.set("api-2", {
+        ...(sessions.get("api-1") as SessionRecord),
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "completed",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      // Only the true owner id (the desk anchor, api-1) has a live pane. The
+      // pre-fix code probed `sidecarTmuxAlive(session.id, name)` directly,
+      // which for api-2's own turn would probe "api-2" and always miss.
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-1" && name === "daemon",
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+        reapOrphanedTmux(): Promise<void>;
+        dispose(): void;
+      };
+
+      // Direct call, not a timer advance: the 60s project-sidecar reap pass
+      // would otherwise also race this same "daemon" candidate on its own
+      // schedule and confound which mechanism produced the observed effect.
+      await service.reapOrphanedTmux();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
+      expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "daemon");
+      service.dispose();
+    });
+
+    it("AC12: falls back to the recorded identity when the desk owner's pane is already gone", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              daemon: {
+                command: "pnpm daemon",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+              },
+            },
+          },
+        },
+      });
+      const sessions = seedReaperSession({
+        status: "completed",
+        sidecarNames: ["daemon"],
+        // A pid this improbable is certain to be unreadable in /proc — the
+        // real reapRecordedIdentity degrades to "do not signal", but the
+        // stale entry must still be cleared (see the startSidecar precedent
+        // above for this exact pid-999999999 convention).
+        sidecarProcs: { daemon: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+      });
+      const { sidecarProcs: _anchorSidecarProcs, ...api1WithoutIdentity } = sessions.get(
+        "api-1",
+      ) as SessionRecord;
+      sessions.set("api-2", {
+        ...api1WithoutIdentity,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "completed",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      // No pane anywhere: the tmux route is fully exhausted for every id.
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+        reapOrphanedTmux(): Promise<void>;
+        dispose(): void;
+      };
+
+      // Direct call, not a timer advance: reapRecordedIdentity does real
+      // (unmocked) /proc + ps I/O, which a fire-and-forget setInterval
+      // callback under fake timers cannot be reliably awaited through.
+      await service.reapOrphanedTmux();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith(expect.stringContaining("daemon"));
+      expect(
+        writeSessionMock.mock.calls.some((call) => {
+          const [dataDir, record] = call as [string, SessionRecord];
+          return (
+            dataDir === TEST_DATA_DIR &&
+            record.id === "api-1" &&
+            record.sidecarProcs?.["daemon"] === undefined
+          );
+        }),
+      ).toBe(true);
+      service.dispose();
+    });
+
     it("leaves sidecars alone when a live agent runs under the terminal session", async () => {
       seedReaperSession({ status: "killed", sidecarNames: ["proxy"] });
       tmuxSessionExistsMock.mockResolvedValue(true);
