@@ -360,6 +360,8 @@ export interface SidecarConfig {
   agents?: AgentName[];
   /** Present when this sidecar exposes an MCP server to the launching agent. */
   mcp?: SidecarMcpConfig;
+  /** Overrides sidecarGc.idleTtlMinutes for this sidecar only. */
+  idleTtlMinutes?: number;
 }
 
 export interface SidecarPortConfig {
@@ -697,6 +699,11 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  sidecarGc: {
+    enabled: boolean;
+    idleTtlMinutes: number;
+    maxAgeWarnMinutes: number;
+  };
   admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
@@ -888,6 +895,8 @@ export interface SessionSidecarView {
   alive: boolean;
   ports: SidecarPortView[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
+  ageSeconds?: number;
 }
 
 export interface SessionView extends SessionRecord {

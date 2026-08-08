@@ -61,6 +61,11 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    sidecarGc: {
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    },
     admission: {
       enabled: true,
       maxLiveSessions: 1000,

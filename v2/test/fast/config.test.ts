@@ -4063,6 +4063,97 @@ projects:
   });
 });
 
+describe("sidecarGc", () => {
+  it("defaults to enabled true / 120 / 360 when absent (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("parses sidecarGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+  idleTtlMinutes: 240
+  maxAgeWarnMinutes: 720
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: false,
+      idleTtlMinutes: 240,
+      maxAgeWarnMinutes: 720,
+    });
+  });
+
+  it("ignores a project-level sidecarGc block", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("reads a per-sidecar idleTtlMinutes override instead of silently dropping it (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      front-local:
+        command: "pnpm dev"
+        idleTtlMinutes: 240
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["front-local"]).toEqual({
+      command: "pnpm dev",
+      autoStart: false,
+      idleTtlMinutes: 240,
+    });
+  });
+
+  it("still rejects idleTtlMinutes on a built-in sidecar (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        idleTtlMinutes: 30
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: idleTtlMinutes)',
+    );
+  });
+});
+
 describe("derive memory floors", () => {
   it("derives ordered defaults for the measured 62.789 GiB host", () => {
     const totalBytes = 67_418_697_728;
