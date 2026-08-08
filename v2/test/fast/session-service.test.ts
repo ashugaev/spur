@@ -6726,11 +6726,44 @@ describe("SessionService", () => {
 
       // Still inside the backoff window: neither event fires again, and no
       // further write is attempted.
+      writeSessionMock.mockClear();
       const second = await internals.captureAgentSessionId(seeded, 0);
 
       expect(second.agentSessionId).toBe("native-1");
       expect(persistFailedCalls()).toHaveLength(1);
       expect(discoveredCalls()).toHaveLength(0);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("retries the write once the backoff window elapses and persists on success", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      writeSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      expect(persistFailedCalls()).toHaveLength(1);
+
+      // Still inside the backoff window: no write attempt.
+      writeSessionMock.mockClear();
+      await internals.captureAgentSessionId(seeded, 0);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+
+      // Past AGENT_SESSION_ID_PERSIST_BACKOFF_MS (session-service.ts:467,
+      // 60_000ms): the next capture retries the write.
+      vi.setSystemTime(new Date(Date.now() + 60_000));
+      const third = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(third.agentSessionId).toBe("native-1");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).toHaveBeenCalledTimes(1);
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(persistFailedCalls()).toHaveLength(1);
     });
 
     it("does not re-emit the discovered event on a duplicate queued send", async () => {
