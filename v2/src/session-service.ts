@@ -2065,9 +2065,28 @@ export class SessionService {
     // scan.configPaths a few lines down, and a worktree-internal path that
     // never reached scan() cannot appear in that output. That keeps the
     // scanner the single owner of registry-file removal.
+    const filteredRegistryPaths = dropWorktreeInternalPaths(
+      this.registryPaths,
+      bootstrap.config.worktreeDir,
+    );
+    // Read-only observability, not a prune: this never touches the registry
+    // file (the scanner's applyConfig write below is the only writer). It
+    // records what the boot filter saw so a host can attribute a doctor
+    // config-registry warning to a real, growing count rather than guessing.
+    logSpurEvent(bootstrap.config.dataDir, {
+      event: "daemon.registry.count",
+      level: "info",
+      message: `registry paths ${this.registryPaths.length} read, ${
+        this.registryPaths.length - filteredRegistryPaths.length
+      } worktree-internal dropped`,
+      details: {
+        read: this.registryPaths.length,
+        worktreeInternalDropped: this.registryPaths.length - filteredRegistryPaths.length,
+      },
+    });
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: dropWorktreeInternalPaths(this.registryPaths, bootstrap.config.worktreeDir),
+      configPaths: filteredRegistryPaths,
       protectedPaths: [bootstrap.config.configPath],
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);

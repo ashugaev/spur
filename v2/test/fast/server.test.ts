@@ -72,10 +72,15 @@ describe("startServer", () => {
       (entry) => entry.event !== "daemon.memory.unbounded",
     );
     expect(events[0]).toMatchObject({
+      event: "daemon.registry.count",
+      details: { read: 1, worktreeInternalDropped: 0 },
+    });
+    expect(events[1]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
     });
     expect(events.map((entry) => entry.event)).toEqual([
+      "daemon.registry.count",
       "gh.poll_cycle",
       "daemon.startup.reconciled",
       "daemon.admission.startup",

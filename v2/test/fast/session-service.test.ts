@@ -1284,6 +1284,33 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("logs a daemon.registry.count event at boot with the raw read count and the worktree-internal drop count", async () => {
+      vi.useRealTimers();
+      const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
+      mkdirSync(dirname(worktreeConfigPath), { recursive: true });
+      writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "daemon.registry.count",
+          details: { read: 2, worktreeInternalDropped: 1 },
+        }),
+      );
+
+      service.dispose();
+    });
+
     it("unregisters a worktree config that outlived the boot filter because it sits outside the current worktreeDir (a worktreeDir-migration leftover)", async () => {
       vi.useRealTimers();
       // The only production path that reaches `unregisterWorktreeConfig`'s
@@ -1485,6 +1512,7 @@ describe("SessionService", () => {
         .map(([, entry]) => entry.event)
         .filter((e) => e !== "session.state.classified"),
     ).toEqual([
+      "daemon.registry.count",
       "session.spawn.started",
       "session.spawn.worktree_created",
       "session.input.received",
