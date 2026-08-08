@@ -6766,6 +6766,69 @@ describe("SessionService", () => {
       expect(persistFailedCalls()).toHaveLength(1);
     });
 
+    it("treats a throwing readSession as an unreadable record: warns once, never throws", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      readSessionMock.mockImplementationOnce(() => {
+        throw new Error(
+          "Invalid session metadata JSON at api-1.json: Unexpected end of JSON input",
+        );
+      });
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "Invalid session metadata JSON at api-1.json: Unexpected end of JSON input",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: no second warn, no readSession retry.
+      readSessionMock.mockClear();
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(readSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("warns once and backs off when the record is gone (session-gc archival mid-poll)", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      // Deliberately not seeded into the store: mirrors a session archived
+      // out from under a still-ticking delivery loop.
+      createSessionStore();
+      const seeded = runningSession();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "session record not found",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: a second tick logs nothing further,
+      // which is the flood this function exists to prevent.
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+    });
+
     it("does not re-emit the discovered event on a duplicate queued send", async () => {
       findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
       const sessions = seedQueuedSendSession("working");
