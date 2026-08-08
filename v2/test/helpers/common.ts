@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -7,6 +7,29 @@ import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 export const execFileAsync = promisify(execFile);
+
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+// Resolves symlinks so a symlinked TMPDIR can't smuggle the real target past
+// the guards below. A not-yet-existing path can't be a symlink, so fall back
+// to a plain (unresolved) absolute path for it and let mkdtemp fail loudly.
+function resolveReal(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if (isEnoent(error)) {
+      return resolve(path);
+    }
+    throw error;
+  }
+}
 
 function hasAncestorProjectConfig(startDir: string): boolean {
   let current = startDir;
@@ -22,14 +45,20 @@ function hasAncestorProjectConfig(startDir: string): boolean {
   }
 }
 
-// true if `root` equals, sits inside, or is an ancestor of `target`.
-function isSameOrAncestorOrDescendant(root: string, target: string): boolean {
-  const a = resolve(root);
-  const b = resolve(target);
+function withTrailingSep(path: string): string {
+  return path.endsWith(sep) ? path : path + sep;
+}
+
+// true if `a` equals, sits inside, or is an ancestor of `b`. Both arguments
+// must already be resolved (realpath'd) — this does no resolution itself.
+// The trailing-separator normalization matters at the filesystem root: for
+// a === "/", `b.startsWith(a + sep)` tests startsWith("//"), which is always
+// false, so the root-as-ancestor case would otherwise never fire.
+function isSameOrAncestorOrDescendant(a: string, b: string): boolean {
   if (a === b) {
     return true;
   }
-  return a.startsWith(b + sep) || b.startsWith(a + sep);
+  return a.startsWith(withTrailingSep(b)) || b.startsWith(withTrailingSep(a));
 }
 
 // tracks every dir this process handed out, so a per-file safety net (see
@@ -51,19 +80,22 @@ export async function cleanupTrackedTempDirs(): Promise<void> {
 }
 
 export async function createTempDir(prefix: string): Promise<string> {
-  const root = tmpdir();
+  const configuredRoot = tmpdir();
+  const root = resolveReal(configuredRoot);
 
-  const homeSpurDir = join(homedir(), ".spur");
+  const homeSpurDir = resolveReal(join(homedir(), ".spur"));
   if (isSameOrAncestorOrDescendant(root, homeSpurDir)) {
     throw new Error(
-      `Refusing to create a temp dir under TMPDIR=${root}: it is inside, equal to, or an ` +
-        `ancestor of ${homeSpurDir}. Set TMPDIR to a writable directory outside ~/.spur.`,
+      `Refusing to create a temp dir under TMPDIR=${configuredRoot} (resolved: ${root}): it is ` +
+        `inside, equal to, or an ancestor of ${homeSpurDir}. Set TMPDIR to a writable directory ` +
+        `outside ~/.spur.`,
     );
   }
   if (hasAncestorProjectConfig(root)) {
     throw new Error(
-      `Refusing to create a temp dir under TMPDIR=${root}: an ancestor has a spur.yaml/spur.yml. ` +
-        `Set TMPDIR to a writable directory outside any spur.yaml tree.`,
+      `Refusing to create a temp dir under TMPDIR=${configuredRoot} (resolved: ${root}): an ` +
+        `ancestor has a spur.yaml/spur.yml. Set TMPDIR to a writable directory outside any ` +
+        `spur.yaml tree.`,
     );
   }
 
@@ -73,8 +105,8 @@ export async function createTempDir(prefix: string): Promise<string> {
     return dir;
   } catch (cause) {
     throw new Error(
-      `Failed to create a temp dir under TMPDIR=${root} with prefix "${prefix}": ${String(cause)}. ` +
-        `Set TMPDIR to a writable directory.`,
+      `Failed to create a temp dir under TMPDIR=${configuredRoot} with prefix "${prefix}": ` +
+        `${String(cause)}. Set TMPDIR to a writable directory.`,
       { cause },
     );
   }
