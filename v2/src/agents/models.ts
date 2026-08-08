@@ -15,7 +15,7 @@ export interface AgentModel {
   isCurrent?: boolean;
 }
 
-const CURSOR_FALLBACK_MODELS: AgentModel[] = [{ id: "auto", label: "Auto", isDefault: true }];
+const CURSOR_FALLBACK_MODELS: AgentModel[] = [{ id: "auto", label: "Auto" }];
 
 const CURSOR_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -83,10 +83,8 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
     if (!id) {
       continue;
     }
-    let isDefault = false;
     let isCurrent = false;
     if (label.endsWith(" (default)")) {
-      isDefault = true;
       label = label.slice(0, -" (default)".length).trim();
     }
     if (label.endsWith(" (current)")) {
@@ -96,7 +94,6 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
     models.push({
       id,
       label,
-      ...(isDefault ? { isDefault: true } : {}),
       ...(isCurrent ? { isCurrent: true } : {}),
     });
   }
@@ -123,18 +120,6 @@ export async function resolveCursorLaunchModel(model?: string): Promise<string> 
   return pickCursorNormalModelId(models) ?? model ?? DEFAULT_CURSOR_MODEL;
 }
 
-function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
-  if (!models.some((model) => model.id === DEFAULT_CURSOR_MODEL)) {
-    return models;
-  }
-  return models.map((model) => ({
-    id: model.id,
-    label: model.label,
-    ...(model.isCurrent ? { isCurrent: true } : {}),
-    ...(model.id === DEFAULT_CURSOR_MODEL ? { isDefault: true } : {}),
-  }));
-}
-
 async function listCursorModels(): Promise<AgentModel[]> {
   const cacheKey = cursorCommand();
   const cached = cursorCache.get(cacheKey);
@@ -148,7 +133,7 @@ async function listCursorModels(): Promise<AgentModel[]> {
     return CURSOR_FALLBACK_MODELS;
   }
   const models = parseCursorModelsOutput(stdout);
-  const resolved = models.length > 0 ? normalizeCursorDefaultModel(models) : CURSOR_FALLBACK_MODELS;
+  const resolved = models.length > 0 ? models : CURSOR_FALLBACK_MODELS;
   cursorCache.set(cacheKey, { models: resolved, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
   return resolved;
 }

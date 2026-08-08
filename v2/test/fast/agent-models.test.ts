@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("listAgentModels claude", () => {
-  it("returns the curated static list", async () => {
+  it("returns the curated static list with opus first and flagged as default", async () => {
     const models = await listAgentModels("claude");
     expect(models.map((m) => m.id)).toEqual(["opus", "sonnet", "haiku", "fable"]);
     expect(models.find((m) => m.id === "opus")?.isDefault).toBe(true);
@@ -63,7 +63,7 @@ describe("listAgentModels codex", () => {
 });
 
 describe("parseCursorModelsOutput", () => {
-  it("parses id/label rows and flags the default", () => {
+  it("parses id/label rows, stripping the default suffix and flagging current", () => {
     const stdout = [
       "Available models",
       "",
@@ -76,7 +76,7 @@ describe("parseCursorModelsOutput", () => {
     expect(models).toEqual([
       { id: "auto", label: "Auto" },
       { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
-      { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
+      { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
       { id: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
     ]);
   });
@@ -91,10 +91,10 @@ describe("listAgentModels cursor", () => {
       },
     );
     const models = await listAgentModels("cursor");
-    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(models).toEqual([{ id: "auto", label: "Auto" }]);
   });
 
-  it("marks auto as Spur's Cursor default over CLI fast default", async () => {
+  it("returns parsed list preserving isCurrent", async () => {
     process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test";
     execFileMock.mockImplementation(
       (
@@ -115,7 +115,7 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     expect(models).toEqual([
-      { id: "auto", label: "Auto", isDefault: true },
+      { id: "auto", label: "Auto" },
       { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
       { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
     ]);
@@ -128,7 +128,7 @@ describe("pickCursorNormalModelId", () => {
       pickCursorNormalModelId([
         { id: "auto", label: "Auto" },
         { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
-        { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
+        { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
       ]),
     ).toBe("composer-2.5");
   });

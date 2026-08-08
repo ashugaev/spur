@@ -55,7 +55,10 @@ export type SpawnModalMode =
   | {
       kind: "spawn";
       project: ProjectControl;
-      model: FieldControl<string | null>;
+      model: FieldControl<string | null> & {
+        preselectWhenEmpty?: boolean;
+        onUserSelect?: (id: string | null) => void;
+      };
       branch: FieldControl<string>;
       workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
@@ -179,6 +182,8 @@ function ModeFields({
               agent={agent}
               ariaLabel="Spawn model"
               onChange={mode.model.onChange}
+              onUserSelect={mode.model.onUserSelect}
+              preselectWhenEmpty={mode.model.preselectWhenEmpty}
               value={mode.model.value}
             />
           </div>

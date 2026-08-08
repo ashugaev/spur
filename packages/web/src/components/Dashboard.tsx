@@ -26,6 +26,7 @@ import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/V
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
+import { useLastAgentSelection } from "@/hooks/useLastAgentSelection";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -1051,6 +1052,20 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  // True only when spawnModel reflects a real user choice (a direct dropdown
+  // click, or a restored draft/lastSelection value that was itself once a
+  // real choice) -- never an auto-preselect. ModelSelect's preselectWhenEmpty
+  // effect can only run while spawnModel is null, so this flag is kept false
+  // whenever spawnModel is null and true whenever it isn't, EXCEPT right
+  // after that auto-preselect fires: that path sets spawnModel through the
+  // plain onChange (not onUserSelect), so the flag stays false. Gates both
+  // the persisted draft's model field and the spawn payload's model field so
+  // an auto-pick the user never interacted with is never frozen into storage
+  // or submitted on their behalf. Kept in state (not a ref) so re-clicking an
+  // already-selected model -- which flips this flag without changing
+  // spawnModel itself, so React would otherwise bail out of the re-render --
+  // still reaches the spawnDraft memo below as a real dependency change.
+  const [spawnModelExplicit, setSpawnModelExplicit] = useState(false);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
   const spawnDraftDirtyRef = useRef(false);
@@ -1068,6 +1083,7 @@ export function Dashboard() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const lastSelection = useLastAgentSelection();
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) => {
@@ -1510,6 +1526,7 @@ export function Dashboard() {
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
+    setSpawnModelExplicit(draft?.modelIsExplicit ?? false);
     setSpawnBranch(draft?.branch ?? "");
     spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
     setSpawnPlanMode(draft?.planMode ?? false);
@@ -1529,6 +1546,26 @@ export function Dashboard() {
     return draft;
   };
 
+  // Wraps restoreSpawnDraft (now purely an internal helper -- every live call
+  // site below goes through this wrapper instead) to also seed agent/model
+  // from lastSelection when the target project has no saved draft, instead
+  // of the claude/Default reset applySpawnDraft falls back to. Needed
+  // everywhere a project resolution can land with no draft -- not just the
+  // initial modal-open click, but also this project-settling effect below,
+  // which re-fires (and re-resolves the project) once configuredProjectOptions
+  // finishes loading after the modal was already opened against the
+  // not-yet-resolved "" project.
+  const restoreSpawnDraftOrLastSelection = (nextProjectId: string) => {
+    const draft = restoreSpawnDraft(nextProjectId);
+    if (!draft) {
+      const agent = lastSelection.lastAgent ?? "claude";
+      setSpawnAgent(agent);
+      const rememberedModel = lastSelection.modelByAgent[agent] ?? null;
+      setSpawnModel(rememberedModel);
+      setSpawnModelExplicit(rememberedModel !== null);
+    }
+  };
+
   useEffect(() => {
     if (spawnPinnedProjectId) {
       if (spawnProjectId !== spawnPinnedProjectId) {
@@ -1545,7 +1582,7 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
       if (spawnOpen && !carriesUnscopedEdits) {
-        restoreSpawnDraft(nextProjectId);
+        restoreSpawnDraftOrLastSelection(nextProjectId);
       } else {
         setSpawnProjectId(nextProjectId);
       }
@@ -1556,7 +1593,7 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     if (normalizedProjectId !== spawnProjectId) {
-      restoreSpawnDraft(normalizedProjectId);
+      restoreSpawnDraftOrLastSelection(normalizedProjectId);
     }
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -1572,7 +1609,12 @@ export function Dashboard() {
       projectId: spawnProjectId,
       prompt: spawnPrompt,
       agent: spawnAgent,
-      model: spawnModel,
+      // Never persist an auto-preselected model: it would freeze the
+      // preselect's first pick into storage and block ModelSelect's
+      // preselect effect from ever reconsidering it (e.g. once the user
+      // favorites a different model).
+      model: spawnModelExplicit ? spawnModel : null,
+      modelIsExplicit: spawnModelExplicit,
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
@@ -1588,6 +1630,7 @@ export function Dashboard() {
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
+    spawnModelExplicit,
     spawnOpen,
     spawnPlanMode,
     spawnProjectId,
@@ -1766,7 +1809,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      if (spawnModel !== null) payload.model = spawnModel;
+      if (spawnModel !== null && spawnModelExplicit) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
@@ -1809,6 +1852,7 @@ export function Dashboard() {
       });
       setSpawnPrompt("");
       setSpawnModel(null);
+      setSpawnModelExplicit(false);
       setSpawnBranch("");
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
@@ -2175,9 +2219,11 @@ export function Dashboard() {
     }
   };
 
+  const isShepherdSpawn = spawnPinnedProjectId === SHEPHERD_PROJECT_ID;
+
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    restoreSpawnDraft(resolvePreferredSpawnProjectId());
+    restoreSpawnDraftOrLastSelection(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 
@@ -2555,7 +2601,19 @@ export function Dashboard() {
                 value: spawnModel,
                 onChange: (next) => {
                   spawnDraftDirtyRef.current = true;
+                  // Only onUserSelect (a real dropdown click) marks the model
+                  // explicit; this onChange also fires for ModelSelect's own
+                  // auto-preselect, which must not count as a user choice.
+                  if (next === null) setSpawnModelExplicit(false);
                   setSpawnModel(next);
+                },
+                preselectWhenEmpty: !isShepherdSpawn,
+                onUserSelect: (id) => {
+                  setSpawnModelExplicit(id !== null);
+                  // preselectWhenEmpty hides the Default menu item for every
+                  // branch except Shepherd, so `id` is only ever null here on
+                  // the Shepherd path (which the !isShepherdSpawn guard skips).
+                  if (id && !isShepherdSpawn) lastSelection.recordModel(spawnAgent, id);
                 },
               },
               branch: {
@@ -2652,7 +2710,15 @@ export function Dashboard() {
             onAgentChange={(next) => {
               spawnDraftDirtyRef.current = true;
               setSpawnAgent(next);
-              setSpawnModel(null);
+              if (isShepherdSpawn) {
+                setSpawnModel(null);
+                setSpawnModelExplicit(false);
+                return;
+              }
+              const rememberedModel = lastSelection.modelByAgent[next] ?? null;
+              setSpawnModel(rememberedModel);
+              setSpawnModelExplicit(rememberedModel !== null);
+              lastSelection.recordAgent(next);
             }}
             onClose={closeSpawnModal}
             onPromptChange={(next) => {

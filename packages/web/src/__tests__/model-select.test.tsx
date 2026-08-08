@@ -4,7 +4,7 @@ import { ModelSelect } from "@/components/ModelSelect.js";
 import type { AgentModel } from "@/lib/types.js";
 
 const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus", isDefault: true },
+  { id: "opus", label: "Opus" },
   { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
 ];
@@ -85,5 +85,122 @@ describe("ModelSelect", () => {
 
     rerender(<ModelSelect agent="codex" value="opus" onChange={onChange} />);
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+  });
+
+  it("does not drop a persisted value when switching back to an agent whose list hasn't loaded yet", async () => {
+    // "haiku" is deliberately NOT the model that a preselect/fallback would
+    // pick for claude (the first entry, "opus"), so a regression that
+    // discards it in favor of a fallback pick would be caught here.
+    const onChange = vi.fn();
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS, codex: CODEX_MODELS }));
+    const { rerender } = render(<ModelSelect agent="claude" value="haiku" onChange={onChange} />);
+    await waitFor(() => expect(onChange).not.toHaveBeenCalled());
+
+    // Switch to codex (its own persisted model), then back to claude with
+    // "haiku" restored -- simulating the parent seeding value synchronously
+    // on agent change, ahead of the new agent's models fetch resolving.
+    rerender(<ModelSelect agent="codex" value="codex-model-id" onChange={onChange} />);
+    await waitFor(() => expect(onChange).not.toHaveBeenCalled());
+
+    rerender(<ModelSelect agent="claude" value="haiku" onChange={onChange} />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Haiku");
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  describe("preselectWhenEmpty", () => {
+    it("auto-selects the alphabetically-first favorited model", async () => {
+      window.localStorage.setItem(
+        "spur:model-favorites",
+        JSON.stringify(["claude:sonnet", "claude:haiku"]),
+      );
+      const onChange = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      render(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />);
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith("haiku"));
+    });
+
+    it("auto-selects the first model in the fetched list when there are no favorites", async () => {
+      const onChange = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      render(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />);
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith("opus"));
+    });
+
+    it("does not auto-select when the prop is left off (default), non-regression for respawn/handoff/Shepherd", async () => {
+      const onChange = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      render(<ModelSelect agent="claude" onChange={onChange} value={null} />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Default");
+      });
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it("never shows the literal Default text on the button, before or after models load", async () => {
+      const onChange = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      const { rerender } = render(
+        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />,
+      );
+
+      // Synchronously after mount, before the models fetch resolves: showing
+      // the same "Loading…" copy the dropdown body uses, never "Default".
+      expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent("Default");
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith("opus"));
+      rerender(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value="opus" />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Sonnet/ })).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("menuitem", { name: "Default" })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("onUserSelect", () => {
+    it("fires with the model id on a model click and with null on the Default click", async () => {
+      const onChange = vi.fn();
+      const onUserSelect = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      render(
+        <ModelSelect agent="claude" onChange={onChange} onUserSelect={onUserSelect} value={null} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Sonnet/ })).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("menuitem", { name: /Sonnet/ }));
+      expect(onUserSelect).toHaveBeenCalledWith("sonnet");
+
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Default" }));
+      expect(onUserSelect).toHaveBeenCalledWith(null);
+    });
+
+    it("does not fire for the programmatic clear-on-agent-change", async () => {
+      const onChange = vi.fn();
+      const onUserSelect = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS, codex: CODEX_MODELS }));
+      const { rerender } = render(
+        <ModelSelect agent="claude" onChange={onChange} onUserSelect={onUserSelect} value="opus" />,
+      );
+      await waitFor(() => expect(onChange).not.toHaveBeenCalled());
+
+      rerender(
+        <ModelSelect agent="codex" onChange={onChange} onUserSelect={onUserSelect} value="opus" />,
+      );
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+      expect(onUserSelect).not.toHaveBeenCalled();
+    });
   });
 });

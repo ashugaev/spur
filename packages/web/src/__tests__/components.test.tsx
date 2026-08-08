@@ -1297,6 +1297,7 @@ describe("Dashboard", () => {
       prompt: "Stale Shepherd prompt",
       agent: "codex",
       model: "gpt-5.6-codex",
+      modelIsExplicit: true,
       branch: "feature/stale-shepherd",
       branchIsExplicit: true,
       workspaceMode: "worktree",
@@ -1351,6 +1352,400 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
+  });
+
+  describe("spawn modal agent/model memory", () => {
+    function mockDashboardFetch() {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          const agent = new URL(url, "http://localhost").searchParams.get("agent") ?? "";
+          const models =
+            agent === "codex"
+              ? [{ id: "gpt-5.5", label: "GPT-5.5" }]
+              : [
+                  { id: "sonnet", label: "Sonnet" },
+                  { id: "opus", label: "Opus" },
+                  { id: "haiku", label: "Haiku" },
+                ];
+          return new Response(JSON.stringify({ models }));
+        }
+        if (url === "/api/sessions") {
+          return new Response(
+            JSON.stringify({
+              projects: [
+                {
+                  id: "spur-shepherd",
+                  name: "Shepherd",
+                  configured: true,
+                  prefix: "shp",
+                  path: "/tmp/spur-data/shepherd",
+                  kind: "shepherd",
+                },
+                ...sessionsPayload().projects,
+              ],
+              sessions: sessionsPayload().sessions,
+            }),
+          );
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+    }
+
+    it("restores the persisted last agent and that agent's last model", async () => {
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "codex", modelByAgent: { codex: "gpt-5.5" } }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("codex");
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+    });
+
+    it("keeps the persisted agent/model when the spawn modal opens before the project list has loaded", async () => {
+      // "Spawn Session" renders unconditionally, before /api/sessions
+      // resolves, so a slow project-list fetch can settle AFTER the modal is
+      // already open. Regression test for a race where the project-settling
+      // effect (which re-resolves the default spawn project once
+      // configuredProjectOptions finishes loading) called plain
+      // restoreSpawnDraft and discarded the agent/model that openSpawnModal
+      // had already seeded from lastSelection, falling back to the fallback
+      // pick ("sonnet") instead of the persisted "haiku".
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku" } }),
+      );
+      let resolveSessions: (() => void) | null = null;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          const agent = new URL(url, "http://localhost").searchParams.get("agent") ?? "";
+          const models =
+            agent === "codex"
+              ? [{ id: "gpt-5.5", label: "GPT-5.5" }]
+              : [
+                  { id: "sonnet", label: "Sonnet" },
+                  { id: "opus", label: "Opus" },
+                  { id: "haiku", label: "Haiku" },
+                ];
+          return new Response(JSON.stringify({ models }));
+        }
+        if (url === "/api/sessions") {
+          await new Promise<void>((resolve) => {
+            resolveSessions = resolve;
+          });
+          return new Response(JSON.stringify(sessionsPayload()));
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+
+      render(<Dashboard />);
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      resolveSessions?.();
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
+
+    it("persists the agent and reseeds the model when switching agent in the spawn dialog", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "codex" },
+      });
+
+      await waitFor(() => {
+        const stored = window.localStorage.getItem("spur:last-agent-model");
+        expect(stored ? (JSON.parse(stored) as { lastAgent?: string }).lastAgent : null).toBe(
+          "codex",
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+    });
+
+    it("persists the selected model for the current agent", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Opus/ })).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("menuitem", { name: /Opus/ }));
+
+      await waitFor(() => {
+        const stored = window.localStorage.getItem("spur:last-agent-model");
+        const parsed = stored
+          ? (JSON.parse(stored) as { modelByAgent?: Record<string, string> })
+          : null;
+        expect(parsed?.modelByAgent?.["claude"]).toBe("opus");
+      });
+    });
+
+    it("restores the persisted per-agent model when switching back, not the fallback pick", async () => {
+      // "haiku" is not the fallback pick for claude (that would be "sonnet",
+      // the first model in the fetched list with no favorites) -- regression
+      // test for a race where switching agent A -> B -> A discarded A's
+      // persisted model because the drop-stale-value effect compared it
+      // against agent B's still-loaded list before agent A's refetch resolved.
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({
+          lastAgent: "claude",
+          modelByAgent: { claude: "haiku", codex: "gpt-5.5" },
+        }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "codex" },
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "claude" },
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
+
+    it("never shows a Default menu item in the main spawn modal once models have loaded", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Opus/ })).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("menuitem", { name: "Default" })).not.toBeInTheDocument();
+    });
+
+    it("keeps Shepherd spawn on claude/Default and does not read or write last-agent-model", async () => {
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "codex", modelByAgent: { codex: "gpt-5.5" } }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
+
+      expect(await screen.findByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Default");
+
+      const stored = window.localStorage.getItem("spur:last-agent-model");
+      expect(stored ? (JSON.parse(stored) as { lastAgent?: string }).lastAgent : null).toBe(
+        "codex",
+      );
+    });
+
+    it("does not freeze an auto-preselected model into the persisted draft, so favoriting later re-preselects it on reopen", async () => {
+      // Regression test: closing the modal used to persist whatever model
+      // ModelSelect's own empty-list preselect had picked (here "Sonnet",
+      // the first model with no favorites yet), even though the user never
+      // touched the model picker. Reopening then restored that frozen draft
+      // model, blocking ModelSelect's preselect effect from ever
+      // reconsidering the favorite the user picked in between.
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Add favorite Haiku" }));
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Remove favorite Haiku" })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
+
+    it("keeps an explicit re-click of the already-selected model over a later favorite", async () => {
+      // Regression test: re-clicking a model row that is already the current
+      // selection calls onChange with the SAME value, so React bails out of
+      // the re-render -- but onUserSelect still needs to mark the choice
+      // explicit so the draft-persisting memo picks it up on its next real
+      // render, not silently keep whatever explicitness was cached before.
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      // preselectWhenEmpty auto-picks "Sonnet", the first model with no
+      // favorites yet -- not a real user choice.
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Add favorite Haiku" }));
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Remove favorite Haiku" })).toBeInTheDocument();
+      });
+
+      // Explicitly re-click Sonnet, which is already the current selection.
+      fireEvent.click(screen.getByRole("menuitem", { name: /Sonnet/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+    });
+
+    it("falls back to the last-selected model when switching to a project with no draft", async () => {
+      // syncSpawnProject (an explicit "Spawn project" dropdown change) is the
+      // third live call site of restoreSpawnDraftOrLastSelection, alongside
+      // the initial modal-open click and the project-settling effect covered
+      // above -- it must fall back to lastSelection the same way, not reset
+      // to Default/null.
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku" } }),
+      );
+      writeSpawnDraft({
+        projectId: "api",
+        prompt: "",
+        agent: "claude",
+        model: "opus",
+        modelIsExplicit: true,
+        branch: "",
+        branchIsExplicit: false,
+        workspaceMode: "default",
+        defaultBranch: "",
+        planMode: false,
+        selfDestruct: false,
+        selfDestructConditions: "",
+        steps: [],
+        trackerUrl: null,
+      });
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                { id: "sonnet", label: "Sonnet" },
+                { id: "opus", label: "Opus" },
+                { id: "haiku", label: "Haiku" },
+              ],
+            }),
+          );
+        }
+        if (url === "/api/sessions") {
+          return new Response(
+            JSON.stringify({
+              projects: [
+                { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+                { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
+              ],
+              sessions: [],
+            }),
+          );
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "sp" },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+    });
   });
 
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
@@ -1448,6 +1843,77 @@ describe("Dashboard", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
+        }),
+      );
+    });
+  });
+
+  it("omits an auto-preselected model from the spawn payload after switching to a project with no draft", async () => {
+    // Regression test: switching the spawn project used to restore the new
+    // project's model draft (null, since it has none) while ModelSelect's
+    // empty-list preselect effect -- still watching the same already-loaded
+    // claude model list -- immediately refilled it with its own auto-pick,
+    // which then rode along into the spawn payload as if the user had chosen
+    // it.
+    const projects = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+      { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+    ];
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ ...sessionsPayload(), projects }), { status: 200 });
+      }
+      if (url === "/api/models?agent=claude") {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "sonnet", label: "Sonnet" },
+              { id: "opus", label: "Opus" },
+              { id: "haiku", label: "Haiku" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/preflight") return new Response(JSON.stringify({ branch: null }));
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "sp" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Carry no model along" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          body: JSON.stringify({
+            projectId: "sp",
+            prompt: "Carry no model along",
+            agent: "claude",
+          }),
         }),
       );
     });
@@ -2242,6 +2708,7 @@ describe("Dashboard", () => {
       prompt: "Keep the chosen branch",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "feature/explicit-branch",
       branchIsExplicit: true,
       workspaceMode: "default",
@@ -2340,6 +2807,7 @@ describe("Dashboard", () => {
       prompt: "Stored prompt",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "",
       branchIsExplicit: false,
       workspaceMode: "default",
@@ -2396,6 +2864,7 @@ describe("Dashboard", () => {
       prompt: "Saved Spur draft",
       agent: "claude",
       model: null,
+      modelIsExplicit: false,
       branch: "feature/sp-draft",
       branchIsExplicit: true,
       workspaceMode: "default",

@@ -27,7 +27,6 @@ export interface BranchExistsResponse {
 export interface AgentModel {
   id: string;
   label: string;
-  isDefault?: boolean;
 }
 
 export interface AgentModelsResponse {

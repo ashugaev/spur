@@ -28,7 +28,7 @@ async function mockModels(page: Page): Promise<void> {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        models: [{ id: "claude-opus", label: "Claude Opus", isDefault: true }],
+        models: [{ id: "claude-opus", label: "Claude Opus" }],
       }),
     });
   });

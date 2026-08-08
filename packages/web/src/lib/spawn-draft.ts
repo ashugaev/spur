@@ -10,6 +10,7 @@ export interface SpawnDraft {
   prompt: string;
   agent: AgentName;
   model: string | null;
+  modelIsExplicit: boolean;
   branch: string;
   branchIsExplicit: boolean;
   workspaceMode: WorkspaceMode;
@@ -21,9 +22,13 @@ export interface SpawnDraft {
   trackerUrl: string | null;
 }
 
-interface StoredSpawnDraft extends SpawnDraft {
+interface StoredSpawnDraft extends Omit<SpawnDraft, "modelIsExplicit"> {
   version: typeof SPAWN_DRAFT_VERSION;
   savedAt: number;
+  // Optional: drafts written before modelIsExplicit existed (v1, pre-#535)
+  // omit this field entirely. Treated as "not explicit" on read, see
+  // readSpawnDraft, rather than discarding the whole draft.
+  modelIsExplicit?: boolean;
 }
 
 function storageKey(projectId: string): string {
@@ -64,6 +69,7 @@ function isStoredSpawnDraft(
     typeof draft.prompt === "string" &&
     isAgentName(draft.agent) &&
     (draft.model === null || typeof draft.model === "string") &&
+    (draft.modelIsExplicit === undefined || typeof draft.modelIsExplicit === "boolean") &&
     typeof draft.branch === "string" &&
     typeof draft.branchIsExplicit === "boolean" &&
     isWorkspaceMode(draft.workspaceMode) &&
@@ -93,7 +99,19 @@ export function readSpawnDraft(
       return null;
     }
     const { version: _version, savedAt: _savedAt, ...draft } = parsed;
-    return draft;
+    // A draft written before modelIsExplicit existed (v1, pre-#535) never
+    // recorded whether its model came from a user click or an auto-pick, so
+    // it can't be trusted as explicit -- and the model value itself can't be
+    // trusted either, since we don't know which case produced it. Restore
+    // every other field, but null out the model instead of discarding the
+    // whole draft. Also normalize the inverse invalid state (an explicit
+    // model that is somehow null) the same way, since it can't be real.
+    const modelIsExplicit = draft.modelIsExplicit === true && draft.model !== null;
+    return {
+      ...draft,
+      model: draft.modelIsExplicit === undefined ? null : draft.model,
+      modelIsExplicit,
+    };
   } catch {
     try {
       storage.removeItem(key);

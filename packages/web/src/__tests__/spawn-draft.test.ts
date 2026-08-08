@@ -14,6 +14,7 @@ const draft: SpawnDraft = {
   prompt: "Fix reconnect state loss",
   agent: "codex",
   model: "gpt-5.6-codex",
+  modelIsExplicit: true,
   branch: "feature/spawn-draft",
   branchIsExplicit: true,
   workspaceMode: "worktree",
@@ -50,6 +51,35 @@ describe("spawn draft storage", () => {
 
     expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it("restores a v1 draft written before modelIsExplicit existed, dropping only the model", () => {
+    const { modelIsExplicit: _modelIsExplicit, ...legacyDraft } = draft;
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(key, JSON.stringify({ ...legacyDraft, version: 1, savedAt: NOW }));
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+
+    expect(restored).toEqual({ ...draft, model: null, modelIsExplicit: false });
+    // Every field the user actually typed survives, only the untrustworthy
+    // model/explicitness pair is reset.
+    expect(restored?.prompt).toBe(draft.prompt);
+    expect(restored?.branch).toBe(draft.branch);
+    expect(restored?.branchIsExplicit).toBe(draft.branchIsExplicit);
+    expect(restored?.steps).toEqual(draft.steps);
+    expect(restored?.trackerUrl).toBe(draft.trackerUrl);
+  });
+
+  it("normalizes an invalid explicit-but-null model instead of discarding the draft", () => {
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...draft, model: null, modelIsExplicit: true, version: 1, savedAt: NOW }),
+    );
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+
+    expect(restored).toEqual({ ...draft, model: null, modelIsExplicit: false });
   });
 
   it("clears only the confirmed project's draft", () => {
