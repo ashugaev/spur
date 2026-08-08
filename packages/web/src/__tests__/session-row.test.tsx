@@ -519,4 +519,33 @@ describe("SessionRow", () => {
       expect(doneButton).not.toBeDisabled();
     });
   });
+
+  it("re-enables the done action when complete resolves into a dialog", async () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "merged",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+    // Complete resolves without removing the row when the dashboard opens the
+    // open-PR or GitHub-unavailable dialog instead of completing.
+    onCompleteSession.mockResolvedValue(undefined);
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const doneButton = screen.getByRole("button", { name: "Mark api-a1 as done" });
+    fireEvent.click(doneButton);
+
+    await waitFor(() => expect(doneButton).not.toBeDisabled());
+  });
 });

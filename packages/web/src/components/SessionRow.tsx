@@ -201,7 +201,9 @@ interface SessionRowProps {
   deskMemberCount?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  // Resolves once the dashboard settled the click — completed, or parked on a
+  // dialog. The row ignores the outcome, so the result type stays open.
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
@@ -335,6 +337,9 @@ export function SessionRow({
               await onCompleteSession(session);
             } catch (err) {
               console.error("complete failed", err);
+            } finally {
+              // Complete can end in a dialog (open PR, GitHub unavailable) instead
+              // of removing the row, so the button must always become clickable again.
               setCompleting(false);
             }
           }}
