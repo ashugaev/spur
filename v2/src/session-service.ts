@@ -460,6 +460,11 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+// After a persist failure, stop retrying the write at delivery-loop cadence
+// (PIPELINE_POLL_INTERVAL_MS, 1s) and instead wait this long before the next
+// attempt. Discovery itself keeps running during the window (resume plans
+// need the id); only the write + event are suppressed.
+const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
@@ -2015,6 +2020,13 @@ export class SessionService {
   // records=50 -> records=17 stays silent). Swept alongside the other
   // classification-scoped maps in pollAttentionStates.
   private readonly lastClassifiedLogStates = new Map<string, SessionState>();
+  // Set when captureAgentSessionId's writeSession throws, keyed by session
+  // id, value = the epoch ms the backoff ends. While backed off, discovery
+  // still runs but the write and both discovered/persist_failed events are
+  // skipped, so a persistently failing disk write logs once per window
+  // instead of at delivery-loop cadence. Swept alongside the other
+  // discovery-scoped maps in pruneSessionScopedState.
+  private readonly agentSessionIdPersistBackoffUntil = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -3679,6 +3691,11 @@ export class SessionService {
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
       if (!liveIds.has(sessionId)) {
         this.lastClassifiedLogStates.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.agentSessionIdPersistBackoffUntil.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.agentSessionIdPersistBackoffUntil.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -9237,6 +9254,42 @@ export class SessionService {
         if (agentSessionId === session.agentSessionId) {
           return session;
         }
+        const backoffUntil = this.agentSessionIdPersistBackoffUntil.get(session.id);
+        if (backoffUntil !== undefined && Date.now() < backoffUntil) {
+          // A prior write failed and the backoff window has not elapsed.
+          // Discovery still ran above (resume plans need the id in memory),
+          // but do not retry the write or emit either event at loop cadence.
+          return { ...session, agentSessionId };
+        }
+        // Merge onto the freshest disk record, never the caller's argument:
+        // a mid-flight caller record (e.g. relaunch after killTmuxSession)
+        // can be stale, and this write must touch only agentSessionId.
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || latest.agentSessionId === agentSessionId) {
+          return { ...session, agentSessionId };
+        }
+        try {
+          writeSession(this.config.dataDir, { ...latest, agentSessionId });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to persist discovered agent session id for ${session.id}`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason,
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
+          return { ...session, agentSessionId };
+        }
+        this.agentSessionIdPersistBackoffUntil.delete(session.id);
         this.logEvent("session.agent_session_id.discovered", {
           level: "info",
           sessionId: session.id,
@@ -9244,7 +9297,7 @@ export class SessionService {
           message: `Discovered native agent session id for ${session.id}`,
           details: {
             agent: session.agent,
-            previousAgentSessionId: session.agentSessionId ?? null,
+            previousAgentSessionId: latest.agentSessionId ?? null,
             agentSessionId,
           },
         });

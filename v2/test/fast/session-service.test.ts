@@ -899,6 +899,8 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
+  agentSessionIdPersistBackoffUntil: Map<string, number>;
   waitForSubmitAck(
     binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
@@ -6606,6 +6608,145 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "session.state.transition" && entry.sessionId === "api-1",
       );
       expect(transitionCalls).toHaveLength(1);
+    });
+  });
+
+  describe("agent session id discovery", () => {
+    function discoveredCalls(sessionId = "api-1") {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.agent_session_id.discovered" && entry.sessionId === sessionId,
+      );
+    }
+
+    function persistFailedCalls(sessionId = "api-1") {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.agent_session_id.persist_failed" &&
+          entry.sessionId === sessionId,
+      );
+    }
+
+    it.each([
+      ["claude", "claude-native-1"],
+      ["codex", "codex-native-1"],
+      ["cursor", "cursor-native-1"],
+    ] as const)(
+      "persists a discovered agent session id on first discovery (%s)",
+      async (agent, discoveredId) => {
+        findAgentSessionIdMock.mockReset().mockResolvedValue(discoveredId);
+        const sessions = createSessionStore();
+        const seeded = runningSession({ agent });
+        sessions.set("api-1", seeded);
+        const service = await createDisposedSessionService();
+
+        const result = await sessionServiceInternals(service).captureAgentSessionId(seeded, 0);
+
+        expect(result.agentSessionId).toBe(discoveredId);
+        expect(sessions.get("api-1")?.agentSessionId).toBe(discoveredId);
+        expect(discoveredCalls()).toHaveLength(1);
+        expect(discoveredCalls()[0]?.[1].details).toMatchObject({
+          agent,
+          previousAgentSessionId: null,
+          agentSessionId: discoveredId,
+        });
+      },
+    );
+
+    it("does not re-emit session.agent_session_id.discovered for an unchanged id", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      writeSessionMock.mockClear();
+      // Reuse the original stale `seeded` argument (no agentSessionId), not
+      // the record captureAgentSessionId returned: this mirrors every real
+      // caller (ensureSessionReadyForSend, send()'s duplicate-ignored branch)
+      // discarding the returned record and re-reading the same stale copy
+      // next tick. The dedup has to hold against the on-disk value, not the
+      // caller's in-memory field.
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("emits again when the discovered id actually changes", async () => {
+      // codex, not claude: a pinned claude id short-circuits before discovery
+      // (:9116-9118) and would never re-poll for a changed id.
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession({ agent: "codex" });
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      findAgentSessionIdMock.mockResolvedValue("native-2");
+      // Same stale `seeded` argument again (see the unchanged-id test above).
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-2");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-2");
+      expect(discoveredCalls()).toHaveLength(2);
+      expect(discoveredCalls()[1]?.[1].details).toMatchObject({
+        previousAgentSessionId: "native-1",
+        agentSessionId: "native-2",
+      });
+    });
+
+    it("logs one warn and backs off when persisting the agent session id fails", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      writeSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(sessions.get("api-1")?.agentSessionId).toBeUndefined();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].level).toBe("warn");
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "disk full",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: neither event fires again, and no
+      // further write is attempted.
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(discoveredCalls()).toHaveLength(0);
+    });
+
+    it("does not re-emit the discovered event on a duplicate queued send", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = seedQueuedSendSession("working");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.send("api-1", { message: "first follow up" });
+      await service.send("api-1", { message: "first follow up" });
+
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-1");
+
+      service.dispose();
     });
   });
 
