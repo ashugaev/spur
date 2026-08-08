@@ -331,6 +331,7 @@ import {
   type SessionNotRestorablePayload,
   type SessionPrBinding,
   type ProjectListEntry,
+  type SpawnDefaultsResponse,
   type PreflightRequest,
   type PreflightResponse,
   type ProjectBranchNamingConfig,
@@ -1605,7 +1606,7 @@ async function waitForRestorePlan(
   return plan;
 }
 
-function resolveSpawnWorktree(
+export function resolveSpawnWorktree(
   project: ProjectConfig,
   overrides: SpawnOverrides | undefined,
 ): boolean {
@@ -3250,6 +3251,24 @@ export class SessionService {
       if (right.kind === "shepherd") return 1;
       return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
     });
+  }
+
+  // The resolved model/worktree a spawn would pick for this project+agent if
+  // the caller sent neither. Lets the client preselect a concrete option
+  // instead of a "server decides" sentinel. Reuses the exact spawn-time
+  // resolution functions so the shown value is always what launches.
+  spawnDefaults(projectId: string, agent: AgentName): SpawnDefaultsResponse {
+    let project: ProjectConfig;
+    try {
+      project = this.getProject(projectId);
+    } catch {
+      throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
+    }
+    return {
+      model:
+        resolveSpawnModel({ requestModel: undefined, resolvedAgent: agent, project }) ?? null,
+      worktree: resolveSpawnWorktree(project, undefined),
+    };
   }
 
   listUnconfiguredProjects(): UnconfiguredProjectEntry[] {

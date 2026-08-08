@@ -906,6 +906,20 @@ export async function startServer(
         return;
       }
 
+      const spawnDefaultsProjectId = path.match(/^\/projects\/([^/]+)\/spawn-defaults$/)?.[1];
+      if (method === "GET" && spawnDefaultsProjectId) {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, service.spawnDefaults(spawnDefaultsProjectId, agent));
+        return;
+      }
+
       const branchExistsId = path.match(/^\/projects\/([^/]+)\/branches\/exists$/)?.[1];
       if (method === "GET" && branchExistsId) {
         const name = url.searchParams.get("name")?.trim() ?? "";
