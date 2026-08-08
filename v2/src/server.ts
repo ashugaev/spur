@@ -653,14 +653,16 @@ export async function startServer(
           sendError(response, 400, "version not in registry");
           return;
         }
-        const helperPath = fileURLToPath(
-          new URL("../scripts/install-and-restart.sh", import.meta.url),
-        );
-        const child = spawn("bash", [helperPath, requestedVersion], {
-          detached: true,
-          stdio: "ignore",
-        });
-        child.unref();
+        if (requestedVersion !== getVersion()) {
+          const helperPath = fileURLToPath(
+            new URL("../scripts/install-and-restart.sh", import.meta.url),
+          );
+          const child = spawn("bash", [helperPath, requestedVersion], {
+            detached: true,
+            stdio: "ignore",
+          });
+          child.unref();
+        }
         sendJson(response, 202, { accepted: true, version: requestedVersion });
         return;
       }

@@ -54,7 +54,9 @@
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
+    "@types/ws": "8.18.1",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.6"
+    "vitest": "^3.2.6",
+    "ws": "^8.21.0"
   }
 }
