@@ -59,7 +59,10 @@ while IFS= read -r -d '' dir; do
     continue
   fi
   candidates+=("$dir")
-  size="$(du -sk "$dir" 2>/dev/null | cut -f1)"
+  # du exits non-zero on an unreadable subdir (runtime fixtures create some);
+  # under set -euo pipefail that would abort the whole script mid-scan, so
+  # tolerate the failure and treat an unmeasurable dir as 0 size.
+  size="$(du -sk "$dir" 2>/dev/null | cut -f1)" || size=0
   total_size=$((total_size + ${size:-0}))
 done < <(find "$ROOT" -mindepth 1 -maxdepth 2 -type d -print0)
 
