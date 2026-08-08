@@ -23,6 +23,7 @@ const draft: SpawnDraft = {
   selfDestructConditions: "After CI passes",
   steps: ["Implement", "Test"],
   trackerUrl: "https://example.com/issues/1",
+  sessionMode: "manager",
 };
 
 describe("spawn draft storage", () => {
@@ -47,6 +48,31 @@ describe("spawn draft storage", () => {
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
     window.localStorage.setItem(key, value);
+
+    expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toBeNull();
+    expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it("restores a pre-existing v1 draft with no sessionMode key, yielding sessionMode null", () => {
+    const { sessionMode: _sessionMode, ...draftWithoutSessionMode } = draft;
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...draftWithoutSessionMode, version: 1, savedAt: NOW }),
+    );
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+    expect(restored).not.toBeNull();
+    expect(restored?.sessionMode).toBeNull();
+    expect(restored?.prompt).toBe(draft.prompt);
+  });
+
+  it("discards a stored draft with a non-string sessionMode", () => {
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...draft, sessionMode: 42, version: 1, savedAt: NOW }),
+    );
 
     expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(key)).toBeNull();

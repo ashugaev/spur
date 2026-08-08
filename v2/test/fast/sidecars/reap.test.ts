@@ -422,6 +422,16 @@ describe("confirmReaps", () => {
     const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
     const pid = must(child.pid, "expected a spawned pid");
     try {
+      // Let the child settle before the baseline snapshot. `ps -o etimes`
+      // reads a still-warming-up /proc/<pid>/stat can occasionally report a
+      // wildly wrong (huge) elapsed time for a pid snapshotted within
+      // microseconds of its own fork — reproduced directly against this
+      // host's `ps`. `computeSurvivorCandidates` would then read the later,
+      // correct, much-smaller etimes as "went backwards" and treat this pid
+      // as already reused, skipping it entirely. A real tmux pane is never
+      // this fresh when reaped, so this settle delay matches production
+      // usage rather than masking anything under test.
+      await new Promise((resolve) => setTimeout(resolve, 30));
       const snapshot = await snapshotProcesses();
       expect(snapshot.byPid.has(pid)).toBe(true);
       const tree = collectTree(pid, snapshot);

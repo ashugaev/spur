@@ -2417,6 +2417,57 @@ describe("startServer", () => {
     }
   });
 
+  it("GET /projects carries modes through the HTTP boundary and omits them for a modes-less project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const plainRepoDir = join(root, "plain-repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(plainRepoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    modes:",
+        "      manager:",
+        "        skill: manager",
+        "        default: true",
+        "  plain:",
+        `    path: ${plainRepoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await response.json()) as Array<{
+        id: string;
+        modes?: Record<string, { skill: string; default?: boolean }>;
+      }>;
+      expect(listed.find((p) => p.id === "demo")?.modes).toEqual({
+        manager: { skill: "manager", default: true },
+      });
+      expect(listed.find((p) => p.id === "plain")).not.toHaveProperty("modes");
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects returns 400 when path does not exist without createMissing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
