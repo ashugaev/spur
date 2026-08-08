@@ -1,10 +1,11 @@
 // Fixture for temp-dir-safety-net.test.ts, spawned in its own isolated
-// vitest process. Deliberately allocates a tracked temp dir and registers
-// NO teardown of its own (no afterEach/afterAll) — the only thing that can
-// remove it is the setupFiles net (test/setup/temp-dirs.ts). When run as
-// part of the normal fast suite this is harmless (the real net cleans it
-// up); the outer test spawns this file alone to observe that cleanup
-// actually happened.
+// vitest process via vitest.fixture.config.ts. vitest.fast.config.ts excludes
+// *.fixture.test.ts, so this file never runs as part of a normal
+// `pnpm --dir v2 test`. Deliberately allocates a tracked temp dir and
+// registers NO teardown of its own (no afterEach/afterAll) — the only thing
+// that can remove it is the setupFiles net (test/setup/temp-dirs.ts); the
+// outer test spawns this file alone to observe that cleanup actually
+// happened.
 import { existsSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createTempDir } from "../helpers/common.js";
