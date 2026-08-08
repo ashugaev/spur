@@ -1,12 +1,21 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dimText } from "./cli-view.js";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
 import {
   assembleSidecarSweepClaims,
   findLeakedSidecarTrees,
@@ -38,6 +47,14 @@ import { getVersion } from "./version.js";
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
 const DISK_SPACE_MIN_FREE_KB = 5_120;
 const DISK_SPACE_PROBE_TIMEOUT_MS = 2_000;
+// Above this total (session shards plus the root-level global logs),
+// `data-dir-log-bytes` warns. Post-sweep steady state projects to ~1-1.5GB,
+// so 5GB is ~3x headroom on a healthy host.
+const LOG_BYTES_WARN_KB = 5 * 1024 * 1024;
+// `du -sk <dataDir>/sessions` on a healthy host completes in ~0.02s; `du -sk
+// <dataDir>` (which also walks worktrees) can take 6+s, so the probe is
+// scoped to `sessions` and given a generous but bounded timeout.
+const LOG_BYTES_PROBE_TIMEOUT_MS = 5_000;
 // A2: `node -e "require('node-pty')"` must never hang doctor on a wedged
 // child process.
 const NODE_PTY_PROBE_TIMEOUT_MS = 5_000;
@@ -555,6 +572,146 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
 }
 
+// A healthy host registers one instance config plus one per real repo
+// (single digits). 24 is ~3x headroom over any plausible fleet and far under
+// the observed 92-entry pathological state (worktree spur.yaml copies
+// auto-registered and never unregistered).
+const CONFIG_REGISTRY_MAX_PATHS = 24;
+
+// Pure over the file it reads: fast-tier testable without a running daemon.
+// `warn` only — never changes hasErrorSeverity or the process exit code.
+// Note: doctor resolves the instance config from SPUR_CONFIG/default and
+// ignores --config, so this check reflects that same instance, not
+// necessarily the one passed via --config.
+export function checkConfigRegistry(dataDir: string, worktreeDir: string): HostInstallCheck {
+  const configPaths = readConfigRegistryFile(dataDir).configPaths;
+  const deadPaths: string[] = [];
+  const worktreeInternalPaths: string[] = [];
+  for (const path of configPaths) {
+    if (!isExistingFile(path)) {
+      deadPaths.push(path);
+      continue;
+    }
+    if (isInsideWorktreeDir(path, worktreeDir)) {
+      worktreeInternalPaths.push(path);
+    }
+  }
+  const overCap = configPaths.length > CONFIG_REGISTRY_MAX_PATHS;
+  const ok = deadPaths.length === 0 && worktreeInternalPaths.length === 0 && !overCap;
+  if (ok) {
+    return {
+      id: "config-registry",
+      ok: true,
+      severity: "warn",
+      detail: `${configPaths.length} registered config path(s), all live and outside worktreeDir`,
+    };
+  }
+  const offending = [...deadPaths, ...worktreeInternalPaths].slice(0, 3);
+  const facts: string[] = [`${configPaths.length} registered config path(s)`];
+  if (deadPaths.length > 0) facts.push(`${deadPaths.length} dead`);
+  if (worktreeInternalPaths.length > 0)
+    facts.push(`${worktreeInternalPaths.length} worktree-internal`);
+  if (overCap) facts.push(`over the ${CONFIG_REGISTRY_MAX_PATHS}-path cap`);
+  const detail =
+    offending.length > 0
+      ? `${facts.join(", ")}: ${offending.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`
+      : `${facts.join(", ")} (doctor reads the instance config from SPUR_CONFIG/default and ignores --config)`;
+  // `spur disconnect` only helps a dead entry — it filters `this.registryPaths`,
+  // which never contains a worktree-internal path (the boot/preview prune
+  // already dropped it), so pointing that fix at one is a silent no-op that
+  // keeps this check red forever. Worktree-internal entries only clear on the
+  // next daemon restart, which re-runs the boot prune.
+  const fixParts: string[] = [];
+  if (deadPaths.length > 0) {
+    fixParts.push(`spur disconnect <path> for a dead entry, e.g. spur disconnect ${deadPaths[0]}`);
+  }
+  if (worktreeInternalPaths.length > 0) {
+    fixParts.push("restart the daemon to prune worktree-internal entries at boot");
+  }
+  return {
+    id: "config-registry",
+    ok: false,
+    severity: "warn",
+    detail,
+    ...(fixParts.length > 0 ? { fix: fixParts.join("; ") } : {}),
+  };
+}
+
+// `du -sk <dir>` first line, first whitespace-delimited field (KB total).
+function parseDuKb(output: string | undefined): number | undefined {
+  if (!output) return undefined;
+  const firstLine = output.trim().split("\n")[0];
+  if (!firstLine) return undefined;
+  const raw = firstLine.trim().split(/\s+/)[0];
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+// The global events.jsonl/user-actions.jsonl logs (and their .gz archives)
+// live at the data-dir root, disjoint from <dataDir>/sessions — eventLog.*
+// governs the events.jsonl family and userActionLog.* the user-actions.jsonl
+// one, so the doctor total must include both. A plain readdir+stat over the
+// root (never recursive) stays cheap regardless of how large `sessions` is.
+function rootLogFileBytes(dataDir: string): number {
+  let names: string[];
+  try {
+    names = readdirSync(dataDir);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const name of names) {
+    if (!name.startsWith("events.jsonl") && !name.startsWith("user-actions.jsonl")) {
+      continue;
+    }
+    try {
+      total += statSync(join(dataDir, name)).size;
+    } catch {
+      // Removed between readdir and stat — not itself a reportable condition.
+    }
+  }
+  return total;
+}
+
+function checkLogBytes(id: string, dataDir: string): HostInstallCheck {
+  const sessionsDir = join(dataDir, "sessions");
+  // A fresh instance (or one that has never spawned a session) has no
+  // sessions dir at all; du exits non-zero on a missing path, which would
+  // otherwise read as "du unavailable" instead of the true 0KB.
+  let sessionsKb: number | undefined = existsSync(sessionsDir) ? undefined : 0;
+  if (sessionsKb === undefined) {
+    const duOutput = tryExec("du", ["-sk", sessionsDir], {
+      timeoutMs: LOG_BYTES_PROBE_TIMEOUT_MS,
+    });
+    sessionsKb = parseDuKb(duOutput);
+  }
+  if (sessionsKb === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — du unavailable or non-numeric on this filesystem",
+    };
+  }
+  const totalKb = sessionsKb + Math.ceil(rootLogFileBytes(dataDir) / 1024);
+  if (totalKb > LOG_BYTES_WARN_KB) {
+    return {
+      id,
+      ok: false,
+      severity: "warn",
+      detail: `Spur logs under ${dataDir} total ${totalKb}KB (above the ${LOG_BYTES_WARN_KB}KB warn threshold)`,
+      fix: `lower eventLog.shardHotBytes / eventLog.retainArchives and userActionLog.shardHotBytes / userActionLog.retainArchives in ~/.spur/config.yaml`,
+    };
+  }
+  return {
+    id,
+    ok: true,
+    severity: "warn",
+    detail: `Spur logs under ${dataDir} total ${totalKb}KB (within the ${LOG_BYTES_WARN_KB}KB warn threshold)`,
+  };
+}
+
 async function portConflictCheck(
   id: ServiceId,
   unit: string,
@@ -988,6 +1145,10 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
     checks.push(checkDirWritable("worktree-dir-writable", instanceConfig.config.worktreeDir));
     checks.push(checkDirWritable("data-dir-writable", instanceConfig.config.dataDir));
     checks.push(checkDiskSpace("data-dir-disk-space", instanceConfig.config.dataDir));
+    checks.push(
+      checkConfigRegistry(instanceConfig.config.dataDir, instanceConfig.config.worktreeDir),
+    );
+    checks.push(checkLogBytes("data-dir-log-bytes", instanceConfig.config.dataDir));
 
     const actualWebPort = readWebPort(scope);
     const configuredWebPort = instanceConfig.config.ui.port;

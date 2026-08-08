@@ -6,9 +6,11 @@ import {
   addUnconfiguredProject,
   buildMergedConfig,
   ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
-  readConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
   writeConfigRegistry,
   writeConfigRegistryFile,
@@ -174,22 +176,57 @@ describe("registry.buildMergedConfig", () => {
   });
 });
 
-describe("registry.readConfigRegistry", () => {
-  it("drops missing config paths and rewrites the registry on disk", async () => {
-    const rootDir = await createTempDir("spur-registry-prune-");
+describe("registry.dropWorktreeInternalPaths", () => {
+  it("refuses to register a config path inside worktreeDir", async () => {
+    const rootDir = await createTempDir("spur-registry-worktree-guard-");
     tempDirs.push(rootDir);
-    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const worktreeConfigPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    mkdirSync(join(worktreeDir, "proj", "sess"), { recursive: true });
+    await writeFile(worktreeConfigPath, "stub: true\n", "utf8");
 
+    expect(isInsideWorktreeDir(worktreeConfigPath, worktreeDir)).toBe(true);
+    expect(dropWorktreeInternalPaths([worktreeConfigPath], worktreeDir)).toEqual([]);
+  });
+
+  it("keeps a path outside worktreeDir untouched, dead or alive — pruning is the scanner's job", async () => {
+    const rootDir = await createTempDir("spur-registry-worktree-guard-keep-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
     const existingPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
     const missingPath = join(rootDir, "missing.yaml");
 
-    writeConfigRegistry(dataDir, [existingPath, missingPath]);
+    expect(dropWorktreeInternalPaths([existingPath, missingPath], worktreeDir)).toEqual([
+      existingPath,
+      missingPath,
+    ]);
+  });
+});
 
-    const firstRead = readConfigRegistry(dataDir);
-    expect(firstRead).toEqual([existingPath]);
+describe("registry.isInsideWorktreeDir", () => {
+  it("rejects a sibling path sharing the worktreeDir prefix", async () => {
+    const rootDir = await createTempDir("spur-registry-prefix-sibling-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
+    const siblingConfigPath = join(`${worktreeDir}-backup`, "spur.yaml");
 
-    const secondRead = readConfigRegistry(dataDir);
-    expect(secondRead).toEqual([existingPath]);
+    expect(isInsideWorktreeDir(siblingConfigPath, worktreeDir)).toBe(false);
+  });
+});
+
+describe("registry.removeConfigRegistryPath", () => {
+  it("removes an entry addressed by a non-canonical path", async () => {
+    const rootDir = await createTempDir("spur-registry-remove-noncanonical-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const registeredPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
+
+    writeConfigRegistry(dataDir, [registeredPath]);
+
+    const nonCanonicalForm = join(rootDir, ".", "exists.yaml");
+    const result = removeConfigRegistryPath(dataDir, nonCanonicalForm);
+
+    expect(result).toEqual([]);
   });
 });
 

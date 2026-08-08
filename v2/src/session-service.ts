@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -106,6 +106,7 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
+  DEFAULT_PROJECT_CONFIG_FILES,
   deriveProjectIdFromDisplayName,
   expandHome,
   findProjectConfigPathInDirectory,
@@ -126,12 +127,20 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  flushEventLogCollapse,
   logSpurEvent,
   logUserInputEvent,
+  sessionEventLogPath,
   type SpurLogEntry,
   type UserInputKind,
 } from "./event-log.js";
-import { deleteSessionUserActions } from "./user-action-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  deleteSessionUserActions,
+  sessionUserActionLogPath,
+} from "./user-action-log.js";
+import { archivePath, tryRotate } from "./jsonl-log-io.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -286,9 +295,13 @@ import {
 import {
   addUnconfiguredProject,
   buildMergedConfig,
+  canonicalConfigKey,
   ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
   type RegistryScanResult,
@@ -452,6 +465,11 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+// After a persist failure, stop retrying the write at delivery-loop cadence
+// (PIPELINE_POLL_INTERVAL_MS, 1s) and instead wait this long before the next
+// attempt. Discovery itself keeps running during the window (resume plans
+// need the id); only the write + event are suppressed.
+const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
@@ -496,6 +514,32 @@ const SESSION_GC_TICK_MS = 5 * 60_000;
 // session). The reaper needs the full set of statuses that mean "this
 // session's runtime is not supposed to exist anymore".
 const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
+// Threshold for a terminal session's FIRST compaction: a shard below this is
+// not worth spending a gzip + archive slot on yet. Only gates the one-time
+// initial compaction — compactShardOnce's existsSync(archivePath) guard is
+// what makes compaction a one-way ratchet, not this floor.
+const TERMINAL_COMPACT_FLOOR_BYTES = 64 * 1024;
+// Bounds each sweep tick to ~0.6s of gzip work (measured 282 MB/s, 8.3 MB
+// average shard) so a large terminal-session backlog never blocks the event
+// loop; the remainder drains over subsequent ticks.
+const COMPACT_MAX_PER_TICK = 20;
+
+// Gzips `path` into its .1.gz archive slot at most once. A terminal session
+// can keep receiving low-volume trickle writes indefinitely (e.g.
+// session.pr_auto_detect.failed); rotating it again at the same small floor
+// every sweep would shift the just-created archive down a slot each time and
+// eventually unlink it once it falls outside retainArchives. Once a .1.gz
+// exists — from this compaction or from an ordinary shardHotBytes rotation —
+// normal size-based rotation owns the shard and this sweep leaves it alone.
+// Stateless by construction (no in-memory "already compacted" bookkeeping),
+// so the ratchet holds across daemon restarts too.
+function compactShardOnce(path: string, retainArchives: number): void {
+  if (existsSync(archivePath(path, 1))) {
+    return;
+  }
+  tryRotate(path, TERMINAL_COMPACT_FLOOR_BYTES, retainArchives);
+}
+
 const PR_CHECK_THROTTLE_MS = 30_000;
 // A session that is not running cannot open a PR by itself, but a user still
 // can, by hand, long after the agent stopped. So the cadence drops instead of
@@ -589,6 +633,10 @@ export class SessionResourceNotFoundError extends Error {
 }
 
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidConfigPathError extends Error {
   readonly statusCode = 400;
 }
 
@@ -1246,9 +1294,15 @@ export function resolveClaudeAuthPlanOptions(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
+  // A "running" status combined with state "error" means the live process is
+  // still alive and only its last turn failed (e.g. a transient transport
+  // error) — not that the session died, so it must not read as restorable.
+  // Only "stopped" state (the pane/process actually went away) qualifies
+  // while status is still "running".
   return (
-    ((isRestorableStatus(session.status) &&
-      (session.state === "stopped" || session.state === "error")) ||
+    ((session.status === "running" && session.state === "stopped") ||
+      ((session.status === "stopped" || session.status === "paused") &&
+        (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
@@ -1977,6 +2031,13 @@ export class SessionService {
   // records=50 -> records=17 stays silent). Swept alongside the other
   // classification-scoped maps in pollAttentionStates.
   private readonly lastClassifiedLogStates = new Map<string, SessionState>();
+  // Set when captureAgentSessionId's writeSession throws, keyed by session
+  // id, value = the epoch ms the backoff ends. While backed off, discovery
+  // still runs but the write and both discovered/persist_failed events are
+  // skipped, so a persistently failing disk write logs once per window
+  // instead of at delivery-loop cadence. Swept alongside the other
+  // discovery-scoped maps in pruneSessionScopedState.
+  private readonly agentSessionIdPersistBackoffUntil = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -1994,6 +2055,11 @@ export class SessionService {
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
+  // Round-robin offset into the terminal-session list, advanced by each
+  // tick's COMPACT_MAX_PER_TICK batch so a backlog larger than one tick's
+  // budget still drains across ticks instead of reprocessing the same head
+  // every time.
+  private compactCursor = 0;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
   private backgroundLoopsStarted = false;
@@ -2071,9 +2137,36 @@ export class SessionService {
       bootstrap.config.dataDir,
       bootstrap.config.configPath,
     );
+    // Worktree-internal filter only: dead/duplicate-alias entries are the
+    // scanner's job now (see ConfigRegistryScanner.scan below). This filter
+    // is applied in-memory only, ahead of scan() — it is never written back
+    // to the registry file directly. It still ends up persisted, though:
+    // applyConfig() unconditionally rewrites the registry file from
+    // scan.configPaths a few lines down, and a worktree-internal path that
+    // never reached scan() cannot appear in that output. That keeps the
+    // scanner the single owner of registry-file removal.
+    const filteredRegistryPaths = dropWorktreeInternalPaths(
+      this.registryPaths,
+      bootstrap.config.worktreeDir,
+    );
+    // Read-only observability, not a prune: this never touches the registry
+    // file (the scanner's applyConfig write below is the only writer). It
+    // records what the boot filter saw so a host can attribute a doctor
+    // config-registry warning to a real, growing count rather than guessing.
+    logSpurEvent(bootstrap.config.dataDir, {
+      event: "daemon.registry.count",
+      level: "info",
+      message: `registry paths ${this.registryPaths.length} read, ${
+        this.registryPaths.length - filteredRegistryPaths.length
+      } worktree-internal dropped`,
+      details: {
+        read: this.registryPaths.length,
+        worktreeInternalDropped: this.registryPaths.length - filteredRegistryPaths.length,
+      },
+    });
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: this.registryPaths,
+      configPaths: filteredRegistryPaths,
       protectedPaths: [bootstrap.config.configPath],
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
@@ -3089,6 +3182,12 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
+    if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
+      throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
+    }
     const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
       this.registryPaths.includes(canonicalPath)
@@ -3103,6 +3202,9 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
     const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== canonicalPath));
   }
@@ -3113,9 +3215,10 @@ export class SessionService {
     changed: boolean;
     unconfiguredToRemove: string[];
   } {
+    const paths = dropWorktreeInternalPaths(nextRegistryPaths, this.config.worktreeDir);
     const scan = this.registryScanner.scan({
       bootstrapConfigPath: this.bootstrapConfigPath,
-      configPaths: nextRegistryPaths,
+      configPaths: paths,
       protectedPaths: [this.bootstrapConfigPath],
     });
     this.emitRegistryScan(this.config.dataDir, scan);
@@ -3174,6 +3277,35 @@ export class SessionService {
 
   getRegistryPaths(): string[] {
     return [...this.registryPaths];
+  }
+
+  // Called beside every removeWorktree() so the registry shrinks on the same
+  // event that deletes the worktree, rather than only on an explicit
+  // /projects/disconnect that may never run (session killed, worktree
+  // deleted, host rebooted mid-teardown). A duplicate-projectId worktree
+  // config never contributed a project (mergeProjects throws on it, and the
+  // daemon skips it via skipInvalid), so no reload is needed here — only the
+  // registry file and this.registryPaths are touched.
+  //
+  // Defense-in-depth, not dead code: `this.registryPaths` never contains an
+  // entry inside the CURRENT worktreeDir (the boot/preview filter in
+  // `dropWorktreeInternalPaths` always drops those first), so the
+  // `isRegistered` guard below is only ever true for a worktree config that
+  // was registered under a worktreeDir the host has since reconfigured away
+  // from, or a pre-existing registry written before this filter shipped. Both
+  // are real, if narrow, production states — see "worktreeDir-migration
+  // leftover" in test/fast/session-service.test.ts.
+  private unregisterWorktreeConfig(worktreePath: string): void {
+    if (!worktreePath) return;
+    for (const name of DEFAULT_PROJECT_CONFIG_FILES) {
+      const candidate = join(worktreePath, name);
+      const candidateKey = canonicalConfigKey(candidate);
+      const isRegistered = this.registryPaths.some(
+        (path) => canonicalConfigKey(path) === candidateKey,
+      );
+      if (!isRegistered) continue;
+      this.registryPaths = removeConfigRegistryPath(this.config.dataDir, candidate);
+    }
   }
 
   listProjects(): ProjectListEntry[] {
@@ -3537,7 +3669,8 @@ export class SessionService {
     try {
       const nextStates = new Map<string, AttentionState>();
       const nextRunStates = new Map<string, SessionState>();
-      const sessions = listSessions(this.config.dataDir).filter(
+      const allSessions = listSessions(this.config.dataDir);
+      const liveSessions = allSessions.filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
       // Run the sweep before the per-session loop, off this same liveIds
@@ -3546,13 +3679,13 @@ export class SessionService {
       // life. Safe to run first: it only deletes/truncates ids ABSENT from
       // liveIds, so nothing the loop is about to populate for a live id is at
       // risk of being evicted on this same pass.
-      const liveIds = new Set(sessions.map((session) => session.id));
+      const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
       const claudeAccounts = this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
-      for (const session of sessions) {
+      for (const session of liveSessions) {
         try {
-          const view = await this.enrich(session, claudeAccounts);
+          const view = await this.enrich(session, claudeAccounts, allSessions);
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
@@ -3636,6 +3769,11 @@ export class SessionService {
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
       if (!liveIds.has(sessionId)) {
         this.lastClassifiedLogStates.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.agentSessionIdPersistBackoffUntil.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.agentSessionIdPersistBackoffUntil.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -3830,8 +3968,63 @@ export class SessionService {
     }
     this.reaperTimer = setInterval(() => {
       void this.reapOrphanedTmux();
+      this.compactTerminalSessionLogs();
+      flushEventLogCollapse(this.config.dataDir);
     }, REAP_INTERVAL_MS);
     this.reaperTimer.unref();
+  }
+
+  // Gzips each terminal (killed/completed/stopped) session's live event-log
+  // and user-action shard once it exceeds TERMINAL_COMPACT_FLOOR_BYTES.
+  // Deliberately does NOT inherit reapOrphanedTmux's `manual_pause` filter —
+  // that filter protects a paused agent's tmux, and compaction never touches
+  // tmux, sidecars, worktrees, or session records. Bounded to
+  // COMPACT_MAX_PER_TICK sessions per tick via compactCursor's round-robin
+  // offset, so a large backlog drains across several ticks — each tick
+  // picking up where the last left off — instead of blocking the event loop
+  // in one gzip burst or reprocessing the same head every tick.
+  //
+  // One-way ratchet, by construction rather than bookkeeping: compactShardOnce
+  // skips a shard that already has a .1.gz archive. A terminal session that
+  // keeps receiving trickle writes (e.g. session.pr_auto_detect.failed) after
+  // its first compaction is left to normal shardHotBytes rotation instead of
+  // being repeatedly re-rotated at the 64 KB floor — that ratchet would walk
+  // the compacted archive out of the retain window across a handful of
+  // 5-minute ticks. Stateless so it also survives a daemon restart, unlike an
+  // in-memory "already compacted" set.
+  private compactTerminalSessionLogs(): void {
+    try {
+      const sessions = listSessions(this.config.dataDir).filter((session) =>
+        REAPABLE_SESSION_STATUSES.has(session.status),
+      );
+      if (sessions.length === 0) {
+        this.compactCursor = 0;
+        return;
+      }
+      // Each shard family keeps its own retain cap: the two logs are configured
+      // independently (eventLog.* / userActionLog.*), so compaction must not
+      // rotate a user-action shard against the event-log cap even though the
+      // defaults happen to match today.
+      const eventRetain = this.config.eventLog?.retainArchives ?? DEFAULT_EVENT_LOG_RETAIN_ARCHIVES;
+      const userActionRetain =
+        this.config.userActionLog?.retainArchives ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES;
+      const start = this.compactCursor % sessions.length;
+      const batch = sessions.slice(start, start + COMPACT_MAX_PER_TICK);
+      for (const session of batch) {
+        compactShardOnce(sessionEventLogPath(this.config.dataDir, session.id), eventRetain);
+        compactShardOnce(
+          sessionUserActionLogPath(this.config.dataDir, session.id),
+          userActionRetain,
+        );
+      }
+      this.compactCursor = start + batch.length >= sessions.length ? 0 : start + batch.length;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.compact.failed", {
+        level: "warn",
+        message: `Terminal-session log compaction sweep failed: ${message}`,
+      });
+    }
   }
 
   // Safety net: a terminal (killed/completed/stopped) session's tmux is
@@ -6646,6 +6839,7 @@ export class SessionService {
         );
         if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
+          this.unregisterWorktreeConfig(workspacePath);
         }
 
         const message = error instanceof Error ? error.message : String(error);
@@ -6747,6 +6941,7 @@ export class SessionService {
     }
     if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
+      this.unregisterWorktreeConfig(workspacePath);
     }
   }
 
@@ -8975,6 +9170,7 @@ export class SessionService {
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     if (!options?.skipEnrichment) await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
@@ -9091,6 +9287,12 @@ export class SessionService {
           details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
         });
       }
+      // Runs even when the removal above only warned: this session reached a
+      // terminal state either way, and a warn-only removal failure still
+      // means Spur no longer manages this worktree going forward — a
+      // migration-leftover config entry pointing at it should not survive
+      // the session that owned it.
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
@@ -9141,6 +9343,78 @@ export class SessionService {
         if (agentSessionId === session.agentSessionId) {
           return session;
         }
+        const backoffUntil = this.agentSessionIdPersistBackoffUntil.get(session.id);
+        if (backoffUntil !== undefined && Date.now() < backoffUntil) {
+          // A prior write failed and the backoff window has not elapsed.
+          // Discovery still ran above (resume plans need the id in memory),
+          // but do not retry the write or emit either event at loop cadence.
+          return { ...session, agentSessionId };
+        }
+        // Merge onto the freshest disk record, never the caller's argument:
+        // a mid-flight caller record (e.g. relaunch after killTmuxSession)
+        // can be stale, and this write must touch only agentSessionId.
+        // The read can throw (a TOCTOU race between findSessionFilePath's
+        // existsSync check and the readFileSync it guards, or momentarily
+        // unparseable JSON mid-write) — treat that the same as a missing
+        // record rather than let it escape into send()/deliver()/spawn().
+        let latest: SessionRecord | null;
+        let readFailureReason: string | undefined;
+        try {
+          latest = readSession(this.config.dataDir, session.id);
+        } catch (error) {
+          latest = null;
+          readFailureReason = error instanceof Error ? error.message : String(error);
+        }
+        if (latest && latest.agentSessionId === agentSessionId) {
+          return { ...session, agentSessionId };
+        }
+        if (!latest) {
+          // Nothing to merge onto: the record is gone (session-gc archival
+          // mid-poll, a normal terminal-state race) or unreadable. The
+          // discovered id is dropped here with no write, so warn once per
+          // the same backoff window persist failures use below — an
+          // unconditional warn would re-fire every delivery tick for a
+          // session stuck in this state, recreating the flood this function
+          // exists to prevent.
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Could not persist discovered agent session id for ${session.id}: session record unavailable`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason: readFailureReason ?? "session record not found",
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
+          return { ...session, agentSessionId };
+        }
+        try {
+          writeSession(this.config.dataDir, { ...latest, agentSessionId });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to persist discovered agent session id for ${session.id}`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason,
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
+          return { ...session, agentSessionId };
+        }
+        this.agentSessionIdPersistBackoffUntil.delete(session.id);
         this.logEvent("session.agent_session_id.discovered", {
           level: "info",
           sessionId: session.id,
@@ -9148,7 +9422,7 @@ export class SessionService {
           message: `Discovered native agent session id for ${session.id}`,
           details: {
             agent: session.agent,
-            previousAgentSessionId: session.agentSessionId ?? null,
+            previousAgentSessionId: latest.agentSessionId ?? null,
             agentSessionId,
           },
         });
@@ -10452,6 +10726,12 @@ export class SessionService {
       remainingMessages,
       true,
     );
+    // Persist the drain before the discovery wait below: captureAgentSessionId
+    // anchors its own internal write on a fresh readSession, and must never
+    // observe the pre-drain queue here. A crash between an internal write and
+    // this function's own write would otherwise leave agentSessionId on disk
+    // while the just-delivered message still shows as queued.
+    writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     this.logEvent("session.message.sent", {
