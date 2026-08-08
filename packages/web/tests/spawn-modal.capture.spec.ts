@@ -118,6 +118,38 @@ test.describe("spawn modal capture", () => {
     });
   });
 
+  test("session mode picker preselects the project default", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    const modedProjects: ProjectInfo[] = [
+      {
+        id: "council-project",
+        name: "council-project",
+        modes: {
+          manager: { skill: "manager", default: true },
+          council: { skill: "council" },
+        },
+      },
+    ];
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "capture-spawn-mode-1", project: "council-project" })],
+      modedProjects,
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await page
+      .getByRole("combobox", { name: "Spawn project" })
+      .selectOption("council-project");
+
+    const modeSelect = page.getByRole("combobox", { name: "Spawn session mode" });
+    await expect(modeSelect).toHaveValue("manager");
+    await expect(modeSelect.locator("option")).toHaveCount(2);
+    await modalShot(page, /spawn session/i, "spawn-modal-07-session-mode.png");
+  });
+
   test("mobile spawn modal stays in viewport", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockModels(page);

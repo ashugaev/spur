@@ -188,14 +188,6 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
-          {mode.sessionMode ? (
-            <SessionModeSelect
-              ariaLabel="Spawn session mode"
-              onChange={mode.sessionMode.onChange}
-              options={mode.sessionMode.options}
-              value={mode.sessionMode.value}
-            />
-          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <input
@@ -206,6 +198,14 @@ function ModeFields({
             placeholder="Branch name"
             value={mode.branch.value}
           />
+          {mode.sessionMode ? (
+            <SessionModeSelect
+              ariaLabel="Spawn session mode"
+              onChange={mode.sessionMode.onChange}
+              options={mode.sessionMode.options}
+              value={mode.sessionMode.value}
+            />
+          ) : null}
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
