@@ -5,9 +5,7 @@ import type { SessionModeInfo } from "@/lib/types";
 // every lookup here goes through Object.hasOwn rather than `in` or bracket
 // access, mirroring v2/src/session-mode.ts.
 
-export function defaultSessionModeName(
-  modes: Record<string, SessionModeInfo> | undefined,
-): string | null {
+function defaultSessionModeName(modes: Record<string, SessionModeInfo> | undefined): string | null {
   if (!modes) return null;
   const entry = Object.entries(modes).find(([, config]) => config.default === true);
   return entry ? entry[0] : null;

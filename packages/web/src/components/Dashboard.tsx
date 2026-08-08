@@ -1489,6 +1489,7 @@ export function Dashboard() {
     (project) => project.id === spawnProjectId,
   )?.modes;
   const effectiveSessionMode = reconcileSessionMode(selectedSpawnProjectModes, spawnSessionMode);
+  const spawnModeOptions = sessionModeOptions(selectedSpawnProjectModes);
 
   const isValidSpawnProject = (candidateProjectId: string) =>
     configuredProjectOptions.some((project) => project.id === candidateProjectId);
@@ -2570,7 +2571,7 @@ export function Dashboard() {
                   setSpawnModel(next);
                 },
               },
-              ...(selectedSpawnProjectModes && Object.keys(selectedSpawnProjectModes).length > 0
+              ...(spawnModeOptions.length > 0
                 ? {
                     sessionMode: {
                       value: effectiveSessionMode ?? "",
@@ -2578,7 +2579,7 @@ export function Dashboard() {
                         spawnDraftDirtyRef.current = true;
                         setSpawnSessionMode(next === "" ? null : next);
                       },
-                      options: sessionModeOptions(selectedSpawnProjectModes),
+                      options: spawnModeOptions,
                     },
                   }
                 : {}),

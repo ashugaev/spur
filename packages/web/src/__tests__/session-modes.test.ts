@@ -1,24 +1,16 @@
 import { describe, expect, it } from "vitest";
-import {
-  defaultSessionModeName,
-  reconcileSessionMode,
-  sessionModeOptions,
-} from "@/lib/session-modes";
+import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import type { SessionModeInfo } from "@/lib/types";
 
 describe("session-modes", () => {
   describe("no modes", () => {
-    it("defaultSessionModeName is null", () => {
-      expect(defaultSessionModeName(undefined)).toBeNull();
-    });
-
     it("sessionModeOptions is empty", () => {
       expect(sessionModeOptions(undefined)).toEqual([]);
     });
 
     it("an empty modes map behaves like no modes", () => {
-      expect(defaultSessionModeName({})).toBeNull();
       expect(sessionModeOptions({})).toEqual([]);
+      expect(reconcileSessionMode({}, null)).toBeNull();
     });
   });
 
@@ -27,10 +19,6 @@ describe("session-modes", () => {
       manager: { skill: "manager", default: true },
       council: { skill: "council" },
     };
-
-    it("defaultSessionModeName returns the default name", () => {
-      expect(defaultSessionModeName(modes)).toBe("manager");
-    });
 
     it("sessionModeOptions lists only configured names, no sentinel", () => {
       expect(sessionModeOptions(modes)).toEqual([
@@ -45,8 +33,8 @@ describe("session-modes", () => {
       council: { skill: "council" },
     };
 
-    it("defaultSessionModeName is null", () => {
-      expect(defaultSessionModeName(modes)).toBeNull();
+    it("reconcileSessionMode resolves to null when nothing is picked", () => {
+      expect(reconcileSessionMode(modes, null)).toBeNull();
     });
 
     it("sessionModeOptions leads with a No mode sentinel", () => {
