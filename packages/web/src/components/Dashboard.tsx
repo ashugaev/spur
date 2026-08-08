@@ -2393,7 +2393,7 @@ export function Dashboard() {
           ) : null}
           <button
             aria-label="Spawn Shepherd"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+            className="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
             onClick={openShepherdSpawnModal}
             title="Spawn Shepherd"
             type="button"

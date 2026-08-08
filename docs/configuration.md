@@ -43,6 +43,15 @@ tmux:
   socketName: spur-4310
 ui:
   port: 5555
+eventLog:
+  hotBytes: 134217728 # 128MB
+  shardHotBytes: 16777216 # 16MB
+  retainArchives: 5
+  collapseWindowMs: 60000
+userActionLog:
+  hotBytes: 134217728 # 128MB
+  shardHotBytes: 16777216 # 16MB
+  retainArchives: 5
 models:
   codexHome: ~/.codex
 
@@ -185,6 +194,16 @@ Chats and forum topics bind to sessions with `/watch`. Without an id, Spur repli
 
 Bound chats get proactive pushes from the attention monitor: `needs_input`, `error`, and `rate_limited` each push once on entry (with a pane tail for the first two), and the forum topic name tracks state. A `working`→`waiting` transition with no reply since the last inbound message nudges the chat once. `complete`/`kill` send a farewell and close the topic. Every send is best-effort — a Telegram failure never blocks the monitor tick or cleanup.
 
+## Event log retention
+
+Two append-only logs live under `dataDir`: `events.jsonl` (daemon/session events) and `user-actions.jsonl` (mutating API calls). Each also shards per session under `<dataDir>/sessions/<id>/`. `eventLog.hotBytes` / `userActionLog.hotBytes` cap the root file before it rotates into a `.N.gz` archive; `shardHotBytes` caps each per-session shard the same way. Rotation itself is lossless — gzip keeps every line, and an archive stays readable through the same read path as the live file. `retainArchives` bounds how many `.N.gz` archives are kept per file; once that many exist, the next rotation deletes the oldest one, so it does prune history past that window.
+
+A 5-minute sweep also gzips a terminal (`killed`/`completed`/`stopped`) session's shard once, the first time it crosses a small floor, so a finished session's logs settle into a `.gz` archive without waiting for `shardHotBytes` to be reached. It is a one-way step: once a shard has a `.1.gz` archive (from this sweep or from an ordinary `shardHotBytes` rotation), the sweep leaves it alone and any further growth is handled by normal size-based rotation. This keeps the sweep from re-rotating a low-traffic terminal session over and over and walking its one real archive out of the `retainArchives` window.
+
+Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `eventLog.collapseWindowMs` are counted, not appended; the next occurrence past the window flushes one summary line before writing itself. The summary carries the LATEST occurrence's `message`/`details` plus `details.suppressedCount`/`details.suppressedSince` — the distinguishing payload of the suppressed occurrences in between (e.g. differing `details` on repeated `http.request.failed` events) is not retained, so do not rely on collapse to keep every occurrence's detail during an incident. Pending (not-yet-flushed) suppressed counts live in memory only; they are flushed on clean shutdown and by the 5-minute sweep, but are lost on a crash. `info`-level events and the user-action log are never collapsed. `collapseWindowMs: 0` disables collapsing.
+
+Both `eventLog` and `userActionLog` are instance config only — a project-config block parses without error and is discarded. `spur doctor`'s `data-dir-log-bytes` check warns when logs under `dataDir` exceed 5GB; severity `warn`, so it never changes doctor's exit code. The number is `du -sk <dataDir>/sessions` (session shards, their archives, and each session's own JSON record file) plus the root-level `events.jsonl`/`user-actions.jsonl` files and archives, so it runs slightly wider than the log files alone.
+
 ## Field reference
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -257,6 +276,13 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
+- `eventLog.hotBytes`: optional, default `134217728` (128MB). Instance config only. See [Event log retention](#event-log-retention).
+- `eventLog.shardHotBytes`: optional, default `16777216` (16MB).
+- `eventLog.retainArchives`: optional, default `5`.
+- `eventLog.collapseWindowMs`: optional, default `60000` (60s); `0` disables collapsing, negative rejected.
+- `userActionLog.hotBytes`: optional, default `134217728` (128MB). Instance config only.
+- `userActionLog.shardHotBytes`: optional, default `16777216` (16MB).
+- `userActionLog.retainArchives`: optional, default `5`.
 - `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, and critical shedding; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
 - `admission.maxLiveSessions`: optional positive integer, default `100`. Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot. An explicit value wins over memory-sizing fields.
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
