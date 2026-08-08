@@ -26,6 +26,7 @@ CONFIG FOOTGUNS
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
+  Sidecar reap: `sidecarGc` (default on) reaps an idle, non-mcp project sidecar per desk-workspace ownership and idle TTL; an established TCP connection on any of its ports vetoes every reap reason. `docs/configuration.md`, `v2/src/sidecars/policy.ts`.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
   Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, and protect the instance path. One canonical problem path emits one warning per daemon lifetime.
   A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
