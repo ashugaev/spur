@@ -225,7 +225,11 @@ export function SessionRow({
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
-  const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
+  // merged and closed are disjoint (github-pr-status.ts discriminates on
+  // node.merged, not node.state), so both states can gate done alongside.
+  const showDone =
+    (prInfo.state === "merged" || prInfo.state === "closed" || mergedAfterMerge) &&
+    canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
   const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);

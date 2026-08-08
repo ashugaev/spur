@@ -5,6 +5,7 @@ import type {
   SpurSessionSidecarView,
   SpurSessionView,
 } from "../src/lib/types";
+import type { PrState } from "../src/lib/pr-status-shape";
 
 const NOW = new Date().toISOString();
 const DEFAULT_GITHUB_STATUS = {
@@ -326,6 +327,22 @@ export async function mockPrStatusBatch(
     });
   });
   return { count: () => requestCount };
+}
+
+export async function mockPrState(page: Page, state: PrState): Promise<void> {
+  await page.route(/\/api\/pr-status\?/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state,
+        ciStatus: null,
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    });
+  });
 }
 
 export async function mockTagCatalog(page: Page): Promise<void> {
