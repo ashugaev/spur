@@ -43,6 +43,7 @@ const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
+type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
 
 const upsertConfigRegistryPathMock = vi.fn();
 const addUnconfiguredProjectMock = vi.fn();
@@ -102,6 +103,11 @@ const waitForPlaywrightReadyMock = vi.fn();
 const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
+// Default "none": most tests declare no sidecar ports at all, and this must
+// never silently default to "unknown" (which would mask a real assertion
+// that a probe failure keeps rather than reaps) or "established" (which
+// would mask the opposite).
+const hasEstablishedConnectionsMock = vi.fn<HasEstablishedConnections>().mockResolvedValue("none");
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
@@ -476,6 +482,7 @@ vi.mock("../../src/sidecars/builtins.js", () => ({
 vi.mock("../../src/port-probe.js", () => ({
   clearPortListener: clearPortListenerMock,
   isHostPortFree: isHostPortFreeMock,
+  hasEstablishedConnections: hasEstablishedConnectionsMock,
 }));
 
 vi.mock("../../src/runtime-tmux.js", () => ({
@@ -1127,6 +1134,7 @@ describe("SessionService", () => {
     resolvePlaywrightSidecarCommandMock.mockReset().mockReturnValue(undefined);
     clearPortListenerMock.mockReset().mockResolvedValue(undefined);
     isHostPortFreeMock.mockReset().mockResolvedValue(true);
+    hasEstablishedConnectionsMock.mockReset().mockResolvedValue("none");
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
     sidecarTmuxSessionMock
       .mockReset()
