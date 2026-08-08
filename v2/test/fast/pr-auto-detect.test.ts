@@ -66,6 +66,9 @@ vi.mock("../../src/preflight.js", () => ({
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
+  // The reaper tick flushes the warn-collapse map; these tests advance timers
+  // past REAP_INTERVAL_MS, so the mock has to carry it.
+  flushEventLogCollapse: vi.fn(),
 }));
 vi.mock("../../src/desktop-notify.js", () => ({
   sendDesktopNotification: vi.fn(),
