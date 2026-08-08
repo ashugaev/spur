@@ -427,9 +427,13 @@ describe("confirmReaps", () => {
       const tree = collectTree(pid, snapshot);
       const pending = { sessionName: "test", panePid: pid, tree, ownedGroups: [], snapshot };
       const [outcome] = await confirmReaps([pending], 50);
+      // `survivors: []` IS the death proof: confirmGone only reaches it via
+      // its own bounded ESRCH-polling loop. A second ad hoc probe here
+      // (wait-then-single-kill(pid, 0)) adds no coverage and races real pid
+      // reuse under CI contention — the kernel is free to hand the just-
+      // freed pid to an unrelated live process before this line runs,
+      // making `toThrow()` fail even though the spawned tree is long dead.
       expect(outcome?.survivors).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(() => process.kill(pid, 0)).toThrow();
     } finally {
       killGroupSafely(pid);
     }
@@ -499,9 +503,11 @@ describe("reapRecordedIdentity", () => {
         .split(/\s+/);
       const starttime = Number.parseInt(fields[19] ?? "", 10);
       const outcome = await reapRecordedIdentity({ pid, pgid: row.pgid, starttime }, "/tmp");
+      // See the identical note in "reaps a real spawned process tree with
+      // zero survivors" above: `survivors: []` already proves death via
+      // confirmGone's own bounded ESRCH polling; a second wait-then-probe
+      // here races real pid reuse under load instead of adding coverage.
       expect(outcome?.survivors).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(() => process.kill(pid, 0)).toThrow();
     } finally {
       killGroupSafely(pid);
     }
