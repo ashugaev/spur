@@ -17,6 +17,12 @@ import {
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
+import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "../../src/event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -3781,6 +3787,61 @@ projects:
 `);
     expect(() => loadConfig(configPath)).toThrow(
       "userActionLog.retainArchives must be a positive integer",
+    );
+  });
+
+  it("parses eventLog in instance mode and defaults when absent", async () => {
+    const withBlock = await writeConfig(`
+eventLog:
+  hotBytes: 12345
+  shardHotBytes: 678
+  retainArchives: 3
+  collapseWindowMs: 5000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(withBlock).eventLog).toEqual({
+      hotBytes: 12345,
+      shardHotBytes: 678,
+      retainArchives: 3,
+      collapseWindowMs: 5000,
+    });
+
+    const absent = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).eventLog).toEqual({
+      hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
+      shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+      retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+      collapseWindowMs: DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
+    });
+  });
+
+  it("accepts eventLog.collapseWindowMs of 0", async () => {
+    const configPath = await writeConfig(`
+eventLog:
+  collapseWindowMs: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(configPath).eventLog?.collapseWindowMs).toBe(0);
+  });
+
+  it("rejects a negative eventLog.collapseWindowMs", async () => {
+    const configPath = await writeConfig(`
+eventLog:
+  collapseWindowMs: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "eventLog.collapseWindowMs must be a non-negative number",
     );
   });
 

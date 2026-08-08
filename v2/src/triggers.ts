@@ -102,9 +102,10 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "needs_input",
 ]);
 
-// A running claude session whose live state is "error" is wedged on a
-// transient Claude server error (session-service.ts's reactivation nudge
-// self-clears it once it recovers), not actually closed or dead — the same
+// A running session whose live state is "error" is wedged on a transient
+// last-turn failure — a Claude server error (session-service.ts's
+// reactivation nudge self-clears it once it recovers) or a Cursor
+// terminalError record — not actually closed or dead — the same
 // "still alive, just blocked" shape as rate_limited. Scoped to
 // status === "running" because a genuinely closed session (status stopped,
 // errored, or killed) can also carry state "error", and that case IS closed.

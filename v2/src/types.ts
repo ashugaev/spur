@@ -683,6 +683,7 @@ export interface AppConfig {
     hotBytes: number;
     shardHotBytes: number;
     retainArchives: number;
+    collapseWindowMs: number;
   };
   userActionLog?: {
     hotBytes: number;
