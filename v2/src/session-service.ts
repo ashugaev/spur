@@ -9264,8 +9264,44 @@ export class SessionService {
         // Merge onto the freshest disk record, never the caller's argument:
         // a mid-flight caller record (e.g. relaunch after killTmuxSession)
         // can be stale, and this write must touch only agentSessionId.
-        const latest = readSession(this.config.dataDir, session.id);
-        if (!latest || latest.agentSessionId === agentSessionId) {
+        // The read can throw (a TOCTOU race between findSessionFilePath's
+        // existsSync check and the readFileSync it guards, or momentarily
+        // unparseable JSON mid-write) — treat that the same as a missing
+        // record rather than let it escape into send()/deliver()/spawn().
+        let latest: SessionRecord | null;
+        let readFailureReason: string | undefined;
+        try {
+          latest = readSession(this.config.dataDir, session.id);
+        } catch (error) {
+          latest = null;
+          readFailureReason = error instanceof Error ? error.message : String(error);
+        }
+        if (latest && latest.agentSessionId === agentSessionId) {
+          return { ...session, agentSessionId };
+        }
+        if (!latest) {
+          // Nothing to merge onto: the record is gone (session-gc archival
+          // mid-poll, a normal terminal-state race) or unreadable. The
+          // discovered id is dropped here with no write, so warn once per
+          // the same backoff window persist failures use below — an
+          // unconditional warn would re-fire every delivery tick for a
+          // session stuck in this state, recreating the flood this function
+          // exists to prevent.
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Could not persist discovered agent session id for ${session.id}: session record unavailable`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason: readFailureReason ?? "session record not found",
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
           return { ...session, agentSessionId };
         }
         try {
