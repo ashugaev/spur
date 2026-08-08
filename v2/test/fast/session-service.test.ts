@@ -17273,6 +17273,56 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
   });
 
+  describe("isRestorableSession", () => {
+    it("does not treat a live running session with a crashed-turn error as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "running",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(false);
+    });
+
+    it("treats a running session as restorable once its pane/process actually died", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "running",
+          state: "stopped",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+
+    it("treats a stopped session with error evidence as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "stopped",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+
+    it("treats an errored session as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "errored",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+  });
+
   it("rejects restore when the session is not restorable", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
