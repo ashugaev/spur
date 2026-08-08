@@ -15,9 +15,7 @@ function githubEventData(overrides: Record<string, unknown> = {}) {
     sessionId: "api-1",
     prNumber: 42,
     prTitle: "feat: add tests",
-    signals: [
-      { key: "comment:1", kind: "comment", text: "New comment from user" },
-    ],
+    signals: [{ key: "comment:1", kind: "comment", text: "New comment from user" }],
     ...overrides,
   };
 }
@@ -119,7 +117,11 @@ describe("GitHub batch", () => {
 
   it("merge() updates signals, prNumber, and prTitle", () => {
     const batch = makeBatch();
-    const next = createSendBatchParser("github", "proj", "src-1")(
+    const next = createSendBatchParser(
+      "github",
+      "proj",
+      "src-1",
+    )(
       githubEventData({
         prNumber: 99,
         prTitle: "updated title",
@@ -131,6 +133,25 @@ describe("GitHub batch", () => {
     expect(formatted).toContain("#99");
     expect(formatted).toContain("updated title");
     expect(formatted).toContain("CI is red");
+    expect(formatted).toContain("New comment from user");
+  });
+
+  it("merge() replaces a signal with the same key instead of duplicating it", () => {
+    const batch = makeBatch();
+    const next = createSendBatchParser(
+      "github",
+      "proj",
+      "src-1",
+    )(
+      githubEventData({
+        signals: [{ key: "comment:1", kind: "comment", text: "edited comment" }],
+      }),
+    )!;
+    batch.merge(next);
+    const formatted = batch.format();
+    expect(formatted).toContain("edited comment");
+    expect(formatted).not.toContain("New comment from user");
+    expect(formatted.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(1);
   });
 
   it("prune() removes signals not in snapshot", async () => {
@@ -213,9 +234,11 @@ describe("Service batch", () => {
 
   it("merge() accumulates ruleIds", () => {
     const batch = makeBatch();
-    const next = createSendBatchParser("service", "proj", "src-1")(
-      serviceEventData({ ruleId: "timeout" }),
-    )!;
+    const next = createSendBatchParser(
+      "service",
+      "proj",
+      "src-1",
+    )(serviceEventData({ ruleId: "timeout" }))!;
     batch.merge(next);
     const formatted = batch.format();
     expect(formatted).toContain("crash");
@@ -224,9 +247,11 @@ describe("Service batch", () => {
 
   it("format() includes serviceId and sorted ruleIds", () => {
     const batch = makeBatch();
-    const next = createSendBatchParser("service", "proj", "src-1")(
-      serviceEventData({ ruleId: "alpha" }),
-    )!;
+    const next = createSendBatchParser(
+      "service",
+      "proj",
+      "src-1",
+    )(serviceEventData({ ruleId: "alpha" }))!;
     batch.merge(next);
     const formatted = batch.format();
     expect(formatted).toContain("web");

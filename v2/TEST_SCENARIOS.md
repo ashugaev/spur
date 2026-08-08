@@ -76,7 +76,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
-- GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
+- GitHub send batch `merge` unions signals, replaces same-key signals, and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
 - Service send batch `merge` accumulates rule ids; `format` includes service id, sorted rule ids, and a custom prompt override.
 - `shortText` collapses whitespace and truncates with ellipsis at a configurable limit.
 - `parseRepoFromUrl` extracts `owner/repo` from GitHub PR URLs and returns empty for non-PR or invalid URLs.
