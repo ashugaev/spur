@@ -21,6 +21,7 @@ Autonomous workers invoked via the `Task` tool. Source: .agents/agents/
   reference-researcher  .agents/agents/reference-researcher.md  Extract reusable patterns from external reference repos
   critic                .agents/agents/critic.md                Verify researcher claims, score options, select winner
   architect             .agents/agents/architect.md             Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification
+  spec-critic           .agents/agents/spec-critic.md           Falsify the architect's spec before the developer builds — check cited facts, change map, bound acceptance criteria
   developer             .agents/agents/developer.md             Implement, fix-after-review, fix-after-test
   reviewer              .agents/agents/reviewer.md              Static diff analysis plus build/lint/test gate
   designer              .agents/agents/designer.md              UI review for visible web changes
