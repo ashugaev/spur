@@ -10597,6 +10597,12 @@ export class SessionService {
       remainingMessages,
       true,
     );
+    // Persist the drain before the discovery wait below: captureAgentSessionId
+    // anchors its own internal write on a fresh readSession, and must never
+    // observe the pre-drain queue here. A crash between an internal write and
+    // this function's own write would otherwise leave agentSessionId on disk
+    // while the just-delivered message still shows as queued.
+    writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     this.logEvent("session.message.sent", {
