@@ -3108,6 +3108,45 @@ describe("Dashboard", () => {
       expect(spawnBody).not.toHaveProperty("mode");
     });
 
+    it("reconciles a stored draft's stale mode name to the project default on restore and on spawn", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+      window.localStorage.setItem("spur:last-spawn-project", "moded");
+      writeSpawnDraft({
+        projectId: "moded",
+        prompt: "Stale mode draft",
+        agent: "claude",
+        model: null,
+        branch: "",
+        branchIsExplicit: false,
+        workspaceMode: "default",
+        defaultBranch: "",
+        planMode: false,
+        selfDestruct: false,
+        selfDestructConditions: "",
+        steps: [],
+        trackerUrl: null,
+        sessionMode: "ghost-mode-removed-from-config",
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      expect(modeSelect).toHaveValue("manager");
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).toMatchObject({ mode: "manager" });
+    });
+
     it("drops the mode from the next spawn when switching from a moded to an unmoded project", async () => {
       let spawnBody: unknown = null;
       const fetchMock = mockSpawnPickerFetch((body) => {
