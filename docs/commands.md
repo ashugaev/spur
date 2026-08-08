@@ -105,6 +105,15 @@ Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, nativ
 
 GitHub source cadence, including `adaptivePoll`, lives in [Configuration](configuration.md#field-reference).
 
+## connect, disconnect
+
+```bash
+spur connect [path]
+spur disconnect [path]
+```
+
+Register or unregister a project config with the running instance. `[path]` resolves against the cwd; omitted, Spur takes the nearest `spur.yaml`/`spur.yml`. What the daemon accepts: [config registry](configuration.md#config-registry).
+
 ## spur-slots
 
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session:
@@ -213,7 +222,7 @@ is silently replaced by Spur's own.
 pnpm --dir v2 build
 ```
 
-`build` also restarts a running daemon when Spur config is discoverable. See [Configuration](configuration.md) for registry precedence, path retention, and warning behavior.
+`build` also restarts a running daemon when Spur config is discoverable. A normal CLI command auto-connects its discovered project config into the daemon; registration and pruning rules live in [config registry](configuration.md#config-registry). Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
 ## Validate
 

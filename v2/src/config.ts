@@ -42,6 +42,7 @@ import {
   type TriggerConfig,
 } from "./types.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
@@ -61,7 +62,7 @@ import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
-const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;
@@ -1980,6 +1981,9 @@ function parseConfigFile(
             retainArchives:
               asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+            collapseWindowMs:
+              asNonNegativeNumber(eventLog["collapseWindowMs"], "eventLog.collapseWindowMs") ??
+              DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
     userActionLog:

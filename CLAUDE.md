@@ -21,6 +21,7 @@ Autonomous workers invoked via the `Task` tool. Source: .claude/agents/
   reference-researcher  .claude/agents/reference-researcher.md  Extract reusable patterns from external reference repos
   critic                .claude/agents/critic.md                Verify researcher claims, score options, select winner
   architect             .claude/agents/architect.md             Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification
+  spec-critic           .claude/agents/spec-critic.md           Falsify the architect's spec before the developer builds — check cited facts, change map, bound acceptance criteria
   developer             .claude/agents/developer.md             Implement, fix-after-review, fix-after-test
   reviewer              .claude/agents/reviewer.md              Static diff analysis plus build/lint/test gate
   designer              .claude/agents/designer.md              UI review for visible web changes

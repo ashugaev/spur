@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as ghModule from "../../src/gh.js";
@@ -193,6 +194,8 @@ class MockPreflightBranchValidationError extends Error {
   }
 }
 const logSpurEventMock = vi.fn();
+const flushEventLogCollapseMock = vi.fn();
+const tryRotateMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
 const readClaudeSessionStatusMock = vi.fn();
@@ -385,6 +388,7 @@ vi.mock("../../src/config.js", () => ({
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
   deriveProjectIdFromDisplayName: (value: string) =>
     value
       .trim()
@@ -409,6 +413,15 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
       const entry = actual.buildUserInputLogEntry(input);
       if (entry) logSpurEventMock(dataDir, entry);
     },
+    flushEventLogCollapse: flushEventLogCollapseMock,
+  };
+});
+
+vi.mock("../../src/jsonl-log-io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof jsonlLogIoModule>();
+  return {
+    ...actual,
+    tryRotate: tryRotateMock,
   };
 });
 
@@ -922,6 +935,8 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
+  agentSessionIdPersistBackoffUntil: Map<string, number>;
   waitForSubmitAck(
     binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
@@ -1200,6 +1215,8 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(() => ({ exists: workspaceExistsMock(), missing: false }));
     logSpurEventMock.mockReset();
+    flushEventLogCollapseMock.mockReset();
+    tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
@@ -1296,6 +1313,187 @@ describe("SessionService", () => {
     vi.restoreAllMocks();
   });
 
+  describe("config registry lifecycle", () => {
+    it("boot worktree-internal filter keeps a worktree config out of the merged registry and its next persisted write", async () => {
+      vi.useRealTimers();
+      const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
+      mkdirSync(dirname(worktreeConfigPath), { recursive: true });
+      writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      expect(service.getRegistryPaths()).not.toContain(worktreeConfigPath);
+      // The filter itself never writes the registry file — it only keeps the
+      // worktree-internal path out of what `applyConfig` hands to the
+      // existing `mutateConfigRegistry` write a few lines later in the
+      // constructor, so the next persisted write excludes it too.
+      const persist = mutateConfigRegistryMock.mock.calls.at(-1)?.[1] as (current: {
+        configPaths: string[];
+        unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
+      }) => { configPaths: string[] };
+      expect(persist({ configPaths: [], unconfiguredProjects: [] }).configPaths).not.toContain(
+        worktreeConfigPath,
+      );
+
+      service.dispose();
+    });
+
+    it("logs a daemon.registry.count event at boot with the raw read count and the worktree-internal drop count", async () => {
+      vi.useRealTimers();
+      const worktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const worktreeConfigPath = join(worktreeDir, "api", "api-1", "spur.yaml");
+      mkdirSync(dirname(worktreeConfigPath), { recursive: true });
+      writeFileSync(worktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock.mockReset().mockReturnValue({ ...baseConfig(), worktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", worktreeConfigPath]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "daemon.registry.count",
+          details: { read: 2, worktreeInternalDropped: 1 },
+        }),
+      );
+
+      service.dispose();
+    });
+
+    it("unregisters a worktree config that outlived the boot filter because it sits outside the current worktreeDir (a worktreeDir-migration leftover)", async () => {
+      vi.useRealTimers();
+      // The only production path that reaches `unregisterWorktreeConfig`'s
+      // `isRegistered` guard: `this.registryPaths` never contains an entry
+      // inside the CURRENT worktreeDir (the boot/preview filter always drops
+      // those), so the guard can only be true for an entry that was
+      // registered under a worktreeDir the host has since reconfigured away
+      // from.
+      const oldWorktreeDir = join(TEST_DATA_DIR, "old-worktrees");
+      const currentWorktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const oldWorktreePath = join(oldWorktreeDir, "api", "api-1");
+      const oldWorktreeConfigPath = join(oldWorktreePath, "spur.yaml");
+      mkdirSync(oldWorktreePath, { recursive: true });
+      writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
+      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+      // Legitimately survives the boot prune: it is outside the CURRENT
+      // worktreeDir, so the boot filter has no reason to drop it.
+      expect(service.getRegistryPaths()).toContain(oldWorktreeConfigPath);
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: oldWorktreePath,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      removeWorktreeMock.mockReset().mockResolvedValue(undefined);
+
+      await service.complete("api-1");
+
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", oldWorktreePath);
+      expect(service.getRegistryPaths()).not.toContain(oldWorktreeConfigPath);
+      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
+      const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+        configPaths: string[];
+      };
+      expect(persisted.configPaths).not.toContain(oldWorktreeConfigPath);
+
+      service.dispose();
+    });
+
+    it("unregisters a migration-leftover worktree config on kill even when the worktree removal itself only warns", async () => {
+      vi.useRealTimers();
+      const oldWorktreeDir = join(TEST_DATA_DIR, "old-worktrees");
+      const currentWorktreeDir = join(TEST_DATA_DIR, "worktrees");
+      const oldWorktreePath = join(oldWorktreeDir, "api", "api-1");
+      const oldWorktreeConfigPath = join(oldWorktreePath, "spur.yaml");
+      mkdirSync(oldWorktreePath, { recursive: true });
+      writeFileSync(oldWorktreeConfigPath, "stub: true\n", "utf8");
+
+      loadConfigMock
+        .mockReset()
+        .mockReturnValue({ ...baseConfig(), worktreeDir: currentWorktreeDir });
+      upsertConfigRegistryPathMock
+        .mockReset()
+        .mockReturnValue(["/tmp/spur.yaml", oldWorktreeConfigPath]);
+      loadProjectConfigMock.mockReset().mockReturnValue({ ...baseConfig(), projects: {} });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      expect(service.getRegistryPaths()).toContain(oldWorktreeConfigPath);
+
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: oldWorktreePath,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      removeWorktreeMock.mockReset().mockRejectedValue(new Error("worktree locked"));
+
+      const result = await service.kill("api-1");
+
+      expect(result.status).toBe("killed");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.kill.worktree_remove_failed" }),
+      );
+      // The registry entry is dropped despite the warn-only removal failure:
+      // the session reached a terminal state, so Spur no longer manages this
+      // worktree going forward either way.
+      expect(service.getRegistryPaths()).not.toContain(oldWorktreeConfigPath);
+      const registryFilePath = join(TEST_DATA_DIR, "config-registry.json");
+      const persisted = JSON.parse(readFileSync(registryFilePath, "utf8")) as {
+        configPaths: string[];
+      };
+      expect(persisted.configPaths).not.toContain(oldWorktreeConfigPath);
+
+      service.dispose();
+    });
+  });
+
   it("spawns a session through one clear path and returns the enriched view", async () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
@@ -1376,6 +1574,7 @@ describe("SessionService", () => {
         .map(([, entry]) => entry.event)
         .filter((e) => e !== "session.state.classified"),
     ).toEqual([
+      "daemon.registry.count",
       "session.spawn.started",
       "session.spawn.worktree_created",
       "session.input.received",
@@ -6731,6 +6930,241 @@ describe("SessionService", () => {
     });
   });
 
+  describe("agent session id discovery", () => {
+    function discoveredCalls(sessionId = "api-1") {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.agent_session_id.discovered" && entry.sessionId === sessionId,
+      );
+    }
+
+    function persistFailedCalls(sessionId = "api-1") {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.agent_session_id.persist_failed" &&
+          entry.sessionId === sessionId,
+      );
+    }
+
+    it.each([
+      ["claude", "claude-native-1"],
+      ["codex", "codex-native-1"],
+      ["cursor", "cursor-native-1"],
+    ] as const)(
+      "persists a discovered agent session id on first discovery (%s)",
+      async (agent, discoveredId) => {
+        findAgentSessionIdMock.mockReset().mockResolvedValue(discoveredId);
+        const sessions = createSessionStore();
+        const seeded = runningSession({ agent });
+        sessions.set("api-1", seeded);
+        const service = await createDisposedSessionService();
+
+        const result = await sessionServiceInternals(service).captureAgentSessionId(seeded, 0);
+
+        expect(result.agentSessionId).toBe(discoveredId);
+        expect(sessions.get("api-1")?.agentSessionId).toBe(discoveredId);
+        expect(discoveredCalls()).toHaveLength(1);
+        expect(discoveredCalls()[0]?.[1].details).toMatchObject({
+          agent,
+          previousAgentSessionId: null,
+          agentSessionId: discoveredId,
+        });
+      },
+    );
+
+    it("does not re-emit session.agent_session_id.discovered for an unchanged id", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      writeSessionMock.mockClear();
+      // Reuse the original stale `seeded` argument (no agentSessionId), not
+      // the record captureAgentSessionId returned: this mirrors every real
+      // caller (ensureSessionReadyForSend, send()'s duplicate-ignored branch)
+      // discarding the returned record and re-reading the same stale copy
+      // next tick. The dedup has to hold against the on-disk value, not the
+      // caller's in-memory field.
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("emits again when the discovered id actually changes", async () => {
+      // codex, not claude: a pinned claude id short-circuits before discovery
+      // (:9116-9118) and would never re-poll for a changed id.
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession({ agent: "codex" });
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      findAgentSessionIdMock.mockResolvedValue("native-2");
+      // Same stale `seeded` argument again (see the unchanged-id test above).
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-2");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-2");
+      expect(discoveredCalls()).toHaveLength(2);
+      expect(discoveredCalls()[1]?.[1].details).toMatchObject({
+        previousAgentSessionId: "native-1",
+        agentSessionId: "native-2",
+      });
+    });
+
+    it("logs one warn and backs off when persisting the agent session id fails", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      writeSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(sessions.get("api-1")?.agentSessionId).toBeUndefined();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].level).toBe("warn");
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "disk full",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: neither event fires again, and no
+      // further write is attempted.
+      writeSessionMock.mockClear();
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(discoveredCalls()).toHaveLength(0);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("retries the write once the backoff window elapses and persists on success", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      writeSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await internals.captureAgentSessionId(seeded, 0);
+      expect(persistFailedCalls()).toHaveLength(1);
+
+      // Still inside the backoff window: no write attempt.
+      writeSessionMock.mockClear();
+      await internals.captureAgentSessionId(seeded, 0);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+
+      // Past AGENT_SESSION_ID_PERSIST_BACKOFF_MS (session-service.ts:467,
+      // 60_000ms): the next capture retries the write.
+      vi.setSystemTime(new Date(Date.now() + 60_000));
+      const third = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(third.agentSessionId).toBe("native-1");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).toHaveBeenCalledTimes(1);
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(persistFailedCalls()).toHaveLength(1);
+    });
+
+    it("treats a throwing readSession as an unreadable record: warns once, never throws", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = createSessionStore();
+      const seeded = runningSession();
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      readSessionMock.mockImplementationOnce(() => {
+        throw new Error(
+          "Invalid session metadata JSON at api-1.json: Unexpected end of JSON input",
+        );
+      });
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "Invalid session metadata JSON at api-1.json: Unexpected end of JSON input",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: no second warn, no readSession retry.
+      readSessionMock.mockClear();
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(readSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("warns once and backs off when the record is gone (session-gc archival mid-poll)", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      // Deliberately not seeded into the store: mirrors a session archived
+      // out from under a still-ticking delivery loop.
+      createSessionStore();
+      const seeded = runningSession();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      const first = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(first.agentSessionId).toBe("native-1");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(persistFailedCalls()).toHaveLength(1);
+      expect(persistFailedCalls()[0]?.[1].details).toMatchObject({
+        agent: "claude",
+        agentSessionId: "native-1",
+        reason: "session record not found",
+      });
+      expect(discoveredCalls()).toHaveLength(0);
+
+      // Still inside the backoff window: a second tick logs nothing further,
+      // which is the flood this function exists to prevent.
+      const second = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(second.agentSessionId).toBe("native-1");
+      expect(persistFailedCalls()).toHaveLength(1);
+    });
+
+    it("does not re-emit the discovered event on a duplicate queued send", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
+      const sessions = seedQueuedSendSession("working");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.send("api-1", { message: "first follow up" });
+      await service.send("api-1", { message: "first follow up" });
+
+      expect(discoveredCalls()).toHaveLength(1);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-1");
+
+      service.dispose();
+    });
+  });
+
   it("delivers a queued message to a codex_stale session, since typing is what un-wedges a hung turn", async () => {
     // Deliberate, not an accident of the activity switch. CODEX_HUNG_AFTER_TOOLS_MS
     // is documented as being set well above any realistic single inference
@@ -6783,6 +7217,25 @@ describe("SessionService", () => {
     // A codex TUI repainting its "Working…" timer right now: pre-fix this alone
     // held the gate shut forever.
     getTmuxSessionActivityMock.mockResolvedValue(now);
+    // Pins deliverQueuedMessage's ordering invariant (session-service.ts,
+    // the "Persist the drain before the discovery wait below" comment): once
+    // the queued message has actually been typed into tmux, the drain must
+    // already be on disk by the time agent-session-id discovery next fires,
+    // so a stale re-read inside captureAgentSessionId can never resurrect
+    // the just-delivered message as still queued. Recorded here rather than
+    // asserted inline: an inline `expect` would throw from inside
+    // findAgentSessionId's caller, which runDeliveryLoop's own try/catch
+    // swallows, masking the failure instead of surfacing it.
+    let queuedMessagesAtDiscovery: string[] | undefined;
+    findAgentSessionIdMock.mockImplementation(() => {
+      const delivered = sendMessageToTmuxMock.mock.calls.some(
+        ([id, message]) => id === "spur-hung" && message === "please continue",
+      );
+      if (delivered && queuedMessagesAtDiscovery === undefined) {
+        queuedMessagesAtDiscovery = sessions.get("spur-hung")?.queuedMessages?.messages ?? [];
+      }
+      return Promise.resolve("session-uuid");
+    });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
@@ -6793,6 +7246,7 @@ describe("SessionService", () => {
         interrupt: false,
         agent: "codex",
       });
+      expect(queuedMessagesAtDiscovery).toEqual([]);
       expect(sessions.get("spur-hung")?.queuedMessages?.messages ?? []).toEqual([]);
     } finally {
       service.dispose();
@@ -9058,6 +9512,9 @@ describe("SessionService", () => {
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
       ) as unknown as MemoryShedService;
+      // Clear any construction-time logging so the calls counted below are
+      // only the memory-shed ones under test.
+      logSpurEventMock.mockClear();
 
       readHostMemoryMock.mockReturnValue({
         ...swapOnly,
@@ -18616,6 +19073,56 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
   });
 
+  describe("isRestorableSession", () => {
+    it("does not treat a live running session with a crashed-turn error as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "running",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(false);
+    });
+
+    it("treats a running session as restorable once its pane/process actually died", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "running",
+          state: "stopped",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+
+    it("treats a stopped session with error evidence as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "stopped",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+
+    it("treats an errored session as restorable", async () => {
+      const { isRestorableSession } = await loadSessionServiceModule();
+
+      expect(
+        isRestorableSession({
+          status: "errored",
+          state: "error",
+          workspaceExists: true,
+        }),
+      ).toBe(true);
+    });
+  });
+
   it("rejects restore when the session is not restorable", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -24594,6 +25101,178 @@ describe("SessionService", () => {
     });
   });
 
+  describe("terminal log compaction", () => {
+    // Built inline instead of importing sessionEventLogPath/sessionUserActionLogPath:
+    // a real (non-type) top-level import of a vi.mock'd module family loads before
+    // this file's own `const ...Mock = vi.fn()` declarations run, which throws a
+    // "before initialization" TDZ error from inside the mock factory.
+    function shardPath(id: string, file: "events.jsonl" | "user-actions.jsonl"): string {
+      return join(TEST_DATA_DIR, "sessions", id, file);
+    }
+
+    function seedCompactSession(
+      id: string,
+      overrides: Partial<SessionRecord> = {},
+    ): Map<string, SessionRecord> {
+      const sessions = createSessionStore();
+      sessions.set(id, {
+        id,
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: id,
+        worktree: true,
+        worktreePath: `/tmp/spur-worktrees/api/${id}`,
+        tmuxSession: id,
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        ...overrides,
+      });
+      return sessions;
+    }
+
+    it("rotates both shards of a completed session with the 64KB floor and configured retain", async () => {
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 5);
+      expect(tryRotateMock).toHaveBeenCalledWith(
+        shardPath("api-1", "user-actions.jsonl"),
+        65536,
+        5,
+      );
+      service.dispose();
+    });
+
+    it("caps each shard family with its own retainArchives setting", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        eventLog: { retainArchives: 3 },
+        userActionLog: { retainArchives: 9 },
+      });
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 3);
+      expect(tryRotateMock).toHaveBeenCalledWith(
+        shardPath("api-1", "user-actions.jsonl"),
+        65536,
+        9,
+      );
+      service.dispose();
+    });
+
+    it("rotates a manual_pause stopped session's shards, unlike the tmux reaper", async () => {
+      seedCompactSession("api-1", { status: "stopped", stopReason: "manual_pause" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).toHaveBeenCalledWith(shardPath("api-1", "events.jsonl"), 65536, 5);
+      service.dispose();
+    });
+
+    it("skips running and errored sessions", async () => {
+      const sessions = seedCompactSession("api-1", { status: "running" });
+      sessions.set("api-2", {
+        ...(sessions.get("api-1") as SessionRecord),
+        id: "api-2",
+        tmuxSession: "api-2",
+        status: "errored",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("bounds one tick to COMPACT_MAX_PER_TICK sessions and drains the rest on the next tick", async () => {
+      const sessions = createSessionStore();
+      for (let i = 0; i < 25; i += 1) {
+        const id = `api-${i}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: "ship the task",
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "completed",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      // 20 sessions x 2 shards (event log + user action) per tick.
+      expect(tryRotateMock.mock.calls.length).toBe(40);
+
+      tryRotateMock.mockClear();
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      // The remaining 5 sessions drain on the second tick.
+      expect(tryRotateMock.mock.calls.length).toBe(10);
+      service.dispose();
+    });
+
+    it("flushes the event-log collapse map once per reaper tick", async () => {
+      seedCompactSession("api-1", { status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(flushEventLogCollapseMock).toHaveBeenCalledWith(TEST_DATA_DIR);
+      expect(flushEventLogCollapseMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("never re-rotates a shard that already has a .1.gz archive, across two ticks", async () => {
+      // Regression for the ratchet bug: compacting a terminal session's shard
+      // every tick at the 64KB floor would shift its .1.gz down a slot each
+      // time a small trickle write reopened it above the floor, and after
+      // enough ticks unlink it once it fell outside retainArchives. A shard
+      // that already has a .1.gz archive — from this compaction or from an
+      // ordinary shardHotBytes rotation — must be left alone by the sweep.
+      seedCompactSession("api-1", { status: "completed" });
+      const eventsPath = shardPath("api-1", "events.jsonl");
+      const actionsPath = shardPath("api-1", "user-actions.jsonl");
+      mkdirSync(join(TEST_DATA_DIR, "sessions", "api-1"), { recursive: true });
+      writeFileSync(eventsPath, "trickle\n");
+      writeFileSync(`${eventsPath}.1.gz`, "already-archived");
+      writeFileSync(actionsPath, "trickle\n");
+      writeFileSync(`${actionsPath}.1.gz`, "already-archived");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(tryRotateMock).not.toHaveBeenCalled();
+      // The pre-existing archive must survive untouched (not shifted to .2.gz).
+      expect(existsSync(`${eventsPath}.1.gz`)).toBe(true);
+      expect(existsSync(`${eventsPath}.2.gz`)).toBe(false);
+      service.dispose();
+    });
+  });
+
   describe("live model override", () => {
     it("overrides record.model with the claude jsonl liveModel", async () => {
       const sessions = createSessionStore();
@@ -27120,6 +27799,12 @@ describe("SessionService", () => {
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
+      enrich(
+        session: SessionRecord,
+        claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+        sessionBatch?: SessionRecord[],
+      ): Promise<SessionView>;
+      pollAttentionStates(baseline: boolean): Promise<void>;
     };
 
     async function drainBaselineTicks(internals: SessionScopedStateInternals): Promise<void> {
@@ -27132,6 +27817,64 @@ describe("SessionService", () => {
         await Promise.resolve();
       }
     }
+
+    it("reuses the attention sweep session batch while enriching every live session", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", worktree: false }));
+      sessions.set("api-2", runningSession({ id: "api-2", worktree: false }));
+      sessions.set(
+        "api-3",
+        runningSession({
+          id: "api-3",
+          worktree: false,
+          workspaceId: "api-1",
+          status: "completed",
+        }),
+      );
+      sessions.set(
+        "api-4",
+        runningSession({ id: "api-4", worktree: false, workspaceId: "api-1", status: "killed" }),
+      );
+      tmuxSessionExistsMock.mockImplementation((tmuxSession: string) =>
+        Promise.resolve(tmuxSession === "api-1" || tmuxSession === "api-2"),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionScopedStateInternals;
+      await drainBaselineTicks(internals);
+      const capturedViews: SessionView[] = [];
+      const enrich = internals.enrich.bind(internals);
+      vi.spyOn(internals, "enrich").mockImplementation(async (...args) => {
+        const view = await enrich(...args);
+        capturedViews.push(view);
+        return view;
+      });
+      listSessionsMock.mockClear();
+
+      await internals.pollAttentionStates(false);
+
+      expect(listSessionsMock).toHaveBeenCalledOnce();
+      expect(capturedViews.map((view) => view.id)).toEqual(["api-1", "api-2"]);
+      expect(capturedViews[0]?.deskGroupMembers).toEqual([
+        {
+          id: "api-1",
+          agent: "claude",
+          status: "running",
+          state: "waiting",
+          runtimeAlive: true,
+        },
+        {
+          id: "api-3",
+          agent: "claude",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+        },
+      ]);
+      service.dispose();
+    });
 
     it("collapses attention-scoped maps to only non-terminal ids once sessions go terminal", async () => {
       mockClaudeJsonlState("waiting");

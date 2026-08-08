@@ -19,8 +19,8 @@ ROUTING RULES
 Route to minimize expected cost per successful task, not per-run tokens. Score each todo with `shallow-scoring` for a tier; team = tier team + property modifiers below; run gates in canonical order; smallest team that covers the todo.
 
   0 direct                  `developer`
-  1 self-plan               `architect` -> `developer`
-  2 strong-plan-cheap-exec  `researcher` -> `critic` -> `architect` -> `developer`
+  1 self-plan               `architect` -> `spec-critic` -> `developer`
+  2 strong-plan-cheap-exec  `researcher` -> `critic` -> `architect` -> `spec-critic` -> `developer`
   3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off. See `docs/workflow-technical-updates.md`.
 
   Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
@@ -36,7 +36,7 @@ Recon before spec: architect (and the tier-3 agent) recons before writing the sp
 
 CANONICAL GATE ORDER
 
-`researcher` -> `critic` -> `design-author` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `docs` -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `design-author` -> `architect` -> `spec-critic` -> `developer` -> `skill-writer` (caveman) -> `docs` -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
 `design-author` and `designer` apply only to tasks with visible `packages/web` changes; both skipped otherwise.
 
@@ -48,7 +48,7 @@ PROCESS
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
-  4  Single-cycle gates: each gate runs once. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns once more. Downstream gates run only when their input changed. Second pass still fails: surface it in the run report, no further retry.
+  4  Single-cycle gates: each gate runs once. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns once more. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns once more. Downstream gates run only when their input changed. Second pass still fails: surface it in the run report, no further retry.
 
 RULES
 
@@ -60,7 +60,7 @@ RULES
 CONTEXT HANDOFF
 
   - Pass structured artifacts between gates (spec, diff, each gate's structured output), never the raw conversation.
-  - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
+  - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun, or `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> architect -> spec-critic rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
   - Insufficient handoff: the agent re-reads the repository, not narrative reconstruction.
   - Tier 2/3: invoke `curator` between gates to append stable facts and a short reflection to `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` and refresh the compact handoff. Curator appends and reflects, never re-summarizes prior entries. Point each receiving gate at that file; it reads it when present.
   - `architect`, `developer`, `designer` read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` directly and honor its Approval status field, at any tier. Tier 2/3 curator can also note an "Accepted design" entry in `task-memory.md`, but the binding never depends on it.

@@ -792,6 +792,40 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
   });
 
+  // Proves the `checkConfigRegistry` push (host-install.ts) is scoped inside
+  // the `instanceConfig.status === "ok" && unitsInstalled` block: a host that
+  // never ran `spur init` (no systemd units here) must not surface it.
+  it("doctor omits config-registry on a host without systemd units", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-no-units-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(doctor.hostChecks.length).toBeGreaterThan(0);
+    expect(doctor.hostChecks.every((check) => check.id !== "config-registry")).toBe(true);
+  });
+
   // Guards the `runDoctorJson` tolerance above: a host-global port conflict is
   // error-severity, so `doctor` exits 1 while its report is perfectly valid on
   // stdout. Squats the pinned daemon port with a 500-answering server, which is
@@ -986,6 +1020,42 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       stopped: false,
     });
     await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("exits on SIGTERM well inside the service-manager stop timeout", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-sigterm-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-sigterm.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    // The production hang: systemd sends SIGTERM, the daemon never finishes
+    // teardown, and SIGKILL lands at TimeoutStopSec=90s. Signal the process
+    // directly — the CLI stop path is already covered above.
+    const startedAt = Date.now();
+    process.kill(daemon.info.pid, "SIGTERM");
+    await pollUntil(async () => !(await processExists(daemon.info.pid)), {
+      timeoutMs: 30_000,
+      accept: (exited) => exited,
+      label: "daemon exit after SIGTERM",
+    });
+    const elapsedMs = Date.now() - startedAt;
+    delete currentActiveContext().daemonPid;
+
+    // Budget is 45s with a 60s backstop, under a 90s TimeoutStopSec. A healthy
+    // teardown finishes in well under a second; 15s only guards against the
+    // regression, so a loaded runner cannot turn this into a flake.
+    expect(elapsedMs).toBeLessThan(15_000);
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+
+    const events = readEventLog(context.dataDir).map((entry: SpurLogEntry) => entry.event);
+    expect(events).toContain("daemon.stopped");
+    expect(events).not.toContain("daemon.shutdown.forced_exit");
   });
 
   it.skipIf(process.platform !== "linux" && process.platform !== "darwin")(

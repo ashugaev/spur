@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { readEventLog } from "../../src/event-log.js";
+import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer, type StartedServer } from "../../src/server.js";
@@ -86,10 +86,15 @@ describe("startServer", () => {
       (entry) => entry.event !== "daemon.memory.unbounded",
     );
     expect(events[0]).toMatchObject({
+      event: "daemon.registry.count",
+      details: { read: 1, worktreeInternalDropped: 0 },
+    });
+    expect(events[1]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
     });
     expect(events.map((entry) => entry.event)).toEqual([
+      "daemon.registry.count",
       "gh.poll_cycle",
       "daemon.startup.reconciled",
       "daemon.admission.startup",
@@ -350,6 +355,63 @@ describe("startServer", () => {
       SessionService.prototype.spawn = originalSpawn;
       await server?.stop();
     }
+  });
+
+  it("flushes a pending collapsed warn before the final daemon.stopped log", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      // All three fall inside the default 60s collapse window: the first
+      // writes immediately, the next two are suppressed (suppressedCount 2).
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "first",
+      });
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "second",
+      });
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "third",
+      });
+    } finally {
+      await server.stop();
+    }
+
+    const events = readEventLog(dataDir);
+    const summaryIndex = events.findIndex((entry) => entry.details?.["suppressedCount"] === 2);
+    const stoppedIndex = events.findIndex((entry) => entry.event === "daemon.stopped");
+    expect(summaryIndex).toBeGreaterThanOrEqual(0);
+    expect(stoppedIndex).toBeGreaterThan(summaryIndex);
   });
 
   it("force closes active requests during stop", async () => {
@@ -2989,6 +3051,104 @@ describe("startServer", () => {
     }
   });
 
+  it("rejects POST /projects/connect for a config inside worktreeDir with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const worktreeConfigDir = join(worktreeDir, "proj", "sess");
+    await mkdir(worktreeConfigDir, { recursive: true });
+    const worktreeConfigPath = join(worktreeConfigDir, "spur.yaml");
+    await writeFile(
+      worktreeConfigPath,
+      ["projects:", "  sess:", `    path: ${worktreeConfigDir}`, ""].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: worktreeConfigPath }),
+      });
+      expect(response.status).toBe(400);
+      expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(worktreeConfigPath);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("rejects POST /projects/disconnect for a relative configPath with 400 instead of resolving it against the daemon cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: "spur.yaml" }),
+      });
+      expect(response.status).toBe(400);
+
+      const projectsResponse = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await projectsResponse.json()) as Array<{ id: string }>;
+      expect(listed.find((entry) => entry.id === "base")).toBeDefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects/connect removes the matching unconfigured stub in a single registry write", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -3189,11 +3349,6 @@ describe("startServer", () => {
         expect(response.status).toBe(200);
       }
 
-      const registryWarnings = readEventLog(dataDir).filter(
-        (entry) => entry.event === "daemon.registry.warning",
-      );
-      expect(registryWarnings).toHaveLength(2);
-
       const finalRegistry = readConfigRegistryFile(dataDir);
       expect(finalRegistry.configPaths).not.toContain(orphanConfigPath);
       expect(finalRegistry.configPaths).toContain(missingParentAlivePath);
@@ -3201,5 +3356,13 @@ describe("startServer", () => {
     } finally {
       await server.stop();
     }
+
+    // Both registry problems are distinct but share level+event+sessionId, so
+    // warn collapse holds the second until a flush. Shutdown flushes it, which
+    // is why this reads the log after stop() rather than inside the try.
+    const registryWarnings = readEventLog(dataDir).filter(
+      (entry) => entry.event === "daemon.registry.warning",
+    );
+    expect(registryWarnings).toHaveLength(2);
   });
 });

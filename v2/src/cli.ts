@@ -9,7 +9,7 @@ import {
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -67,7 +67,12 @@ import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
-import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import {
+  buildMergedConfig,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
+  readConfigRegistryFile,
+} from "./registry.js";
 import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
@@ -385,7 +390,8 @@ function getConfigPath(program: Command): string | undefined {
 export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
-  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
+  const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
   const project = config.projects[projectId];
   if (!project) {
     throw new Error(`Unknown project: ${projectId}`);
@@ -399,7 +405,7 @@ function prepareInstanceConfig(program: Command): { configPath: string; initiali
   return ensured;
 }
 
-async function maybeAutoConnectProject(
+export async function maybeAutoConnectProject(
   cliEntrypoint: string,
   configPath: string,
   explicitProjectConfigPath?: string,
@@ -421,6 +427,9 @@ async function maybeAutoConnectProject(
   }
   const projectConfigPath = [...candidates][0];
   if (!projectConfigPath) {
+    return {};
+  }
+  if (isInsideWorktreeDir(projectConfigPath, loadConfig(configPath).worktreeDir)) {
     return {};
   }
 
@@ -2243,7 +2252,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to connect");
       }
@@ -2268,7 +2277,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to disconnect");
       }
