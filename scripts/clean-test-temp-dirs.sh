@@ -72,11 +72,21 @@ if [[ ${#candidates[@]} -eq 0 ]]; then
 fi
 
 if [[ "$DELETE" -eq 1 ]]; then
+  failed=0
   for dir in "${candidates[@]}"; do
     echo "REMOVE: $dir"
-    rm -rf -- "$dir"
+    # An unreadable subdir (runtime fixtures create some) makes rm exit
+    # non-zero; under set -euo pipefail that would abort the whole run and
+    # abandon every remaining candidate with no summary at all. Same shape
+    # as the smoke-test drain fix: report and keep going.
+    rm -rf -- "$dir" || {
+      echo "FAILED: $dir" >&2
+      failed=$((failed + 1))
+      continue
+    }
   done
-  echo "Removed ${#candidates[@]} dirs."
+  removed=$(( ${#candidates[@]} - failed ))
+  echo "Removed $removed dirs, $failed failed."
 else
   for dir in "${candidates[@]}"; do
     echo "$dir"
