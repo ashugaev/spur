@@ -15461,6 +15461,142 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  describe("REQ5: cross-workspace overlapping port range refusal", () => {
+    function overlappingRangeConfig() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              "front-local": {
+                command: "pnpm dev:local",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_LOCAL", start: 3000, end: 3004 } },
+              },
+              "front-pp-tunnel": {
+                command: "pnpm dev:tunnel",
+                autoStart: false,
+                // Same declared range as front-local — the measured host shape.
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_TUNNEL", start: 3000, end: 3004 } },
+              },
+              "other-service": {
+                command: "pnpm other",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_OTHER", start: 5000, end: 5004 } },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    it("refuses a start when another workspace already has a live sidecar on an overlapping range, naming the holder", async () => {
+      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["front-pp-tunnel"] }),
+      );
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-2" && name === "front-pp-tunnel",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.startSidecar("api-1", "front-local")).rejects.toThrow(
+        /workspace "api-2".*front-pp-tunnel/,
+      );
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("allows a start when another workspace's live sidecar declares a non-overlapping range", async () => {
+      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["other-service"] }),
+      );
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-2" && name === "other-service",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "front-local");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
+      );
+    });
+
+    it("does not self-refuse when the live overlapping-range sidecar belongs to the same workspace", async () => {
+      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+      );
+      // A desk sibling in the SAME workspace, with a live overlapping-range
+      // sidecar of its own — must never trip the cross-workspace guard.
+      sessions.set(
+        "api-1b",
+        sessionRecord({
+          id: "api-1b",
+          deskId: "api-1",
+          worktree: true,
+          sidecarNames: ["front-pp-tunnel"],
+        }),
+      );
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string, name: string) => id === "api-1" && name === "front-pp-tunnel",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "front-local");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
+      );
+    });
+
+    it("does not refuse when the other workspace's overlapping-range holder is dead", async () => {
+      loadConfigMock.mockReturnValue(overlappingRangeConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", worktree: true, sidecarNames: ["front-local"] }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({ id: "api-2", worktree: true, sidecarNames: ["front-pp-tunnel"] }),
+      );
+      // Declared but not alive anywhere — a dead/absent holder never blocks a start.
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "front-local");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "front-local" }),
+      );
+    });
+  });
+
   describe("project sidecar idle-TTL reap pass", () => {
     function frontLocalConfig(overrides: Record<string, unknown> = {}) {
       return {

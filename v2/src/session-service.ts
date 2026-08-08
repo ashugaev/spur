@@ -4706,6 +4706,84 @@ export class SessionService {
     });
   }
 
+  // REQ5: a live pane in another workspace of the same project, whose
+  // declared port range overlaps this sidecar's, refuses this start outright
+  // — never reuses the other workspace's pane, never auto-reaps it. Ports
+  // reserve on the owner record and killSidecarAndUnlinkSlot/teardown gate on
+  // hasRunningWorkspaceMembers (same-workspace siblings only), so reusing or
+  // reaping across a workspace boundary would let one workspace's teardown
+  // kill another's server, or kill a pane a user has an established
+  // connection to right now (recon measured exactly that on 3001/3002).
+  // Enumerated from records only — sessionSidecarNames -> sidecarOwnerIdForName
+  // -> sidecarTmuxSession, exactly the construction the reap pass above uses
+  // — never by parsing a tmux name. Scoped to non-mcp (desk-shared) sidecars:
+  // an mcp sidecar is always per-session, already gets its own port from the
+  // same free-port scan, and is not the shape this guards against.
+  private async refuseOverlappingCrossWorkspaceSidecar(
+    owner: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): Promise<void> {
+    if (sidecar.mcp || !sidecar.ports || Object.keys(sidecar.ports).length === 0) {
+      return;
+    }
+    const ranges = Object.values(sidecar.ports).map((port) => ({
+      start: port.start,
+      end: port.end,
+    }));
+    const overlaps = (a: { start: number; end: number }, b: { start: number; end: number }) =>
+      a.start <= b.end && b.start <= a.end;
+
+    const ownWorkspaceId = workspaceIdOf(owner);
+    const checkedTmuxNames = new Set<string>();
+    for (const other of listSessions(this.config.dataDir)) {
+      if (other.project !== owner.project) {
+        continue;
+      }
+      let otherProject: ProjectConfig | undefined;
+      try {
+        otherProject = this.resolveProjectForSession(other);
+      } catch {
+        continue;
+      }
+      for (const otherSidecarName of sessionSidecarNames(other, otherProject)) {
+        const otherSidecar = otherProject?.sidecars[otherSidecarName];
+        if (!otherSidecar || otherSidecar.mcp || !otherSidecar.ports) {
+          continue;
+        }
+        const otherOwnerId = this.sidecarOwnerIdForName(other, otherProject, otherSidecarName);
+        if (otherOwnerId === ownWorkspaceId) {
+          continue;
+        }
+        const otherTmuxName = sidecarTmuxSession(otherOwnerId, otherSidecarName);
+        if (checkedTmuxNames.has(otherTmuxName)) {
+          continue;
+        }
+        checkedTmuxNames.add(otherTmuxName);
+        const otherRanges = Object.values(otherSidecar.ports).map((port) => ({
+          start: port.start,
+          end: port.end,
+        }));
+        const rangeOverlaps = ranges.some((range) =>
+          otherRanges.some((otherRange) => overlaps(range, otherRange)),
+        );
+        if (!rangeOverlaps) {
+          continue;
+        }
+        // A dead/absent holder never blocks a start — only a live pane does.
+        if (!(await sidecarTmuxAlive(otherOwnerId, otherSidecarName))) {
+          continue;
+        }
+        throw new Error(
+          `Refusing to start sidecar "${sidecarName}" for workspace "${ownWorkspaceId}": ` +
+            `workspace "${otherOwnerId}" already has a live sidecar "${otherSidecarName}" ` +
+            `for project "${owner.project}" on an overlapping port range. Stop that sidecar ` +
+            `first — Spur never reuses or auto-reaps another workspace's sidecar.`,
+        );
+      }
+    }
+  }
+
   private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
@@ -4974,6 +5052,19 @@ export class SessionService {
         }
         this.clearSidecarProcEntry(args.session.id, args.sidecarName);
       }
+
+      // REQ5: refuse rather than reuse or auto-reap. ensureSidecarReservation
+      // below would otherwise happily hand this workspace the next free port
+      // in the same declared range another workspace's sidecar is already
+      // live on (the measured shape: front-preprod/front-pp-tunnel/
+      // front-local all declare the identical `frontend: 3000-3004` range),
+      // multiplying live dev servers until the pool is exhausted. Checked
+      // before any reservation or teardown side effect runs.
+      await this.refuseOverlappingCrossWorkspaceSidecar(
+        args.session,
+        args.sidecarName,
+        args.sidecar,
+      );
 
       // Built-ins may defer command resolution (e.g. a bundle-resolved bin
       // path) to this point instead of config load — see BuiltinSidecarDef.
