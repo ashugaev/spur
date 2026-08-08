@@ -103,6 +103,8 @@ export interface SpurSessionSidecarView {
   alive: boolean;
   ports?: SpurSidecarPort[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
+  ageSeconds?: number;
 }
 
 export interface SpurSidecarPortConflictCandidate {

@@ -456,6 +456,18 @@ function artifactUrl(sessionId: string, artifactId: string): string {
   return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
 }
 
+// Single largest unit, no rounding-up — matches the sidecar row's other
+// tokens (name, port) in being a terse glance value, not a precise duration.
+function formatSidecarAge(ageSeconds: number): string {
+  if (ageSeconds < 60) return `${ageSeconds}s`;
+  const minutes = Math.floor(ageSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
 function artifactExtension(name: string): string {
   const ext = name.split(".").pop();
   return ext ? ext.toUpperCase() : "FILE";
@@ -3285,6 +3297,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 :{port.port}
                               </span>
                             ))}
+                            {sc.ageSeconds != null ? (
+                              <span
+                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                                data-testid={`sidecar-age-${sc.name}`}
+                              >
+                                {formatSidecarAge(sc.ageSeconds)}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
                             {sc.alive && canAttach ? (
