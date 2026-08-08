@@ -7,6 +7,10 @@ import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 
+// Not redundant with the setupFiles net (test/setup/temp-dirs.ts): afterEach
+// reclaims disk between tests in THIS file; the net only sweeps at the end
+// of the whole file. Without this, a long-running file would hold every dir
+// it ever created until the file finishes.
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
