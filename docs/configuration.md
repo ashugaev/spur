@@ -202,7 +202,7 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.maxLiveSessions`: optional positive integer. Per-project cap on top of the global `admission.maxLiveSessions` cap — a spawn or restore that would put this project over its own cap is refused even while the host is under the global cap. Works in both instance and project config.
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
-- `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer, user (non-built-in) sidecars only. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. Rejected on a built-in sidecar like every key but `autoStart`.
+- `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. See [Sidecar reaping](#sidecar-reaping).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.
@@ -257,11 +257,9 @@ Bound chats get proactive pushes from the attention monitor: `needs_input`, `err
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
-- `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. Unlike `sessionGc`, defaults on: this reaper only kills a restartable project-sidecar process, never a worktree or a record. Governs both the 5-minute reaper tick and the one-shot boot pass.
-- `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. A non-mcp project sidecar is reaped once its desk workspace has been idle at least this long — "idle" is measured from the latest activity across every member of the sidecar's desk workspace (dashboard `lastActivityAt`, falling back to a member's `updatedAt`), not just the sidecar's own owner record. Override per sidecar with `projects.<id>.sidecars.<name>.idleTtlMinutes`.
-- `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. A sidecar older than this that was NOT reaped this pass (e.g. an idle sidecar kept alive by an established connection) emits a `session.sidecar.age_warning` event every tick. Warn-only — it never authorizes a kill.
-  Active, for this reaper's ownership check, means: at least one member of the sidecar's desk workspace is itself `running` or `spawning` (a single-session workspace counts its own status), or a member is mid-restore warmup. A sidecar owned by a workspace with no active member is reaped regardless of idle time (an errored, paused, or manually-stopped owner with no active sibling), unless a port it declares has an established TCP connection — that veto outranks every reap reason, including idle time and ownership, on any owner status.
-- Starting a project sidecar (`spur sidecar start`, or autostart) refuses with an error naming the holding workspace and sidecar name when another workspace of the same project already has a live pane for a sidecar whose declared port range overlaps this one's. This never reuses or auto-reaps the other workspace's pane — stop that sidecar (or its owning session) first. A same-workspace sidecar, or a declared-but-not-live holder, never triggers the refusal.
+- `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
+- `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
+- `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 - `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, and critical shedding; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
 - `admission.maxLiveSessions`: optional positive integer, default `100`. Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot. An explicit value wins over memory-sizing fields.
@@ -294,6 +292,38 @@ The 1-second sampler reads host `MemAvailable` plus daemon-cgroup `memory.curren
 Below the critical floor, each tick stops at most one safe sidecar. Session shedding starts after 12 seconds of continuous low host RAM. Host RAM at half the critical floor, capped at 2 GiB, or finite cgroup-max headroom at that threshold bypasses the grace period: the tick tries one sidecar, re-samples pressure, then pauses at most one session if pressure still authorizes it. `memory.high` alone permits sidecar shedding, never session shedding. Session order remains `rate_limited` before `waiting`, oldest `updatedAt` first. Sidecar order remains all built-in MCP sidecars before project sidecars. `working`, `needs_input`, restore-warmup, unclassifiable sessions, and protected shared sidecars stay untouched. Paused sessions remain restorable.
 
 RAM pressure closes at the admission floor. Cgroup-high pressure closes below its threshold by the smaller of 10% or the emergency threshold. Finite-max pressure closes above twice the emergency headroom. Swap-only shedding starts disarmed after daemon startup, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt before another recovery. Recovery and healthy ticks emit no memory event. Actions, partial failures, and edge-triggered exhaustion retain `daemon.memory.shed` / `daemon.memory.shed.failed`; other memory events remain `session.admission.denied`, `session.admission.memory_guard`, and startup warning `daemon.memory.unbounded`.
+
+## Sidecar reaping
+
+`sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars declared under `projects.<id>.sidecars`. A built-in MCP sidecar (`playwright`) is never a candidate. The pass runs on the daemon's sidecar-reaper tick and once at boot.
+
+A reap kills the sidecar's tmux pane process tree and drops its recorded process. Session record, worktree, and port reservation survive; a restart is a normal sidecar start ([Sidecars](commands.md#sidecars)).
+
+A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads that workspace, not one session.
+
+Active workspace: at least one member is `running` or `spawning`, or at least one member sits in restore warmup. A one-session workspace reads its own status. Members that are `stopped`, `paused`, `errored`, `completed`, or `killed` count as inactive.
+
+Idle time: now minus the newest activity over all workspace members, where a member's activity is its dashboard `lastActivityAt`, falling back to its record `updatedAt`. One active member holds the shared sidecar for the rest.
+
+Decision per sidecar, first match wins:
+
+1. `sidecarGc.enabled: false` — keep.
+2. MCP sidecar — keep.
+3. No live pane and no recorded process — keep.
+4. Established TCP connection on any port reserved for this sidecar — keep. Outranks every reap rule below, on any owner status.
+5. Connection probe unreadable on any of those ports — keep.
+6. Owner record gone — reap.
+7. Worktree gone — reap.
+8. Workspace not active — reap, whatever the idle time.
+9. No parsable activity timestamp on any member — keep.
+10. Idle time at or past the sidecar's `idleTtlMinutes` — reap.
+11. Otherwise — keep.
+
+Predicting a dev server: it survives a pass while something holds a connection to one of its reserved ports (rule 4), or while its workspace stays active (rule 8) with idle time under the TTL (rule 10). The probe reads recorded reservations only — a sidecar that reserved no port gets no rule-4 veto.
+
+Each pass logs `session.sidecar.reaped` per kill with the matched rule and the freed tree RSS, and `session.sidecar.age_warning` per kept sidecar whose process age reached `maxAgeWarnMinutes` — a connection-held idle sidecar warns every tick and stays.
+
+Cross-workspace port overlap: a sidecar start refuses when another workspace of the same project already has a live pane for a non-MCP sidecar whose declared `ports` range overlaps this one's. The error names the holding workspace and its sidecar. Spur reuses no pane and reaps nothing across a workspace boundary — stop that sidecar or its owning session first. A same-workspace sidecar, and a declared holder with no live pane, refuse nothing.
 
 ## Events
 

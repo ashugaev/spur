@@ -105,6 +105,8 @@ export interface SpurSessionSidecarView {
   tmuxSession: string;
   /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
   ageSeconds?: number;
+  /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
+  ageWarn?: boolean;
 }
 
 export interface SpurSidecarPortConflictCandidate {

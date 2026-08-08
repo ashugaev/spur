@@ -13011,6 +13011,73 @@ describe("SessionService", () => {
       expect(dev?.ageSeconds).toBeUndefined();
     });
 
+    it("marks ageWarn once ageSeconds reaches sidecarGc.maxAgeWarnMinutes, off the same config value the reaper warns at", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        // 0 minutes: any resolvable ageSeconds (>= 0) reaches the threshold.
+        sidecarGc: { enabled: true, idleTtlMinutes: 120, maxAgeWarnMinutes: 0 },
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          sidecarNames: ["dev"],
+          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+      expect(dev?.ageWarn).toBe(true);
+    });
+
+    it("omits ageWarn while ageSeconds is under sidecarGc.maxAgeWarnMinutes", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        sidecarGc: { enabled: true, idleTtlMinutes: 120, maxAgeWarnMinutes: 999_999 },
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          sidecarNames: ["dev"],
+          sidecarProcs: { dev: { pid: process.pid, pgid: process.pid, starttime: 1 } },
+        }),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev?.ageSeconds).toEqual(expect.any(Number));
+      expect(dev?.ageWarn).toBeUndefined();
+    });
+
     it("lists a desk-shared sidecar as running for every member in the dashboard view", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),

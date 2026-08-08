@@ -897,6 +897,8 @@ export interface SessionSidecarView {
   tmuxSession: string;
   /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
   ageSeconds?: number;
+  /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
+  ageWarn?: boolean;
 }
 
 export interface SessionView extends SessionRecord {

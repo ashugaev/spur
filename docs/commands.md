@@ -178,6 +178,8 @@ Sidecars, project services, and the Claude OAuth login pane do NOT inherit the a
 
 Stop and restart reap the sidecar's whole tmux pane process tree, not just the pane's direct child — a supervisor (nodemon, tsx watch) that `setsid`s a worker into its own process group no longer leaves that worker behind. `spur sidecar sweep` reports sidecar process trees no live session claims (pid, rss, age, worktree); nothing is killed unless you pass `--reap`.
 
+The daemon also reaps idle sidecars on its own policy, and refuses to start a duplicate one across workspaces — see [Sidecar reaping](configuration.md#sidecar-reaping).
+
 ### Built-in MCP sidecars
 
 A sidecar entry can carry MCP wiring, injecting its reserved port into the launching agent's MCP

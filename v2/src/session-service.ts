@@ -2829,8 +2829,9 @@ export class SessionService {
     }
   }
 
-  // Shared by the 5-minute reaper tick and boot: records-driven candidate
-  // collection, the pure policy, then execution. Callers pass in the
+  // Shared by the SIDECAR_REAPER_INTERVAL_MS reaper tick and boot:
+  // records-driven candidate collection, the pure policy, then execution.
+  // Callers pass in the
   // sessions/tmux-name snapshots they already hold to avoid a second listing
   // pass in the reaper tick, which runs this right next to the builtin-name
   // loop above.
@@ -6154,8 +6155,9 @@ export class SessionService {
     }
 
     await this.sweepLeakedBuiltinSidecars("boot");
-    // Run the same project-sidecar reap pass the 5-minute reaper tick runs,
-    // once at boot: a host that stays up for weeks between restarts would
+    // Run the same project-sidecar reap pass the SIDECAR_REAPER_INTERVAL_MS
+    // tick runs, once at boot: a host that stays up for weeks between
+    // restarts would
     // otherwise wait a full tick after every restart before an idle leak
     // from before the restart gets swept.
     await this.collectAndExecuteSidecarReapPass(
@@ -12409,12 +12411,19 @@ export class SessionService {
       const ownerRecord = ownerId === session.id ? session : anchorRecord;
       const identity = ownerRecord.sidecarProcs?.[name];
       const ageSeconds = identity ? sidecarAgeSnapshot?.byPid.get(identity.pid)?.etimes : undefined;
+      // Same threshold the reaper's own age_warning event uses
+      // (sidecarGc.maxAgeWarnMinutes, see policy.ts's warn check) — computed
+      // here, not duplicated as a separate client-side number, so the UI and
+      // the backend event can never disagree.
+      const ageWarn =
+        ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60;
       sidecars.push({
         name,
         alive: await sidecarTmuxAlive(ownerId, name),
         ports: sidecarViewPorts(ownerRecord, name, sidecar),
         tmuxSession: sidecarTmuxSession(ownerId, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
+        ...(ageWarn ? { ageWarn } : {}),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);

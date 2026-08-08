@@ -3299,7 +3299,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ))}
                             {sc.ageSeconds !== undefined ? (
                               <span
-                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                                className={`shrink-0 ${sc.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
                                 data-testid={`sidecar-age-${sc.name}`}
                               >
                                 {formatSidecarAge(sc.ageSeconds)}
