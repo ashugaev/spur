@@ -15396,6 +15396,378 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  describe("project sidecar idle-TTL reap pass", () => {
+    function frontLocalConfig(overrides: Record<string, unknown> = {}) {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              "front-local": {
+                command: "pnpm dev",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_FRONT_LOCAL", start: 3000, end: 3099 } },
+              },
+            },
+          },
+        },
+        ...overrides,
+      };
+    }
+
+    it("AC3: never selects a --svc-- service pane as a reap candidate", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          // 10 hours idle against the 120-minute default TTL.
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      // A service pane sharing the session's id prefix — never producible by
+      // sessionSidecarNames -> sidecarTmuxSession construction, but present
+      // in tmux regardless (runtime-tmux.ts:518 documents the collision).
+      listTmuxSessionNamesMock.mockResolvedValue(
+        new Set(["api-1--front-local", "api-1--svc--worker"]),
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--svc--worker");
+      service.dispose();
+    });
+
+    it("AC4: never selects an mcp sidecar pane, even under a live (running) session", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              playwright: {
+                command: "node cli.js --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+                autoStart: true,
+                agents: ["claude", "codex"],
+                ports: { http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 } },
+                mcp: { server: "playwright", portId: "http", path: "/mcp" },
+              },
+            },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["playwright"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--playwright"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      // A live pane makes the fire-and-forgotten attention monitor classify
+      // and persist this session concurrently; pin its own tmux to "gone"
+      // so that race can never touch this record mid-test.
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--playwright");
+      service.dispose();
+    });
+
+    it("AC5: keeps a desk-shared pane whose workspace has one running sibling and recent activity", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({
+          id: "api-2",
+          deskId: "api-1",
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          // Recent activity on the running sibling, not the terminal anchor.
+          updatedAt: "2026-03-18T10:04:30.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC6: reaps a non-builtin sidecar whose owner is errored with no running workspace member", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "errored",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          // Recent activity — reaped on ownership (workspace_not_running),
+          // not on idle time, and without touching REAPABLE_SESSION_STATUSES
+          // (errored is not in that set).
+          updatedAt: "2026-03-18T10:04:59.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      // The session's OWN tmux (not the sidecar's) must read as genuinely
+      // gone, or the fire-and-forgotten attention monitor self-heals
+      // "errored" back to "running" mid-test and confounds workspaceRunning.
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC6: reaps a non-builtin sidecar stopped with stopReason manual_pause and no running workspace member", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          stopReason: "manual_pause",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T10:04:59.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC7: never reaps an idle-past-TTL sidecar whose port has an established connection", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { http: 3002 } },
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      hasEstablishedConnectionsMock.mockImplementation(async (port: number) =>
+        port === 3002 ? "established" : "none",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(hasEstablishedConnectionsMock).toHaveBeenCalledWith(3002);
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC2: a connection probe that throws resolves to unknown and keeps, even for an idle-past-TTL owner", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { http: 3002 } },
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      hasEstablishedConnectionsMock.mockRejectedValue(new Error("ss: command not found"));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      // hasEstablishedConnections is expected to resolve "unknown" itself
+      // rather than throw (see port-probe.test.ts), but the candidate
+      // collector must not treat a thrown probe as authorization either —
+      // belt and braces against a caller-side regression.
+      await expect(service.reapDeadSessionSidecars()).resolves.toBeUndefined();
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("AC8: routes through reapSidecarByName and emits treeRssKb + survivors when the pane is alive", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          // Own status "running" (not terminal): reached via idle_ttl
+          // specifically (workspaceRunning true, so step 8 does not fire
+          // first) — the exact host shape recon found for intelas-0bf7.
+          status: "running",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      const reapedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.sidecar.reaped" && entry.sessionId === "api-1",
+      );
+      expect(reapedEvent).toBeDefined();
+      expect(reapedEvent?.[1].details).toEqual(
+        expect.objectContaining({
+          sidecarName: "front-local",
+          reason: "idle_ttl",
+          treeRssKb: expect.any(Number),
+          survivors: expect.any(Array),
+        }),
+      );
+      service.dispose();
+    });
+
+    it("AC8/AC12-style: routes through reapRecordedIdentity + clearSidecarProcEntry when the pane is gone", async () => {
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "completed",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          updatedAt: "2026-03-18T00:00:00.000Z",
+          // Certain to be unreadable in /proc — reapRecordedIdentity degrades
+          // to "do not signal" for the pid itself, but the entry must still
+          // be cleared (matches the startSidecar precedent elsewhere in this
+          // file for this exact pid-999999999 convention).
+          sidecarProcs: { "front-local": { pid: 999_999_999, pgid: 999_999_999, starttime: 1 } },
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set());
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(
+        writeSessionMock.mock.calls.some((call) => {
+          const [dataDir, record] = call as [string, SessionRecord];
+          return (
+            dataDir === TEST_DATA_DIR &&
+            record.id === "api-1" &&
+            record.sidecarProcs?.["front-local"] === undefined
+          );
+        }),
+      ).toBe(true);
+      service.dispose();
+    });
+  });
+
   it("never runs the session GC sweep while sessionGc.enabled is false", async () => {
     createSessionStore();
     const { SessionService } = await loadSessionServiceModule();

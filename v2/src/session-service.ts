@@ -2660,9 +2660,16 @@ export class SessionService {
   // non-builtin, desk-shareable project sidecars — never by parsing a tmux
   // name (a `--svc--` service pane can never be produced by this
   // construction: `name` only ever comes from sessionSidecarNames).
+  // Deliberately does NOT consult the builtin-loop's protectedTmux set
+  // (buildProtectedSidecarTmux): that set blanket-protects every LIVE
+  // session's own sidecar names, which is correct for the builtin sweep's
+  // "no policy, just don't touch a live session" rule but would blanket-
+  // protect exactly the shape this pass exists to reap — a live (running),
+  // non-desk session's own idle sidecar (the measured intelas-0bf7 leak).
+  // Safety for a live session instead comes from this pass's own
+  // ownership/idle/connection reasoning (planSidecarReap).
   private async collectSidecarReapCandidates(
     tmuxNames: ReadonlySet<string>,
-    protectedTmux: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
   ): Promise<SidecarReapCandidate[]> {
     const psSnapshot = await snapshotProcesses();
@@ -2671,7 +2678,11 @@ export class SessionService {
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
       let pending = connectionCache.get(port);
       if (!pending) {
-        pending = hasEstablishedConnections(port);
+        // hasEstablishedConnections is designed to never reject, but a
+        // thrown probe must degrade to "unknown" (keep), never propagate
+        // and never read as "none" (which would authorize a reap) — belt
+        // and braces on top of that contract, not a substitute for it.
+        pending = hasEstablishedConnections(port).catch(() => "unknown" as const);
         connectionCache.set(port, pending);
       }
       return pending;
@@ -2692,7 +2703,7 @@ export class SessionService {
         }
         const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
         const tmuxName = sidecarTmuxSession(ownerId, sidecarName);
-        if (seenTmuxNames.has(tmuxName) || protectedTmux.has(tmuxName)) {
+        if (seenTmuxNames.has(tmuxName)) {
           continue;
         }
         seenTmuxNames.add(tmuxName);
@@ -2825,9 +2836,7 @@ export class SessionService {
     sessions: readonly SessionRecord[],
     tmuxNames: ReadonlySet<string>,
   ): Promise<SidecarReapPlan> {
-    const liveSessions = sessions.filter((session) => this.isLiveSessionRecord(session));
-    const protectedTmux = this.buildProtectedSidecarTmux(liveSessions);
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, protectedTmux, sessions);
+    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions);
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
