@@ -3000,6 +3000,140 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
     expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
   });
+
+  describe("spawn session mode picker", () => {
+    function payloadWithModes() {
+      return {
+        projects: [
+          {
+            id: "api",
+            name: "API",
+            configured: true,
+            prefix: "api",
+            path: "/repo/api",
+          },
+          {
+            id: "moded",
+            name: "Moded",
+            configured: true,
+            prefix: "mod",
+            path: "/repo/moded",
+            modes: {
+              manager: { skill: "manager", default: true },
+              council: { skill: "council" },
+            },
+          },
+        ],
+        sessions: [],
+      };
+    }
+
+    function mockSpawnPickerFetch(onSpawn: (body: unknown) => Response) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+        if (url === "/api/sessions") return new Response(JSON.stringify(payloadWithModes()));
+        if (url === "/api/spawn") {
+          return onSpawn(init?.body ? JSON.parse(String(init.body)) : null);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    it("shows the combobox preselected to the default mode for a project with modes", async () => {
+      mockSpawnPickerFetch(() => new Response(JSON.stringify(sessionsPayload().sessions[0])));
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      expect(modeSelect).toHaveValue("manager");
+      expect(within(modeSelect).getByRole("option", { name: "council" })).toBeInTheDocument();
+    });
+
+    it("posts the picked non-default mode as `mode` on spawn", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      fireEvent.change(modeSelect, { target: { value: "council" } });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).toMatchObject({ mode: "council" });
+    });
+
+    it("renders no combobox and posts no mode key for a project without modes", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
+
+      expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).not.toHaveProperty("mode");
+    });
+
+    it("drops the mode from the next spawn when switching from a moded to an unmoded project", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+      await screen.findByRole("combobox", { name: "Spawn session mode" });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
+      expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).not.toHaveProperty("mode");
+    });
+  });
 });
 
 describe("StatusBar", () => {
