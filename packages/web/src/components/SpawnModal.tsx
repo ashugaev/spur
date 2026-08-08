@@ -3,6 +3,7 @@
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
+import { SessionModeSelect } from "@/components/SessionModeSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { Spinner } from "@/components/icons/Spinner";
@@ -56,6 +57,11 @@ export type SpawnModalMode =
       kind: "spawn";
       project: ProjectControl;
       model: FieldControl<string | null>;
+      sessionMode?: {
+        value: string;
+        onChange: (next: string) => void;
+        options: { value: string; label: string }[];
+      };
       branch: FieldControl<string>;
       workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
@@ -182,6 +188,14 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
+          {mode.sessionMode ? (
+            <SessionModeSelect
+              ariaLabel="Spawn session mode"
+              onChange={mode.sessionMode.onChange}
+              options={mode.sessionMode.options}
+              value={mode.sessionMode.value}
+            />
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <input
