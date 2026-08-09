@@ -47,7 +47,7 @@ Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs 
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -56,6 +56,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
 - `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, or `cursor models`.
+- `--mode <name>` picks a session mode from `projects.<id>.modes`, overriding the project default. Unknown name fails the spawn. See [Modes](configuration.md#modes).
 - `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.

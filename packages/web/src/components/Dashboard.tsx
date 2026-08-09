@@ -54,6 +54,7 @@ import {
   type SpawnDraft,
 } from "@/lib/spawn-draft";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
+import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
@@ -1051,6 +1052,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
   const spawnDraftDirtyRef = useRef(false);
@@ -1483,6 +1485,12 @@ export function Dashboard() {
     [filterProjectOptions],
   );
 
+  const selectedSpawnProjectModes = filterProjectOptions.find(
+    (project) => project.id === spawnProjectId,
+  )?.modes;
+  const effectiveSessionMode = reconcileSessionMode(selectedSpawnProjectModes, spawnSessionMode);
+  const spawnModeOptions = sessionModeOptions(selectedSpawnProjectModes);
+
   const isValidSpawnProject = (candidateProjectId: string) =>
     configuredProjectOptions.some((project) => project.id === candidateProjectId);
 
@@ -1510,6 +1518,7 @@ export function Dashboard() {
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
+    setSpawnSessionMode(draft?.sessionMode ?? null);
     setSpawnBranch(draft?.branch ?? "");
     spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
     setSpawnPlanMode(draft?.planMode ?? false);
@@ -1582,6 +1591,7 @@ export function Dashboard() {
       selfDestructConditions: spawnSelfDestructConditions,
       steps: spawnSteps.map((step) => step.value),
       trackerUrl: spawnTrackerUrl,
+      sessionMode: spawnSessionMode,
     };
   }, [
     spawnAgent,
@@ -1594,6 +1604,7 @@ export function Dashboard() {
     spawnPrompt,
     spawnSelfDestruct,
     spawnSelfDestructConditions,
+    spawnSessionMode,
     spawnSteps,
     spawnTrackerUrl,
     spawnWorkspaceMode,
@@ -1767,6 +1778,7 @@ export function Dashboard() {
         agent: spawnAgent,
       };
       if (spawnModel !== null) payload.model = spawnModel;
+      if (effectiveSessionMode) payload.mode = effectiveSessionMode;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
@@ -1809,6 +1821,7 @@ export function Dashboard() {
       });
       setSpawnPrompt("");
       setSpawnModel(null);
+      setSpawnSessionMode(null);
       setSpawnBranch("");
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
@@ -2558,6 +2571,18 @@ export function Dashboard() {
                   setSpawnModel(next);
                 },
               },
+              ...(spawnModeOptions.length > 0
+                ? {
+                    sessionMode: {
+                      value: effectiveSessionMode ?? "",
+                      onChange: (next: string) => {
+                        spawnDraftDirtyRef.current = true;
+                        setSpawnSessionMode(next === "" ? null : next);
+                      },
+                      options: spawnModeOptions,
+                    },
+                  }
+                : {}),
               branch: {
                 value: spawnBranch,
                 onChange: (next) => {

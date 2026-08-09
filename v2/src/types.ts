@@ -408,6 +408,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -548,6 +549,11 @@ export interface ProjectMcpConfig {
   exclude: string[];
 }
 
+export interface SessionModeConfig {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -564,6 +570,7 @@ export interface ProjectConfig {
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
+  modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
   mcp?: ProjectMcpConfig;
   sources: Record<string, SourceConfig>;
@@ -809,6 +816,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -973,6 +981,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -1125,6 +1134,7 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
 }
 
 export interface CreateProjectRequest {
