@@ -60,7 +60,7 @@ Prunable classes and age floors (a global 7-day floor applies to every class on 
 
 - `vendor-cache` (`~/.npm/_cacache`, one unit) — 7d; protected while any package-manager process (npm/pnpm/npx/yarn) is running.
 - `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if its path appears in a live process's argv.
-- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when zero `browsers.json` sources resolve at all.
+- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when either zero `browsers.json` sources resolve at all, or the instance config itself does not resolve (every `browsers.json` source depends on it).
 - `browser-profile` (`mcp-*` dirs under either playwright cache root) — 7d; protected by argv or a live session descendant's cwd.
 - `browser-registry` (`~/.cache/ms-playwright/b`) — never pruned, measured and reported only.
 - `generic` (every other `~/.cache` entry) — 30d; prunable. No pin key like `browser-revision` — protected only by argv match, a live session descendant's cwd, ownership, and age.
