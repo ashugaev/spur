@@ -192,6 +192,25 @@ describe("verdictFor", () => {
     });
   });
 
+  it("AC3b: instanceConfigOk false protects every browser-revision entry regardless of pinSourceCount (fail-closed)", () => {
+    const revisionClass: CacheEntryClass = {
+      kind: "browser-revision",
+      browser: "chromium",
+      revision: "1148",
+      dirName: "chromium-1148",
+    };
+    const noInstanceConfig = makeLiveness({
+      pinnedDirNames: new Set(),
+      pinSourceCount: 3,
+      instanceConfigOk: false,
+    });
+    const aged400 = makeEntry({ entryClass: revisionClass, ageDays: 400 });
+    expect(verdictFor(aged400, makeOwnership(), noInstanceConfig, MY_UID)).toEqual({
+      kind: "protected",
+      reason: { kind: "pin-unresolved" },
+    });
+  });
+
   it("AC5: an mcp-chrome-* dir referenced in a fake ps argv table is protected in-use, otherwise prunable", () => {
     const profileClass: CacheEntryClass = { kind: "browser-profile" };
     const entry = makeEntry({
