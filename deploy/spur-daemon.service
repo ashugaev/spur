@@ -21,6 +21,14 @@ ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
+# Daemon cgroup guardrails. Direct-fallback tmux processes share these limits;
+# auto user scopes live outside this unit's cgroup. Host-memory sampling remains
+# the fleet-wide pressure signal. The High/Max gap preserves daemon control-path
+# room, and the swap limit bounds direct-fallback swap use.
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=2G
+
 # The daemon spawns tmux sessions that must outlive daemon restarts.
 # KillMode=process is the actual guarantee: a daemon restart stops only the
 # daemon node process, never the tmux sessions or agents running inside it.

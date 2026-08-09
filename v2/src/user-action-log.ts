@@ -33,8 +33,8 @@ export interface BuildUserActionInput {
 const USER_ACTION_LOG_FILE = "user-actions.jsonl";
 const SESSIONS_DIR = "sessions";
 
-export const DEFAULT_USER_ACTION_LOG_HOT_BYTES = 500 * 1024 * 1024;
-export const DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_USER_ACTION_LOG_HOT_BYTES = 128 * 1024 * 1024;
+export const DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES = 5;
 
 export interface UserActionLogConfig {
@@ -137,6 +137,31 @@ export function readSessionUserActions(
     collect(line);
   }
   return out;
+}
+
+// Scans only the live shard, never the gzip archives. This runs on every ungated
+// adaptive-poll tick (github.ts shouldPollThisTick), once per pollable session, so it
+// must stay cheap — iterArchivedThenLive would gunzip up to retainArchives (default 5)
+// full archives synchronously first. A shard only rotates once it exceeds
+// shardHotBytes (default 50MB), which implies far more history than the sinceMs window
+// this function checks (activeGraceMs, typically minutes) — the archives essentially
+// never hold the answer. The one edge case this misses is a match that landed on the
+// last line before a rotation boundary; that only delays adaptive polling by one tick,
+// it never suppresses it, since the slowIntervalMs deadline still fires.
+export function hasRecentSessionUserAction(
+  dataDir: string,
+  sessionId: string,
+  actions: ReadonlySet<string>,
+  sinceMs: number,
+): boolean {
+  if (!existsSync(sessionShardDir(dataDir, sessionId))) return false;
+
+  for (const line of iterLiveLines(sessionUserActionLogPath(dataDir, sessionId))) {
+    const entry = parseJsonLine<UserActionRecord>(line);
+    if (!entry || entry.sessionId !== sessionId || !actions.has(entry.action)) continue;
+    if (Date.parse(entry.ts) >= sinceMs) return true;
+  }
+  return false;
 }
 
 export function deleteSessionUserActions(dataDir: string, sessionId: string): void {

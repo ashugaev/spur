@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  archiveSessions,
   deletePendingSendBatch,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
@@ -23,6 +24,7 @@ import {
   writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
+import { appendEventLog } from "../../src/event-log.js";
 import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -425,6 +427,113 @@ describe("session workspaceId normalization", () => {
   });
 });
 
+describe("sidecarProcs", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("keeps a valid entry across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: { dev: { pid: 1234, pgid: 1234, starttime: 5678 } },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("drops a malformed entry instead of persisting it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      sidecarProcs: {
+        dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+        broken: { pid: -1, pgid: 0, starttime: NaN } as unknown as {
+          pid: number;
+          pgid: number;
+          starttime: number;
+        },
+      },
+    });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+
+  it("stays absent on a record written without the field", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
+
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toBeUndefined();
+  });
+
+  it("drops a null entry instead of throwing on read (hand-edited/corrupted JSON)", async () => {
+    // writeSession's own normalizeSessionRecord would filter this out before
+    // it ever hits disk, so a bad entry can only originate from a file
+    // written outside that path — write raw JSON directly to simulate it.
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-1.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify({
+        ...base,
+        id: "api-1",
+        tmuxSession: "api-1",
+        sidecarProcs: {
+          dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+          broken: null,
+        },
+      })}\n`,
+    );
+
+    expect(() => readSession(dataDir, "api-1")).not.toThrow();
+    expect(readSession(dataDir, "api-1")?.sidecarProcs).toEqual({
+      dev: { pid: 1234, pgid: 1234, starttime: 5678 },
+    });
+  });
+});
+
+describe("agentSessionId", () => {
+  it("keeps agentSessionId across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      id: "api-1",
+      tmuxSession: "api-1",
+      agentSessionId: "native-session-1",
+    });
+
+    expect(readSession(dataDir, "api-1")?.agentSessionId).toBe("native-session-1");
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();
@@ -823,5 +932,255 @@ describe("session metadata PR migration", () => {
     expect(listSessions(dataDir)).toEqual([
       expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
     ]);
+  });
+});
+
+const sessionBase = {
+  project: "api",
+  agent: "claude" as const,
+  prompt: "ship it",
+  branch: "api-1",
+  worktree: true,
+  worktreePath: "/tmp/spur-worktrees/api/api-1",
+  launchCommand: "claude",
+  status: "completed" as const,
+  createdAt: "2026-03-18T10:00:00.000Z",
+  updatedAt: "2026-03-18T10:01:00.000Z",
+};
+
+describe("archiveSessions", () => {
+  it("moves a member's record and log shard out of listSessions/readSession/.index.json in one rewrite", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    appendEventLog(dataDir, {
+      event: "session.test",
+      level: "info",
+      sessionId: "api-1",
+      message: "hello",
+    });
+    const shardDir = join(dataDir, "sessions", "api-1");
+    expect(existsSync(shardDir)).toBe(true);
+
+    const result = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(result.archivedIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")).toBeNull();
+    expect(listSessions(dataDir)).toEqual([]);
+    expect(existsSync(shardDir)).toBe(false);
+    expect(existsSync(join(result.archiveDir, "api", "api-1", "events.jsonl"))).toBe(true);
+    const index = JSON.parse(
+      readFileSync(join(dataDir, "sessions", ".index.json"), "utf-8"),
+    ) as Record<string, string>;
+    expect(index["api-1"]).toBeUndefined();
+  });
+
+  it("restores an archived record by moving the file back", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const { archiveDir } = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+    expect(readSession(dataDir, "api-1")).toBeNull();
+
+    mkdirSync(join(dataDir, "sessions", "api"), { recursive: true });
+    const { renameSync } = await import("node:fs");
+    renameSync(
+      join(archiveDir, "api", "api-1.json"),
+      join(dataDir, "sessions", "api", "api-1.json"),
+    );
+
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+  });
+
+  it("archives every member of a group and leaves other records untouched", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    writeSession(dataDir, { ...sessionBase, id: "api-3", tmuxSession: "api-3" });
+
+    archiveSessions(dataDir, [
+      { id: "api-1", project: "api" },
+      { id: "api-2", project: "api" },
+    ]);
+
+    expect(
+      listSessions(dataDir)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(["api-3"]);
+    expect(readSession(dataDir, "api-3")?.id).toBe("api-3");
+  });
+});
+
+describe("listSessions concurrency", () => {
+  it("skips a record file removed mid-scan", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    const { rmSync } = await import("node:fs");
+    rmSync(path);
+
+    expect(listSessions(dataDir)).toEqual([]);
+  });
+
+  it("still throws on a corrupt record file", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "sessions", "api");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "api-1.json"), "{not json", "utf-8");
+
+    expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
+  });
+});
+
+describe("listSessions record cache", () => {
+  function fixtureSession(id: string): SessionRecord {
+    return {
+      id,
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: id,
+      worktree: true,
+      worktreePath: `/tmp/spur-worktrees/api/${id}`,
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("keeps record identity for unchanged session files", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    writeSession(dataDir, fixtureSession("api-2"));
+
+    const first = listSessions(dataDir);
+    const second = listSessions(dataDir);
+    expect(second.find((s) => s.id === "api-1")).toBe(first.find((s) => s.id === "api-1"));
+    expect(second.find((s) => s.id === "api-2")).toBe(first.find((s) => s.id === "api-2"));
+
+    // After a write to only one record, that record is a new object and the
+    // untouched one is still the same object reference.
+    writeSession(dataDir, { ...fixtureSession("api-1"), status: "completed" });
+    const third = listSessions(dataDir);
+    const thirdApi1 = third.find((s) => s.id === "api-1");
+    const thirdApi2 = third.find((s) => s.id === "api-2");
+    expect(thirdApi1).not.toBe(second.find((s) => s.id === "api-1"));
+    expect(thirdApi1?.status).toBe("completed");
+    expect(thirdApi2).toBe(second.find((s) => s.id === "api-2"));
+  });
+
+  it("settles after the legacy pr-slot rewrite", async () => {
+    const dataDir = await createTempDir("spur-metadata-cache-");
+    tempDirs.push(dataDir);
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-a1b2.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify(
+        {
+          id: "api-a1b2",
+          project: "api",
+          agent: "claude",
+          prompt: "fix the bug",
+          branch: "feature/native-pr-binding",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api-a1b2",
+          tmuxSession: "api-a1b2",
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-04-26T09:00:00.000Z",
+          updatedAt: "2026-04-26T09:00:00.000Z",
+          slots: {
+            links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    // 1st call reads the legacy shape, which readSessionFile rewrites in
+    // place — a renameSync always yields a new inode, so this call's cache
+    // entry (keyed on the PRE-read, now-stale fingerprint) is invalidated
+    // the instant the next call's pre-read stat misses it.
+    const first = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(first?.pr).toMatchObject({ number: 42, repo: "acme/api" });
+
+    // 2nd call's pre-read stat misses the stale cache entry, so it
+    // re-parses once — reading the now-native shape, with no further
+    // rewrite, so this time the fingerprint it caches matches going
+    // forward.
+    const second = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(second).not.toBe(first);
+
+    // 3rd call is a pure cache hit: same object as the 2nd call, proving no
+    // permanent re-parse loop.
+    const third = listSessions(dataDir).find((s) => s.id === "api-a1b2");
+    expect(third).toBe(second);
+  });
+
+  it("does not prune a sibling data dir whose sessions root is a raw string-prefix match", async () => {
+    const dataDir1 = await newDataDir();
+    // dataDir2's sessions root ("<rootDir1>-extra/sessions") shares
+    // dataDir1's sessions root as a raw string prefix with no separator
+    // immediately after -- the exact shape of a "sessions-old" vs
+    // "sessions" sibling collision.
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+
+    // Populating/pruning dataDir1's cache must never evict dataDir2's
+    // cache entries just because dataDir2's root string-starts-with
+    // dataDir1's root.
+    listSessions(dataDir1);
+
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("prunes only the missing sessions root before it is restored", async () => {
+    const dataDir1 = await newDataDir();
+    const dataDir2 = `${join(dataDir1, "sessions")}-extra`;
+    tempDirs.push(dataDir2);
+
+    writeSession(dataDir1, fixtureSession("api-1"));
+    writeSession(dataDir2, fixtureSession("other-1"));
+
+    const dataDir1First = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2First = listSessions(dataDir2).find((s) => s.id === "other-1");
+    const sessionsRoot = join(dataDir1, "sessions");
+    const parkedRoot = join(dataDir1, "sessions-parked");
+
+    // Moving the root away and back preserves the file's fingerprint. A
+    // stale cache entry would therefore return the exact same object after
+    // restoration unless the missing-root listing prunes it.
+    renameSync(sessionsRoot, parkedRoot);
+    expect(listSessions(dataDir1)).toEqual([]);
+    renameSync(parkedRoot, sessionsRoot);
+
+    const dataDir1Second = listSessions(dataDir1).find((s) => s.id === "api-1");
+    const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
+    expect(dataDir1Second).not.toBe(dataDir1First);
+    expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("lists a session file that has no index entry", async () => {
+    const dataDir = await newDataDir();
+    const sessionDir = join(dataDir, "sessions", "api");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "api-1.json"),
+      `${JSON.stringify(fixtureSession("api-1"), null, 2)}\n`,
+    );
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
   });
 });

@@ -46,6 +46,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-test" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
     rateLimitReactivation: { afterHours: 0 },
     authRotation: {
@@ -54,6 +55,32 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       maxRotationsPerEpisode: 2,
     },
     diskRetention: { warnFreeGb: 10 },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    },
+    admission: {
+      enabled: true,
+      maxLiveSessions: 1000,
+      maxLiveSessionsSource: "derived",
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: {
+        enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1_073_741_824,
+        minFreeSwapBytes: 0,
+        admissionFloorBytes: 8_000_000_000,
+        shedCriticalFloorBytes: 4_000_000_000,
+        restoreFloorBytes: 9_610_612_736,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
+    },
     tags: [],
     projects: {
       api: {

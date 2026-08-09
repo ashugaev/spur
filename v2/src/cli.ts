@@ -19,7 +19,7 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -39,6 +39,7 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  assertConfigMayUseProdSlot,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
@@ -72,11 +73,19 @@ import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
+import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
-import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import {
+  buildMergedConfig,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
+  readConfigRegistryFile,
+} from "./registry.js";
+import { listSessions } from "./metadata.js";
+import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
@@ -93,6 +102,7 @@ import {
   type SessionMemoryListResponse,
   type SessionMemoryRecord,
   type SessionMemoryRecordResponse,
+  type SessionGcStatus,
   type SessionState,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
@@ -113,7 +123,12 @@ import {
   type HandoffSessionRequest,
 } from "./types.js";
 import { getVersion } from "./version.js";
-import { checkProjectWorkspace, readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import {
+  checkProjectWorkspace,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
+  workspaceExists,
+} from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -386,7 +401,8 @@ function getConfigPath(program: Command): string | undefined {
 export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
-  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
+  const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
   const project = config.projects[projectId];
   if (!project) {
     throw new Error(`Unknown project: ${projectId}`);
@@ -400,7 +416,7 @@ function prepareInstanceConfig(program: Command): { configPath: string; initiali
   return ensured;
 }
 
-async function maybeAutoConnectProject(
+export async function maybeAutoConnectProject(
   cliEntrypoint: string,
   configPath: string,
   explicitProjectConfigPath?: string,
@@ -422,6 +438,9 @@ async function maybeAutoConnectProject(
   }
   const projectConfigPath = [...candidates][0];
   if (!projectConfigPath) {
+    return {};
+  }
+  if (isInsideWorktreeDir(projectConfigPath, loadConfig(configPath).worktreeDir)) {
     return {};
   }
 
@@ -984,6 +1003,138 @@ function renderCacheActionResult(result: CacheActionResult): string {
   return lines.join("\n");
 }
 
+function renderSidecarSweepResult(result: SidecarSweepResult): string {
+  if (!result.supported) {
+    return dimText("Process table or procfs unreadable on this host — sweep skipped.");
+  }
+  if (result.leaked.length === 0) {
+    return dimText("No leaked sidecar process trees found.");
+  }
+  // Keyed by rootPid, not just presence: an outcome with survivors left
+  // alive after the SIGKILL confirmation window is a partial kill, not a
+  // clean reap — surfacing it as "[reaped]" would tell the operator nothing
+  // is left running when something still is.
+  const outcomeByRootPid = new Map(result.reaped.map((outcome) => [outcome.panePid, outcome]));
+  const lines = result.leaked.map((tree) => {
+    const ageMinutes = Math.floor(tree.ageSeconds / 60);
+    const outcome = outcomeByRootPid.get(tree.rootPid);
+    const status =
+      outcome === undefined
+        ? tree.reapable
+          ? "reapable"
+          : "report-only"
+        : outcome.survivors.length === 0
+          ? "reaped"
+          : "partial";
+    const survivorsSuffix =
+      outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
+    // Tree total, not the root pid's own rss — the root alone understated
+    // the measured 863333/863351 leak by 17x.
+    return dimText(
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+    );
+  });
+  return lines.join("\n");
+}
+
+// Test-only: exercises the sweep summary's status/survivors formatting
+// without spinning up a live CLI command or the daemon route it calls.
+export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// Bounds one interactive `spur gc` run; the daemon sweep has its own
+// sessionGc.maxGroupsPerSweep instead.
+const DEFAULT_GC_CLI_LIMIT = 100;
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null) {
+    return "-";
+  }
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const unit = BYTE_UNITS[unitIndex] ?? "B";
+  return unitIndex === 0 ? `${bytes} ${unit}` : `${value.toFixed(1)} ${unit}`;
+}
+
+export function renderSessionGcResult(report: GcReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.sessions} record(s) in ${report.scanned.groups} group(s); planned ${report.groups.length} (limit ${report.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+    ),
+    "",
+  ];
+  if (report.groups.length === 0) {
+    lines.push(dimText("Nothing to collect."));
+    return lines.join("\n");
+  }
+  for (const group of report.groups) {
+    const records = `${group.sessionIds.length} record${group.sessionIds.length === 1 ? "" : "s"}`;
+    const detail = group.error
+      ? `error: ${group.error}`
+      : group.action === "blocked"
+        ? group.blockReasons.join(",")
+        : group.worktreePath || "(no worktree)";
+    lines.push(
+      `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
+    );
+    lines.push(dimText(`           ${group.sessionIds.join(" ")}`));
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${formatBytes(report.totals.freedBytes)} freed, ${report.totals.errors} error(s).`,
+  );
+  const restoreLoss = report.groups.flatMap((group) => group.restoreLossSessionIds);
+  if (restoreLoss.length > 0) {
+    lines.push(
+      dimText(
+        `${restoreLoss.length} stopped session(s) lose \`spur restore\` once collected: ${restoreLoss.join(" ")}`,
+      ),
+    );
+  }
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    throw new Error("--statuses must list at least one of completed,killed,stopped");
+  }
+  const statuses: SessionGcStatus[] = [];
+  for (const part of parts) {
+    if (part !== "completed" && part !== "killed" && part !== "stopped") {
+      throw new Error(`--statuses only accepts completed,killed,stopped (got ${part})`);
+    }
+    statuses.push(part);
+  }
+  return [...new Set(statuses)];
+}
+
+function parseNonNegativeIntegerOption(value: string, flag: string): number {
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(value.trim(), 10);
+}
+
+function parsePositiveIntegerOption(value: string, flag: string): number {
+  const parsed = parseNonNegativeIntegerOption(value, flag);
+  if (parsed === 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  return parsed;
+}
+
 function collectOptionValue(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
@@ -1122,6 +1273,14 @@ function helpNotes(command: Command): string[] {
       "Pass `--scaffold` to write a local `spur.yaml` when no project config is found; never overwrites an existing one.",
       "Run `spur init` if host checks report missing units, linger, or inactive/unreachable services.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
+    ];
+  }
+  if (command.name() === "gc") {
+    return [
+      "Dry run by default: prints every group with its age, size, and the action it would take. Nothing is touched without `--execute`.",
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
+      "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
+      "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -2030,6 +2189,64 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("gc")
+    .description(
+      "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
+    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum groups to act on in one run")
+    .option("--no-sizes", "Skip `du` size measurement (no freed-byte reporting)")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const olderThanDays =
+        options.olderThan === undefined
+          ? config.sessionGc.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const statuses =
+        options.statuses === undefined
+          ? config.sessionGc.statuses
+          : parseSessionGcStatusesOption(String(options.statuses));
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      const sizes = options.sizes !== false;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning session gc" : "running session gc",
+        action: async () => {
+          const plan = planSessionGc({
+            sessions: listSessions(config.dataDir),
+            worktreeDir: config.worktreeDir,
+            now: new Date(),
+            olderThanDays,
+            statuses,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            pathExists: (path) => workspaceExists(path),
+          });
+          return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
+        },
+        render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
@@ -2207,7 +2424,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to connect");
       }
@@ -2232,7 +2449,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to disconnect");
       }
@@ -3098,6 +3315,33 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  sidecar
+    .command("sweep")
+    .description("Report sidecar process trees no live session claims; --reap to kill them.")
+    .option("--reap", "Signal reapable leaked trees instead of only reporting them")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sweeping sidecar process trees",
+        action: () =>
+          postJson<SidecarSweepResult>(
+            cliEntrypoint,
+            "/sidecars/sweep",
+            { reap: Boolean(options.reap) },
+            configPath,
+          ),
+        success: (result) =>
+          result.leaked.length === 0
+            ? "No leaked sidecar process trees found."
+            : `Found ${result.leaked.length} leaked sidecar process tree(s).`,
+        render: renderSidecarSweepResult,
+      });
+    });
+
   const branch = program
     .command("branch", { hidden: true })
     .description("Internal branch policy helpers.");
@@ -3183,6 +3427,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
@@ -3225,6 +3470,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -3240,6 +3486,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),

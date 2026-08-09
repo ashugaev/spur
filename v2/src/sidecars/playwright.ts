@@ -1,9 +1,13 @@
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { collectDescendants, listProcesses, type ProcessInfo } from "../process-tree.js";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
+import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
+
+// Re-exported for callers/tests that import the shared process-info shape
+// through this module.
+export type { ProcessInfo };
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -165,53 +169,16 @@ export function isLeakedManagedPlaywright(
   return !ownedPorts.has(port);
 }
 
-function killPid(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-      // Permission or other errors are non-fatal for a best-effort sweep.
-    }
-  }
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-const KILL_TREE_GRACE_MS = 1000;
-
-/**
- * SIGTERM the process and all descendants (catches chromium children), wait a
- * grace period, then SIGKILL survivors. Guards ESRCH for already-dead pids.
- */
-async function killProcessTree(pid: number): Promise<void> {
-  // `null` (ps unavailable/unparseable) is treated as "no known descendants"
-  // here — a missed teardown kill is safe (the reaper's next tick retries),
-  // unlike cache-retention.ts's use of the same signal as a deletion guard.
-  const processes = (await listProcesses()) ?? [];
-  const tree = collectDescendants(pid, processes);
-  // Kill leaves first so parents do not respawn children mid-teardown.
-  for (const target of [...tree].reverse()) {
-    killPid(target, "SIGTERM");
-  }
-  await sleep(KILL_TREE_GRACE_MS);
-  for (const target of [...tree].reverse()) {
-    if (processAlive(target)) {
-      killPid(target, "SIGKILL");
-    }
-  }
-}
-
 /**
  * Find leaked managed playwright servers (orphaned, our bin, port not owned by
- * a live session) and kill their process trees. Returns the count of leaked
- * roots killed.
+ * a live session) and kill their process trees. Takes ONE shared `ps`
+ * snapshot for the whole sweep and passes it into every `killProcessTree`
+ * call (`../process-tree.js`) via its `list` override, instead of forking a
+ * fresh `ps` per leaked root. `killProcessTree` re-reads each target's
+ * `/proc/<pid>/stat` starttime right before SIGKILL and only signals pids
+ * whose starttime is unchanged, so a pid reused for something else after
+ * SIGTERM is never signaled a second time.
+ * Returns the count of leaked roots killed.
  */
 export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Promise<number> {
   // Nothing this daemon started can be running if the package cannot be
@@ -224,11 +191,13 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
-  // Same fail-open-is-safe reasoning as killProcessTree above.
+  // `null` (ps unavailable/unparseable) falls back to `[]` here — a missed
+  // teardown kill is safe (the reaper's next tick retries), unlike
+  // cache-retention.ts's use of the same signal as a deletion guard.
   const processes = (await listProcesses()) ?? [];
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
-    await killProcessTree(proc.pid);
+    await killProcessTree(proc.pid, { list: async () => processes });
   }
   return leaked.length;
 }

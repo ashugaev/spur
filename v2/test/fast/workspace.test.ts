@@ -88,7 +88,10 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  pruneRepoWorktrees,
+  readCurrentBranch,
   readDoctorBranchHint,
+  readRemoteUrls,
   resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
   workspaceExists,
@@ -118,6 +121,16 @@ function mockGitSuccess(stdout = ""): void {
 
 function mockGitFailure(message: string, code = 1): void {
   mockExecFileAsync.mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+}
+
+// Every git spawn carries a timeout: no git call may wait forever. Mutating
+// commands get the generous cap, read probes the short one.
+function gitOpts(cwd: string): { cwd: string; timeout: number } {
+  return { cwd, timeout: 5 * 60_000 };
+}
+
+function gitProbeOpts(cwd: string): { cwd: string; timeout: number } {
+  return { cwd, timeout: 5_000 };
 }
 
 const baseInput = {
@@ -161,16 +174,20 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], {
-      cwd: "/repo/api",
-    });
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
-      cwd: "/repo/api",
-    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["remote", "get-url", "origin"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["fetch", "origin", "--quiet"],
+      gitOpts("/repo/api"),
+    );
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -194,12 +211,12 @@ describe("createWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
     expect(mockExecFileAsync).not.toHaveBeenCalledWith(
       "git",
       ["merge", "--ff-only", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -221,13 +238,15 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["merge", "--ff-only", "origin/main"], {
-      cwd: "/repo/api",
-    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["merge", "--ff-only", "origin/main"],
+      gitOpts("/repo/api"),
+    );
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -251,7 +270,7 @@ describe("createWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "release", "/tmp/spur-worktrees/api/api-1", "origin/release"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -285,12 +304,12 @@ describe("createWorktree", () => {
     expect(forceUpdateCall).toEqual([
       "git",
       ["branch", "-f", "feature/fresh", "origin/feature/fresh"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     ]);
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "/tmp/spur-worktrees/api/api-1", "feature/fresh"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -324,16 +343,20 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], {
-      cwd: "/repo/api",
-    });
-    expect(mockExecFileAsync).not.toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
-      cwd: "/repo/api",
-    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["remote", "get-url", "origin"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      "git",
+      ["fetch", "origin", "--quiet"],
+      gitOpts("/repo/api"),
+    );
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
@@ -488,7 +511,7 @@ describe("resolveRepoPathFromWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { cwd: "/tmp/spur-worktrees/api/api-1" },
+      gitOpts("/tmp/spur-worktrees/api/api-1"),
     );
   });
 
@@ -554,6 +577,34 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("pruneRepoWorktrees", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("acquires the workspace lock and runs git worktree prune", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
+
+    await pruneRepoWorktrees("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "prune", "--expire", "now"],
+      gitOpts("/repo/api"),
+    );
+  });
+
+  it("does not throw when git worktree prune fails", async () => {
+    mockWorkspaceLockResolution();
+    mockGitFailure("prune failed");
+
+    await expect(pruneRepoWorktrees("/repo/api")).resolves.toBeUndefined();
   });
 });
 
@@ -799,7 +850,7 @@ describe("resolveDoctorRepoRoot", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--path-format=absolute", "--show-toplevel"],
-      { cwd: "/repo/api/packages/service" },
+      gitOpts("/repo/api/packages/service"),
     );
   });
 
@@ -837,7 +888,7 @@ describe("hasUncommittedChanges", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["status", "--short", "--", ".", ":(exclude)node_modules", ":(exclude)dist"],
-      { cwd: "/wt" },
+      gitOpts("/wt"),
     );
   });
 });
@@ -875,5 +926,51 @@ describe("hasUnpushedCommits", () => {
     mockGitSuccess("  origin/feat");
 
     await expect(hasUnpushedCommits("/wt")).resolves.toBe(false);
+  });
+});
+
+describe("git read probes", () => {
+  const readOpts = gitProbeOpts("/wt");
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("bounds the branch probe with the short read timeout", async () => {
+    mockGitSuccess("feature/live");
+
+    await expect(readCurrentBranch("/wt")).resolves.toBe("feature/live");
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      readOpts,
+    );
+  });
+
+  it("reads every remote url in one bounded spawn", async () => {
+    mockGitSuccess(
+      "remote.origin.url git@github.com:acme/api.git\nremote.upstream.url https://github.com/base/api.git",
+    );
+
+    await expect(readRemoteUrls("/wt")).resolves.toEqual(
+      new Map([
+        ["origin", "git@github.com:acme/api.git"],
+        ["upstream", "https://github.com/base/api.git"],
+      ]),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["config", "--get-regexp", "^remote\\..*\\.url$"],
+      readOpts,
+    );
+  });
+
+  it("reads no remotes when the probe fails", async () => {
+    mockGitFailure("not a git repository", 128);
+
+    await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
   });
 });

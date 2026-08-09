@@ -48,6 +48,44 @@ interface DoctorResult {
   existingProjectConfigPath?: string;
 }
 
+// `doctor`'s host checks read host-global state that a temp `HOME` cannot
+// isolate. The daemon port comes from the pinned instance config, but the web
+// port does not: `readWebPort` parses `Environment=PORT=` out of the user's
+// `spur-web.service` unit file and falls back to 5555 when that file is absent
+// — it never consults `ui.port`. On a shared self-hosted runner another user's
+// service legitimately holds 5555, and if its `/` does not answer inside the
+// 2s probe window (CI load is enough), `checkServiceHealth` emits
+// `web-port-conflict` at `error` severity and the CLI exits 1. Same documented
+// collision class as the daemon's default 4310.
+//
+// So exit code is not a usable signal for the scaffolding invariants these
+// tests own. Parse stdout and assert on the specific check under test instead;
+// a genuinely crashed `doctor` prints no JSON and still fails here.
+async function runDoctorJson(
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<{ doctor: DoctorResult; exitCode: number }> {
+  let stdout: string;
+  let exitCode: number;
+  try {
+    const result = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
+      ...options,
+      timeout: 60_000,
+    });
+    stdout = result.stdout;
+    exitCode = 0;
+  } catch (error) {
+    const execError = error as { stdout?: string; code?: number };
+    stdout = execError.stdout ?? "";
+    exitCode = execError.code ?? 1;
+  }
+  try {
+    return { doctor: JSON.parse(stdout) as DoctorResult, exitCode };
+  } catch (error) {
+    throw new Error(`Expected doctor JSON output, received: ${stdout}`, { cause: error });
+  }
+}
+
 const activeContexts: Array<{
   context: RuntimeTestContext;
   daemonPid?: number;
@@ -412,6 +450,32 @@ async function findConsecutiveFreePorts(): Promise<{ start: number; end: number 
   throw new Error("Failed to find consecutive free TCP ports for runtime test");
 }
 
+async function listenOnAllInterfaces(
+  server: ReturnType<typeof createServer>,
+  port: number,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 async function runRestoreScenario(args: {
   agent?: "claude" | "codex" | "cursor";
   configName: string;
@@ -511,8 +575,6 @@ async function runRestoreScenario(args: {
     });
 
     await sendKeysToTmux(controllerSessionName, "r");
-    await sleep(1_000);
-    await sendKeysToTmux(controllerSessionName, "q");
   }
 
   const restored = await pollUntil(
@@ -525,6 +587,9 @@ async function runRestoreScenario(args: {
       accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
     },
   );
+  if (!args.agent) {
+    await sendKeysToTmux(`${sessionPrefix}-ui`, "q");
+  }
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
@@ -611,23 +676,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    const doctorRun = await execFileAsync(
-      process.execPath,
-      [CLI_PATH, "doctor", "--json", "--scaffold"],
-      {
-        cwd: context.repoDir,
-        env: doctorEnv,
-        timeout: 60_000,
-      },
-    );
-    let doctor: DoctorResult;
-    try {
-      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
-    } catch (error) {
-      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
-        cause: error,
-      });
-    }
+    const { doctor } = await runDoctorJson(["doctor", "--json", "--scaffold"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
 
     expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
     expect(doctor.defaultBranch).toBe("main");
@@ -686,23 +738,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    const doctorRun = await execFileAsync(
-      process.execPath,
-      [CLI_PATH, "doctor", "--json", "--scaffold"],
-      {
-        cwd: nestedDir,
-        env: doctorEnv,
-        timeout: 60_000,
-      },
-    );
-    let doctor: DoctorResult;
-    try {
-      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
-    } catch (error) {
-      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
-        cause: error,
-      });
-    }
+    const { doctor } = await runDoctorJson(["doctor", "--json", "--scaffold"], {
+      cwd: nestedDir,
+      env: doctorEnv,
+    });
 
     expect(doctor.configPath).toBe(join(context.repoDir, "spur.yaml"));
     expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
@@ -740,19 +779,107 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
       cwd: context.repoDir,
       env: doctorEnv,
-      timeout: 60_000,
     });
 
-    const doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
     expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
     expect(doctor.hostChecks.length).toBeGreaterThan(0);
     expect(doctor.hostChecks.some((check) => check.id === "project-config-valid" && check.ok)).toBe(
       true,
     );
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
+
+  // Proves the `checkConfigRegistry` push (host-install.ts) is scoped inside
+  // the `instanceConfig.status === "ok" && unitsInstalled` block: a host that
+  // never ran `spur init` (no systemd units here) must not surface it.
+  it("doctor omits config-registry on a host without systemd units", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-no-units-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
+
+    expect(doctor.hostChecks.length).toBeGreaterThan(0);
+    expect(doctor.hostChecks.every((check) => check.id !== "config-registry")).toBe(true);
+  });
+
+  // Guards the `runDoctorJson` tolerance above: a host-global port conflict is
+  // error-severity, so `doctor` exits 1 while its report is perfectly valid on
+  // stdout. Squats the pinned daemon port with a 500-answering server, which is
+  // the same branch (`portConflictCheck`) the runner hits on port 5555 — but
+  // driven by a port this test owns, so it never touches host state. Reverting
+  // any doctor test to a bare `await execFileAsync` fails here.
+  it("doctor still reports its config findings when a host port conflict forces a non-zero exit", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-port-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
+    await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+    const squatPort = await findFreePort();
+    const squatter = createServer((_req, res) => {
+      res.statusCode = 500;
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      squatter.listen(squatPort, "127.0.0.1", resolve);
+    });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${squatPort}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+
+    try {
+      const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+        cwd: context.repoDir,
+        env: { ...context.env, SPUR_CONFIG: instanceConfigPath },
+      });
+
+      expect(exitCode).toBe(1);
+      expect(doctor.hostChecks.find((check) => check.id === "daemon-port-conflict")).toMatchObject({
+        ok: false,
+        severity: "error",
+      });
+      expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
+      expect(
+        doctor.hostChecks.some((check) => check.id === "project-config-valid" && check.ok),
+      ).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => {
+        squatter.close(() => resolve());
+      });
+    }
   });
 
   it("doctor --json without --scaffold never creates spur.yaml or the global/pinned instance config on a never-initialized host", async () => {
@@ -770,34 +897,11 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    // The default daemon port (4310) is host-global, not isolated by the
-    // temp `HOME` above (documented self-hosted-CI collision class): a real
-    // ambient daemon already bound there makes `checkServiceHealth` report a
-    // `daemon-port-conflict` (error severity), so the CLI can legitimately
-    // exit non-zero here. That is unrelated to the invariant this test
-    // guards (no config file gets written), so tolerate either exit code and
-    // still parse stdout.
-    let stdout: string;
-    try {
-      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
-        cwd: context.repoDir,
-        env: doctorEnv,
-        timeout: 60_000,
-      });
-      stdout = result.stdout;
-    } catch (error) {
-      const execError = error as { stdout?: string };
-      stdout = execError.stdout ?? "";
-    }
+    const { doctor } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
 
-    let doctor: DoctorResult;
-    try {
-      doctor = JSON.parse(stdout) as DoctorResult;
-    } catch (error) {
-      throw new Error(`Expected doctor JSON output, received: ${stdout}`, {
-        cause: error,
-      });
-    }
     expect(doctor.configPath).toBeUndefined();
     expect(doctor.existingProjectConfigPath).toBeUndefined();
     expect(existsSync(join(context.repoDir, "spur.yaml"))).toBe(false);
@@ -828,24 +932,12 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    let stdout: string;
-    let exitCode: number | undefined;
-    try {
-      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
-        cwd: context.repoDir,
-        env: doctorEnv,
-        timeout: 60_000,
-      });
-      stdout = result.stdout;
-      exitCode = 0;
-    } catch (error) {
-      const execError = error as { stdout?: string; code?: number };
-      stdout = execError.stdout ?? "";
-      exitCode = execError.code;
-    }
+    const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
 
     expect(exitCode).toBe(1);
-    const doctor = JSON.parse(stdout) as DoctorResult;
     expect(doctor.hostChecks.find((check) => check.id === "project-config-valid")).toMatchObject({
       ok: false,
       severity: "error",
@@ -884,24 +976,12 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_CONFIG: instanceConfigPath,
     };
 
-    let stdout: string;
-    let exitCode: number | undefined;
-    try {
-      const result = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
-        cwd: context.repoDir,
-        env: doctorEnv,
-        timeout: 60_000,
-      });
-      stdout = result.stdout;
-      exitCode = 0;
-    } catch (error) {
-      const execError = error as { stdout?: string; code?: number };
-      stdout = execError.stdout ?? "";
-      exitCode = execError.code;
-    }
+    const { doctor, exitCode } = await runDoctorJson(["doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+    });
 
     expect(exitCode).toBe(1);
-    const doctor = JSON.parse(stdout) as DoctorResult;
     expect(
       doctor.hostChecks.find((check) => check.id === "project-path-exists:gone"),
     ).toMatchObject({
@@ -940,6 +1020,42 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       stopped: false,
     });
     await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("exits on SIGTERM well inside the service-manager stop timeout", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-sigterm-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-sigterm.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    // The production hang: systemd sends SIGTERM, the daemon never finishes
+    // teardown, and SIGKILL lands at TimeoutStopSec=90s. Signal the process
+    // directly — the CLI stop path is already covered above.
+    const startedAt = Date.now();
+    process.kill(daemon.info.pid, "SIGTERM");
+    await pollUntil(async () => !(await processExists(daemon.info.pid)), {
+      timeoutMs: 30_000,
+      accept: (exited) => exited,
+      label: "daemon exit after SIGTERM",
+    });
+    const elapsedMs = Date.now() - startedAt;
+    delete currentActiveContext().daemonPid;
+
+    // Budget is 45s with a 60s backstop, under a 90s TimeoutStopSec. A healthy
+    // teardown finishes in well under a second; 15s only guards against the
+    // regression, so a loaded runner cannot turn this into a flake.
+    expect(elapsedMs).toBeLessThan(15_000);
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+
+    const events = readEventLog(context.dataDir).map((entry: SpurLogEntry) => entry.event);
+    expect(events).toContain("daemon.stopped");
+    expect(events).not.toContain("daemon.shutdown.forced_exit");
   });
 
   it.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
@@ -1392,6 +1508,8 @@ projects:
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
+admission:
+  enabled: false
 projects:
   web:
     path: ${context.repoDir}
@@ -5337,37 +5455,39 @@ projects:
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
     const reservedRange = await findConsecutiveFreePorts();
-    const context = await createRuntimeTestContext(port);
-    const sessionPrefix = `rt-sidecar-os-bound-${port}`;
-    activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
-    const configPath = await writeReservedPortSidecarConfig(context, {
-      configName: "sidecar-os-bound-port.yaml",
-      sessionPrefix,
-      serverPort: port,
-      rangeStart: reservedRange.start,
-      rangeEnd: reservedRange.end,
-    });
-    const daemon = await context.startDaemon(configPath);
-    currentActiveContext().daemonPid = daemon.info.pid;
     const occupiedServer = createServer((_request, response) => {
       response.writeHead(204);
       response.end();
     });
+    const freePortGuard = createServer();
+    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
+    try {
+      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
+    } catch (error) {
+      await closeServer(occupiedServer);
+      throw error;
+    }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.once("error", reject);
-        occupiedServer.listen(reservedRange.start, "0.0.0.0", () => {
-          occupiedServer.off("error", reject);
-          resolve();
-        });
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-sidecar-os-bound-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
       });
+      const configPath = await writeReservedPortSidecarConfig(context, {
+        configName: "sidecar-os-bound-port.yaml",
+        sessionPrefix,
+        serverPort: port,
+        rangeStart: reservedRange.start,
+        rangeEnd: reservedRange.end,
+      });
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+      await closeServer(freePortGuard);
 
       const first = JSON.parse(
         (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
@@ -5410,15 +5530,7 @@ projects:
         },
       );
 
-      await new Promise<void>((resolve, reject) => {
-        occupiedServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      await closeServer(occupiedServer);
       await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
       await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
         method: "POST",
@@ -5429,17 +5541,8 @@ projects:
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {
-      if (occupiedServer.listening) {
-        await new Promise<void>((resolve, reject) => {
-          occupiedServer.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          });
-        });
-      }
+      await closeServer(freePortGuard);
+      await closeServer(occupiedServer);
     }
   });
 

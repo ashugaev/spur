@@ -10,6 +10,7 @@ import { agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
+import { killProcessTree } from "./process-tree.js";
 import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
@@ -93,6 +94,7 @@ function memoizedProbe<T>(
 interface FleetSessionSnapshot {
   names: Set<string>;
   activity: Map<string, Date | null>;
+  readable: boolean;
 }
 
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
@@ -125,6 +127,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
   return memoizedProbe(fleetSessionCache, FLEET_SESSION_CACHE_KEY, async () => {
     const names = new Set<string>();
     const activity = new Map<string, Date | null>();
+    let readable = true;
     try {
       const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
@@ -146,8 +149,9 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     } catch {
       // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
+      readable = false;
     }
-    return { names, activity };
+    return { names, activity, readable };
   });
 }
 
@@ -444,42 +448,104 @@ export function _capturePaneCacheSizeForTests(): number {
 
 // Pid of the session's pane process (the shell hosting the agent). Used to
 // bind ambiguous agent status files to the process actually in this pane.
-export async function getTmuxPanePid(sessionName: string): Promise<number | null> {
+// `fresh` busts the shared fleet-pane cache before reading — same rationale
+// as tmuxPaneDead's `fresh`: a reap's signal target must be the CURRENT pane
+// pid, never one from a stale TTL window.
+export async function getTmuxPanePid(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<number | null> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
   const panes = await getFleetPaneSnapshot();
   return panes.get(sessionName)?.activePanePid ?? null;
 }
 
 interface PsRow {
   tty: string;
+  rssKb: number;
   args: string;
 }
 
 // Shared, TTL-cached `ps` snapshot: the full process table is identical for
 // every session in a tick, so this is one fork per TTL window instead of one
-// per session.
+// per session. Carries rss so getFleetSessionRssBytes (headroom reporting)
+// reuses this exact fork instead of adding a second one.
 const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
 const PS_SNAPSHOT_CACHE_KEY = "ps";
+// execFile's default maxBuffer (1 MiB) truncates a large process table
+// instead of erroring; the catch below would then treat the truncation the
+// same as a genuine ps failure and return []. That makes the only caller,
+// isProcessRunningInTmux, misclassify every live agent in the fleet as dead —
+// a worse outcome than a missed reap — so this is sized well above any
+// observed process table, not just the current one.
+const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
+      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,rss,args"], {
         timeout: 5_000,
+        maxBuffer: PS_MAX_BUFFER_BYTES,
       });
       return psOut
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 3) {
+          if (cols.length < 4) {
             return null;
           }
-          return { tty: cols[1] ?? "", args: cols.slice(2).join(" ") };
+          const rssKb = Number.parseInt(cols[2] ?? "", 10);
+          return {
+            tty: cols[1] ?? "",
+            rssKb: Number.isFinite(rssKb) ? rssKb : 0,
+            args: cols.slice(3).join(" "),
+          };
         })
         .filter((row): row is PsRow => row !== null);
     } catch {
       return [];
     }
   });
+}
+
+// Reporting-only RSS roll-up per session (headroom reporting — never on the
+// admission path). Reuses the two existing TTL-cached fleet snapshots (pane
+// map + ps table) instead of forking, so this costs zero extra forks
+// regardless of fleet size. A pane snapshot key is either a bare session id
+// (the agent's own tmux session) or `${sessionId}--${sidecarName}` /
+// `${sessionId}--svc--${serviceId}` (sidecarTmuxSession /
+// startMcpSidecars' service naming) — attribute every key to the id before
+// its first "--". Shared project sidecars retain the workspace anchor in
+// their tmux name after that anchor becomes terminal; callers can map that
+// anchor to one live workspace member so the RSS remains visible exactly once.
+export async function getFleetSessionRssBytes(
+  liveSessionByWorkspaceId: ReadonlyMap<string, string> = new Map(),
+): Promise<Map<string, number>> {
+  const [panes, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  const rssKbByTty = new Map<string, number>();
+  for (const row of psRows) {
+    if (!row.tty) continue;
+    rssKbByTty.set(row.tty, (rssKbByTty.get(row.tty) ?? 0) + row.rssKb);
+  }
+  const rssKbBySessionId = new Map<string, number>();
+  for (const [sessionName, entry] of panes) {
+    const tmuxOwnerId = sessionName.includes("--")
+      ? (sessionName.split("--")[0] ?? sessionName)
+      : sessionName;
+    const sessionId = liveSessionByWorkspaceId.get(tmuxOwnerId) ?? tmuxOwnerId;
+    let rssKb = 0;
+    for (const tty of entry.allTtys) {
+      rssKb += rssKbByTty.get(tty.replace(/^\/dev\//, "")) ?? 0;
+    }
+    rssKbBySessionId.set(sessionId, (rssKbBySessionId.get(sessionId) ?? 0) + rssKb);
+  }
+  const rssBytesBySessionId = new Map<string, number>();
+  for (const [sessionId, rssKb] of rssKbBySessionId) {
+    rssBytesBySessionId.set(sessionId, rssKb * 1024);
+  }
+  return rssBytesBySessionId;
 }
 
 // `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —
@@ -826,6 +892,15 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
   }
 }
 
+export async function killTmuxSessionTree(sessionName: string): Promise<boolean> {
+  const panePid = await getTmuxPanePid(sessionName);
+  if (panePid !== null) await killProcessTree(panePid);
+  await killTmuxSession(sessionName);
+  fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  const snapshot = await getFleetSessionSnapshot();
+  return snapshot.readable && !snapshot.names.has(sessionName);
+}
+
 export function sidecarTmuxSession(sessionId: string, sidecarName: string): string {
   return `${sessionId}--${sidecarName}`;
 }
@@ -847,8 +922,4 @@ export async function createTmuxSidecarSession(input: {
 
 export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
   return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
-}
-
-export async function killSidecarTmux(sessionId: string, sidecarName: string): Promise<void> {
-  await killTmuxSession(sidecarTmuxSession(sessionId, sidecarName));
 }

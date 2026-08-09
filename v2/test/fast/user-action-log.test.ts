@@ -5,9 +5,13 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
   appendUserAction,
   buildUserActionRecord,
   deleteSessionUserActions,
+  hasRecentSessionUserAction,
   readSessionUserActions,
   readUserActionLog,
   sessionUserActionLogPath,
@@ -46,6 +50,14 @@ beforeEach(() => {
 afterEach(async () => {
   setUserActionLogConfig(DEFAULT_USER_ACTION_LOG_CONFIG);
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe("retention defaults", () => {
+  it("mirrors the event-log retention defaults: 128MB global, 16MB shard, 5 archives", () => {
+    expect(DEFAULT_USER_ACTION_LOG_HOT_BYTES).toBe(128 * 1024 * 1024);
+    expect(DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES).toBe(16 * 1024 * 1024);
+    expect(DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES).toBe(5);
+  });
 });
 
 describe("appendUserAction dual-write", () => {
@@ -120,6 +132,121 @@ describe("read shard vs global", () => {
     expect(capped.map((entry) => entry.action)).toEqual(["session.kill", "session.pause"]);
 
     expect(readUserActionLog(dir)).toHaveLength(3);
+  });
+});
+
+describe("hasRecentSessionUserAction", () => {
+  const actions = new Set(["session.send", "session.source_reply"]);
+
+  it("returns false when the session has no shard yet", async () => {
+    const dir = await makeDir();
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, 0)).toBe(false);
+  });
+
+  it("never falls back to the global log: a matching in-window entry there alone is not enough without a shard", async () => {
+    const dir = await makeDir();
+    // Write directly to the global log only — bypass appendUserAction so no
+    // per-session shard gets created for demo-1.
+    const line = `${JSON.stringify(
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    )}\n`;
+    writeFileSync(userActionLogPath(dir), line, { encoding: "utf-8", mode: 0o600 });
+    expect(existsSync(sessionUserActionLogPath(dir, "demo-1"))).toBe(false);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns true for a matching action inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
+  });
+
+  it("returns false for a matching action aged out of the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:00.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:10.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a non-matching action type inside the window", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.kill", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("returns false for a different session id", async () => {
+    const dir = await makeDir();
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-2", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("only scans the live shard, not archived ones: a match rotated into a .gz archive is not found", async () => {
+    const dir = await makeDir();
+    // retainArchives=5 with only 4 padding appends keeps the matching record inside
+    // retention (it lands in an archive, not evicted past it) — this matters because
+    // if the padding count evicted it past every retained archive, this test would
+    // pass identically whether hasRecentSessionUserAction correctly scans only the
+    // live shard or incorrectly still walks archives too: the record wouldn't exist
+    // anywhere either way. Each record here exceeds shardHotBytes on its own, so
+    // every append rotates a single record straight into .1.gz and shifts prior
+    // archives up by one; with retainArchives=5 the match survives through 4 shifts
+    // and is pruned on the 5th, so 4 padding appends keeps it discoverable in an
+    // archive (verified: reverting the live-shard-only fix makes this test fail).
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 5 });
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(false);
+  });
+
+  it("finds a matching entry still in the live shard after other entries have rotated out", async () => {
+    const dir = await makeDir();
+    setUserActionLogConfig({ hotBytes: 1024 * 1024, shardHotBytes: 200, retainArchives: 2 });
+    for (let i = 0; i < 40; i += 1) {
+      appendUserAction(dir, record({ sessionId: "demo-1", action: "session.kill", latencyMs: i }));
+    }
+    const shardPath = sessionUserActionLogPath(dir, "demo-1");
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    // Raise the threshold so this append lands in — and stays in — the live shard
+    // instead of immediately triggering another rotation.
+    setUserActionLogConfig({
+      hotBytes: 1024 * 1024,
+      shardHotBytes: 1024 * 1024,
+      retainArchives: 2,
+    });
+    appendUserAction(
+      dir,
+      record({ sessionId: "demo-1", action: "session.send", ts: "2026-07-12T00:00:10.000Z" }),
+    );
+
+    const sinceMs = Date.parse("2026-07-12T00:00:00.000Z");
+    expect(hasRecentSessionUserAction(dir, "demo-1", actions, sinceMs)).toBe(true);
   });
 });
 

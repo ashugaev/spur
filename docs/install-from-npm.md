@@ -32,6 +32,8 @@ Units installed:
 | `spur-daemon.service` | HTTP API `:4310`, tmux sessions                                                 |
 | `spur-web.service`    | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
 
+Daemon unit bounds the shared fleet cgroup with `MemoryHigh=75%`, `MemoryMax=85%`, and `MemorySwapMax=2G`. On a 62 GiB host, reclaim starts near 46.5 GiB and the hard cap lands near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure can throttle its guard; the gap preserves control-path room. Set `MemorySwapMax=0` in a systemd drop-in for no fleet swap. Package templates have no live effect until `spur init` or `spur update` reinstalls units.
+
 Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
 
 ```bash
@@ -122,7 +124,7 @@ spur update
 
 ## System-wide units (advanced)
 
-`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon; restart the system units directly, and re-copy the templates when a version changes the unit contract. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
+`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon. When a version changes the unit contract, re-copy the adapted templates, run `systemctl daemon-reload`, then restart the system units in a maintenance window. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
 
 ## Reference
 

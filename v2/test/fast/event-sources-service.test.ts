@@ -13,6 +13,10 @@ describe("normalizeLines", () => {
   it("drops blank and whitespace-only lines", () => {
     expect(normalizeLines("first\n\n   \nsecond")).toEqual(["first", "second"]);
   });
+
+  it("strips the carriage return from CRLF input", () => {
+    expect(normalizeLines("line1\r\nline2\r\n")).toEqual(["line1", "line2"]);
+  });
 });
 
 describe("appendedLines", () => {
