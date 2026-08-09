@@ -19,7 +19,8 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -2174,11 +2175,18 @@ export function createProgram(cliEntrypoint: string): Command {
         action: async (): Promise<CacheActionResult> => {
           const plan = await planCachePrune({ instanceConfig });
           if (options.prune && options.yes) {
+            // Instance config not resolving must not drop the dataDir/worktreeDir
+            // exclusion guard — fall back to the same defaults `config.ts` bootstraps
+            // (~/.spur, ~/.spur/worktrees) rather than passing nothing.
             const outcome = await executePrune(plan.candidates, {
-              ...(instanceConfig.status === "ok" ? { dataDir: instanceConfig.config.dataDir } : {}),
-              ...(instanceConfig.status === "ok"
-                ? { worktreeDir: instanceConfig.config.worktreeDir }
-                : {}),
+              dataDir:
+                instanceConfig.status === "ok"
+                  ? instanceConfig.config.dataDir
+                  : join(homedir(), ".spur"),
+              worktreeDir:
+                instanceConfig.status === "ok"
+                  ? instanceConfig.config.worktreeDir
+                  : join(homedir(), ".spur", "worktrees"),
             });
             return { plan, outcome, wouldPrune: false };
           }
