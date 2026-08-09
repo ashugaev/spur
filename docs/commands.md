@@ -30,7 +30,8 @@ Prunable classes and age floors (a global 7-day floor applies to every class on 
 - `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if its path appears in a live process's argv.
 - `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when zero `browsers.json` sources resolve at all.
 - `browser-profile` (`mcp-*` dirs under either playwright cache root) — 7d; protected by argv or a live session descendant's cwd.
-- `browser-registry` (`~/.cache/ms-playwright/b`) and every other `~/.cache` entry (`generic`) — never pruned, measured and reported only.
+- `browser-registry` (`~/.cache/ms-playwright/b`) — never pruned, measured and reported only.
+- `generic` (every other `~/.cache` entry) — 30d; prunable. No pin key like `browser-revision` — protected only by argv match, a live session descendant's cwd, ownership, and age.
 - `tmp-entry` (`/tmp`) — 7d (the global floor, no extra grace); a fixed deny-list (`systemd-private-*`, `tmux-*`, `.X11-unix`, `snap-private-*`, `spur*`, etc.) is never a candidate regardless of age.
 
 Every class also protects a symlink, an entry not owned by the invoking uid, and any entry when the process tree isn't readable (the whole plan degrades to report-only in that case).
