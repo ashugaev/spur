@@ -20,6 +20,7 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
@@ -56,7 +57,7 @@ export type SpawnModalMode =
       project: ProjectControl;
       model: FieldControl<string | null>;
       branch: FieldControl<string>;
-      workspaceMode: FieldControl<"default" | "worktree" | "shared">;
+      workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
@@ -194,9 +195,7 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
             <option value="default">Default</option>

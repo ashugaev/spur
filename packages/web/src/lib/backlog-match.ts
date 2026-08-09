@@ -32,7 +32,9 @@ export function isBacklogItemActivelyWorked(
     const links = session.links ?? [];
     if (
       links.some(
-        (link) => link.label === "tracker" && normalizeTrackerUrl(link.url) === normalizedItemUrl,
+        (link) =>
+          (link.label === "tracker" || link.label === "jira") &&
+          normalizeTrackerUrl(link.url) === normalizedItemUrl,
       )
     ) {
       return true;

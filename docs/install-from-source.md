@@ -69,8 +69,10 @@ Systemd units are templates (`deploy/spur-daemon.service`, `deploy/spur-web.serv
 
 Load-bearing unit fields:
 
-- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive).
+- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive); `MemoryHigh=75%`, `MemoryMax=85%`, `MemorySwapMax=2G` bound the daemon and direct-fallback tmux processes. Auto user scopes sit outside this unit's cgroup; the host sampler supplies the fleet signal.
 - Web: `WEB_HOST=127.0.0.1`, `PORT=3012` (one server for HTTP + `/ws`); `Requires=spur-daemon.service`.
+
+On a 62 GiB host, the memory limits start reclaim near 46.5 GiB and cap this unit near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB outside it. Direct fallback shares the daemon cgroup; auto user scopes do not. Sustained unit pressure can throttle the memory guard, so the 10-point gap preserves control-path room before the hard cap. `MemorySwapMax=0` is the stricter no-unit-swap override. Repository template edits have no live effect until a later `pnpm main:deploy` applies them.
 
 First install:
 
@@ -91,6 +93,10 @@ server {
     listen 127.0.0.1:5555;
     listen <private-ip>:5555;
     server_name _;
+
+    # Image attachments (spawn, session send, respawn) go inline as base64 in
+    # the request body. nginx's 1m default rejects them with a raw HTML 413.
+    client_max_body_size 20m;
 
     # One upstream serves the UI and the terminal WebSocket (/ws); the
     # Upgrade/Connection headers let the WS handshake pass through `/`.

@@ -6,7 +6,12 @@ import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
+import {
+  isReviewLinkLabel,
+  isTrackerLinkLabel,
+  primePrInfo,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -216,11 +221,15 @@ export function SessionRow({
     (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
-  const trackerLink = session.links.find((l) => l.label === "tracker");
+  const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
-  const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
+  // merged and closed are disjoint (github-pr-status.ts discriminates on
+  // node.merged, not node.state), so both states can gate done alongside.
+  const showDone =
+    (prInfo.state === "merged" || prInfo.state === "closed" || mergedAfterMerge) &&
+    canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
   const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);

@@ -1,8 +1,12 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const KILL_TREE_GRACE_MS = 1000;
+const PROCESS_LIST_TIMEOUT_MS = 2_000;
+const PROCESS_LIST_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 
 // Resolves a process' parent pid. Returns null when the pid cannot be read
 // (dead process, proc race, or no procfs on this platform).
@@ -106,13 +110,38 @@ export function parseElapsedSeconds(etime: string): number {
   return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
 }
 
-// One `ps -eo pid=,ppid=,rss=,etime=,args=` fork (execFile, no shell).
-// Malformed rows are skipped. Never throws — a failed `ps` reads as "no
-// processes", the same degrade-quietly contract as the rest of this module.
-export async function listProcesses(): Promise<ProcessSnapshotEntry[]> {
+interface ProcessListOptions {
+  encoding: "utf8";
+  timeout: number;
+  maxBuffer: number;
+}
+
+export type ProcessListRunner = (
+  file: string,
+  args: string[],
+  options: ProcessListOptions,
+) => Promise<{ stdout: string }>;
+
+const runProcessList: ProcessListRunner = async (file, args, options) => {
+  const { stdout } = await execFileAsync(file, args, options);
+  return { stdout };
+};
+
+// One `ps -eo pid=,ppid=,rss=,etime=,args=` fork (execFile, no shell), bounded
+// by a timeout and a max buffer so a wedged or oversized `ps` cannot hang or
+// OOM this process. Malformed rows are skipped. Never throws — a failed `ps`
+// (including a timeout) reads as "no processes", the same degrade-quietly
+// contract as the rest of this module.
+export async function listProcesses(
+  run: ProcessListRunner = runProcessList,
+): Promise<ProcessSnapshotEntry[]> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,rss=,etime=,args="]));
+    ({ stdout } = await run("ps", ["-eo", "pid=,ppid=,rss=,etime=,args="], {
+      encoding: "utf8",
+      timeout: PROCESS_LIST_TIMEOUT_MS,
+      maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
+    }));
   } catch {
     return [];
   }
@@ -276,4 +305,73 @@ export async function readProcessEnvValue(pid: number, key: string): Promise<Pro
 // that as "cannot tell", never as "no processes found".
 export async function canReadProcessEnv(): Promise<boolean> {
   return (await readProcessEnvValue(process.pid, "PATH")).status === "ok";
+}
+
+export type ProcessIdentityReader = (pid: number) => Promise<string | null>;
+export type ProcessSignaler = (pid: number, signal: NodeJS.Signals) => void;
+
+// Same /proc/<pid>/stat field used by readPpidFromProc, but reads field[19]
+// (starttime) instead of field[1] (ppid): a pid's starttime never changes
+// while it lives and is reused only after the kernel would also have to
+// reuse the pid itself, so comparing it before/after a grace sleep is how
+// killProcessTree tells "this pid is still MY target" from "this pid now
+// belongs to something else that grabbed the number after SIGTERM landed".
+async function readProcessIdentity(pid: number): Promise<string | null> {
+  try {
+    const content = await readFile(`/proc/${pid}/stat`, "utf8");
+    const close = content.lastIndexOf(")");
+    if (close === -1) return null;
+    const fields = content
+      .slice(close + 2)
+      .trim()
+      .split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function signalProcess(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Best effort. The process may have exited after the identity read.
+  }
+}
+
+/**
+ * SIGTERM the process and all descendants (catches chromium children), wait
+ * a grace period, then SIGKILL only the ones whose identity (starttime) is
+ * unchanged — a pid reused for something else after SIGTERM is never
+ * signaled a second time. Shared by playwright.ts's leaked-server sweep and
+ * runtime-tmux.ts's killTmuxSessionTree (sidecar/service pane teardown
+ * only — see killAgentPaneAndConfirmExit in session-service.ts for the
+ * agent-pane path, which has its own P1 survivor-confirmation contract).
+ */
+export async function killProcessTree(
+  pid: number,
+  options: {
+    list?: () => Promise<ProcessSnapshotEntry[]>;
+    readIdentity?: ProcessIdentityReader;
+    signal?: ProcessSignaler;
+    wait?: () => Promise<void>;
+  } = {},
+): Promise<void> {
+  const tree = collectDescendants(pid, await (options.list ?? listProcesses)()).reverse();
+  const identityReader = options.readIdentity ?? readProcessIdentity;
+  const signaler = options.signal ?? signalProcess;
+  const identities = new Map<number, string>();
+  for (const target of tree) {
+    const identity = await identityReader(target);
+    if (identity === null) continue;
+    identities.set(target, identity);
+    signaler(target, "SIGTERM");
+  }
+  await (options.wait ?? (() => sleep(KILL_TREE_GRACE_MS)))();
+  for (const target of tree) {
+    const identity = identities.get(target);
+    if (identity !== undefined && (await identityReader(target)) === identity) {
+      signaler(target, "SIGKILL");
+    }
+  }
 }

@@ -83,7 +83,7 @@ cleanup() {
     wait "$WEB_PID" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 restore_next_type_files() {
   if [[ -f "$NEXT_ENV_BACKUP" ]]; then

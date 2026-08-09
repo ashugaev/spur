@@ -29,16 +29,30 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
+  errorMessage,
+  readApiErrorMessage,
+  readResponsePayload,
+  responseErrorMessage,
+} from "@/lib/json-payload";
+import {
+  assertAttachmentsWithinLimit,
   encodeFileAttachments,
   fileAttachmentsFromFiles,
+  mergeAttachmentsWithinLimit,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
+import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import {
+  clearSpawnDraft,
+  readSpawnDraft,
+  writeSpawnDraft,
+  type SpawnDraft,
+} from "@/lib/spawn-draft";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
@@ -48,7 +62,6 @@ import {
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
-  sessionMatchesQuery,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -65,6 +78,7 @@ import {
   type SpurSessionsResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
+  type WorkspaceMode,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useBackendConnection } from "@/lib/backend-connection-context";
@@ -81,6 +95,7 @@ const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -149,7 +164,7 @@ function sessionMatchesFacetFilters(
   ) {
     return false;
   }
-  if (filters.searchQuery && !sessionMatchesQuery(session, filters.searchQuery)) {
+  if (filters.searchQuery && !matchesSessionSearch(session, filters.searchQuery)) {
     return false;
   }
   if (exclude !== "prReady" && filters.prReadyOnly && filters.prReady.loaded) {
@@ -512,7 +527,7 @@ function readLocationSearch(): string {
 }
 
 function buildSpawnOverrides(
-  workspaceMode: "default" | "worktree" | "shared",
+  workspaceMode: WorkspaceMode,
   defaultBranch: string,
 ): SpawnOverrides | undefined {
   if (workspaceMode === "worktree") {
@@ -1037,14 +1052,14 @@ export function Dashboard() {
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const spawnBranchExplicitRef = useRef(false);
+  const spawnDraftDirtyRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
-    "default",
-  );
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("default");
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1055,8 +1070,10 @@ export function Dashboard() {
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
-    onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      spawnDraftDirtyRef.current = true;
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
@@ -1162,18 +1179,6 @@ export function Dashboard() {
       window.removeEventListener("popstate", syncFromLocation);
     };
   }, []);
-
-  useEffect(() => {
-    if (!spawnOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSpawnOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [spawnOpen]);
 
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
@@ -1328,9 +1333,10 @@ export function Dashboard() {
   }, [agentFilteredSessions, prReadyOnly, prReady]);
 
   const sessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return prReadyFilteredSessions;
-    const narrowed = prReadyFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
+    if (!searchQuery.trim()) return prReadyFilteredSessions;
+    const narrowed = prReadyFilteredSessions.filter((session) =>
+      matchesSessionSearch(session, searchQuery),
+    );
     const keys = new Set(narrowed.map((s) => s.deskKey));
     return prReadyFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [prReadyFilteredSessions, searchQuery]);
@@ -1499,6 +1505,30 @@ export function Dashboard() {
     return configuredProjectOptions[0]?.id ?? "";
   };
 
+  const applySpawnDraft = (nextProjectId: string, draft: SpawnDraft | null) => {
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt(draft?.prompt ?? "");
+    setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnModel(draft?.model ?? null);
+    setSpawnBranch(draft?.branch ?? "");
+    spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
+    setSpawnPlanMode(draft?.planMode ?? false);
+    setSpawnSelfDestruct(draft?.selfDestruct ?? false);
+    setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
+    setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
+    setSpawnDefaultBranch(draft?.defaultBranch ?? "");
+    setSpawnTrackerUrl(draft?.trackerUrl ?? null);
+    setSpawnAttachments([]);
+    spawnDraftDirtyRef.current = false;
+  };
+
+  const restoreSpawnDraft = (nextProjectId: string) => {
+    const draft = readSpawnDraft(nextProjectId);
+    applySpawnDraft(nextProjectId, draft);
+    return draft;
+  };
+
   useEffect(() => {
     if (spawnPinnedProjectId) {
       if (spawnProjectId !== spawnPinnedProjectId) {
@@ -1513,14 +1543,21 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      setSpawnProjectId(nextProjectId);
+      const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
+      if (spawnOpen && !carriesUnscopedEdits) {
+        restoreSpawnDraft(nextProjectId);
+      } else {
+        setSpawnProjectId(nextProjectId);
+      }
     }
-  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnOpen, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(normalizedProjectId);
+    if (normalizedProjectId !== spawnProjectId) {
+      restoreSpawnDraft(normalizedProjectId);
+    }
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1528,6 +1565,64 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  const spawnDraft = useMemo<SpawnDraft | null>(() => {
+    if (!spawnProjectId) return null;
+    return {
+      projectId: spawnProjectId,
+      prompt: spawnPrompt,
+      agent: spawnAgent,
+      model: spawnModel,
+      branch: spawnBranch,
+      branchIsExplicit: spawnBranchExplicitRef.current,
+      workspaceMode: spawnWorkspaceMode,
+      defaultBranch: spawnDefaultBranch,
+      planMode: spawnPlanMode,
+      selfDestruct: spawnSelfDestruct,
+      selfDestructConditions: spawnSelfDestructConditions,
+      steps: spawnSteps.map((step) => step.value),
+      trackerUrl: spawnTrackerUrl,
+    };
+  }, [
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnModel,
+    spawnOpen,
+    spawnPlanMode,
+    spawnProjectId,
+    spawnPrompt,
+    spawnSelfDestruct,
+    spawnSelfDestructConditions,
+    spawnSteps,
+    spawnTrackerUrl,
+    spawnWorkspaceMode,
+  ]);
+  const spawnDraftRef = useRef(spawnDraft);
+  spawnDraftRef.current = spawnDraft;
+
+  useEffect(() => {
+    if (!spawnOpen || !spawnDraft) return;
+    const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [spawnDraft, spawnOpen]);
+
+  const closeSpawnModal = useCallback(() => {
+    if (spawnDraftRef.current) writeSpawnDraft(spawnDraftRef.current);
+    setSpawnOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSpawnModal();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [closeSpawnModal, spawnOpen]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -1582,11 +1677,17 @@ export function Dashboard() {
   );
 
   const addStep = () => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
-  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
-  const updateStep = (id: number, value: string) =>
+  const removeStep = (id: number) => {
+    spawnDraftDirtyRef.current = true;
+    setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
+  };
+  const updateStep = (id: number, value: string) => {
+    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+  };
 
   useEffect(() => {
     const project = spawnProjectId.trim();
@@ -1606,7 +1707,9 @@ export function Dashboard() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
+            setSpawnBranch(result.branch);
+          }
         })
         .catch(() => {});
     }, 500);
@@ -1665,6 +1768,7 @@ export function Dashboard() {
       };
       if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
       if (normalizedBranch) payload.branch = normalizedBranch;
@@ -1687,9 +1791,12 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to spawn Spur session"));
+      }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      clearSpawnDraft(nextProjectId);
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -1703,6 +1810,7 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnModel(null);
       setSpawnBranch("");
+      spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
@@ -1957,7 +2065,9 @@ export function Dashboard() {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+      }
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -2067,43 +2177,47 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    restoreSpawnDraft(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnModel(null);
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    applySpawnDraft(SHEPHERD_PROJECT_ID, null);
     setSpawnOpen(true);
   };
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(item.projectId);
-    setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
-    setSpawnAttachments([]);
-    setSpawnTrackerUrl(item.url);
+    const draft = readSpawnDraft(item.projectId);
+    if (draft?.trackerUrl === item.url) {
+      applySpawnDraft(item.projectId, draft);
+    } else {
+      applySpawnDraft(item.projectId, null);
+      setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
+      setSpawnTrackerUrl(item.url);
+    }
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addSpawnFiles = useCallback(
+    (files: FileList | File[] | null) => {
+      spawnDraftDirtyRef.current = true;
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          let rejectedMessage: string | null = null;
+          setSpawnAttachments((current) => {
+            const result = mergeAttachmentsWithinLimit(current, attachments);
+            rejectedMessage = result.rejectedMessage;
+            return result.attachments;
+          });
+          if (rejectedMessage) showErrorToast(rejectedMessage);
+        })
+        .catch(() => {});
+    },
+    [showErrorToast],
+  );
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -2279,7 +2393,7 @@ export function Dashboard() {
           ) : null}
           <button
             aria-label="Spawn Shepherd"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+            className="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
             onClick={openShepherdSpawnModal}
             title="Spawn Shepherd"
             type="button"
@@ -2420,7 +2534,13 @@ export function Dashboard() {
             attachments={spawnAttachments}
             canClose
             clearLabel="Clear spawn prompt"
-            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
+            history={{
+              entries: spawnHistory.entries,
+              onSelect: (next) => {
+                spawnDraftDirtyRef.current = true;
+                setSpawnPrompt(next);
+              },
+            }}
             mode={{
               kind: "spawn",
               project: {
@@ -2431,15 +2551,47 @@ export function Dashboard() {
                   label: projectOptionLabel(project),
                 })),
               },
-              model: { value: spawnModel, onChange: setSpawnModel },
+              model: {
+                value: spawnModel,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnModel(next);
+                },
+              },
               branch: {
                 value: spawnBranch,
-                onChange: setSpawnBranch,
-                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  spawnBranchExplicitRef.current = next.trim().length > 0;
+                  setSpawnBranch(next);
+                },
+                onBlur: () => {
+                  const normalizedBranch = normalizeBranchName(spawnBranch);
+                  spawnBranchExplicitRef.current = normalizedBranch.length > 0;
+                  setSpawnBranch(normalizedBranch);
+                },
               },
-              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
-              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
-              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
+              workspaceMode: {
+                value: spawnWorkspaceMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnWorkspaceMode(next);
+                },
+              },
+              planMode: {
+                value: spawnPlanMode,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnPlanMode(next);
+                },
+              },
+              selfDestruct: {
+                value: spawnSelfDestruct,
+                onChange: (next) => {
+                  spawnDraftDirtyRef.current = true;
+                  setSpawnSelfDestruct(next);
+                },
+              },
               steps: {
                 items: spawnSteps,
                 onUpdate: updateStep,
@@ -2475,7 +2627,10 @@ export function Dashboard() {
                 <textarea
                   aria-label="Self-destruct conditions"
                   className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                  onChange={(event) => {
+                    spawnDraftDirtyRef.current = true;
+                    setSpawnSelfDestructConditions(event.target.value);
+                  }}
                   placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
                   value={spawnSelfDestructConditions}
                 />
@@ -2484,7 +2639,10 @@ export function Dashboard() {
                 spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    onChange={(event) => {
+                      spawnDraftDirtyRef.current = true;
+                      setSpawnDefaultBranch(event.target.value);
+                    }}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
@@ -2492,16 +2650,21 @@ export function Dashboard() {
             }}
             onAddFiles={addSpawnFiles}
             onAgentChange={(next) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAgent(next);
               setSpawnModel(null);
             }}
-            onClose={() => setSpawnOpen(false)}
-            onPromptChange={setSpawnPrompt}
-            onRemoveAttachment={(index) =>
+            onClose={closeSpawnModal}
+            onPromptChange={(next) => {
+              spawnDraftDirtyRef.current = true;
+              setSpawnPrompt(next);
+            }}
+            onRemoveAttachment={(index) => {
+              spawnDraftDirtyRef.current = true;
               setSpawnAttachments((current) =>
                 current.filter((_, currentIndex) => currentIndex !== index),
-              )
-            }
+              );
+            }}
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
             promptAriaLabel="Prompt..."

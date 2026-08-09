@@ -6,6 +6,8 @@ import {
   collectDescendants,
   isPidAlive,
   isZombieProcessState,
+  killProcessTree,
+  listProcesses,
   parseElapsedSeconds,
   snapshotProcessLiveness,
   type ProcessSnapshotEntry,
@@ -101,6 +103,15 @@ describe("collectDescendants", () => {
     ];
     expect(collectDescendants(500, cyclic).sort()).toEqual([500, 600]);
   });
+
+  it("returns the root followed by breadth-ordered descendants", () => {
+    const table: ProcessSnapshotEntry[] = [
+      { pid: 200, ppid: 100, rssKb: 1000, elapsedSeconds: 10, args: "child" },
+      { pid: 300, ppid: 200, rssKb: 1000, elapsedSeconds: 10, args: "grandchild" },
+      { pid: 400, ppid: 100, rssKb: 1000, elapsedSeconds: 10, args: "sibling" },
+    ];
+    expect(collectDescendants(100, table)).toEqual([100, 200, 400, 300]);
+  });
 });
 
 describe("isZombieProcessState", () => {
@@ -178,5 +189,53 @@ describe("snapshotProcessLiveness", () => {
       vi.doUnmock("node:child_process");
       vi.resetModules();
     }
+  });
+});
+
+describe("listProcesses", () => {
+  it("bounds ps enumeration and fails closed on timeout", async () => {
+    const processes = await listProcesses(async (file, args, options) => {
+      expect(file).toBe("ps");
+      expect(args).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
+      expect(options).toMatchObject({ encoding: "utf8", timeout: 2_000 });
+      expect(options.maxBuffer).toBeGreaterThan(0);
+      throw new Error("ps timed out");
+    });
+
+    expect(processes).toEqual([]);
+  });
+});
+
+describe("killProcessTree", () => {
+  it("signals leaves first and skips SIGKILL when a pid identity changes", async () => {
+    const signals: Array<[number, NodeJS.Signals]> = [];
+    const identities = new Map([
+      [100, ["root", "root"]],
+      [200, ["child", "replacement"]],
+      [300, ["leaf", "leaf"]],
+    ]);
+    const reads = new Map<number, number>();
+
+    await killProcessTree(100, {
+      list: async () => [
+        { pid: 200, ppid: 100, rssKb: 1000, elapsedSeconds: 10, args: "child" },
+        { pid: 300, ppid: 200, rssKb: 1000, elapsedSeconds: 10, args: "leaf" },
+      ],
+      readIdentity: async (pid) => {
+        const index = reads.get(pid) ?? 0;
+        reads.set(pid, index + 1);
+        return identities.get(pid)?.[index] ?? null;
+      },
+      signal: (pid, signal) => signals.push([pid, signal]),
+      wait: async () => undefined,
+    });
+
+    expect(signals).toEqual([
+      [300, "SIGTERM"],
+      [200, "SIGTERM"],
+      [100, "SIGTERM"],
+      [300, "SIGKILL"],
+      [100, "SIGKILL"],
+    ]);
   });
 });

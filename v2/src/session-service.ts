@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -44,6 +44,18 @@ import {
   resolveSessionSidecars,
 } from "./sidecars/index.js";
 import {
+  assembleSidecarSweepClaims,
+  confirmReaps,
+  reapRecordedIdentity,
+  reapSidecarPane,
+  readProcessStarttime,
+  signalSidecarPane,
+  sweepSidecars,
+  type PendingReap,
+  type ReapOutcome,
+  type SidecarSweepResult,
+} from "./sidecars/reap.js";
+import {
   deleteAgentHookState,
   readAgentHookState,
   type AgentHookStateRecord,
@@ -58,11 +70,12 @@ import {
   claudeCommand,
   DEFAULT_CLAUDE_MODEL,
 } from "./agents/claude.js";
-import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
+import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexRolloutState,
+  type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
@@ -98,9 +111,10 @@ import {
 } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
+  DEFAULT_PROJECT_CONFIG_FILES,
   deriveProjectIdFromDisplayName,
   expandHome,
-  findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadProjectConfig,
   PROJECT_ID_PATTERN,
 } from "./config.js";
@@ -118,12 +132,20 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  flushEventLogCollapse,
   logSpurEvent,
   logUserInputEvent,
+  sessionEventLogPath,
   type SpurLogEntry,
   type UserInputKind,
 } from "./event-log.js";
-import { deleteSessionUserActions } from "./user-action-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  deleteSessionUserActions,
+  sessionUserActionLogPath,
+} from "./user-action-log.js";
+import { archivePath, tryRotate } from "./jsonl-log-io.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -174,11 +196,12 @@ import {
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
+  getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
   isProcessRunningInTmux,
-  killSidecarTmux,
   killTmuxSession,
+  killTmuxSessionTree,
   listTmuxSessionNames,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
@@ -188,6 +211,14 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
+import {
+  isSystemdOomdPresent,
+  readCgroupMemorySnapshot,
+  readCgroupPressure,
+  readHostMemory,
+  type CgroupMemorySnapshot,
+  type HostMemory,
+} from "./host-memory.js";
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
@@ -211,6 +242,13 @@ import {
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
+import {
+  createGcDeps,
+  executeSessionGc,
+  planSessionGc,
+  resolveSessionCleanupContext,
+  type SessionCleanupContext,
+} from "./session-gc.js";
 import {
   deleteWorkspaceState,
   resolveWorkspaceState,
@@ -238,26 +276,50 @@ import {
 import {
   closeSessionPr,
   deriveSessionSlots,
-  discoverSessionPrBinding,
   parseSessionPrBinding,
+  prLookupBindingOf,
   resolvePrDiscoveryBranch,
   resolveSessionPrBinding,
   viewSessionPrState,
 } from "./session-pr.js";
 import {
+  type PrLookupOutcome,
+  cancelPendingPrLookups,
+  claimPollPrLookup,
+  enqueuePrLookup,
+  flushPrLookups,
+  resolvePrLookupRepo,
+} from "./pr-lookup.js";
+import {
+  PR_LOOKUP_IDLE_CAP_MS,
+  PR_LOOKUP_LIVE_CAP_MS,
+  type PrRepoSlug,
+  isPrLookupDue,
+  readPrLookupEntry,
+} from "./pr-lookup-cache.js";
+import {
   addUnconfiguredProject,
   buildMergedConfig,
+  canonicalConfigKey,
+  ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
+  type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isTerminalSessionStatus,
+  type AdmissionCapSource,
   type AgentName,
+  type ProviderReasoningEffort,
   type AgentSuggestionsResponse,
   type AppConfig,
   type AvailableBacklogItem,
@@ -273,6 +335,7 @@ import {
   type DeleteProjectResponse,
   type KillSessionRequest,
   type GithubPrCheckUnavailablePayload,
+  type HeadroomReport,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -298,6 +361,7 @@ import {
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
+  type SidecarProcessIdentity,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -352,7 +416,6 @@ import {
   isGitWorktree,
   readCurrentBranch,
   removeWorktree,
-  resolveRepoPathFromWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
@@ -372,6 +435,9 @@ const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
+const MEMORY_SHED_INTERVAL_MS = 1_000;
+const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
+const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
@@ -390,6 +456,7 @@ const STATE_HOLD_MS = 4_000;
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 const RESTORE_WARMUP_MS = 30_000;
+const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
@@ -407,10 +474,36 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+// After a persist failure, stop retrying the write at delivery-loop cadence
+// (PIPELINE_POLL_INTERVAL_MS, 1s) and instead wait this long before the next
+// attempt. Discovery itself keeps running during the window (resume plans
+// need the id); only the write + event are suppressed.
+const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+// Idle (non-live) dashboard entries can only drift from filesystem state
+// (workspaceExists, hasServiceIssues, workspace slots), never from agent
+// activity, so they don't need every-tick re-enrichment — a small bounded
+// round-robin corrects that drift without making the tick cost scale with
+// total record count. Some of that drift (workspaceExists, runtimeAlive)
+// gates real controls (Restore/Recover, the terminal button), so the quota
+// scales with the idle set instead of staying fixed: a fixed 4/tick sweeps
+// ~2 s worth of idle sessions in a couple of ticks at small fleet sizes but
+// takes ~13.5 min to sweep 1612 idle sessions, which is long enough for a
+// removed worktree to keep offering Restore. quota = ceil(idle / 60),
+// clamped to [MIN, MAX]: at 10 idle that's still the MIN floor of 4 (full
+// sweep in 3 ticks, ~6 s); at 1612 idle that's 27/tick (full sweep in 60
+// ticks, ~2 min); above ~1920 idle the MAX cap of 32 keeps per-tick cost
+// bounded at the price of a sweep slower than 2 min.
+const DASHBOARD_IDLE_REFRESH_MIN_PER_TICK = 4;
+const DASHBOARD_IDLE_REFRESH_MAX_PER_TICK = 32;
+// Divisor for the quota formula above: ceil(idle / this) ticks the quota to
+// target a full idle-set sweep in roughly this many ticks (60 ticks * the
+// 2 s DASHBOARD_CACHE_INTERVAL_MS tick == a ~2 min sweep) before the MIN/MAX
+// clamp takes over at the small and large ends of the fleet-size range.
+const DASHBOARD_IDLE_REFRESH_SWEEP_TICKS = 60;
 // Must outlast the gap between attention-monitor sweeps (ATTENTION_POLL_INTERVAL_MS)
 // with buffer for scheduling jitter, so the scanPane:false dashboard tick keeps
 // showing the corrected needs_input state between live pane scans instead of
@@ -420,18 +513,113 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
+// Fixed tick cadence for the session GC sweep; the actual sweep frequency is
+// gated inside the tick by sessionGc.intervalMinutes (re-read from
+// this.config on every tick, so a config-only reload takes effect without a
+// daemon restart).
+const SESSION_GC_TICK_MS = 5 * 60_000;
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
 // session's runtime is not supposed to exist anymore".
 const REAPABLE_SESSION_STATUSES = new Set<SessionStatus>(["killed", "completed", "stopped"]);
+// Threshold for a terminal session's FIRST compaction: a shard below this is
+// not worth spending a gzip + archive slot on yet. Only gates the one-time
+// initial compaction — compactShardOnce's existsSync(archivePath) guard is
+// what makes compaction a one-way ratchet, not this floor.
+const TERMINAL_COMPACT_FLOOR_BYTES = 64 * 1024;
+// Bounds each sweep tick to ~0.6s of gzip work (measured 282 MB/s, 8.3 MB
+// average shard) so a large terminal-session backlog never blocks the event
+// loop; the remainder drains over subsequent ticks.
+const COMPACT_MAX_PER_TICK = 20;
+
+// Gzips `path` into its .1.gz archive slot at most once. A terminal session
+// can keep receiving low-volume trickle writes indefinitely (e.g.
+// session.pr_auto_detect.failed); rotating it again at the same small floor
+// every sweep would shift the just-created archive down a slot each time and
+// eventually unlink it once it falls outside retainArchives. Once a .1.gz
+// exists — from this compaction or from an ordinary shardHotBytes rotation —
+// normal size-based rotation owns the shard and this sweep leaves it alone.
+// Stateless by construction (no in-memory "already compacted" bookkeeping),
+// so the ratchet holds across daemon restarts too.
+function compactShardOnce(path: string, retainArchives: number): void {
+  if (existsSync(archivePath(path, 1))) {
+    return;
+  }
+  tryRotate(path, TERMINAL_COMPACT_FLOOR_BYTES, retainArchives);
+}
+
 const PR_CHECK_THROTTLE_MS = 30_000;
+// A session that is not running cannot open a PR by itself, but a user still
+// can, by hand, long after the agent stopped. So the cadence drops instead of
+// stopping: worst case such a PR binds within this throttle plus the lookup
+// backoff cap. isTerminalSessionStatus is deliberately not widened for this —
+// 16 other call sites depend on its current meaning.
+const PR_CHECK_IDLE_THROTTLE_MS = 30 * 60_000;
+// A session's resolved (branch, repo slug) is remembered this long so a session
+// whose lookup is not due yet — and a session flapping between working and
+// waiting, which resets the throttle — costs zero git spawns. A branch renamed
+// inside the window binds one window late at worst.
+const PR_DISCOVERY_MEMO_TTL_MS = 5 * 60_000;
+// Total wall clock one sweep may spend resolving branches and slugs from git.
+// Bounded because the sweep awaits these spawns in sequence: a cold start has no
+// memo for any session, and 400 unbudgeted spawns behind a hung mount would
+// stall attention detection for the whole fleet. Sessions past the budget keep
+// their throttle untouched and are picked up by the next sweep.
+const PR_CHECK_GIT_BUDGET_MS = 2_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
+
+type MemoryShedTrigger =
+  | "available_floor"
+  | "cgroup_max_headroom"
+  | "cgroup_high"
+  | "swap_saturation";
+type MemoryShedStage = "none" | "sidecar" | "session" | "emergency";
+type MemoryShedTier = "mcp_sidecar" | "user_sidecar" | "session";
+type MemoryShedExhaustedEdge =
+  | "ram:sidecar"
+  | "ram:session"
+  | "cgroup-high:sidecar"
+  | "cgroup-max:emergency"
+  | "swap:sidecar";
+type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
+
+interface MemoryShedEpisode {
+  ramContinuousSinceMs: number | null;
+  cgroupHighLatched: boolean;
+  cgroupMaxLatched: boolean;
+  swapState: "armed" | "active" | "spent";
+  exhaustedEdges: Set<MemoryShedExhaustedEdge>;
+}
+
+interface MemoryPressureState {
+  host: HostMemory | null;
+  cgroup: CgroupMemorySnapshot | null;
+  activeTriggers: MemoryShedTrigger[];
+  stage: MemoryShedStage;
+  continuousRamPressureMs: number | null;
+  emergencyReasons: Array<"host_available" | "cgroup_max_headroom" | "cgroup_high_no_runway">;
+  cgroupMaxHeadroomBytes: number | null;
+}
+
+function createMemoryShedEpisode(): MemoryShedEpisode {
+  return {
+    ramContinuousSinceMs: null,
+    cgroupHighLatched: false,
+    cgroupMaxLatched: false,
+    swapState: "spent",
+    exhaustedEdges: new Set(),
+  };
+}
+
+function memoryShedEmergencyBytes(guard: MemoryGuardConfig): number {
+  return Math.min(MEMORY_SHED_EMERGENCY_CAP_BYTES, Math.floor(guard.shedCriticalFloorBytes / 2));
+}
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface StoredImageAttachment {
@@ -445,6 +633,8 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+  /** Last git-resolved discovery target, so the cache can be read spawn-free. */
+  discovery?: { branch: string; slug: PrRepoSlug | null; resolvedAt: number };
 }
 
 export class SessionResourceNotFoundError extends Error {
@@ -452,6 +642,10 @@ export class SessionResourceNotFoundError extends Error {
 }
 
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidConfigPathError extends Error {
   readonly statusCode = 400;
 }
 
@@ -541,6 +735,14 @@ export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
 }
 
+// Message-only (like SessionRateLimitedError): the candidate session ids to
+// stop are named directly in the message string, not a structured payload —
+// neither client.ts's formatDaemonError nor the web toast decode a payload
+// field, so one here would be written and never read.
+export class SessionAdmissionDeniedError extends Error {
+  readonly statusCode = 429;
+}
+
 export class SessionNotReopenableError extends Error {
   readonly statusCode = 409;
 }
@@ -577,10 +779,6 @@ type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
-interface SessionCleanupContext {
-  repoPath: string;
-  symlinks: string[];
-}
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -601,17 +799,6 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
-}
-
-function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
-  if (session.agent !== "cursor") {
-    return symlinks;
-  }
-  return [...symlinks, ".cursor/.workspace-trusted"];
-}
-
-function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
-  return status === "completed" || status === "killed";
 }
 
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
@@ -762,6 +949,20 @@ function tryRealpath(path: string): string {
   }
 }
 
+// Cache stamp for a config file: mtime alone can repeat when two writes land
+// inside the filesystem's mtime resolution, so size rides along. Any stat
+// failure (unlinked mid-call, EACCES, a flaky network mount) yields no stamp
+// rather than throwing — callers on the 2s dashboard tick must not abort a
+// whole cycle over one unreadable file.
+function tryConfigStamp(path: string): string | undefined {
+  try {
+    const stats = statSync(path);
+    return `${stats.mtimeMs}:${stats.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeSpawnRequest(
   request: SpawnSessionRequest,
   defaultSteps?: string[],
@@ -812,6 +1013,7 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
+  modelsCacheHome: string;
   mcpBindings?: SidecarMcpBinding[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
@@ -828,6 +1030,7 @@ async function setupSessionAgentHooks(args: {
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
+    ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -858,6 +1061,7 @@ function withAgentModeOptions(
     codexHomePath?: string;
     cursorConfigDir?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
   },
   modes: { planMode: boolean; restrictWrites: boolean },
 ): {
@@ -865,6 +1069,7 @@ function withAgentModeOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
   restrictWrites?: boolean;
 } {
@@ -880,7 +1085,8 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
 }
 
 function withProjectAgentOptions(
-  project: Pick<ProjectConfig, "codexArgs">,
+  agent: AgentName,
+  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -893,8 +1099,14 @@ function withProjectAgentOptions(
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
 } {
-  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
+  const reasoningEffort = agent === "cursor" ? undefined : project.reasoningEffort?.[agent];
+  return {
+    ...options,
+    ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  };
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -1089,9 +1301,15 @@ export function resolveClaudeAuthPlanOptions(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
+  // A "running" status combined with state "error" means the live process is
+  // still alive and only its last turn failed (e.g. a transient transport
+  // error) — not that the session died, so it must not read as restorable.
+  // Only "stopped" state (the pane/process actually went away) qualifies
+  // while status is still "running".
   return (
-    ((isRestorableStatus(session.status) &&
-      (session.state === "stopped" || session.state === "error")) ||
+    ((session.status === "running" && session.state === "stopped") ||
+      ((session.status === "stopped" || session.status === "paused") &&
+        (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
@@ -1804,6 +2022,9 @@ export class SessionService {
   readonly startedAt: string;
   config: AppConfig;
   private registryPaths: string[];
+  // Shared by boot and later rescans. Keeps path-local loads hot and bounds
+  // registry warnings to one per canonical path for this daemon process.
+  private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
@@ -1819,25 +2040,76 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  // Dedupes session.state.classified: emit once per classify call only when
+  // the raw classified state actually changed since the last classify call
+  // for that session (not the message, so a detail-only churn like
+  // records=50 -> records=17 stays silent). Swept alongside the other
+  // classification-scoped maps in pollAttentionStates.
+  private readonly lastClassifiedLogStates = new Map<string, SessionState>();
+  // Set when captureAgentSessionId's writeSession throws, keyed by session
+  // id, value = the epoch ms the backoff ends. While backed off, discovery
+  // still runs but the write and both discovered/persist_failed events are
+  // skipped, so a persistently failing disk write logs once per window
+  // instead of at delivery-loop cadence. Swept alongside the other
+  // discovery-scoped maps in pruneSessionScopedState.
+  private readonly agentSessionIdPersistBackoffUntil = new Map<string, number>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  // Records the exact record object last handed to enrichDashboard for each
+  // id. Since listSessions() now returns the SAME object for an unchanged
+  // file (see metadata.ts), object-identity inequality against this map is an
+  // exact, free "did this session's record change since we last enriched it"
+  // check — no re-serialisation, no extra reads.
+  private readonly dashboardEnrichedRecords = new Map<string, SessionRecord>();
+  // Rotating cursor into the idle (non-live) id array for the bounded
+  // round-robin refresh; see DASHBOARD_IDLE_REFRESH_MIN_PER_TICK.
+  private dashboardIdleCursor = 0;
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
+  // Round-robin offset into the terminal-session list, advanced by each
+  // tick's COMPACT_MAX_PER_TICK batch so a backlog larger than one tick's
+  // budget still drains across ticks instead of reprocessing the same head
+  // every time.
+  private compactCursor = 0;
+  private sessionGcTimer: NodeJS.Timeout | null = null;
+  private sessionGcRunning = false;
+  private backgroundLoopsStarted = false;
+  // Construction time, not epoch 0: a daemon restart must not treat "never
+  // swept before" as "due immediately" — the first tick after a restart
+  // waits out a full intervalMinutes like every other tick.
+  private lastSessionGcSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private sidecarReaperRunning = false;
+  private memoryShedTimer: NodeJS.Timeout | null = null;
+  private memoryShedRunning = false;
+  private memoryShedEpisode = createMemoryShedEpisode();
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  // Local (in-worktree) project config resolved per session. The 2s dashboard
+  // tick resolves a project for every session, so without this each tick
+  // re-parsed the same YAML for the whole fleet — and re-logged the same parse
+  // failure forever. A cache hit costs one statSync and no parse. Keyed by
+  // session id, invalidated by config path or stamp change (see
+  // tryConfigStamp), pruned against the included id set in runDashboardCacheTick.
+  private readonly sessionProjectCache = new Map<
+    string,
+    { configPath: string; stamp: string; project: ProjectConfig | undefined }
+  >();
   private readonly restoreWarmupUntil = new Map<string, number>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // Every spawn owns one future live-session slot from its synchronous
+  // admission check until its spawning record is written. Other admissions
+  // count the slot; a handoff passes its existing reservation to its successor.
+  private readonly admissionReservations = new Map<symbol, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -1845,20 +2117,30 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
+  private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
+  /** Git wall clock spent by the current sweep resolving PR discovery targets. */
+  private prCheckGitSpentMs = 0;
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
   // considered rate-limited; sessionId -> per-episode rotation count.
   private readonly claudeAccountRateLimit = new Map<string, number>();
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
+  // Serializes sendAgentMessage per tmux pane so two trigger batches on one
+  // session queue instead of racing two pastes into the same composer.
+  private readonly paneWriteLocks = new Map<string, Promise<void>>();
 
-  constructor(configPath?: string, startedAt = nowIso()) {
+  constructor(
+    configPath?: string,
+    startedAt = nowIso(),
+    options: { deferBackgroundLoops?: boolean } = {},
+  ) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
@@ -1870,24 +2152,55 @@ export class SessionService {
       bootstrap.config.dataDir,
       bootstrap.config.configPath,
     );
-    const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
-      skipInvalid: true,
-      warn: (message) => {
-        logSpurEvent(bootstrap.config.dataDir, {
-          event: "daemon.registry.warning",
-          level: "warn",
-          message,
-        });
+    // Worktree-internal filter only: dead/duplicate-alias entries are the
+    // scanner's job now (see ConfigRegistryScanner.scan below). This filter
+    // is applied in-memory only, ahead of scan() — it is never written back
+    // to the registry file directly. It still ends up persisted, though:
+    // applyConfig() unconditionally rewrites the registry file from
+    // scan.configPaths a few lines down, and a worktree-internal path that
+    // never reached scan() cannot appear in that output. That keeps the
+    // scanner the single owner of registry-file removal.
+    const filteredRegistryPaths = dropWorktreeInternalPaths(
+      this.registryPaths,
+      bootstrap.config.worktreeDir,
+    );
+    // Read-only observability, not a prune: this never touches the registry
+    // file (the scanner's applyConfig write below is the only writer). It
+    // records what the boot filter saw so a host can attribute a doctor
+    // config-registry warning to a real, growing count rather than guessing.
+    logSpurEvent(bootstrap.config.dataDir, {
+      event: "daemon.registry.count",
+      level: "info",
+      message: `registry paths ${this.registryPaths.length} read, ${
+        this.registryPaths.length - filteredRegistryPaths.length
+      } worktree-internal dropped`,
+      details: {
+        read: this.registryPaths.length,
+        worktreeInternalDropped: this.registryPaths.length - filteredRegistryPaths.length,
       },
     });
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: filteredRegistryPaths,
+      protectedPaths: [bootstrap.config.configPath],
+    });
+    this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
-    this.applyConfig(merged.config, merged.configPaths);
+    this.applyConfig(scan.config, scan.configPaths);
+    if (!options.deferBackgroundLoops) this.startBackgroundLoops();
+  }
+
+  startBackgroundLoops(): void {
+    if (this.backgroundLoopsStarted) return;
+    this.backgroundLoopsStarted = true;
     this.startAttentionMonitor();
     this.startScheduledWakeMonitor();
     this.startSidecarReaper();
+    this.startMemoryShedLoop();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
     this.startReaperLoop();
+    this.startSessionGcLoop();
   }
 
   /**
@@ -1905,6 +2218,9 @@ export class SessionService {
   }
 
   dispose(): void {
+    // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
+    // cannot hang on a batch that will never flush.
+    cancelPendingPrLookups();
     if (this.attentionMonitorTimer) {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
@@ -1917,9 +2233,17 @@ export class SessionService {
       clearInterval(this.sidecarReaperTimer);
       this.sidecarReaperTimer = null;
     }
+    if (this.memoryShedTimer) {
+      clearInterval(this.memoryShedTimer);
+      this.memoryShedTimer = null;
+    }
     if (this.reaperTimer) {
       clearInterval(this.reaperTimer);
       this.reaperTimer = null;
+    }
+    if (this.sessionGcTimer) {
+      clearInterval(this.sessionGcTimer);
+      this.sessionGcTimer = null;
     }
     this.stopDashboardCacheLoop();
   }
@@ -1934,6 +2258,27 @@ export class SessionService {
     this.sidecarReaperTimer.unref();
   }
 
+  private startMemoryShedLoop(): void {
+    if (this.memoryShedTimer) return;
+    this.memoryShedTimer = setInterval(() => {
+      void this.runMemoryShedTick();
+    }, MEMORY_SHED_INTERVAL_MS);
+    this.memoryShedTimer.unref();
+  }
+
+  private async runMemoryShedTick(): Promise<void> {
+    try {
+      await this.runMemoryShed();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.memory.shed.failed", {
+        level: "warn",
+        message: `Memory shed failed: ${message}`,
+        details: { message },
+      });
+    }
+  }
+
   private async runSidecarReaper(): Promise<void> {
     try {
       await this.reapDeadSessionSidecars();
@@ -1943,6 +2288,381 @@ export class SessionService {
         level: "warn",
         message: `Sidecar reaper failed: ${message}`,
       });
+    }
+  }
+
+  private readMemoryPressure(nowMs: number): MemoryPressureState {
+    const host = readHostMemory();
+    const cgroup = readCgroupMemorySnapshot();
+    const guard = this.config.admission.memoryGuard;
+    const episode = this.memoryShedEpisode;
+    const emergencyBytes = memoryShedEmergencyBytes(guard);
+
+    let ramActive = false;
+    let ramEmergency = false;
+    if (!host) {
+      episode.ramContinuousSinceMs = null;
+    } else if (host.availableBytes >= guard.admissionFloorBytes) {
+      episode.ramContinuousSinceMs = null;
+      episode.exhaustedEdges.delete("ram:sidecar");
+      episode.exhaustedEdges.delete("ram:session");
+    } else if (host.availableBytes < guard.shedCriticalFloorBytes) {
+      ramActive = true;
+      ramEmergency = host.availableBytes <= emergencyBytes;
+      episode.ramContinuousSinceMs ??= nowMs;
+    } else {
+      episode.ramContinuousSinceMs = null;
+    }
+
+    let cgroupMaxHeadroomBytes: number | null = null;
+    if (cgroup) {
+      const highBytes = cgroup.highBytes;
+      const usableHigh =
+        highBytes !== null && (cgroup.maxBytes === null || highBytes < cgroup.maxBytes);
+      if (!usableHigh) {
+        episode.cgroupHighLatched = false;
+        episode.exhaustedEdges.delete("cgroup-high:sidecar");
+      } else if (cgroup.currentBytes >= highBytes) {
+        episode.cgroupHighLatched = true;
+      } else {
+        const recoveryBytes = Math.min(emergencyBytes, Math.floor(highBytes / 10));
+        if (cgroup.currentBytes <= highBytes - recoveryBytes) {
+          episode.cgroupHighLatched = false;
+          episode.exhaustedEdges.delete("cgroup-high:sidecar");
+        }
+      }
+
+      if (cgroup.maxBytes === null) {
+        episode.cgroupMaxLatched = false;
+        episode.exhaustedEdges.delete("cgroup-max:emergency");
+      } else {
+        cgroupMaxHeadroomBytes = Math.max(0, cgroup.maxBytes - cgroup.currentBytes);
+        if (cgroupMaxHeadroomBytes <= emergencyBytes) {
+          episode.cgroupMaxLatched = true;
+        } else if (cgroupMaxHeadroomBytes > 2 * emergencyBytes) {
+          episode.cgroupMaxLatched = false;
+          episode.exhaustedEdges.delete("cgroup-max:emergency");
+        }
+      }
+    }
+
+    if (host) {
+      const swapUsedFraction =
+        host.swapTotalBytes === 0
+          ? 0
+          : Math.min(
+              1,
+              Math.max(0, (host.swapTotalBytes - host.swapFreeBytes) / host.swapTotalBytes),
+            );
+      const swapRecovery = Math.max(0, guard.shedSwapUsedFraction - 0.1);
+      if (swapUsedFraction <= swapRecovery) {
+        episode.swapState = "armed";
+        episode.exhaustedEdges.delete("swap:sidecar");
+      } else if (swapUsedFraction >= guard.shedSwapUsedFraction && episode.swapState === "armed") {
+        episode.swapState = "active";
+      }
+    }
+
+    const continuousRamPressureMs =
+      ramActive && episode.ramContinuousSinceMs !== null
+        ? Math.max(0, nowMs - episode.ramContinuousSinceMs)
+        : null;
+    const cgroupHighActive = cgroup !== null && episode.cgroupHighLatched;
+    const cgroupMaxActive = cgroup !== null && episode.cgroupMaxLatched;
+    const swapActive = host !== null && episode.swapState === "active";
+    const activeTriggers: MemoryShedTrigger[] = [];
+    if (ramActive) activeTriggers.push("available_floor");
+    if (cgroupMaxActive) activeTriggers.push("cgroup_max_headroom");
+    if (cgroupHighActive) activeTriggers.push("cgroup_high");
+    if (swapActive) activeTriggers.push("swap_saturation");
+
+    const emergencyReasons: MemoryPressureState["emergencyReasons"] = [];
+    if (ramEmergency) emergencyReasons.push("host_available");
+    if (cgroupMaxActive) emergencyReasons.push("cgroup_max_headroom");
+    if (
+      cgroup !== null &&
+      cgroup.highBytes !== null &&
+      cgroup.maxBytes !== null &&
+      cgroup.highBytes < cgroup.maxBytes &&
+      cgroup.currentBytes >= cgroup.highBytes &&
+      cgroup.maxBytes - cgroup.highBytes <= emergencyBytes
+    ) {
+      emergencyReasons.push("cgroup_high_no_runway");
+    }
+
+    let stage: MemoryShedStage = "none";
+    if (ramEmergency || cgroupMaxActive) stage = "emergency";
+    else if (
+      ramActive &&
+      continuousRamPressureMs !== null &&
+      continuousRamPressureMs >= MEMORY_SHED_SESSION_GRACE_MS
+    ) {
+      stage = "session";
+    } else if (ramActive || cgroupHighActive || swapActive) {
+      stage = "sidecar";
+    }
+
+    return {
+      host,
+      cgroup,
+      activeTriggers,
+      stage,
+      continuousRamPressureMs,
+      emergencyReasons,
+      cgroupMaxHeadroomBytes,
+    };
+  }
+
+  private async memoryShedCandidates(): Promise<SessionRecord[]> {
+    const candidates: Array<{ session: SessionRecord; state: "rate_limited" | "waiting" }> = [];
+    for (const session of this.countLiveSessions().records) {
+      if (this.isInRestoreWarmup(session.id)) continue;
+      try {
+        const state = (await this.classifySessionRecord(session, { scanPane: false })).state;
+        if (state === "rate_limited" || state === "waiting") candidates.push({ session, state });
+      } catch {
+        // Fail closed: an unclassifiable session is treated as working.
+      }
+    }
+    return candidates
+      .sort((a, b) => {
+        if (a.state !== b.state) return a.state === "rate_limited" ? -1 : 1;
+        return a.session.updatedAt.localeCompare(b.session.updatedAt);
+      })
+      .map(({ session }) => session);
+  }
+
+  private async memoryShedEligibleRecord(sessionId: string): Promise<SessionRecord | null> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session || this.isInRestoreWarmup(session.id)) return null;
+    try {
+      const state = (await this.classifySessionRecord(session, { scanPane: false })).state;
+      return state === "rate_limited" || state === "waiting" ? session : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async memoryShedSidecarTarget(
+    candidateId: string,
+    sidecarName: string,
+  ): Promise<string | null> {
+    const candidate = await this.memoryShedEligibleRecord(candidateId);
+    if (!candidate) return null;
+    const project = this.resolveProjectForSession(candidate);
+    const sidecar = project?.sidecars[sidecarName];
+    if (!sidecar) return null;
+    const ownerId = this.sidecarOwnerIdForName(candidate, project, sidecarName);
+    if (!sidecar.mcp) {
+      const workspaceId = workspaceIdOf(candidate);
+      const liveMembers = listSessions(this.config.dataDir).filter(
+        (session) =>
+          session.project === candidate.project &&
+          workspaceIdOf(session) === workspaceId &&
+          (session.status === "running" ||
+            session.status === "spawning" ||
+            this.isInRestoreWarmup(session.id)),
+      );
+      for (const member of liveMembers) {
+        if (!(await this.memoryShedEligibleRecord(member.id))) return null;
+      }
+    }
+    return sidecarTmuxSession(ownerId, sidecarName);
+  }
+
+  private logMemoryShedResult(args: {
+    pressure: MemoryPressureState;
+    afterHost: HostMemory | null;
+    tier: MemoryShedTier;
+    stoppedTmux: string[];
+    stoppedSessions: string[];
+    exhausted?: boolean;
+    failure?: string;
+  }): void {
+    const trigger = args.pressure.activeTriggers[0];
+    if (!trigger) return;
+    const cgroup = args.pressure.cgroup;
+    this.logEvent("daemon.memory.shed", {
+      level: "warn",
+      message: args.failure
+        ? `Memory shed stopped after a partial failure: ${args.failure}`
+        : `Memory shed ${args.exhausted ? "exhausted safe candidates" : "recovered host headroom"}`,
+      details: {
+        trigger,
+        tier: args.tier,
+        stage: args.pressure.stage,
+        activeTriggers: args.pressure.activeTriggers,
+        stoppedTmux: args.stoppedTmux,
+        stoppedSessions: args.stoppedSessions,
+        ...(args.pressure.host
+          ? {
+              availableBytesBefore: args.pressure.host.availableBytes,
+              availableBytesAfter: args.afterHost?.availableBytes ?? null,
+            }
+          : {}),
+        ...(args.pressure.continuousRamPressureMs !== null
+          ? { continuousRamPressureMs: args.pressure.continuousRamPressureMs }
+          : {}),
+        ...(cgroup
+          ? {
+              cgroupCurrentBytes: cgroup.currentBytes,
+              cgroupHighBytes: cgroup.highBytes,
+              cgroupMaxBytes: cgroup.maxBytes,
+              ...(args.pressure.cgroupMaxHeadroomBytes !== null
+                ? { cgroupMaxHeadroomBytes: args.pressure.cgroupMaxHeadroomBytes }
+                : {}),
+            }
+          : {}),
+        ...(args.pressure.emergencyReasons.length > 0
+          ? { emergencyReasons: args.pressure.emergencyReasons }
+          : {}),
+        ...(args.exhausted ? { exhausted: true } : {}),
+        ...(args.failure ? { partial: true, failure: args.failure } : {}),
+      },
+    });
+  }
+
+  private async shedOneMemorySidecar(
+    candidates: SessionRecord[],
+    liveTmux: Set<string>,
+  ): Promise<{ attempted: boolean; stoppedTmux: string | null; tier: MemoryShedTier }> {
+    for (const mcp of [true, false]) {
+      for (const candidate of candidates) {
+        const project = this.resolveProjectForSession(candidate);
+        for (const name of sessionSidecarNames(candidate, project)) {
+          if (Boolean(BUILTIN_SIDECARS[name]?.config.mcp) !== mcp) continue;
+          const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
+          if (!tmuxName || !liveTmux.has(tmuxName)) continue;
+          const stopped = await killTmuxSessionTree(tmuxName);
+          // Drop the owner's sidecarProcs entry the same way every other
+          // sidecar kill site does — otherwise its dead pane's pgid stays
+          // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
+          // sidecar restarts, masking the orphan from the sweep and doctor.
+          const ownerId = this.sidecarOwnerIdForName(candidate, project, name);
+          this.clearSidecarProcEntry(ownerId, name);
+          return {
+            attempted: true,
+            stoppedTmux: stopped ? tmuxName : null,
+            tier: mcp ? "mcp_sidecar" : "user_sidecar",
+          };
+        }
+      }
+    }
+    return { attempted: false, stoppedTmux: null, tier: "user_sidecar" };
+  }
+
+  private memoryShedExhaustionEdges(pressure: MemoryPressureState): MemoryShedExhaustedEdge[] {
+    const edges: MemoryShedExhaustedEdge[] = [];
+    if (pressure.stage === "sidecar" || pressure.stage === "emergency") {
+      if (pressure.activeTriggers.includes("available_floor")) edges.push("ram:sidecar");
+      if (pressure.activeTriggers.includes("cgroup_high")) edges.push("cgroup-high:sidecar");
+      if (pressure.activeTriggers.includes("swap_saturation")) edges.push("swap:sidecar");
+    }
+    if (pressure.stage === "session" || pressure.stage === "emergency") {
+      if (pressure.activeTriggers.includes("available_floor")) edges.push("ram:session");
+      if (pressure.activeTriggers.includes("cgroup_max_headroom")) {
+        edges.push("cgroup-max:emergency");
+      }
+    }
+    return edges;
+  }
+
+  private async runMemoryShed(): Promise<void> {
+    if (this.memoryShedRunning) return;
+    const guard = this.config.admission.memoryGuard;
+    if (!this.config.admission.enabled || !guard.shedEnabled) {
+      this.memoryShedEpisode = createMemoryShedEpisode();
+      return;
+    }
+    this.memoryShedRunning = true;
+    let pressure: MemoryPressureState | null = null;
+    let afterPressure: MemoryPressureState | null = null;
+    const stoppedTmux: string[] = [];
+    const stoppedSessions: string[] = [];
+    let tier: MemoryShedTier = "mcp_sidecar";
+    let candidateProvenExhausted = false;
+    try {
+      pressure = this.readMemoryPressure(Date.now());
+      if (pressure.stage === "none") return;
+      const candidates = await this.memoryShedCandidates();
+      const liveTmux = await listTmuxSessionNames();
+      let sidecarAttempted = false;
+      let sessionAttempted = false;
+
+      if (pressure.stage === "sidecar" || pressure.stage === "emergency") {
+        const result = await this.shedOneMemorySidecar(candidates, liveTmux);
+        sidecarAttempted = result.attempted;
+        tier = result.tier;
+        if (result.stoppedTmux) stoppedTmux.push(result.stoppedTmux);
+        if (this.memoryShedEpisode.swapState === "active") {
+          this.memoryShedEpisode.swapState = "spent";
+        }
+        if (!result.attempted) candidateProvenExhausted = true;
+        if (result.attempted) afterPressure = this.readMemoryPressure(Date.now());
+      }
+
+      if (pressure.stage === "session" || pressure.stage === "emergency") {
+        const currentPressure = afterPressure ?? pressure;
+        const hostStillAuthorizes =
+          currentPressure.host !== null &&
+          (currentPressure.host.availableBytes <= memoryShedEmergencyBytes(guard) ||
+            (currentPressure.host.availableBytes < guard.shedCriticalFloorBytes &&
+              currentPressure.continuousRamPressureMs !== null &&
+              currentPressure.continuousRamPressureMs >= MEMORY_SHED_SESSION_GRACE_MS));
+        const cgroupStillAuthorizes =
+          currentPressure.cgroup !== null && this.memoryShedEpisode.cgroupMaxLatched;
+        const canStopSession =
+          pressure.stage === "session" || hostStillAuthorizes || cgroupStillAuthorizes;
+        if (canStopSession) {
+          tier = "session";
+          for (const candidate of candidates) {
+            if (!(await this.memoryShedEligibleRecord(candidate.id))) continue;
+            sessionAttempted = true;
+            await this.applyManualStatus(candidate.id, "stopped", {}, { skipEnrichment: true });
+            stoppedSessions.push(candidate.id);
+            afterPressure = this.readMemoryPressure(Date.now());
+            break;
+          }
+        }
+        if (pressure.stage === "session") candidateProvenExhausted = !sessionAttempted;
+        if (pressure.stage === "emergency") {
+          candidateProvenExhausted = canStopSession && !sidecarAttempted && !sessionAttempted;
+        }
+      }
+
+      const exhaustionEdges = this.memoryShedExhaustionEdges(pressure);
+      const newExhaustionEdge =
+        candidateProvenExhausted &&
+        exhaustionEdges.some((edge) => !this.memoryShedEpisode.exhaustedEdges.has(edge));
+      if (candidateProvenExhausted) {
+        for (const edge of exhaustionEdges) this.memoryShedEpisode.exhaustedEdges.add(edge);
+      }
+      if (stoppedTmux.length > 0 || stoppedSessions.length > 0 || newExhaustionEdge) {
+        this.logMemoryShedResult({
+          pressure,
+          afterHost: afterPressure ? afterPressure.host : pressure.host,
+          tier,
+          stoppedTmux,
+          stoppedSessions,
+          ...(newExhaustionEdge ? { exhausted: true } : {}),
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (pressure && (stoppedTmux.length > 0 || stoppedSessions.length > 0)) {
+        afterPressure ??= this.readMemoryPressure(Date.now());
+        this.logMemoryShedResult({
+          pressure,
+          afterHost: afterPressure.host,
+          tier,
+          stoppedTmux,
+          stoppedSessions,
+          failure: message,
+        });
+      }
+      throw error;
+    } finally {
+      this.memoryShedRunning = false;
     }
   }
 
@@ -1963,11 +2683,8 @@ export class SessionService {
       // already have started its sidecar tmux pane (see restore() and
       // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
       // call for exactly this gap).
-      const liveSessions = listSessions(this.config.dataDir).filter(
-        (session) =>
-          session.status === "running" ||
-          session.status === "spawning" ||
-          this.isInRestoreWarmup(session.id),
+      const liveSessions = listSessions(this.config.dataDir).filter((session) =>
+        this.isLiveSessionRecord(session),
       );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
@@ -2009,7 +2726,8 @@ export class SessionService {
           continue;
         }
         const sessionId = name.slice(0, -`--${builtinName}`.length);
-        await killSidecarTmux(sessionId, builtinName).catch(() => {});
+        await this.reapSidecarByName(sessionId, builtinName);
+        this.clearSidecarProcEntry(sessionId, builtinName);
       }
       await this.sweepLeakedBuiltinSidecars("reaper");
     } finally {
@@ -2125,37 +2843,42 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          try {
-            await this.send(session.id, { message: scheduledWake.message });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-              current.scheduledWake.message === scheduledWake.message
-            ) {
-              const { scheduledWake: _scheduledWake, ...base } = current;
-              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-              writeSession(this.config.dataDir, cleared);
+          // Claim the due occurrence BEFORE sending: clear scheduledWake and
+          // persist it first. A slow or failing send must not leave the wake
+          // due, or the `<= now` guard stays true and it re-fires every tick
+          // forever.
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message;
+          if (claimed) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            try {
+              await this.send(session.id, { message: scheduledWake.message });
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                details: {
+                  dueAt: scheduledWake.dueAt,
+                },
+              });
             }
-            this.logEvent("session.wake.sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent scheduled wake to ${session.id}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-              details: {
-                dueAt: scheduledWake.dueAt,
-              },
-            });
           }
         }
 
@@ -2371,54 +3094,96 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        try {
-          await this.send(session.id, {
-            message: this.formatDailyWakeMessage(
-              session.id,
-              dailyWake.message,
-              dailyWake.stopCondition,
-            ),
-          });
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          if (
-            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-            current.dailyWake.message === dailyWake.message &&
-            current.dailyWake.stopCondition === dailyWake.stopCondition
-          ) {
-            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-            const updated: SessionRecord = {
-              ...current,
+        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+        // next future scheduled time and persist it first. A slow or failing
+        // send must not leave the wake due, or the `<= now` guard stays true
+        // and it re-fires every tick forever.
+        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+        const dailyWakeClaimed =
+          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+        if (dailyWakeClaimed) {
+          // Resolving the next occurrence can throw on a malformed dailyAt
+          // (e.g. a stray "99:99" that slipped into an existing record
+          // before validation covered it). Scope this to the session,
+          // mirroring the auto-rotate catch above: one bad record must not
+          // escape the loop and starve every later session's wake
+          // processing this tick. Unlike a delivery failure, a malformed
+          // dailyAt has no next occurrence to advance to, so skip 24h ahead
+          // instead of clearing the schedule -- an absent dailyWake is
+          // invisible in the web UI and in `spur list`, and disabling a
+          // schedule is meant to be an explicit user action (cancelWake).
+          // This bounds the storm to one failure event per day and keeps
+          // message/stopCondition intact for repair via re-arm.
+          let nextDueAt: Date;
+          try {
+            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const skipped: SessionRecord = {
+              ...currentDailyWakeSession,
               dailyWake: {
                 ...dailyWake,
-                nextDueAt: nextDueAt.toISOString(),
+                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
               },
               updatedAt: nowIso(),
             };
-            writeSession(this.config.dataDir, updated);
+            writeSession(this.config.dataDir, skipped);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+            continue;
           }
-          this.logEvent("session.wake.daily_sent", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Sent daily wake to ${session.id}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
+          const updated: SessionRecord = {
+            ...currentDailyWakeSession,
+            dailyWake: {
+              ...dailyWake,
+              nextDueAt: nextDueAt.toISOString(),
             },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.daily_failed", {
-            level: "error",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Failed to send daily wake to ${session.id}: ${message}`,
-            details: {
-              nextDueAt: dailyWake.nextDueAt,
-              dailyAt: dailyWake.dailyAt,
-            },
-          });
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, updated);
+          try {
+            await this.send(session.id, {
+              message: this.formatDailyWakeMessage(
+                session.id,
+                dailyWake.message,
+                dailyWake.stopCondition,
+              ),
+            });
+            this.logEvent("session.wake.daily_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent daily wake to ${session.id}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.daily_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send daily wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: dailyWake.nextDueAt,
+                dailyAt: dailyWake.dailyAt,
+              },
+            });
+          }
         }
       }
     } finally {
@@ -2430,13 +3195,19 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
+    if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
+      throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
+    }
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
-      this.registryPaths.includes(configPath)
+      this.registryPaths.includes(canonicalPath)
         ? this.registryPaths
-        : [...this.registryPaths, configPath],
+        : [...this.registryPaths, canonicalPath],
     );
   }
 
@@ -2444,41 +3215,54 @@ export class SessionService {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
+    if (!isAbsolute(configPath)) {
+      throw new InvalidConfigPathError(`configPath must be absolute: ${configPath}`);
+    }
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
+    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== canonicalPath));
   }
 
   private previewRegistryPaths(nextRegistryPaths: string[]): {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
-    warnings: string[];
     unconfiguredToRemove: string[];
   } {
-    const warnings: string[] = [];
-    const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
-      skipInvalid: true,
-      warn: (message) => warnings.push(message),
+    const paths = dropWorktreeInternalPaths(nextRegistryPaths, this.config.worktreeDir);
+    const scan = this.registryScanner.scan({
+      bootstrapConfigPath: this.bootstrapConfigPath,
+      configPaths: paths,
+      protectedPaths: [this.bootstrapConfigPath],
     });
+    this.emitRegistryScan(this.config.dataDir, scan);
     const currentSignature = JSON.stringify(this.config.projects);
-    const nextSignature = JSON.stringify(merged.config.projects);
+    const nextSignature = JSON.stringify(scan.config.projects);
     const unconfiguredIds = new Set(this.listUnconfiguredProjects().map((entry) => entry.id));
-    const unconfiguredToRemove = Object.keys(merged.config.projects).filter((id) =>
+    const unconfiguredToRemove = Object.keys(scan.config.projects).filter((id) =>
       unconfiguredIds.has(id),
     );
     return {
-      config: merged.config,
-      registryPaths: merged.configPaths,
-      warnings,
+      config: scan.config,
+      registryPaths: scan.configPaths,
       changed:
         currentSignature !== nextSignature ||
-        merged.configPaths.length !== this.registryPaths.length ||
-        merged.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
+        scan.configPaths.length !== this.registryPaths.length ||
+        scan.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
         unconfiguredToRemove.length > 0,
       unconfiguredToRemove,
     };
+  }
+
+  private emitRegistryScan(dataDir: string, scan: RegistryScanResult): void {
+    for (const diagnostic of scan.newDiagnostics) {
+      logSpurEvent(dataDir, {
+        event: "daemon.registry.warning",
+        level: "warn",
+        message: diagnostic.message,
+      });
+    }
   }
 
   applyConfig(
@@ -2486,8 +3270,13 @@ export class SessionService {
     registryPaths: string[],
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
+    const nextRegistryPaths = [...new Set(registryPaths)];
+    this.registryScanner.invalidateRemovedPaths(this.registryPaths, nextRegistryPaths);
     this.config = config;
-    this.registryPaths = [...new Set(registryPaths)];
+    // Local project configs are parsed with the daemon config as defaults, so
+    // every cached resolution is stale the moment the daemon config changes.
+    this.sessionProjectCache.clear();
+    this.registryPaths = nextRegistryPaths;
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
@@ -2503,6 +3292,35 @@ export class SessionService {
 
   getRegistryPaths(): string[] {
     return [...this.registryPaths];
+  }
+
+  // Called beside every removeWorktree() so the registry shrinks on the same
+  // event that deletes the worktree, rather than only on an explicit
+  // /projects/disconnect that may never run (session killed, worktree
+  // deleted, host rebooted mid-teardown). A duplicate-projectId worktree
+  // config never contributed a project (mergeProjects throws on it, and the
+  // daemon skips it via skipInvalid), so no reload is needed here — only the
+  // registry file and this.registryPaths are touched.
+  //
+  // Defense-in-depth, not dead code: `this.registryPaths` never contains an
+  // entry inside the CURRENT worktreeDir (the boot/preview filter in
+  // `dropWorktreeInternalPaths` always drops those first), so the
+  // `isRegistered` guard below is only ever true for a worktree config that
+  // was registered under a worktreeDir the host has since reconfigured away
+  // from, or a pre-existing registry written before this filter shipped. Both
+  // are real, if narrow, production states — see "worktreeDir-migration
+  // leftover" in test/fast/session-service.test.ts.
+  private unregisterWorktreeConfig(worktreePath: string): void {
+    if (!worktreePath) return;
+    for (const name of DEFAULT_PROJECT_CONFIG_FILES) {
+      const candidate = join(worktreePath, name);
+      const candidateKey = canonicalConfigKey(candidate);
+      const isRegistered = this.registryPaths.some(
+        (path) => canonicalConfigKey(path) === candidateKey,
+      );
+      if (!isRegistered) continue;
+      this.registryPaths = removeConfigRegistryPath(this.config.dataDir, candidate);
+    }
   }
 
   listProjects(): ProjectListEntry[] {
@@ -2807,6 +3625,29 @@ export class SessionService {
     }
   }
 
+  // Keyed chained-promise lock, one entry per tmux pane with a send in
+  // flight. Install `current` before the first await so two acquirers in
+  // one turn chain instead of racing; delete only under the identity guard
+  // so a waiter that already replaced the entry keeps its own (same idiom
+  // as triggers.ts enqueue).
+  private async withPaneWriteLock<T>(paneKey: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.paneWriteLocks.get(paneKey) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.paneWriteLocks.set(paneKey, current);
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.paneWriteLocks.get(paneKey) === current) {
+        this.paneWriteLocks.delete(paneKey);
+      }
+    }
+  }
+
   private scheduleDeliveryRunner(sessionId: string): void {
     this.ensureDeliveryRunner(sessionId);
   }
@@ -2824,7 +3665,7 @@ export class SessionService {
 
   private async runAttentionMonitor(baseline: boolean): Promise<void> {
     try {
-      await this.pollAttentionStates(baseline);
+      await runGhPollCycle({ kind: "attention" }, () => this.pollAttentionStates(baseline));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.attention_monitor.failed", {
@@ -2843,34 +3684,71 @@ export class SessionService {
     try {
       const nextStates = new Map<string, AttentionState>();
       const nextRunStates = new Map<string, SessionState>();
-      const sessions = listSessions(this.config.dataDir).filter(
+      const allSessions = listSessions(this.config.dataDir);
+      const liveSessions = allSessions.filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
+      // Run the sweep before the per-session loop, off this same liveIds
+      // snapshot, so a session that throws below (see the per-session
+      // try/catch) can never skip reclamation for the rest of the daemon's
+      // life. Safe to run first: it only deletes/truncates ids ABSENT from
+      // liveIds, so nothing the loop is about to populate for a live id is at
+      // risk of being evicted on this same pass.
+      const liveIds = new Set(liveSessions.map((session) => session.id));
+      this.pruneSessionScopedState(liveIds);
       const claudeAccounts = this.computeClaudeAccountsView();
-      for (const session of sessions) {
-        const view = await this.enrich(session, claudeAccounts);
-        this.checkPrForSession(session, view.state);
-        const prevRunState = this.lastObservedRunStates.get(view.id);
-        nextRunStates.set(view.id, view.state);
-        if (!baseline && prevRunState === "working" && view.state === "waiting") {
-          await this.maybeNudgeForgottenReply(view);
-        }
-        const attention: AttentionState | null =
-          view.state === "needs_input"
-            ? "needs_input"
-            : view.state === "error"
-              ? "error"
-              : view.state === "rate_limited"
-                ? "rate_limited"
-                : null;
-        if (!attention) {
-          continue;
-        }
-        nextStates.set(view.id, attention);
-        if (!baseline && this.attentionStates.get(view.id) !== attention) {
-          await this.notifyAttention(view, attention);
+      this.prCheckGitSpentMs = 0;
+      for (const session of liveSessions) {
+        try {
+          const view = await this.enrich(session, claudeAccounts, allSessions);
+          await this.checkPrForSession(session, view.state);
+          const prevRunState = this.lastObservedRunStates.get(view.id);
+          nextRunStates.set(view.id, view.state);
+          if (!baseline && prevRunState === "working" && view.state === "waiting") {
+            await this.maybeNudgeForgottenReply(view);
+          }
+          const attention: AttentionState | null =
+            view.state === "needs_input"
+              ? "needs_input"
+              : view.state === "error"
+                ? "error"
+                : view.state === "rate_limited"
+                  ? "rate_limited"
+                  : null;
+          if (!attention) {
+            continue;
+          }
+          nextStates.set(view.id, attention);
+          if (!baseline && this.attentionStates.get(view.id) !== attention) {
+            await this.notifyAttention(view, attention);
+          }
+        } catch (error) {
+          // Carry the previous tick's values forward so an aborted tick can
+          // neither erase a still-current attention state (spurious
+          // re-notify next tick) nor erase a still-current run state (a
+          // working->waiting edge landing on the very next tick would
+          // otherwise never see its "working" predecessor). Only carry
+          // forward what was actually observed before; never invent one.
+          const previousAttention = this.attentionStates.get(session.id);
+          if (previousAttention !== undefined) {
+            nextStates.set(session.id, previousAttention);
+          }
+          const previousRunState = this.lastObservedRunStates.get(session.id);
+          if (previousRunState !== undefined) {
+            nextRunStates.set(session.id, previousRunState);
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.attention_monitor.session_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Attention monitor skipped session ${session.id}: ${message}`,
+          });
         }
       }
+      // The sweep is the batch window: every PR lookup this sweep queued goes
+      // out as one `gh api graphql` per repo instead of one call per branch.
+      await flushPrLookups();
       this.attentionStates.clear();
       for (const [sessionId, attention] of nextStates) {
         this.attentionStates.set(sessionId, attention);
@@ -2879,19 +3757,69 @@ export class SessionService {
       for (const [sessionId, runState] of nextRunStates) {
         this.lastObservedRunStates.set(sessionId, runState);
       }
-      const liveIds = new Set(sessions.map((session) => session.id));
-      for (const sessionId of this.codexMcpDialogOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.codexMcpDialogOverrides.delete(sessionId);
-        }
-      }
-      for (const sessionId of this.claudeCompactingOverrides.keys()) {
-        if (!liveIds.has(sessionId)) {
-          this.claudeCompactingOverrides.delete(sessionId);
-        }
-      }
     } finally {
       this.attentionMonitorRunning = false;
+    }
+  }
+
+  // Single sweep for session-scoped maps whose lifetime ends at terminal
+  // status. Runs against the non-terminal id set pollAttentionStates already
+  // computes, so its key set is bounded by "currently live sessions" instead
+  // of "every session ever classified". Deliberately does not touch
+  // dashboardCache, sessionProjectCache, stateHistory, or stateCache. Those
+  // four follow the wider dashboard lifetime because completed and
+  // killed+retainInList sessions are still enriched by its idle round-robin;
+  // runDashboardCacheTick owns their pruning.
+  private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.codexMcpDialogOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.codexMcpDialogOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeCompactingOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.lastClassifiedLogStates.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastClassifiedLogStates.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.agentSessionIdPersistBackoffUntil.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.agentSessionIdPersistBackoffUntil.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.cursorJsonlReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorJsonlReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.codexRolloutReaders.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.codexRolloutReaders.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.prCheckTrackers.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.prCheckTrackers.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.usageMenuConfirmedAt.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.usageMenuConfirmedAt.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeRotationEpisode.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeRotationEpisode.delete(sessionId);
+      }
     }
   }
 
@@ -2924,14 +3852,118 @@ export class SessionService {
         }
         return session.status !== "killed" || session.retainInList === true;
       });
-      const liveIds = new Set(sessions.map((session) => session.id));
-      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
+      const includedIds = new Set(sessions.map((session) => session.id));
+      const terminalIds = new Set(
+        sessions
+          .filter((session) => isTerminalSessionStatus(session.status))
+          .map((session) => session.id),
+      );
+
+      // These caches serve dashboard enrichment, so their lifetime follows
+      // includedIds rather than the attention monitor's non-terminal set.
+      // Delete records that left the store/dashboard entirely. For retained
+      // terminal records, keep the last history entry: deleting it would make
+      // updateStateHistory re-enter its transition branch every tick, while
+      // retaining the whole array would keep up to STATE_HISTORY_LIMIT entries.
+      for (const [id, history] of this.stateHistory) {
+        if (!includedIds.has(id)) {
+          this.stateHistory.delete(id);
+        } else if (terminalIds.has(id) && history.length > 1) {
+          this.stateHistory.set(id, history.slice(-1));
+        }
+      }
+      for (const id of this.stateCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.stateCache.delete(id);
+        }
+      }
+
+      // A session is due for enrichment when it can still change on its own
+      // (isLiveSessionRecord), when its on-disk record object changed since
+      // we last enriched it (recordChanged is exact object-identity
+      // inequality, made free by listSessions' stat-gated parse cache — see
+      // metadata.ts), or when it has no cached view yet. Everything else is
+      // idle: its dashboard view can only drift from filesystem state, not
+      // agent activity, so it only needs the bounded round-robin below.
+      const due: SessionRecord[] = [];
+      const idle: SessionRecord[] = [];
+      let nextDashboardIdleCursor = this.dashboardIdleCursor;
+      for (const session of sessions) {
+        const recordChanged = this.dashboardEnrichedRecords.get(session.id) !== session;
+        if (
+          this.isLiveSessionRecord(session) ||
+          recordChanged ||
+          !this.dashboardCache.has(session.id)
+        ) {
+          due.push(session);
+        } else {
+          idle.push(session);
+        }
+      }
+
+      // Bounded round-robin over the idle set: clamp(ceil(idle / SWEEP_TICKS),
+      // MIN, MAX) least-recently-visited entries per tick via a rotating
+      // cursor (O(1), no sort), so filesystem-only drift still eventually
+      // surfaces. The quota scales with the idle set to hold the sweep period
+      // near SWEEP_TICKS, and the MAX cap is what keeps the tick's cost
+      // bounded by a constant rather than by the idle set's size.
+      if (idle.length > 0) {
+        const targetQuota = Math.ceil(idle.length / DASHBOARD_IDLE_REFRESH_SWEEP_TICKS);
+        const clampedQuota = Math.min(
+          DASHBOARD_IDLE_REFRESH_MAX_PER_TICK,
+          Math.max(DASHBOARD_IDLE_REFRESH_MIN_PER_TICK, targetQuota),
+        );
+        const quota = Math.min(clampedQuota, idle.length);
+        for (let offset = 0; offset < quota; offset += 1) {
+          const roundRobinSession = idle[(this.dashboardIdleCursor + offset) % idle.length];
+          if (roundRobinSession) {
+            due.push(roundRobinSession);
+          }
+        }
+        nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
+      }
+
+      const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
       for (const view of enriched) {
         this.dashboardCache.set(view.id, view);
       }
+      // Store the pre-enrich listSessions reference, NOT the classified
+      // session enrichDashboard derived. This map is only ever compared by
+      // identity against the next tick's listSessions output, so it has to
+      // hold objects from that same parse cache; a classified session is a
+      // fresh object and would compare unequal every tick, making every
+      // record look changed. Reconcile-driven disk writes are picked up by
+      // the parse cache's inode check on the next listSessions, not from
+      // anything stored here.
+      for (const session of due) {
+        this.dashboardEnrichedRecords.set(session.id, session);
+      }
+      this.dashboardIdleCursor = nextDashboardIdleCursor;
+
+      // Prune off the enumerated+filtered set, never off the enriched
+      // subset, so an idle entry that was seeded once and then never due
+      // again is not evicted just because this tick skipped it.
       for (const id of this.dashboardCache.keys()) {
-        if (!liveIds.has(id)) {
+        if (!includedIds.has(id)) {
           this.dashboardCache.delete(id);
+        }
+      }
+      // sessionProjectCache's consumer (resolveProjectForSession, via
+      // enrich) is called from both ticks, so its retention has to match
+      // the WIDER dashboard set, not pollAttentionStates' non-terminal
+      // liveIds — a completed or killed+retainInList session still gets
+      // enriched here by the idle round-robin long after it leaves the
+      // attention monitor's live set. Pruning against liveIds would evict
+      // its entry the tick after it goes terminal, forcing a fresh
+      // YAML parse (and a re-logged parse failure) on every idle revisit.
+      for (const id of this.sessionProjectCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.sessionProjectCache.delete(id);
+        }
+      }
+      for (const id of this.dashboardEnrichedRecords.keys()) {
+        if (!includedIds.has(id)) {
+          this.dashboardEnrichedRecords.delete(id);
         }
       }
     } catch (error) {
@@ -2951,8 +3983,63 @@ export class SessionService {
     }
     this.reaperTimer = setInterval(() => {
       void this.reapOrphanedTmux();
+      this.compactTerminalSessionLogs();
+      flushEventLogCollapse(this.config.dataDir);
     }, REAP_INTERVAL_MS);
     this.reaperTimer.unref();
+  }
+
+  // Gzips each terminal (killed/completed/stopped) session's live event-log
+  // and user-action shard once it exceeds TERMINAL_COMPACT_FLOOR_BYTES.
+  // Deliberately does NOT inherit reapOrphanedTmux's `manual_pause` filter —
+  // that filter protects a paused agent's tmux, and compaction never touches
+  // tmux, sidecars, worktrees, or session records. Bounded to
+  // COMPACT_MAX_PER_TICK sessions per tick via compactCursor's round-robin
+  // offset, so a large backlog drains across several ticks — each tick
+  // picking up where the last left off — instead of blocking the event loop
+  // in one gzip burst or reprocessing the same head every tick.
+  //
+  // One-way ratchet, by construction rather than bookkeeping: compactShardOnce
+  // skips a shard that already has a .1.gz archive. A terminal session that
+  // keeps receiving trickle writes (e.g. session.pr_auto_detect.failed) after
+  // its first compaction is left to normal shardHotBytes rotation instead of
+  // being repeatedly re-rotated at the 64 KB floor — that ratchet would walk
+  // the compacted archive out of the retain window across a handful of
+  // 5-minute ticks. Stateless so it also survives a daemon restart, unlike an
+  // in-memory "already compacted" set.
+  private compactTerminalSessionLogs(): void {
+    try {
+      const sessions = listSessions(this.config.dataDir).filter((session) =>
+        REAPABLE_SESSION_STATUSES.has(session.status),
+      );
+      if (sessions.length === 0) {
+        this.compactCursor = 0;
+        return;
+      }
+      // Each shard family keeps its own retain cap: the two logs are configured
+      // independently (eventLog.* / userActionLog.*), so compaction must not
+      // rotate a user-action shard against the event-log cap even though the
+      // defaults happen to match today.
+      const eventRetain = this.config.eventLog?.retainArchives ?? DEFAULT_EVENT_LOG_RETAIN_ARCHIVES;
+      const userActionRetain =
+        this.config.userActionLog?.retainArchives ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES;
+      const start = this.compactCursor % sessions.length;
+      const batch = sessions.slice(start, start + COMPACT_MAX_PER_TICK);
+      for (const session of batch) {
+        compactShardOnce(sessionEventLogPath(this.config.dataDir, session.id), eventRetain);
+        compactShardOnce(
+          sessionUserActionLogPath(this.config.dataDir, session.id),
+          userActionRetain,
+        );
+      }
+      this.compactCursor = start + batch.length >= sessions.length ? 0 : start + batch.length;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.compact.failed", {
+        level: "warn",
+        message: `Terminal-session log compaction sweep failed: ${message}`,
+      });
+    }
   }
 
   // Safety net: a terminal (killed/completed/stopped) session's tmux is
@@ -3022,7 +4109,8 @@ export class SessionService {
             continue;
           }
           if (await sidecarTmuxAlive(session.id, sidecarName)) {
-            await killSidecarTmux(session.id, sidecarName);
+            await this.reapSidecarByName(session.id, sidecarName);
+            this.clearSidecarProcEntry(session.id, sidecarName);
             reaped += 1;
           }
         }
@@ -3042,6 +4130,76 @@ export class SessionService {
       });
     } finally {
       this.reaperRunning = false;
+    }
+  }
+
+  private startSessionGcLoop(): void {
+    if (this.sessionGcTimer) {
+      return;
+    }
+    this.sessionGcTimer = setInterval(() => {
+      void this.runSessionGcSweep();
+    }, SESSION_GC_TICK_MS);
+    this.sessionGcTimer.unref();
+  }
+
+  // Config-gated daemon sweep: off unless sessionGc.enabled is true, and both
+  // that flag and intervalMinutes are re-read from this.config on every tick
+  // (not cached at construction), so a config reload takes effect on the next
+  // tick without a daemon restart. lastSessionGcSweepAt seeds from
+  // construction time, so a restart never fires an immediate sweep.
+  private async runSessionGcSweep(): Promise<void> {
+    if (this.sessionGcRunning) {
+      return;
+    }
+    const gcConfig = this.config.sessionGc;
+    if (!gcConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastSessionGcSweepAt < gcConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.sessionGcRunning = true;
+    this.lastSessionGcSweepAt = Date.now();
+    try {
+      const sessions = listSessions(this.config.dataDir);
+      const plan = planSessionGc({
+        sessions,
+        protectedSessionIds: new Set(
+          sessions
+            .filter((session) => this.isLiveSessionRecord(session))
+            .map((session) => session.id),
+        ),
+        worktreeDir: this.config.worktreeDir,
+        now: new Date(),
+        olderThanDays: gcConfig.olderThanDays,
+        statuses: gcConfig.statuses,
+        limit: gcConfig.maxGroupsPerSweep,
+        pathExists: (path) => workspaceExists(path),
+      });
+      // sizes: true so the sweep can report freed bytes; the du cost is bounded
+      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      const report = await executeSessionGc(
+        plan,
+        createGcDeps(this.config, (session) => this.isLiveSessionRecord(session)),
+        {
+          dryRun: false,
+          sizes: true,
+        },
+      );
+      this.logEvent("session.gc.completed", {
+        level: "info",
+        message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
+        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.gc.failed", {
+        level: "warn",
+        message: `Session GC sweep failed: ${message}`,
+      });
+    } finally {
+      this.sessionGcRunning = false;
     }
   }
 
@@ -3066,7 +4224,13 @@ export class SessionService {
     }
   }
 
-  private checkPrForSession(session: SessionRecord, state: SessionState): void {
+  /**
+   * Resolves once this session's lookup is registered with the batch queue (or
+   * ruled out), not once it has an answer. The caller awaits this per session
+   * and then flushes the queue, so the whole sweep leaves as one query per
+   * repo. The answer itself lands through the fire-and-forget run.
+   */
+  private async checkPrForSession(session: SessionRecord, state: SessionState): Promise<void> {
     // PR binding is workspace-owned: skip once any desk member already has
     // one. resolveWorkspaceState is the dual-read (workspace file, else the
     // legacy owning-record fallback) that replaces a plain anchor-record read.
@@ -3079,6 +4243,12 @@ export class SessionService {
     }
     // Skip if no worktree
     if (!session.worktree || !session.worktreePath) {
+      return;
+    }
+    // A removed worktree can never grow a PR. Sync stat, no spawn — mirrors the
+    // GitHub review source's session filter. isGitWorktree is deliberately not
+    // used here: it spawns git.
+    if (!existsSync(session.worktreePath)) {
       return;
     }
 
@@ -3109,19 +4279,60 @@ export class SessionService {
       return;
     }
 
-    // Throttle between gh calls
-    if (Date.now() - tracker.lastCheckAt < PR_CHECK_THROTTLE_MS) {
+    // Throttle between lookups. A running session keeps the 30s cadence; every
+    // other status drops to the idle cadence, which is what the bulk of the
+    // eligible set is.
+    const live = session.status === "running";
+    if (
+      Date.now() - tracker.lastCheckAt <
+      (live ? PR_CHECK_THROTTLE_MS : PR_CHECK_IDLE_THROTTLE_MS)
+    ) {
+      return;
+    }
+    const capMs = live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS;
+
+    // Persisted cache before any subprocess: a branch whose lookup is not due
+    // must cost nothing at all, or the graphql burst is traded for a git one.
+    const memo = tracker.discovery;
+    if (
+      memo &&
+      Date.now() - memo.resolvedAt < PR_DISCOVERY_MEMO_TTL_MS &&
+      memo.slug &&
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, memo.slug, memo.branch), capMs)
+    ) {
+      tracker.lastCheckAt = Date.now();
       return;
     }
 
+    // Past here the sweep pays for git. Out of budget means "next sweep", with
+    // the throttle deliberately left untouched.
+    if (this.prCheckGitSpentMs >= PR_CHECK_GIT_BUDGET_MS) {
+      return;
+    }
+    const gitStartedAt = Date.now();
+    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
+    // git only, no GitHub budget, and memoized per worktree.
+    const slug = await resolvePrLookupRepo(session.worktreePath);
+    this.prCheckGitSpentMs += Date.now() - gitStartedAt;
+    tracker.discovery = { branch: discoveryBranch, slug, resolvedAt: Date.now() };
+
     tracker.lastCheckAt = Date.now();
+    if (
+      slug &&
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, slug, discoveryBranch), capMs)
+    ) {
+      return;
+    }
+    // Counted here, not above: the waiting limit exists to stop repeated
+    // lookups, so an attempt that performed none must not burn a slot.
     if (state === "waiting") {
       tracker.waitingChecks += 1;
     }
 
     // Fire and forget, but tracked so teardown can drain it — an unawaited
-    // `gh` call outliving its caller lands on whatever runs next.
-    const run = this.runPrCheck(session).catch((error) => {
+    // `gh` call outliving its caller lands on whatever runs next. The queue
+    // registration inside is synchronous, so the caller's flush sees it.
+    const run = this.runPrCheck(session, discoveryBranch, slug, capMs).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.pr_auto_detect.failed", {
         level: "warn",
@@ -3134,8 +4345,53 @@ export class SessionService {
     void run.finally(() => this.prCheckRuns.delete(run));
   }
 
-  private async runPrCheck(session: SessionRecord): Promise<void> {
-    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+  /**
+   * Runs one session's queued lookup and keeps the persisted negative cache in
+   * step. A skipped outcome remains distinct from "no PR" so it cannot advance
+   * the cache; transport errors also let configured non-GitHub providers run.
+   */
+  private async resolveQueuedPrLookup(
+    slug: PrRepoSlug,
+    branch: string,
+    worktreePath: string,
+    capMs: number,
+  ): Promise<PrLookupOutcome> {
+    const claim = claimPollPrLookup({
+      dataDir: this.config.dataDir,
+      slug,
+      branch,
+      capMs,
+    });
+    if (claim.status === "cached") return claim.outcome;
+    if (claim.status === "joined") return claim.outcome;
+    let outcome: PrLookupOutcome = { status: "skipped", reason: "error" };
+    try {
+      outcome = await enqueuePrLookup({ slug, branch, worktreePath });
+    } finally {
+      claim.settle(outcome);
+    }
+    return outcome;
+  }
+
+  private async runPrCheck(
+    session: SessionRecord,
+    discoveryBranch: string,
+    slug: PrRepoSlug | null,
+    capMs: number,
+  ): Promise<void> {
+    // No GitHub remote: nothing to look up and nothing to cache, but the
+    // non-github review providers still get their turn below.
+    const outcome: PrLookupOutcome = slug
+      ? await this.resolveQueuedPrLookup(slug, discoveryBranch, session.worktreePath, capMs)
+      : { status: "absent" };
+    // Budget/cancellation means no provider was attempted. A transport error
+    // from a two-segment remote is different: arbitrary GitHub Enterprise
+    // hostnames are valid, but the same syntax is also used by Gitea and other
+    // forges. Let configured non-GitHub providers inspect that uncertain remote.
+    if (outcome.status === "skipped" && outcome.reason !== "error") {
+      return;
+    }
+    const binding = outcome.status === "found" ? prLookupBindingOf(outcome.pr) : null;
     // PR binding write lands on the workspace's own state so every desk
     // member shares it. `workspaceIdOf(session) === session.id` for a
     // non-desk session, so this is the same re-read as before (no extra IO
@@ -3171,7 +4427,6 @@ export class SessionService {
     }
 
     const project = this.config.projects[session.project];
-    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
     const providerIds = (await orderedReviewProviderIds(session.worktreePath, project)).filter(
       (providerId) => providerId !== "github",
     );
@@ -3346,21 +4601,38 @@ export class SessionService {
       return buildShepherdProject(this.config.dataDir);
     }
     const daemonProject = this.config.projects[session.project];
+    // Only a config that lives in the session's own worktree counts. Walking
+    // up the tree escapes a deleted or config-less worktree and lands on an
+    // unrelated ancestor spur.yaml (the shared worktree root, say), which then
+    // fails project-mode validation on every single call.
     const projectConfigPath = session.worktreePath
-      ? findProjectConfigPath(session.worktreePath)
+      ? findProjectConfigPathInDirectory(session.worktreePath)
       : undefined;
     if (!projectConfigPath) {
+      this.sessionProjectCache.delete(session.id);
       return daemonProject;
     }
 
+    // No stamp means the file went unreadable between the lookup and the stat.
+    // Parse uncached that once rather than cache a lie; the next call either
+    // resolves no path at all or gets a real stamp.
+    const stamp = tryConfigStamp(projectConfigPath);
+    const cached = this.sessionProjectCache.get(session.id);
+    if (
+      cached &&
+      stamp !== undefined &&
+      cached.configPath === projectConfigPath &&
+      cached.stamp === stamp
+    ) {
+      return cached.project ?? daemonProject;
+    }
+
+    let localProject: ProjectConfig | undefined;
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
-        session.project
-      ];
-      if (localProject) {
-        return localProject;
-      }
+      localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
     } catch (error) {
+      // Logged only on a cache miss, so a permanently broken config warns once
+      // per (session, config stamp) instead of once per tick.
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.project_config.local.failed", {
         level: "warn",
@@ -3369,15 +4641,15 @@ export class SessionService {
         message: `Failed to load local project config for ${session.id}: ${message}`,
       });
     }
+    if (stamp !== undefined) {
+      this.sessionProjectCache.set(session.id, {
+        configPath: projectConfigPath,
+        stamp,
+        project: localProject,
+      });
+    }
 
-    return daemonProject;
-  }
-
-  private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
-    const resolvedRepoPath = tryRealpath(repoPath);
-    return Object.values(this.config.projects).find(
-      (project) => tryRealpath(project.path) === resolvedRepoPath,
-    );
+    return localProject ?? daemonProject;
   }
 
   private releaseSidecarPortFromSession(
@@ -3592,9 +4864,8 @@ export class SessionService {
       if (plan.kind === "clear") {
         if (plan.crossSession) {
           this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
-          await killTmuxSession(
-            sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
-          );
+          await this.reapSidecarByName(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          this.clearSidecarProcEntry(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.releaseSidecarPortFromSession(
             plan.crossSession.sessionId,
             plan.crossSession.sidecarName,
@@ -3639,7 +4910,13 @@ export class SessionService {
     clearPort?: number;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
-      if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+      const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
+      const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+      // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
+      // "session exists" — that pane's escapee tree can hold a reserved port
+      // forever unless treated as not-alive here and reaped before restart.
+      const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+      if (alive && !paneDead) {
         if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
           this.scheduleSidecarUrlReadyAndPublish(
             args.session.id,
@@ -3649,6 +4926,24 @@ export class SessionService {
           );
         }
         return args.session;
+      }
+      if (paneDead) {
+        await this.reapSidecarByName(args.session.id, args.sidecarName);
+        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+      } else if (!alive) {
+        // tmux session/window is gone entirely (killed externally, crashed)
+        // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
+        // fall through to the recorded sidecarProcs identity — the exact
+        // leak shape reapRecordedIdentity targets — before reserving the
+        // port for a new instance, or a still-live escapee tree from the
+        // old instance keeps running under the reused port.
+        const owner = readSession(this.config.dataDir, args.session.id);
+        const identity = owner?.sidecarProcs?.[args.sidecarName];
+        if (owner && identity) {
+          const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+          this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
+        }
+        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
       }
 
       // Built-ins may defer command resolution (e.g. a bundle-resolved bin
@@ -3700,7 +4995,39 @@ export class SessionService {
         });
         await verifySidecarStartup(reservedSession.id, args.sidecarName);
 
+        // Record this instance's identity so a tree that outlives its
+        // tmux supervisor is still identifiable and reapable later — see
+        // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
+        // (race, no procfs) leaves sidecarProcs unset for this name rather
+        // than blocking the start.
+        const freshPanePid = await getTmuxPanePid(
+          sidecarTmuxSession(reservedSession.id, args.sidecarName),
+          { fresh: true },
+        );
+        const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+        const identity: SidecarProcessIdentity | undefined =
+          freshPanePid !== null && starttime !== null
+            ? { pid: freshPanePid, pgid: freshPanePid, starttime }
+            : undefined;
+
         const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+        // clearSidecarProcEntry above already dropped this name from disk
+        // when the pane was dead or the tmux session was gone —
+        // reservedSession can still be a stale
+        // in-memory copy from before that write (ensureSidecarReservation
+        // returns the untouched `session` param when the sidecar has no
+        // ports to reserve). Build sidecarProcs explicitly rather than
+        // trusting the `...reservedSession` spread, so an unreadable
+        // identity persists as cleared instead of resurrecting the stale
+        // pgid clearSidecarProcEntry just removed.
+        const sidecarProcsWithoutStale = Object.fromEntries(
+          Object.entries(reservedSession.sidecarProcs ?? {}).filter(
+            ([name]) => name !== args.sidecarName,
+          ),
+        );
+        const nextSidecarProcs = identity
+          ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
+          : sidecarProcsWithoutStale;
         const updated: SessionRecord = {
           ...reservedSession,
           updatedAt: nowIso(),
@@ -3708,6 +5035,11 @@ export class SessionService {
             ? {}
             : { sidecarNames: [...sidecarNames, args.sidecarName] }),
         };
+        if (Object.keys(nextSidecarProcs).length > 0) {
+          updated.sidecarProcs = nextSidecarProcs;
+        } else {
+          delete updated.sidecarProcs;
+        }
         writeSession(this.config.dataDir, updated);
         this.scheduleSidecarUrlReadyAndPublish(
           reservedSession.id,
@@ -3717,7 +5049,8 @@ export class SessionService {
         );
         return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
-        await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
         const baseRecord =
           reservedSession !== args.session
             ? args.session
@@ -4090,26 +5423,7 @@ export class SessionService {
   }
 
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
-    const currentProject = this.config.projects[session.project];
-    if (currentProject) {
-      return {
-        repoPath: currentProject.path,
-        symlinks: cleanupIgnoredPaths(session, currentProject.symlinks),
-      };
-    }
-    if (!session.worktree || !session.worktreePath) {
-      throw new Error(`Unknown project: ${session.project}`);
-    }
-    const repoPath = await resolveRepoPathFromWorktree(session.worktreePath);
-    if (!repoPath) {
-      throw new Error(
-        `Cannot resolve repository root for ${session.id} after project rename: ${session.worktreePath}`,
-      );
-    }
-    return {
-      repoPath,
-      symlinks: cleanupIgnoredPaths(session, this.findProjectByRepoPath(repoPath)?.symlinks ?? []),
-    };
+    return resolveSessionCleanupContext(this.config.projects, session);
   }
 
   private requireSessionMemorySession(sessionId: string, key?: string): void {
@@ -4212,7 +5526,8 @@ export class SessionService {
         return view.status !== "killed" || view.retainInList === true;
       });
     }
-    const sessions = listSessions(this.config.dataDir).filter((session) => {
+    const allSessions = listSessions(this.config.dataDir);
+    const sessions = allSessions.filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
@@ -4222,7 +5537,7 @@ export class SessionService {
     // per-session inside enrich (N listAccounts reads + N×M existsSync).
     const claudeAccounts = this.computeClaudeAccountsView();
     const views = await Promise.all(
-      sessions.map((session) => this.enrich(session, claudeAccounts)),
+      sessions.map((session) => this.enrich(session, claudeAccounts, allSessions)),
     );
     return views;
   }
@@ -4250,11 +5565,15 @@ export class SessionService {
     return { records: subscriber.stateSubscriptions ?? [] };
   }
 
-  subscribeToSessionStates(
+  // Shared by subscribeToSessionStates (one entry, writes immediately) and
+  // applyRequestedStateSubscriptions (N entries, accumulated in memory and
+  // written once) so both stay on the same validation/merge rules.
+  private buildNextStateSubscriptions(
     subscriberId: string,
+    existing: SessionStateSubscription[],
     request: SubscribeSessionStatesRequest,
-  ): SessionStateSubscriptionRecordResponse {
-    const subscriber = this.requireSession(subscriberId);
+    now: string,
+  ): { record: SessionStateSubscription; nextSubscriptions: SessionStateSubscription[] } {
     const targetSessionId = request.targetSessionId.trim();
     if (!targetSessionId) {
       throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
@@ -4265,9 +5584,7 @@ export class SessionService {
     }
     const states = canonicalSubscriptionStates(request.states);
     const message = request.message?.trim();
-    const now = nowIso();
     const id = stateSubscriptionId(targetSessionId);
-    const existing = subscriber.stateSubscriptions ?? [];
     const previous = existing.find(
       (subscription) => subscription.targetSessionId === targetSessionId,
     );
@@ -4286,6 +5603,21 @@ export class SessionService {
     const nextSubscriptions = previous
       ? existing.map((subscription) => (subscription.id === id ? record : subscription))
       : [...existing, record];
+    return { record, nextSubscriptions };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const now = nowIso();
+    const { record, nextSubscriptions } = this.buildNextStateSubscriptions(
+      subscriberId,
+      subscriber.stateSubscriptions ?? [],
+      request,
+      now,
+    );
     this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
     return { record };
   }
@@ -4302,6 +5634,59 @@ export class SessionService {
     }
     this.writeStateSubscriptions(subscriber, nextSubscriptions);
     return { records: nextSubscriptions };
+  }
+
+  private applyRequestedStateSubscriptions(
+    session: SessionRecord,
+    requested: SubscribeSessionStatesRequest[] | undefined,
+  ): SessionRecord {
+    if (!requested || requested.length === 0) {
+      return session;
+    }
+    const now = nowIso();
+    let nextSubscriptions = session.stateSubscriptions ?? [];
+    let armedAny = false;
+    // Accumulate every requested entry in memory and persist once — avoids
+    // one readSession/writeSession/syncStateSubscriptionIndex round trip per
+    // entry on the spawn hot path.
+    for (const entry of requested) {
+      try {
+        nextSubscriptions = this.buildNextStateSubscriptions(
+          session.id,
+          nextSubscriptions,
+          entry,
+          now,
+        ).nextSubscriptions;
+        armedAny = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: {
+            targetSessionId: entry.targetSessionId,
+            error: message,
+          },
+        });
+      }
+    }
+    if (armedAny) {
+      try {
+        this.writeStateSubscriptions(session, nextSubscriptions, now);
+      } catch (error) {
+        // A write/index failure here must not fail the spawn — same
+        // non-fatal contract as the per-entry validation above.
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.subscription.spawn_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          details: { error: message },
+        });
+      }
+    }
+    return readSession(this.config.dataDir, session.id) ?? session;
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -4574,14 +5959,36 @@ export class SessionService {
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
-    for (const { id, project } of drifted) {
+    for (const [index, { id, project }] of drifted.entries()) {
       const projectConfig = this.config.projects[project];
       if (projectConfig?.restoreAfterReboot !== true) continue;
+      const memory = readHostMemory();
+      if (
+        this.config.admission.enabled &&
+        this.config.admission.memoryGuard.enforceFloors &&
+        memory !== null &&
+        memory.availableBytes < this.config.admission.memoryGuard.restoreFloorBytes
+      ) {
+        this.logEvent("session.reboot.restore.aborted", {
+          level: "warn",
+          message: `Reboot restore stopped before ${id}: available memory is below the restore floor`,
+          details: {
+            reason: "memory_floor",
+            availableBytes: memory.availableBytes,
+            floorBytes: this.config.admission.memoryGuard.restoreFloorBytes,
+            remaining: drifted.length - index,
+          },
+        });
+        break;
+      }
       try {
         await this.restore(id);
         const record = readSession(this.config.dataDir, id);
         if (record) {
           await this.startAutoStartSidecars(record, projectConfig);
+        }
+        if (memory !== null) {
+          await sleep(RESTORE_SETTLE_MS);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -4910,9 +6317,19 @@ export class SessionService {
 
   async spawn(
     request: SpawnSessionRequest,
-    options?: { promptKind?: UserInputKind },
+    options?: {
+      promptKind?: UserInputKind;
+      replacingSessionId?: string;
+      admissionReservation?: symbol;
+    },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation =
+      options?.admissionReservation ??
+      this.reserveAdmission(request.project, "spawn", {
+        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
+      });
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -5130,6 +6547,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
@@ -5230,6 +6649,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
@@ -5238,7 +6658,7 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
@@ -5372,6 +6792,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -5420,9 +6841,9 @@ export class SessionService {
           if (!sidecar.mcp && failedSpawnDeskAlive) {
             continue;
           }
-          await killSidecarTmux(sidecarOwnerId(failedSpawnSession, sidecar), scName).catch(
-            () => {},
-          );
+          const failedSpawnOwnerId = sidecarOwnerId(failedSpawnSession, sidecar);
+          await this.reapSidecarByName(failedSpawnOwnerId, scName);
+          this.clearSidecarProcEntry(failedSpawnOwnerId, scName);
         }
         // Startup attachments are preserved for a respawn, so the ids come
         // from the persisted placeholder — they are out of scope here.
@@ -5441,6 +6862,7 @@ export class SessionService {
         );
         if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
+          this.unregisterWorktreeConfig(workspacePath);
         }
 
         const message = error instanceof Error ? error.message : String(error);
@@ -5502,6 +6924,9 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
       }
@@ -5540,9 +6965,9 @@ export class SessionService {
       if (!sidecar.mcp && deskAlive) {
         continue;
       }
-      await killSidecarTmux(sidecarOwnerId(prepared.placeholder, sidecar), sidecarName).catch(
-        () => {},
-      );
+      const cleanupOwnerId = sidecarOwnerId(prepared.placeholder, sidecar);
+      await this.reapSidecarByName(cleanupOwnerId, sidecarName);
+      this.clearSidecarProcEntry(cleanupOwnerId, sidecarName);
     }
     if (finalFailure) {
       this.removeSessionArtifacts(prepared.placeholder);
@@ -5551,6 +6976,7 @@ export class SessionService {
     }
     if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
+      this.unregisterWorktreeConfig(workspacePath);
     }
   }
 
@@ -5603,9 +7029,12 @@ export class SessionService {
     };
   }
 
-  private listDeskSessions(session: SessionRecord): SessionRecord[] {
+  private listDeskSessions(
+    session: SessionRecord,
+    sessionBatch = listSessions(this.config.dataDir),
+  ): SessionRecord[] {
     const anchor = workspaceIdOf(session);
-    return listSessions(this.config.dataDir)
+    return sessionBatch
       .filter(
         (member) =>
           member.project === session.project &&
@@ -5618,9 +7047,10 @@ export class SessionService {
   private async buildDeskGroupMembers(
     session: SessionRecord,
     current: { state: SessionState; runtimeAlive: boolean },
+    sessionBatch?: SessionRecord[],
   ): Promise<SessionDeskMember[]> {
     const members: SessionDeskMember[] = [];
-    for (const member of this.listDeskSessions(session)) {
+    for (const member of this.listDeskSessions(session, sessionBatch)) {
       if (member.id === session.id) {
         members.push({
           id: session.id,
@@ -5778,6 +7208,8 @@ export class SessionService {
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
+    const admissionReservation = this.reserveAdmission(request.project, "spawn");
+    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -5881,6 +7313,8 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      this.admissionReservations.delete(admissionReservation);
+      admissionReserved = false;
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -5976,6 +7410,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (admissionReserved) {
+        this.admissionReservations.delete(admissionReservation);
+      }
     }
   }
 
@@ -6206,13 +7644,14 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+        ...withAgentModeOptions(withProjectAgentOptions(agent, project, hookSetup), {
           planMode,
           restrictWrites,
         }),
@@ -6332,6 +7771,7 @@ export class SessionService {
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -7020,6 +8460,19 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    return this.withPaneWriteLock(session.tmuxSession, () =>
+      this.writeAgentMessage(session, message, options),
+    );
+  }
+
+  private async writeAgentMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<void> {
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
@@ -7359,13 +8812,75 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  // Reaps a sidecar's whole tmux pane process tree (group-first where
+  // proven, per-pid leaves-first otherwise) and waits for confirmation.
+  // Never throws — a survivor becomes a `warn` log entry, not a rejected
+  // promise (invariant: reap never blocks teardown). This is THE reap path
+  // for every single-shot sidecar-kill site; only teardownSessionSidecars
+  // bypasses it (signals all its sidecars first, confirms once, batching
+  // the grace window instead of paying it once per sidecar here).
+  private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+    return outcome;
+  }
+
+  private logSidecarReapSurvivors(
+    ownerId: string,
+    sidecarName: string,
+    outcome: ReapOutcome | null,
+  ): void {
+    if (!outcome || outcome.survivors.length === 0) {
+      return;
+    }
+    this.logEvent("session.sidecar.reap_incomplete", {
+      level: "warn",
+      sessionId: ownerId,
+      message: `Sidecar ${sidecarName} reap on ${ownerId} left ${outcome.survivors.length} process(es) alive after the confirmation window`,
+      details: { sidecarName, survivors: outcome.survivors },
+    });
+  }
+
+  // Drops sidecarProcs[sidecarName] from the owner record once its pane has
+  // been reaped, so a stopped sidecar's stale pgid can never be mistaken for
+  // a live claim by the sweep predicate. Mirrors the `delete mirrored.slots`
+  // pattern in writeWorkspaceStateWithLegacyMirror.
+  private clearSidecarProcEntry(ownerId: string, sidecarName: string): void {
+    const record = readSession(this.config.dataDir, ownerId);
+    if (!record?.sidecarProcs?.[sidecarName]) {
+      return;
+    }
+    const nextProcs = Object.fromEntries(
+      Object.entries(record.sidecarProcs).filter(([name]) => name !== sidecarName),
+    );
+    const updated: SessionRecord = { ...record };
+    if (Object.keys(nextProcs).length > 0) {
+      updated.sidecarProcs = nextProcs;
+    } else {
+      delete updated.sidecarProcs;
+    }
+    writeSession(this.config.dataDir, updated);
+  }
+
   // Kills a sidecar's tmux pane and unlinks its slot on the OWNER id (the
   // anchor's record for a desk-shared project sidecar, else the session's
   // own). Used by stopSidecar before its own event-logged write; the caller
   // re-reads its own record afterward rather than trusting this return.
+  // Never gates on sidecarTmuxAlive alone (a dead pane and an absent tmux
+  // session are exactly the states a leaked tree lives in): falls through to
+  // the recorded `sidecarProcs` identity when the tmux session is gone.
   private async killSidecarAndUnlinkSlot(ownerId: string, sidecarName: string): Promise<void> {
     this.abortSidecarUrlProbe(ownerId, sidecarName);
-    await killSidecarTmux(ownerId, sidecarName);
+    if (await sidecarTmuxAlive(ownerId, sidecarName)) {
+      await this.reapSidecarByName(ownerId, sidecarName);
+    } else {
+      const owner = readSession(this.config.dataDir, ownerId);
+      const identity = owner?.sidecarProcs?.[sidecarName];
+      if (owner && identity) {
+        const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
+      }
+    }
 
     const afterKill = readSession(this.config.dataDir, ownerId);
     if (!afterKill) return;
@@ -7383,6 +8898,7 @@ export class SessionService {
     } else {
       writeSession(this.config.dataDir, { ...afterKill, updatedAt: nowIso() });
     }
+    this.clearSidecarProcEntry(ownerId, sidecarName);
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
@@ -7400,7 +8916,11 @@ export class SessionService {
     }
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
 
-    if (!(await sidecarTmuxAlive(ownerId, sidecarName))) {
+    // A dead pane or an absent tmux session with no recorded identity means
+    // there is genuinely nothing left to reap.
+    const owner = readSession(this.config.dataDir, ownerId);
+    const alive = await sidecarTmuxAlive(ownerId, sidecarName);
+    if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
       return this.enrich(session);
     }
 
@@ -7418,12 +8938,29 @@ export class SessionService {
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
   }
 
+  // Report-first sweep for sidecar process trees no live session claims.
+  // Reaping only happens when `reap` is true — callers are `spur sidecar
+  // sweep [--reap]`; `spur doctor` calls `findLeakedSidecarTrees` directly
+  // and never reaches this method, keeping doctor read-only.
+  async sweepSidecarProcesses(reap: boolean): Promise<SidecarSweepResult> {
+    const sessions = listSessions(this.config.dataDir);
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
+    if (!assembled) {
+      return { supported: false, leaked: [], reaped: [] };
+    }
+    return sweepSidecars({ ...assembled, reap });
+  }
+
+  // Signals every torn-down sidecar's pane first, then confirms the whole
+  // batch through ONE shared grace window — not one sleep per sidecar (that
+  // would multiply teardown latency by sidecar count).
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     // Resolved once for the whole teardown: re-reading it per sidecar would
     // both cost a listSessions each time and let a sibling transitioning
     // mid-loop leave the desk's sidecars half torn down.
     const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
+    const pendingBySidecar: Array<{ ownerId: string; scName: string; pending: PendingReap }> = [];
     for (const scName of sessionSidecarNames(session, project)) {
       const sidecar = project?.sidecars[scName];
       // Non-mcp project sidecars are desk-shared: while another desk member's
@@ -7449,7 +8986,13 @@ export class SessionService {
           });
         }
       }
-      await killSidecarTmux(ownerId, scName).catch(() => {});
+      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+      pendingBySidecar.push({ ownerId, scName, pending });
+    }
+    const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    for (const [index, entry] of pendingBySidecar.entries()) {
+      this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
+      this.clearSidecarProcEntry(entry.ownerId, entry.scName);
     }
   }
 
@@ -7617,9 +9160,21 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest,
+    options: { retainInList?: boolean; skipEnrichment: true },
+  ): Promise<void>;
+  private async applyManualStatus(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
+    request?: CompleteSessionRequest,
+    options?: { retainInList?: boolean; skipEnrichment?: false },
+  ): Promise<SessionView>;
+  private async applyManualStatus(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean },
-  ): Promise<SessionView> {
+    options?: { retainInList?: boolean; skipEnrichment?: boolean },
+  ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -7639,6 +9194,7 @@ export class SessionService {
       delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
+      if (options?.skipEnrichment) return;
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
@@ -7657,10 +9213,11 @@ export class SessionService {
         delete record.error;
         writeSession(this.config.dataDir, record);
         this.stateCache.delete(sessionId);
+        if (options?.skipEnrichment) return;
         await this.refreshDashboardCacheEntry(record);
         return this.enrich(record);
       }
-      return this.enrich(session);
+      return options?.skipEnrichment ? undefined : this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
@@ -7718,8 +9275,9 @@ export class SessionService {
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
-    await this.refreshDashboardCacheEntry(record);
+    if (!options?.skipEnrichment) await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
       sessionId,
@@ -7729,7 +9287,7 @@ export class SessionService {
         worktree: session.worktree,
       },
     });
-    return this.enrich(record);
+    return options?.skipEnrichment ? undefined : this.enrich(record);
   }
 
   private async ensureKillDirtyWorktreeAllowed(
@@ -7834,6 +9392,12 @@ export class SessionService {
           details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
         });
       }
+      // Runs even when the removal above only warned: this session reached a
+      // terminal state either way, and a warn-only removal failure still
+      // means Spur no longer manages this worktree going forward — a
+      // migration-leftover config entry pointing at it should not survive
+      // the session that owned it.
+      this.unregisterWorktreeConfig(record.worktreePath);
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
@@ -7884,6 +9448,78 @@ export class SessionService {
         if (agentSessionId === session.agentSessionId) {
           return session;
         }
+        const backoffUntil = this.agentSessionIdPersistBackoffUntil.get(session.id);
+        if (backoffUntil !== undefined && Date.now() < backoffUntil) {
+          // A prior write failed and the backoff window has not elapsed.
+          // Discovery still ran above (resume plans need the id in memory),
+          // but do not retry the write or emit either event at loop cadence.
+          return { ...session, agentSessionId };
+        }
+        // Merge onto the freshest disk record, never the caller's argument:
+        // a mid-flight caller record (e.g. relaunch after killTmuxSession)
+        // can be stale, and this write must touch only agentSessionId.
+        // The read can throw (a TOCTOU race between findSessionFilePath's
+        // existsSync check and the readFileSync it guards, or momentarily
+        // unparseable JSON mid-write) — treat that the same as a missing
+        // record rather than let it escape into send()/deliver()/spawn().
+        let latest: SessionRecord | null;
+        let readFailureReason: string | undefined;
+        try {
+          latest = readSession(this.config.dataDir, session.id);
+        } catch (error) {
+          latest = null;
+          readFailureReason = error instanceof Error ? error.message : String(error);
+        }
+        if (latest && latest.agentSessionId === agentSessionId) {
+          return { ...session, agentSessionId };
+        }
+        if (!latest) {
+          // Nothing to merge onto: the record is gone (session-gc archival
+          // mid-poll, a normal terminal-state race) or unreadable. The
+          // discovered id is dropped here with no write, so warn once per
+          // the same backoff window persist failures use below — an
+          // unconditional warn would re-fire every delivery tick for a
+          // session stuck in this state, recreating the flood this function
+          // exists to prevent.
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Could not persist discovered agent session id for ${session.id}: session record unavailable`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason: readFailureReason ?? "session record not found",
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
+          return { ...session, agentSessionId };
+        }
+        try {
+          writeSession(this.config.dataDir, { ...latest, agentSessionId });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.agent_session_id.persist_failed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to persist discovered agent session id for ${session.id}`,
+            details: {
+              agent: session.agent,
+              agentSessionId,
+              reason,
+            },
+          });
+          this.agentSessionIdPersistBackoffUntil.set(
+            session.id,
+            Date.now() + AGENT_SESSION_ID_PERSIST_BACKOFF_MS,
+          );
+          return { ...session, agentSessionId };
+        }
+        this.agentSessionIdPersistBackoffUntil.delete(session.id);
         this.logEvent("session.agent_session_id.discovered", {
           level: "info",
           sessionId: session.id,
@@ -7891,7 +9527,7 @@ export class SessionService {
           message: `Discovered native agent session id for ${session.id}`,
           details: {
             agent: session.agent,
-            previousAgentSessionId: session.agentSessionId ?? null,
+            previousAgentSessionId: latest.agentSessionId ?? null,
             agentSessionId,
           },
         });
@@ -7919,8 +9555,7 @@ export class SessionService {
       }
     }
 
-    const workspacePresent =
-      session.worktree && session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     this.logEvent("session.recover.check", {
       level: "info",
       sessionId: session.id,
@@ -7942,8 +9577,18 @@ export class SessionService {
     if (session.status === "completed") {
       throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
-    if (!session.worktree || !session.worktreePath || !workspacePresent) {
-      throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
+    if (!session.worktreePath || !workspacePresent) {
+      // Shepherd's workspace is a plain directory (worktree: false), never a
+      // git worktree Spur removes on its own — see shouldRemoveWorktreeOnTerminal.
+      // If an operator (or a wiped host) deletes it out from under a stopped
+      // session, re-materialize the same empty dir spawnShepherd creates on
+      // first spawn rather than leaving shepherd permanently unrecoverable.
+      if (session.project !== SHEPHERD_PROJECT_ID) {
+        throw new Error(
+          `Session ${session.id} cannot be recovered because its workspace is missing`,
+        );
+      }
+      ensureShepherdWorkspace(this.config.dataDir);
     }
 
     const project = this.getProject(session.project);
@@ -8003,6 +9648,7 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
+      modelsCacheHome: this.config.models.codexHome,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
@@ -8011,7 +9657,7 @@ export class SessionService {
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(project, {
+        withProjectAgentOptions(session.agent, project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
@@ -8166,6 +9812,23 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
+    // path reads the session directly rather than through that method, so
+    // isRestorableSession's workspaceExists (computed by enrich() below) would
+    // otherwise see a wiped shepherd workspace as unrestorable. Gated on
+    // !isTerminalSessionStatus (not isRestorableStatus, which excludes
+    // "errored") so an errored shepherd still heals here, matching
+    // isRestorableSession's own errored+state==="error" branch and the
+    // send-path sibling above. A killed/completed shepherd is still rejected
+    // below rather than having its workspace re-created as a side effect
+    // first.
+    if (
+      !isTerminalSessionStatus(session.status) &&
+      session.project === SHEPHERD_PROJECT_ID &&
+      !workspaceExists(session.worktreePath)
+    ) {
+      ensureShepherdWorkspace(this.config.dataDir);
+    }
 
     const current = await this.enrich(session);
     if (!isRestorableSession(current)) {
@@ -8190,6 +9853,8 @@ export class SessionService {
         availableActions,
       );
     }
+
+    this.assertAdmissible(current.project, "restore");
 
     this.logEvent("session.restore.started", {
       level: "info",
@@ -8225,6 +9890,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
+        modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
@@ -8237,7 +9903,7 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(restoreProjectConfig, {
+          withProjectAgentOptions(current.agent, restoreProjectConfig, {
             ...hookSetup,
             ...(sessionAgentConfig.planOptions ?? {}),
           }),
@@ -8836,7 +10502,8 @@ export class SessionService {
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
+      launchCommand: claudeCommand(),
+      env: { CLAUDE_CONFIG_DIR: account.configDir },
     });
     return { loginTmuxSession };
   }
@@ -8910,6 +10577,11 @@ export class SessionService {
     if (session.status === "completed") {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
     }
+    // Unlike handoff, respawn needs no replacingSessionId exclusion: the
+    // status guard above requires completed/killed/errored, none of which
+    // countLiveSessions treats as live, and the kill() below (source cleanup
+    // for a status other than "completed") only runs after this spawn
+    // already succeeded — so admission never counts the source twice.
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(bootstrap ? { bootstrap: true } : {}),
@@ -8944,130 +10616,143 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-
-    const agent = parseAgentName(request.agent);
-    const notes = request.notes?.trim();
-    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-    const clonedAttachments = this.cloneStartupAttachments(
-      workspaceIdOf(session),
-      session.startupAttachmentIds ?? [],
-    );
-    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
-    const mergedAttachments = [
-      ...clonedAttachments,
-      ...(handoffScreenshot ? [handoffScreenshot] : []),
-    ];
-    let remainingPipelineSteps: string[] | undefined;
-    if (session.pipeline?.status === "running") {
-      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
-      if (steps.length > 0) {
-        remainingPipelineSteps = steps;
-      }
-    }
-    const model = resolveCarriedSpawnModel(session, agent, request.model);
-
-    let sourceForSpawn = session;
-    if (session.status === "running" || session.status === "spawning") {
-      const stopped: SessionRecord = {
-        ...this.sessionWithReleasedSidecarPorts(session),
-        status: "stopped",
-        stopReason: "manual_pause",
-        updatedAt: nowIso(),
-        retainInList: true,
-      };
-      writeSession(this.config.dataDir, stopped);
-      this.stateCache.delete(sessionId);
-      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
-      await this.cleanupSessionServices(stopped);
-      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
-    }
-
-    const prompt = renderHandoffPrompt({
-      sourceSessionId: session.id,
-      sourceAgent: session.agent,
-      branch: session.branch,
-      worktreePath: session.worktreePath,
-      originalPrompt: originalTask,
-      ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: sourceForSpawn.slots?.links ?? [],
-      ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
-      ...(session.pr ? { pr: session.pr } : {}),
-      ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
-      ...(notes ? { notes } : {}),
-      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+    // Gate before any teardown below. The source session is still on-disk as
+    // running/spawning here, so a denial leaves it fully untouched — no kill,
+    // no status flip. The successor replaces the source rather than adding to
+    // the fleet, so exclude it from the live count: a handoff at exactly the
+    // cap is net-neutral (stop one, start one) and must be allowed.
+    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
+      replacingSessionId: session.id,
     });
-
-    this.logEvent("session.handoff.started", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Handing off ${sessionId} to ${agent}`,
-      details: {
-        sourceAgent: session.agent,
-        targetAgent: agent,
-        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
-      },
-    });
-
-    let spawned = await this.spawn(
-      resolveHandoffSpawnRequest(sourceForSpawn, {
-        prompt,
-        agent,
-        ...(model !== undefined ? { model } : {}),
-        originalTaskPrompt: originalTask,
-        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
-        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
-      }),
-    );
-
-    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
-    if (spawnedRecord) {
-      writeSession(this.config.dataDir, {
-        ...spawnedRecord,
-        ...(session.pr ? { pr: session.pr } : {}),
-        originalTaskPrompt: originalTask,
-        updatedAt: nowIso(),
-      });
-    }
-
-    if (session.slots?.title || session.slots?.tags?.length) {
-      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
-      if (session.slots.title || carryTags.length > 0) {
-        try {
-          spawned = await this.updateSlots(spawned.id, {
-            ...(session.slots.title ? { title: session.slots.title } : {}),
-            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.handoff.carry_slots_failed", {
-            level: "warn",
-            sessionId,
-            projectId: session.project,
-            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
-          });
-        }
-      }
-    }
 
     try {
-      await this.complete(
-        session.id,
-        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+      const agent = parseAgentName(request.agent);
+      const notes = request.notes?.trim();
+      const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
+      const clonedAttachments = this.cloneStartupAttachments(
+        workspaceIdOf(session),
+        session.startupAttachmentIds ?? [],
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.handoff.source_complete_failed", {
-        level: "warn",
+      const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+      const mergedAttachments = [
+        ...clonedAttachments,
+        ...(handoffScreenshot ? [handoffScreenshot] : []),
+      ];
+      let remainingPipelineSteps: string[] | undefined;
+      if (session.pipeline?.status === "running") {
+        const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+        if (steps.length > 0) {
+          remainingPipelineSteps = steps;
+        }
+      }
+      const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+      let sourceForSpawn = session;
+      if (session.status === "running" || session.status === "spawning") {
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          retainInList: true,
+        };
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(sessionId);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        await this.cleanupSessionServices(stopped);
+        sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+      }
+
+      const prompt = renderHandoffPrompt({
+        sourceSessionId: session.id,
+        sourceAgent: session.agent,
+        branch: session.branch,
+        worktreePath: session.worktreePath,
+        originalPrompt: originalTask,
+        ...(session.slots?.title ? { title: session.slots.title } : {}),
+        links: sourceForSpawn.slots?.links ?? [],
+        ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
+        ...(session.pr ? { pr: session.pr } : {}),
+        ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
+        ...(notes ? { notes } : {}),
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      });
+
+      this.logEvent("session.handoff.started", {
+        level: "info",
         sessionId,
         projectId: session.project,
-        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        message: `Handing off ${sessionId} to ${agent}`,
+        details: {
+          sourceAgent: session.agent,
+          targetAgent: agent,
+          ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        },
       });
-    }
 
-    return spawned;
+      let spawned = await this.spawn(
+        resolveHandoffSpawnRequest(sourceForSpawn, {
+          prompt,
+          agent,
+          ...(model !== undefined ? { model } : {}),
+          originalTaskPrompt: originalTask,
+          ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+          ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+        }),
+        { replacingSessionId: session.id, admissionReservation },
+      );
+
+      const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+      if (spawnedRecord) {
+        writeSession(this.config.dataDir, {
+          ...spawnedRecord,
+          ...(session.pr ? { pr: session.pr } : {}),
+          originalTaskPrompt: originalTask,
+          updatedAt: nowIso(),
+        });
+      }
+
+      if (session.slots?.title || session.slots?.tags?.length) {
+        const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+        if (session.slots.title || carryTags.length > 0) {
+          try {
+            spawned = await this.updateSlots(spawned.id, {
+              ...(session.slots.title ? { title: session.slots.title } : {}),
+              ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.handoff.carry_slots_failed", {
+              level: "warn",
+              sessionId,
+              projectId: session.project,
+              message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+            });
+          }
+        }
+      }
+
+      try {
+        await this.complete(
+          session.id,
+          { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+          { retainInList: true },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.handoff.source_complete_failed", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+        });
+      }
+
+      return spawned;
+    } finally {
+      this.admissionReservations.delete(admissionReservation);
+    }
   }
 
   private resumeSessionDelivery(): void {
@@ -9160,6 +10845,12 @@ export class SessionService {
       remainingMessages,
       true,
     );
+    // Persist the drain before the discovery wait below: captureAgentSessionId
+    // anchors its own internal write on a fresh readSession, and must never
+    // observe the pre-drain queue here. A crash between an internal write and
+    // this function's own write would otherwise leave agentSessionId on disk
+    // while the just-delivered message still shows as queued.
+    writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     this.logEvent("session.message.sent", {
@@ -9585,7 +11276,12 @@ export class SessionService {
     model?: string;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
+    this.codexRolloutReaders.set(sessionId, rolloutReader);
+    const rolloutRead = await readCodexRolloutState(
+      this.codexSessionsDir(sessionId),
+      rolloutReader,
+    );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
@@ -9656,6 +11352,275 @@ export class SessionService {
     if (until !== undefined && Date.now() < until) return true;
     this.restoreWarmupUntil.delete(sessionId);
     return false;
+  }
+
+  // Same "can this session's dashboard view still change from agent
+  // activity" predicate as reapDeadSessionSidecars' inline filter. The
+  // short-circuit order matters: isInRestoreWarmup mutates (it clears an
+  // expired warmup entry), so running/spawning sessions must never reach it,
+  // exactly as the sidecar reaper already relies on.
+  private isLiveSessionRecord(session: Pick<SessionRecord, "id" | "status">): boolean {
+    return (
+      session.status === "running" ||
+      session.status === "spawning" ||
+      this.isInRestoreWarmup(session.id)
+    );
+  }
+
+  // Single source of truth for "is this session live" across the two
+  // admission gates, /headroom, and the daemon-startup log. Never calls
+  // enrich() — running|spawning is the on-disk status predicate
+  // reconcileStoppedSessions already uses, unioned with sessions mid-restore
+  // (on-disk status still stopped/errored, see restore()'s comment above
+  // restoreWarmupUntil.set) so a restore in flight is counted exactly once.
+  // `excludeSessionId` drops one session from the live count before admission
+  // math runs. Used to make a "replace this session" admission decision
+  // (handoff) net-neutral: the source is still on-disk as running/spawning
+  // when the check runs (it must be, so a denial leaves it untouched), but
+  // it is about to be torn down and replaced, so it should not count against
+  // the very spawn that replaces it.
+  private countLiveSessions(excludeSessionId?: string): {
+    total: number;
+    byProject: Map<string, number>;
+    records: SessionRecord[];
+  } {
+    const live = listSessions(this.config.dataDir).filter(
+      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+    );
+    const byProject = new Map<string, number>();
+    for (const session of live) {
+      byProject.set(session.project, (byProject.get(session.project) ?? 0) + 1);
+    }
+    return { total: live.length, byProject, records: live };
+  }
+
+  private admissionDenialAction(records: SessionRecord[]): string {
+    const candidates = [...records]
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .slice(0, 3)
+      .map((session) => `${session.id} (${session.project})`)
+      .join(", ");
+    return candidates
+      ? `Stop one of: ${candidates}.`
+      : "Wait for an in-flight spawn to finish, then stop a live session or retry.";
+  }
+
+  private admissionOccupancy(live: number, reserved: number): string {
+    const claimed = live + reserved;
+    return `${claimed} ${claimed === 1 ? "slot" : "slots"} claimed: ${live} live, ${reserved} reserved`;
+  }
+
+  // Runs at both admission gates (resolveSpawnTarget, restore). Never
+  // mutates state, never kills, never acts retroactively on sessions already
+  // above the cap — a denial only refuses the *new* spawn/restore in front
+  // of it. `admission.enabled: false` is a full escape hatch: neither the
+  // cap nor the memory guard can deny, though the guard still logs a
+  // report-only warning when crossed so the condition stays visible.
+  private assertAdmissible(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+  ): void {
+    const admission = this.config.admission;
+    const memory = readHostMemory();
+    let legacyGuardDetail: string | undefined;
+    let floorGuardDetail: string | undefined;
+    if (memory) {
+      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+        legacyGuardDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+        legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      }
+
+      const contextFloor =
+        context === "restore"
+          ? admission.memoryGuard.restoreFloorBytes
+          : admission.memoryGuard.admissionFloorBytes;
+      if (memory.availableBytes < contextFloor) {
+        floorGuardDetail = `available memory ${availableMiB}MB is below the ${(
+          contextFloor /
+          (1024 * 1024)
+        ).toFixed(0)}MB ${context} floor`;
+      } else {
+        const pressure = readCgroupPressure();
+        if (
+          pressure !== null &&
+          pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse
+        ) {
+          floorGuardDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
+        }
+      }
+    }
+    if (legacyGuardDetail) {
+      this.logEvent("session.admission.memory_guard", {
+        level: "warn",
+        projectId,
+        message: `Memory guard crossed for ${context} in project "${projectId}": ${legacyGuardDetail}`,
+      });
+    }
+    if (!admission.enabled) {
+      return;
+    }
+    const denialDetail =
+      (legacyGuardDetail && admission.memoryGuard.enforce ? legacyGuardDetail : undefined) ??
+      (floorGuardDetail && admission.memoryGuard.enforceFloors ? floorGuardDetail : undefined);
+    if (denialDetail) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    const live = this.countLiveSessions(opts?.replacingSessionId);
+    let reservedTotal = 0;
+    let projectReserved = 0;
+    for (const [reservation, reservedProjectId] of this.admissionReservations) {
+      if (reservation === opts?.admissionReservation) continue;
+      reservedTotal += 1;
+      if (reservedProjectId === projectId) projectReserved += 1;
+    }
+    const projectCap = this.config.projects[projectId]?.maxLiveSessions;
+    const projectLive = live.byProject.get(projectId) ?? 0;
+    const projectClaimed = projectLive + projectReserved;
+    if (projectCap !== undefined && projectClaimed >= projectCap) {
+      const projectCandidates = live.records.filter((session) => session.project === projectId);
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+    const totalLive = live.total + reservedTotal;
+    if (totalLive >= admission.maxLiveSessions) {
+      const denial = new SessionAdmissionDeniedError(
+        `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
+      );
+      this.logEvent("session.admission.denied", {
+        level: "warn",
+        projectId,
+        message: denial.message,
+      });
+      throw denial;
+    }
+  }
+
+  private reserveAdmission(
+    projectId: string,
+    context: "spawn" | "restore",
+    opts?: { replacingSessionId?: string },
+  ): symbol {
+    this.assertAdmissible(projectId, context, opts);
+    const reservation = Symbol(projectId);
+    this.admissionReservations.set(reservation, projectId);
+    return reservation;
+  }
+
+  // Cheap admission snapshot for the daemon-startup log: cap and live count
+  // only. getHeadroom() also awaits getFleetSessionRssBytes() (a `ps` fork
+  // plus `tmux list-panes -a`) for its per-session RSS breakdown, which the
+  // boot log throws away — too costly to run inside the pre-`ready` window.
+  getAdmissionStartupSummary(): {
+    enabled: boolean;
+    cap: { global: number; source: AdmissionCapSource };
+    liveCount: number;
+  } {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    return {
+      enabled: admission.enabled,
+      cap: { global: admission.maxLiveSessions, source: admission.maxLiveSessionsSource },
+      liveCount: live.total,
+    };
+  }
+
+  getMemoryCeilingWarning(): {
+    cgroupPath: string;
+    memoryMaxUnlimited: true;
+    memoryHighUnlimited: boolean;
+    oomdPresent: false;
+  } | null {
+    const limits = readCgroupMemorySnapshot();
+    const oomdPresent = isSystemdOomdPresent();
+    if (limits?.maxBytes !== null || oomdPresent) return null;
+    return {
+      cgroupPath: limits.path,
+      memoryMaxUnlimited: true,
+      memoryHighUnlimited: limits.highBytes === null,
+      oomdPresent: false,
+    };
+  }
+
+  async getHeadroom(): Promise<HeadroomReport> {
+    const admission = this.config.admission;
+    const live = this.countLiveSessions();
+    const liveSessionByWorkspaceId = new Map<string, string>();
+    for (const session of live.records) {
+      const workspaceId = workspaceIdOf(session);
+      const currentOwner = liveSessionByWorkspaceId.get(workspaceId);
+      if (!currentOwner || session.id === workspaceId) {
+        liveSessionByWorkspaceId.set(workspaceId, session.id);
+      }
+    }
+    const rssBySessionId = await getFleetSessionRssBytes(liveSessionByWorkspaceId);
+    const projectCaps: Record<string, number> = {};
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      if (project.maxLiveSessions !== undefined) {
+        projectCaps[projectId] = project.maxLiveSessions;
+      }
+    }
+    const byProject: Record<string, number> = {};
+    for (const [projectId, count] of live.byProject) {
+      byProject[projectId] = count;
+    }
+    const memory = readHostMemory();
+    const guardCrossed =
+      memory !== null &&
+      (memory.availableBytes < admission.memoryGuard.minAvailableBytes ||
+        memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes ||
+        memory.availableBytes < admission.memoryGuard.admissionFloorBytes);
+    return {
+      cap: {
+        global: admission.maxLiveSessions,
+        source: admission.maxLiveSessionsSource,
+        perSessionBytes: admission.perSessionBytes,
+        reserveFraction: admission.reserveFraction,
+      },
+      projectCaps,
+      live: { count: live.total, byProject },
+      projectedRoom: Math.max(0, admission.maxLiveSessions - live.total),
+      sessions: [...live.records]
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+        .map((session) => ({
+          id: session.id,
+          project: session.project,
+          status: session.status,
+          rssBytes: rssBySessionId.get(session.id) ?? 0,
+        })),
+      memory,
+      guard: {
+        enforce: admission.memoryGuard.enforce,
+        enforceFloors: admission.memoryGuard.enforceFloors,
+        minAvailableBytes: admission.memoryGuard.minAvailableBytes,
+        minFreeSwapBytes: admission.memoryGuard.minFreeSwapBytes,
+        admissionFloorBytes: admission.memoryGuard.admissionFloorBytes,
+        shedCriticalFloorBytes: admission.memoryGuard.shedCriticalFloorBytes,
+        restoreFloorBytes: admission.memoryGuard.restoreFloorBytes,
+        pressureSomeAvg10Refuse: admission.memoryGuard.pressureSomeAvg10Refuse,
+        crossed: guardCrossed,
+      },
+    };
   }
 
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
@@ -10133,6 +12098,11 @@ export class SessionService {
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
+    // Holds the message for the single deduped session.state.classified emit
+    // at the end of this function; undefined means never log (unchanged from
+    // today for non-running/dead-pane sessions). A later branch's assignment
+    // overrides an earlier one exactly as it overrides `state`.
+    let classifiedDetail: string | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -10197,30 +12167,15 @@ export class SessionService {
           state = statusResult.state;
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (claude status=${statusResult.status})`,
-          });
+          classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no claude status/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);
@@ -10231,35 +12186,15 @@ export class SessionService {
         liveModel = codexState.model;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`,
-          });
+          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
-          });
+          classifiedDetail = `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`;
         } else if (codexState.hookState) {
           const hookState = codexState.hookState;
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
-          });
+          classifiedDetail = `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`;
         } else {
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no hook/jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no hook/jsonl)`;
         }
       } else {
         const jsonlResult = await readCursorJsonlState(
@@ -10274,20 +12209,10 @@ export class SessionService {
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-          });
+          classifiedDetail = `State: ${state} (cursor jsonl, records=${jsonlResult.reader.tailRecords.length})`;
         } else {
           state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no cursor jsonl)`,
-          });
+          classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       }
 
@@ -10330,12 +12255,7 @@ export class SessionService {
             session.id,
             Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: working (claude compacting)",
-          });
+          classifiedDetail = "State: working (claude compacting)";
         } else {
           this.claudeCompactingOverrides.delete(session.id);
         }
@@ -10349,6 +12269,7 @@ export class SessionService {
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "working";
+          classifiedDetail = "State: working (claude compacting)";
         }
       } else if (scanPane && strategy === "hook") {
         // Codex-specific: a hard rate-limit banner always wins. Otherwise,
@@ -10367,12 +12288,7 @@ export class SessionService {
             session.id,
             Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
           );
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: "State: needs_input (codex MCP permission dialog)",
-          });
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         } else {
           this.codexMcpDialogOverrides.delete(session.id);
         }
@@ -10392,6 +12308,7 @@ export class SessionService {
         if (expiresAt !== undefined && expiresAt > Date.now()) {
           state = "needs_input";
           rateLimit = null;
+          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
       } else if (scanPane && !rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
@@ -10402,23 +12319,27 @@ export class SessionService {
       }
       if (rateLimit?.limited) {
         state = "rate_limited";
-        this.logEvent("session.state.classified", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `State: rate_limited (${rateLimit.reason})`,
-        });
+        classifiedDetail = `State: rate_limited (${rateLimit.reason})`;
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
         historySourcePath = serverErrorJsonlPath;
+        classifiedDetail = "State: error (claude server error)";
+      }
+    }
+
+    if (classifiedDetail === undefined) {
+      this.lastClassifiedLogStates.delete(session.id);
+    } else {
+      if (this.lastClassifiedLogStates.get(session.id) !== state) {
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
           projectId: session.project,
-          message: "State: error (claude server error)",
+          message: classifiedDetail,
         });
       }
+      this.lastClassifiedLogStates.set(session.id, state);
     }
 
     return {
@@ -10465,10 +12386,9 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
-    // (it probes its own tmux id, which never has the pane). Resolving the
-    // project re-reads and re-validates the config file, so this 2s-tick path
-    // only pays for it when the session is actually a desk member with
-    // sidecars — a non-desk session always owns its own panes.
+    // (it probes its own tmux id, which never has the pane). Still gated on
+    // being a desk member with sidecars — a non-desk session always owns its
+    // own panes, so this 2s-tick path skips even the cached lookup.
     const sidecarNames = session.sidecarNames ?? [];
     const deskProject =
       workspaceIdOf(session) !== session.id && sidecarNames.length > 0
@@ -10518,6 +12438,7 @@ export class SessionService {
   private async enrich(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
@@ -10562,10 +12483,14 @@ export class SessionService {
     const displaySlots = deriveSessionSlots(
       resolveWorkspaceState(this.config.dataDir, anchorRecord),
     );
-    const deskGroupMembers = await this.buildDeskGroupMembers(session, {
-      state,
-      runtimeAlive: classified.runtime.runtimeAlive,
-    });
+    const deskGroupMembers = await this.buildDeskGroupMembers(
+      session,
+      {
+        state,
+        runtimeAlive: classified.runtime.runtimeAlive,
+      },
+      sessionBatch,
+    );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 

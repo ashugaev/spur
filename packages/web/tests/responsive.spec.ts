@@ -37,6 +37,42 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("spawn draft survives mobile close and full reload", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let settledPreflights = 0;
+    await page.route("**/api/preflight", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/auto-branch" }),
+      });
+      settledPreflights += 1;
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByPlaceholder("Prompt...").fill("Keep mobile draft");
+    await page.getByLabel("branch name").fill("feature/mobile-draft");
+    await page.getByLabel("Plan").check();
+    await expect.poll(() => settledPreflights).toBe(1);
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(1);
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.reload();
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(2);
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await expect(page.getByLabel("Plan")).toBeChecked();
+  });
+
   // Design acceptance criteria 1-3: the header collapses to a single row at
   // every width, the spawn FAB is reachable, and nothing overflows.
   test("header controls share one y-band, the FAB is visible, and there is no horizontal scroll", async ({
@@ -346,7 +382,9 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await page.setViewportSize({ width: 700, height: 844 });
     await page.goto("/");
 
-    const glyph = page.getByRole("img", { name: "Spur" });
+    // Scoped to the header: with zero sessions the EmptyState renders a second
+    // "Spur" glyph inside main once it loads, and the bare locator goes ambiguous.
+    const glyph = page.getByRole("banner").getByRole("img", { name: "Spur" });
     const filtersTrigger = page.getByRole("button", { name: "Filters" });
     const searchInput = page.getByPlaceholder("Filter...");
     const shepherd = page.getByRole("button", { name: "Spawn Shepherd" });
@@ -393,7 +431,8 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await page.goto("/");
 
     const controls = [
-      page.getByRole("img", { name: "Spur" }),
+      // Header-scoped for the same reason as the 700px/390px test above.
+      page.getByRole("banner").getByRole("img", { name: "Spur" }),
       page.getByRole("button", { name: "Filters" }),
       page.getByPlaceholder("Filter..."),
       page.getByRole("button", { name: "Spawn Shepherd" }),

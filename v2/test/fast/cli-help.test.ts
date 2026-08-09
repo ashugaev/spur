@@ -13,6 +13,7 @@ describe("spur help", () => {
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
     expect(help).toContain("doctor [options]");
+    expect(help).toContain("gc [options]");
     expect(help).toContain("init [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
@@ -27,11 +28,11 @@ describe("spur help", () => {
     expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("service");
     expect(help).toContain("source");
+    expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
-    expect(help).not.toContain("subscribe");
     expect(help).not.toContain("internal");
     expect(help).not.toContain("playwright");
   });
@@ -86,6 +87,33 @@ describe("spur help", () => {
     expect(help).not.toContain("help [command]");
   });
 
+  it("documents gc as dry-run-by-default with its safety guarantees", () => {
+    const program = buildProgram();
+    const gc = program.commands.find((command) => command.name() === "gc");
+
+    expect(gc).toBeDefined();
+    if (!gc) {
+      throw new Error("Expected gc command to be registered");
+    }
+
+    const help = gc.helpInformation();
+
+    expect(help).toContain("dry run unless --execute");
+    expect(help).toContain("--execute");
+    expect(help).toContain("--older-than <days>");
+    expect(help).toContain("--statuses <list>");
+    expect(help).toContain("--project <id>");
+    expect(help).toContain("--limit <number>");
+    expect(help).toContain("--no-sizes");
+    expect(help).toContain("--json");
+    expect(help).toContain("Nothing is touched without `--execute`.");
+    expect(help).toContain(
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR",
+    );
+    expect(help).toContain("`git worktree remove`");
+    expect(help).toContain("can no longer be restored");
+  });
+
   it("documents spawn branch and current workspace flags", () => {
     const program = buildProgram();
     const spawn = program.commands.find((command) => command.name() === "spawn");
@@ -103,6 +131,9 @@ describe("spur help", () => {
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
+    expect(help).toContain("--subscribe-to <sessionId>");
+    expect(help).toContain("--subscribe-state <state>");
+    expect(help).toContain("--subscribe-message <message>");
     expect(help).toContain("Agent to start: claude, codex, or cursor");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");

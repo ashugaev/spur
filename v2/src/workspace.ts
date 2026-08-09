@@ -27,6 +27,13 @@ const WORKSPACE_LOCK_FILE = "spur-workspace.lock";
 // longer worktree-creation lock timeout above — this bounds `isGitWorktree`/
 // `branchStatus` independently of that.
 const PROJECT_GIT_CHECK_TIMEOUT_MS = 5_000;
+// No git spawn may wait forever: a worktree on a hung mount, or an index lock
+// held by a dead agent, would otherwise pin whatever awaits it (the attention
+// sweep included). Mutating commands get the generous cap — `fetch` and
+// `worktree add` are legitimately slow on a large repo — while the read probes
+// that run per session per sweep get the short one.
+const GIT_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const GIT_READ_TIMEOUT_MS = 5_000;
 
 interface CreateWorktreeInput {
   repoPath: string;
@@ -62,9 +69,13 @@ interface LockOwner {
 
 const DEFAULT_BRANCH_HINT = "main";
 
-async function git(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd });
+async function runGit(cwd: string, args: string[], timeoutMs: number): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd, timeout: timeoutMs });
   return stdout.trimEnd();
+}
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  return runGit(cwd, args, GIT_COMMAND_TIMEOUT_MS);
 }
 
 async function tryGit(cwd: string, ...args: string[]): Promise<string | undefined> {
@@ -262,7 +273,37 @@ function parseWorktreeList(output: string): GitWorktreeEntry[] {
 }
 
 export async function readCurrentBranch(repoPath: string): Promise<string> {
-  return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
+  return runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"], GIT_READ_TIMEOUT_MS);
+}
+
+/**
+ * Configured URL of every git remote, keyed by remote name. One spawn for the
+ * whole set instead of one `remote get-url` per candidate remote, and no GitHub
+ * budget at all. Empty when the repo is unreadable or has no remote.
+ */
+export async function readRemoteUrls(repoPath: string): Promise<Map<string, string>> {
+  const urls = new Map<string, string>();
+  let output: string;
+  try {
+    output = await runGit(
+      repoPath,
+      ["config", "--get-regexp", "^remote\\..*\\.url$"],
+      GIT_READ_TIMEOUT_MS,
+    );
+  } catch {
+    // Exit code 1 means "no remote configured"; anything else (missing repo,
+    // hung mount hitting the timeout) reads the same way here: no remotes.
+    return urls;
+  }
+  for (const line of output.split("\n")) {
+    const match = /^remote\.(.+)\.url\s+(\S.*)$/.exec(line.trim());
+    const name = match?.[1];
+    const url = match?.[2]?.trim();
+    if (name && url) {
+      urls.set(name, url);
+    }
+  }
+  return urls;
 }
 
 function normalizeBranchHint(value: string | undefined): string | undefined {
@@ -336,9 +377,21 @@ async function pruneWorktrees(repoPath: string): Promise<void> {
   }
 }
 
+// Public entry point for a caller outside this module (session GC) that
+// needs to prune stale worktree metadata after removing one out from under
+// git's back (removeWorktree's rmSync/sudo-rm fallback path can leave a
+// worktree entry registered in .git/worktrees even though the directory is
+// gone, which would block a later `git worktree add`/reopen at the same
+// path). Every other caller of pruneWorktrees already runs inside its own
+// withWorkspaceGitLock; this one takes the lock itself since GC calls it
+// standalone, after its own removeWorktree calls have already released theirs.
+export async function pruneRepoWorktrees(repoPath: string): Promise<void> {
+  await withWorkspaceGitLock(repoPath, () => pruneWorktrees(repoPath));
+}
+
 async function gitExitCode(cwd: string, ...args: string[]): Promise<number> {
   try {
-    await execFileAsync("git", args, { cwd });
+    await execFileAsync("git", args, { cwd, timeout: GIT_READ_TIMEOUT_MS });
     return 0;
   } catch (error) {
     return errorExitCode(error) ?? 1;

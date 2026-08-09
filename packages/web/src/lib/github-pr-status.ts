@@ -72,9 +72,9 @@ export function recordGitHubPrNode(
   error?: string,
 ): PrStatusResponse {
   let state: PrState;
-  if (node.isDraft) state = "draft";
-  else if (node.merged) state = "merged";
+  if (node.merged) state = "merged";
   else if (node.state === "CLOSED") state = "closed";
+  else if (node.isDraft) state = "draft";
   else state = "open";
 
   const totalThreads = node.reviewThreads.nodes.length;
