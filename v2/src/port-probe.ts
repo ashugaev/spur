@@ -42,6 +42,23 @@ async function execFileOutput(file: string, args: string[]): Promise<string> {
   }
 }
 
+// Unlike execFileOutput, a failure here must stay visibly distinct from an
+// empty/zero-row success — the sidecar reap veto (hasEstablishedConnections)
+// treats "the probe could not run" as "unknown" (keep, never reap), not as
+// "no connections" (which would authorize a reap). execFileOutput collapsing
+// every failure to "" is exactly the trap this sibling exists to avoid.
+async function execFileTriState(
+  file: string,
+  args: string[],
+): Promise<{ ok: true; stdout: string } | { ok: false }> {
+  try {
+    const { stdout } = await execFileAsync(file, args, { timeout: LISTENER_LOOKUP_TIMEOUT_MS });
+    return { ok: true, stdout: stdout.toString() };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function parseLsofPids(output: string): number[] {
   const pids = new Set<number>();
   for (const line of output.split("\n")) {
@@ -97,6 +114,34 @@ export async function findListenerPids(port: number): Promise<number[]> {
 
   const ssOutput = await execFileOutput("ss", ["-ltnp", "sport", "=", `:${port}`]);
   return parseSsPids(ssOutput);
+}
+
+// The sidecar reap veto: an established TCP connection on a sidecar's
+// reserved port is treated as "a user is debugging this", regardless of the
+// owner session's status. `ss` prints a header row even with zero matches,
+// so more than one non-empty line proves a live connection; anything the
+// probe itself could not resolve (missing `ss`, timeout, non-zero exit)
+// must come back "unknown" — never "none" — so a probe failure can never be
+// misread as proof of no connections. See execFileTriState above.
+export async function hasEstablishedConnections(
+  port: number,
+): Promise<"established" | "none" | "unknown"> {
+  if (!isValidPort(port)) {
+    return "unknown";
+  }
+  const result = await execFileTriState("ss", [
+    "-tn",
+    "state",
+    "established",
+    "sport",
+    "=",
+    `:${port}`,
+  ]);
+  if (!result.ok) {
+    return "unknown";
+  }
+  const lines = result.stdout.split("\n").filter((line) => line.trim().length > 0);
+  return lines.length > 1 ? "established" : "none";
 }
 
 export async function clearPortListener(port: number): Promise<void> {

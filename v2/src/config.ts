@@ -1138,12 +1138,17 @@ function parseSidecars(
         );
       }
     }
+    const idleTtlMinutes = asOptionalPositiveInteger(
+      entryRaw["idleTtlMinutes"],
+      `${entryLabel}.idleTtlMinutes`,
+    );
     result[name] = {
       command,
       autoStart,
       ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
       ...(env ? { env } : {}),
       ...(ports ? { ports } : {}),
+      ...(idleTtlMinutes !== undefined ? { idleTtlMinutes } : {}),
     };
   }
   validateSidecarDependencies(label, result);
@@ -1640,6 +1645,35 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
   };
 }
 
+// Ship enabled by default (unlike sessionGc): this reaper is a memory-safety
+// control that kills a restartable sidecar process, never a worktree or a
+// record, so the destructive-by-default caution sessionGc needs does not
+// apply here.
+export const DEFAULT_SIDECAR_GC: AppConfig["sidecarGc"] = {
+  enabled: true,
+  idleTtlMinutes: 120,
+  maxAgeWarnMinutes: 360,
+};
+
+// Instance-only, same footgun as sessionGc/authRotation/rateLimitReactivation:
+// parsed only when mode === "instance", so a per-project sidecarGc block is
+// silently ignored.
+function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
+  if (value === undefined) {
+    return DEFAULT_SIDECAR_GC;
+  }
+  const root = asObject(value, "sidecarGc");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "sidecarGc.enabled") ?? DEFAULT_SIDECAR_GC.enabled,
+    idleTtlMinutes:
+      asOptionalPositiveInteger(root["idleTtlMinutes"], "sidecarGc.idleTtlMinutes") ??
+      DEFAULT_SIDECAR_GC.idleTtlMinutes,
+    maxAgeWarnMinutes:
+      asOptionalPositiveInteger(root["maxAgeWarnMinutes"], "sidecarGc.maxAgeWarnMinutes") ??
+      DEFAULT_SIDECAR_GC.maxAgeWarnMinutes,
+  };
+}
+
 // Estimated from an agent, Playwright MCP sidecar, and isolated daemon:
 // 1.5 GiB per session leaves room above the 1.21 GiB design estimate.
 const DEFAULT_ADMISSION_MAX_LIVE_SESSIONS = 100;
@@ -2024,6 +2058,7 @@ function parseConfigFile(
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
     projects: normalizedProjects,
     tags,
