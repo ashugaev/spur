@@ -1275,6 +1275,144 @@ projects:
     });
   });
 
+  it("parses a project modes registry", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: manager
+        default: true
+      council:
+        skill: council
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.modes).toEqual({
+      manager: { skill: "manager", default: true },
+      council: { skill: "council" },
+    });
+  });
+
+  it("parses a mode literally named __proto__ as a genuine own key, not a prototype mutation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      __proto__:
+        skill: manager
+`);
+
+    const config = loadConfig(configPath);
+    const modes = config.projects["backend"]?.modes;
+
+    expect(Object.hasOwn(modes ?? {}, "__proto__")).toBe(true);
+    expect(Object.entries(modes ?? {})).toEqual([["__proto__", { skill: "manager" }]]);
+  });
+
+  it("rejects a modes registry with more than one default", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: manager
+        default: true
+      council:
+        skill: council
+        default: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.modes: at most one mode may set default: true",
+    );
+  });
+
+  it("rejects a mode with an empty skill", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: ""
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.modes.manager.skill must be a non-empty string",
+    );
+  });
+
+  it("rejects an invalid mode name", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      "bad name":
+        skill: manager
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /projects\.backend\.modes\.bad name is invalid: mode names must match/,
+    );
+  });
+
+  it("parses a trigger spawn block mode field", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          mode: council
+`);
+
+    const config = loadConfig(configPath);
+    const trigger = config.projects["backend"]?.triggers["review"];
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected review to be a spawn trigger");
+    }
+
+    expect(trigger.spawn.blocks[0]?.mode).toBe("council");
+  });
+
+  it("rejects a spawn-level mode field alongside blocks[]", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          mode: council
+          blocks:
+            - prompt: "review"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn: put per-block fields inside blocks[]",
+    );
+  });
+
   it("parses project codex args", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2563,6 +2701,13 @@ projects:
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
+  });
+
+  it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+
+    expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
+    expect(config.projects["sp"]?.spawn?.steps).toBeUndefined();
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -4175,6 +4320,97 @@ projects:
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     });
+  });
+});
+
+describe("sidecarGc", () => {
+  it("defaults to enabled true / 120 / 360 when absent (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("parses sidecarGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+  idleTtlMinutes: 240
+  maxAgeWarnMinutes: 720
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: false,
+      idleTtlMinutes: 240,
+      maxAgeWarnMinutes: 720,
+    });
+  });
+
+  it("ignores a project-level sidecarGc block", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("reads a per-sidecar idleTtlMinutes override instead of silently dropping it (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      front-local:
+        command: "pnpm dev"
+        idleTtlMinutes: 240
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["front-local"]).toEqual({
+      command: "pnpm dev",
+      autoStart: false,
+      idleTtlMinutes: 240,
+    });
+  });
+
+  it("still rejects idleTtlMinutes on a built-in sidecar (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        idleTtlMinutes: 30
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: idleTtlMinutes)',
+    );
   });
 });
 
