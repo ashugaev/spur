@@ -2085,6 +2085,10 @@ export function createProgram(cliEntrypoint: string): Command {
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
     )
     .option(
+      "--mode <name>",
+      "Session mode from projects.<id>.modes; overrides the project default mode",
+    )
+    .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
@@ -2171,6 +2175,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),

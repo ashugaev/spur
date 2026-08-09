@@ -299,6 +299,11 @@ export interface SpurSessionView {
   };
 }
 
+export interface SessionModeInfo {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectInfo {
   id: string;
   name: string;
@@ -306,6 +311,7 @@ export interface ProjectInfo {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeInfo>;
 }
 
 export interface CreateProjectRequest {

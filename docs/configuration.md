@@ -171,7 +171,7 @@ projects:
 
 When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction to run the session-local `spur-self-destruct` helper after the task completes. Omitting `conditions` (or leaving it blank) uses the default completion condition, `every objective in the task prompt is done`; an explicit `conditions` string is trimmed and replaces it.
 
-With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message.
+With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message — unless a mode resolved (see Modes below), in which case the mode instruction becomes the session's initial message on its own.
 
 ## Desk groups
 
@@ -201,6 +201,19 @@ A desk group is any set of sessions sharing one workspace: the children of a `sp
 Members share slots (title/links/tags/PR), session artifacts, and non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one shared instance per desk, addressable by any member. Each member still keeps its own transcript, agent process, status, MCP sidecar (`playwright`), and session tool dir.
 
 The worktree and the shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. A shared sidecar and its reserved ports are released as soon as no member has a running agent; restoring a member starts it again.
+
+## Modes
+
+```yaml
+projects:
+  backend-api:
+    modes:
+      manager: { skill: manager, default: true }
+```
+
+A mode is a per-session behavior contract: a prompt suffix telling the session which skill to load. Resolved once at spawn from `--mode`, the `POST /sessions` body, or a trigger `spawn.mode`; an explicit request beats the project's `default: true` entry, which beats no suffix. An unknown requested name fails the spawn, listing the configured names. No `modes:` on a project means no suffix. The parser does not check that the named skill exists — the daemon cannot see the agent's skill search path. A resolved mode always reaches the session even with an empty/no prompt: the mode instruction becomes the session's whole initial message instead of being appended to nothing. The web spawn modal shows a session mode picker for projects that configure `modes:`, preselected to the `default: true` entry (or to no mode when none is marked default), and forwards the picked name; projects without `modes:` show no picker and spawn unmoded.
+
+Respawn, handoff, and restore carry the persisted mode forward instead of re-resolving it against the project default. If the config changed underneath the session (mode renamed or removed) the carried-forward lookup degrades to no-mode with a logged warning instead of blocking the respawn/handoff/restore.
 
 ## Telegram binding
 
@@ -244,6 +257,8 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
 - `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
+- `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
+- `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
@@ -266,6 +281,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `spawn.prompt` / `spawn[].prompt`: required task prompt.
 - `spawn.steps` / `spawn[].steps`: optional ordered phase list.
 - `spawn.agent` / `spawn[].agent`: optional `claude|codex|cursor`.
+- `spawn.mode` / `spawn[].mode`: optional mode name from `projects.<id>.modes`.
 - `spawn.selfDestruct` / `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
 - `spawn.branch` / `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
 - `spawn.overrides.worktree` / `spawn[].overrides.worktree`: optional boolean.

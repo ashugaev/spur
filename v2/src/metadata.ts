@@ -677,6 +677,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     workspaceId: workspaceIdOf(normalizedSession),
     agent: normalizedSession.agent,
     ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
+    ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
