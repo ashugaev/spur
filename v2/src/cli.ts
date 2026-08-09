@@ -8,8 +8,11 @@ import {
   type HostInstallCheck,
 } from "./host-install.js";
 import {
+  byEntrySizeDesc,
   executePrune,
+  formatCacheSizeGb,
   planCachePrune,
+  prunableCandidates,
   type CachePlan,
   type CacheCandidate,
   type PruneOutcome,
@@ -857,10 +860,6 @@ function renderDoctorResult(result: DoctorResult): string {
   return lines.join("\n");
 }
 
-function formatGb(kb: number): string {
-  return `${(kb / (1024 * 1024)).toFixed(2)}GB`;
-}
-
 const MAX_LISTED_CANDIDATES = 20;
 
 function formatProtectedReason(candidate: CacheCandidate): string {
@@ -881,6 +880,8 @@ function formatProtectedReason(candidate: CacheCandidate): string {
       return "never pruned (this class is report-only)";
     case "process-tree-unreadable":
       return "process tree unreadable";
+    case "process-list-unavailable":
+      return "process listing unavailable";
     case "not-owned":
       return `not owned by this user (uid ${reason.uid})`;
     case "symlink":
@@ -888,39 +889,31 @@ function formatProtectedReason(candidate: CacheCandidate): string {
   }
 }
 
-// Ranked by size descending — never rely on filesystem/readdir order.
-function bySizeDesc(a: CacheCandidate, b: CacheCandidate): number {
-  return b.entry.sizeKb - a.entry.sizeKb;
-}
-
 function renderCachePlan(plan: CachePlan): string {
   const lines: string[] = [boldText("Cache roots")];
   for (const root of plan.roots) {
     lines.push(
-      `  ${accent(root.rootId.padEnd(20))}  ${root.status.padEnd(9)}  ${formatGb(root.totalKb).padStart(9)}  ${String(root.entryCount).padStart(5)} entries  ${dimText(root.path)}`,
+      `  ${accent(root.rootId.padEnd(20))}  ${root.status.padEnd(9)}  ${formatCacheSizeGb(root.totalKb).padStart(9)}  ${String(root.entryCount).padStart(5)} entries  ${dimText(root.path)}`,
     );
   }
 
-  const prunable = plan.candidates
-    .filter(
-      (candidate): candidate is CacheCandidate & { verdict: { kind: "prunable" } } =>
-        candidate.verdict.kind === "prunable",
-    )
-    .sort(bySizeDesc);
+  const prunable = prunableCandidates(plan);
   const protectedCandidates = plan.candidates
     .filter(
       (candidate): candidate is CacheCandidate & { verdict: { kind: "protected" } } =>
         candidate.verdict.kind === "protected",
     )
-    .sort(bySizeDesc);
+    .sort(byEntrySizeDesc);
 
   lines.push(
     "",
-    boldText(`Prunable: ${prunable.length} entries, ${formatGb(plan.reclaimableKb)} reclaimable`),
+    boldText(
+      `Prunable: ${prunable.length} entries, ${formatCacheSizeGb(plan.reclaimableKb)} reclaimable`,
+    ),
   );
   for (const candidate of prunable.slice(0, MAX_LISTED_CANDIDATES)) {
     lines.push(
-      `  ${formatGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}`,
+      `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}`,
     );
   }
   if (prunable.length > MAX_LISTED_CANDIDATES) {
@@ -931,7 +924,7 @@ function renderCachePlan(plan: CachePlan): string {
   for (const candidate of protectedCandidates.slice(0, MAX_LISTED_CANDIDATES)) {
     lines.push(
       dimText(
-        `  ${formatGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}  — ${formatProtectedReason(candidate)}`,
+        `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}  — ${formatProtectedReason(candidate)}`,
       ),
     );
   }
@@ -954,7 +947,9 @@ function renderCachePlan(plan: CachePlan): string {
 
 function renderPruneOutcome(outcome: PruneOutcome): string {
   const lines = [
-    boldText(`Removed ${outcome.removed.length} entries, freed ${formatGb(outcome.freedKb)}`),
+    boldText(
+      `Removed ${outcome.removed.length} entries, freed ${formatCacheSizeGb(outcome.freedKb)}`,
+    ),
   ];
   if (outcome.failures.length > 0) {
     lines.push(dimText(`${outcome.failures.length} failures:`));
@@ -982,7 +977,7 @@ function renderCacheActionResult(result: CacheActionResult): string {
     lines.push(
       "",
       dimText(
-        `Would remove ${prunableCount} entries, ${formatGb(result.plan.reclaimableKb)} — re-run with --prune --yes to actually delete.`,
+        `Would remove ${prunableCount} entries, ${formatCacheSizeGb(result.plan.reclaimableKb)} — re-run with --prune --yes to actually delete.`,
       ),
     );
   }

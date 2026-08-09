@@ -58,10 +58,12 @@ function makeOwnership(overrides: Partial<EntryOwnership> = {}): EntryOwnership 
 function makeLiveness(overrides: Partial<LivenessSnapshot> = {}): LivenessSnapshot {
   return {
     processTreeReadable: true,
+    processListReadable: true,
     processes: [],
     sessionCwds: [],
     pinnedDirNames: new Set(),
     pinSourceCount: 1,
+    instanceConfigOk: true,
     ...overrides,
   };
 }
@@ -348,15 +350,17 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     execFileMock.mockReset();
     canReadProcessTreeMock.mockReset();
     canReadProcessTreeMock.mockResolvedValue(true);
-    // No live ps rows by default — irrelevant to these tests beyond not
-    // throwing.
+    // A single innocuous row by default — `listProcesses()` treats a
+    // genuinely empty table as "unavailable" (see process-tree.ts), and a
+    // real `ps -eo` always lists at least init, so an empty mock would be
+    // unrepresentative of a working `ps` here.
     execFileMock.mockImplementation(
       (file: string, args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
         const callback = (
           typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
         ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
         if (file === "ps") {
-          callback(null, { stdout: "", stderr: "" });
+          callback(null, { stdout: "1 0 /sbin/init\n", stderr: "" });
           return {} as ChildProcess.ChildProcess;
         }
         if (file === "du") {
@@ -490,7 +494,19 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       },
     ];
 
-    const outcome = await executePrune(candidates, { home });
+    // `ctime` cannot be back-dated by `utimes()` — it always reflects real
+    // wall-clock fixture creation, which just happened. executePrune's
+    // delete-time re-check (F3) uses max(mtime, ctime), so without advancing
+    // the clock every one of these freshly-created fixtures would fail the
+    // age floor before ever reaching the guard this test targets.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let outcome: Awaited<ReturnType<typeof executePrune>>;
+    try {
+      outcome = await executePrune(candidates, { home });
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(outcome.removed).toEqual([{ path: realFile, sizeKb: 10 }]);
     expect(outcome.failures).toEqual([
@@ -500,5 +516,79 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
 
     await rm(escapeTargetDir, { recursive: true, force: true });
     await rm(outsideRootDir, { recursive: true, force: true });
+  });
+
+  it("AC13: executePrune refuses a candidate resolving inside dataDir, even though it clears every other guard", async () => {
+    await mkdir(join(home, ".cache"), { recursive: true });
+    const insideDataDir = join(home, ".cache", "livedata");
+    await mkdir(insideDataDir);
+    await writeFile(join(insideDataDir, "data"), "x");
+
+    const candidate = {
+      entry: {
+        path: insideDataDir,
+        rootId: "xdg-cache" as const,
+        entryClass: { kind: "generic" as const, name: "livedata" },
+        sizeKb: 10,
+        newestChangeMs: Date.now(),
+        ageDays: 60,
+      },
+      verdict: { kind: "prunable" as const },
+    };
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let outcome: Awaited<ReturnType<typeof executePrune>>;
+    try {
+      // `dataDir` set to the temp home's `.cache` parent — the whole home
+      // dir, exactly as spur.yaml's `dataDir` would resolve above a real
+      // `.cache` — so a candidate that would otherwise clear every other
+      // guard (symlink, own-root containment, age) still must not be
+      // deleted.
+      outcome = await executePrune([candidate], { home, dataDir: home });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(outcome.removed).toEqual([]);
+    expect(outcome.failures).toEqual([
+      { path: insideDataDir, message: "refused: resolves inside dataDir" },
+    ]);
+  });
+
+  it("AC14: executePrune refuses a candidate resolving inside worktreeDir, even though it clears every other guard", async () => {
+    await mkdir(join(home, ".cache", "worktrees"), { recursive: true });
+    const insideWorktreeDir = join(home, ".cache", "worktrees", "proj", "sess");
+    await mkdir(insideWorktreeDir, { recursive: true });
+    await writeFile(join(insideWorktreeDir, "data"), "x");
+
+    const candidate = {
+      entry: {
+        path: insideWorktreeDir,
+        rootId: "xdg-cache" as const,
+        entryClass: { kind: "generic" as const, name: "sess" },
+        sizeKb: 10,
+        newestChangeMs: Date.now(),
+        ageDays: 60,
+      },
+      verdict: { kind: "prunable" as const },
+    };
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let outcome: Awaited<ReturnType<typeof executePrune>>;
+    try {
+      outcome = await executePrune([candidate], {
+        home,
+        worktreeDir: join(home, ".cache", "worktrees"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(outcome.removed).toEqual([]);
+    expect(outcome.failures).toEqual([
+      { path: insideWorktreeDir, message: "refused: resolves inside worktreeDir" },
+    ]);
   });
 });

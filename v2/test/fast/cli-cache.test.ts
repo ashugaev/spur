@@ -128,7 +128,18 @@ describe("spur cache CLI", () => {
   });
 
   it("calls rm exactly once per prunable candidate with --prune --yes", async () => {
-    await parseCache(["--prune", "--yes"]);
+    // executePrune's delete-time re-check (F3) recomputes age from a fresh
+    // `lstat`, and `ctime` cannot be back-dated on a file `writeFileSync`
+    // just created — advance the clock instead so the fixture reads as
+    // genuinely old at delete time, same as the fixed plan's declared
+    // `ageDays: 40` claims.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 41 * 86_400_000);
+    try {
+      await parseCache(["--prune", "--yes"]);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(rmMock).toHaveBeenCalledTimes(2);
     const removedPaths = rmMock.mock.calls.map((call) => call[0]);
     expect(removedPaths).toEqual(expect.arrayContaining([smallPath, bigPath]));
@@ -160,7 +171,13 @@ describe("spur cache CLI", () => {
   });
 
   it("includes the prune outcome in --json output when executed", async () => {
-    await parseCache(["--json", "--prune", "--yes"]);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 41 * 86_400_000);
+    try {
+      await parseCache(["--json", "--prune", "--yes"]);
+    } finally {
+      vi.useRealTimers();
+    }
     const printed = writeStdoutMock.mock.calls
       .map((call) => String(call[0]))
       .find((line) => line.startsWith("{"));

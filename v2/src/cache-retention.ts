@@ -11,19 +11,27 @@ import {
   listProcesses,
   type ProcessInfo,
 } from "./process-tree.js";
-import { getTmuxPanePid, setTmuxSocketName } from "./runtime-tmux.js";
+import { getTmuxPanePid, getTmuxSocketName, setTmuxSocketName } from "./runtime-tmux.js";
 import type { InstanceConfigReadResult } from "./config.js";
 
 const execFileAsync = promisify(execFile);
 
-// CLI-only module: `du` (measurement) and `rm` (deletion) only ever run from
-// an explicit `spur cache` invocation, never from the daemon. The daemon's
-// only disk syscall is `disk-space.ts`'s `readFreeKb` (a `df`, not a `du`) —
-// see session-service.ts's warnIfHostDiskLow. Importing this module from the
-// daemon's request-handling path (server.ts, session-service.ts) would
-// silently widen that boundary; only host-install.ts's CLI-only
-// `reclaimable-caches` doctor check and cli.ts's `cache` command may import
-// it.
+// `du` (measurement) and `rm` (deletion) only ever run from an explicit
+// `spur cache` or `spur doctor` invocation, never from a daemon
+// request-handling path. This is a call-site discipline, not an import-graph
+// one: `spur daemon start` runs in the same process as every other CLI
+// subcommand (cli.ts is the single entrypoint), so this module IS loaded
+// into the daemon's process — via cli.ts's own top-level import of
+// host-install.ts, not via session-service.ts (its only reference to
+// host-install.ts, through workspace.ts, is a type-only import that is
+// erased at build time and pulls in nothing at runtime). Importing it does
+// not by itself widen the daemon's syscall surface — what matters is that
+// neither server.ts nor session-service.ts ever calls
+// `planCachePrune`/`executePrune`. The daemon's only disk syscall on that
+// path stays `disk-space.ts`'s `readFreeKb` (a `df`, not a `du`) — see
+// session-service.ts's warnIfHostDiskLow. Only host-install.ts's
+// `reclaimable-caches` doctor check and cli.ts's `cache` command call these
+// functions.
 
 export type CacheRootId =
   | "npm-cacache"
@@ -56,6 +64,7 @@ export type ProtectedReason =
   | { kind: "pin-unresolved" }
   | { kind: "class-never-pruned" }
   | { kind: "process-tree-unreadable" }
+  | { kind: "process-list-unavailable" }
   | { kind: "not-owned"; uid: number }
   | { kind: "symlink" };
 
@@ -91,15 +100,25 @@ export interface LiveSessionCwd {
 
 export interface LivenessSnapshot {
   processTreeReadable: boolean;
+  // `listProcesses()` returned `null` (ps unavailable, or an empty table —
+  // see process-tree.ts) rather than a genuine process table. Kept distinct
+  // from `processTreeReadable` (which only probes /proc/self/stat and stays
+  // true even when the `ps` binary itself is missing or blocked).
+  processListReadable: boolean;
   processes: readonly ProcessInfo[];
   sessionCwds: readonly LiveSessionCwd[];
   pinnedDirNames: ReadonlySet<string>;
   pinSourceCount: number;
+  // Whether the instance config resolved (`status === "ok"`). Browser
+  // revisions require this in addition to `pinSourceCount > 0`: P2/P3 pin
+  // sources (every configured project/worktree) never resolve at all
+  // without it, so a missing/invalid config must fail closed the same way
+  // zero resolved sources does, not silently rely on whatever P1/P4 found.
+  instanceConfigOk: boolean;
 }
 
 export interface CachePlan {
   generatedAt: string;
-  freeKbBefore?: number;
   roots: CacheRootMeasurement[];
   candidates: CacheCandidate[];
   reclaimableKb: number;
@@ -124,9 +143,6 @@ export const BROWSER_PROFILE_MIN_AGE_DAYS = 7;
 // than the global one since there is no liveness signal for them beyond
 // argv/cwd.
 export const GENERIC_MIN_AGE_DAYS = 30;
-// CORR-A: /tmp floor equals the global floor — no extra grace beyond the
-// hard minimum every class already gets.
-export const TMP_MIN_AGE_DAYS = GLOBAL_MIN_AGE_DAYS;
 export const CACHE_MEASURE_TIMEOUT_MS = 30_000;
 export const DU_CHUNK_SIZE = 500;
 
@@ -183,11 +199,12 @@ export function classifyEntry(rootId: CacheRootId, name: string): CacheEntryClas
   }
 }
 
-// `undefined` means "no age floor at all" — reachable only for
-// browser-registry, the sole class that stays class-never-pruned regardless
-// of age (C4: it is neither a revision nor a profile, so no staleness signal
-// applies to it at all).
-function classFloorDays(entryClass: CacheEntryClass): number | undefined {
+// Total over every CacheEntryClass so callers never need an `?? GLOBAL_MIN_AGE_DAYS`
+// fallback. `browser-registry`'s case is unreachable in practice — C4: it is
+// class-never-pruned before this is ever consulted (verdictFor short-circuits
+// on it, and it can never be a `prunable` candidate reaching executePrune
+// either) — but the switch stays exhaustive rather than partial.
+function classFloorDays(entryClass: CacheEntryClass): number {
   switch (entryClass.kind) {
     case "vendor-cache":
       return GLOBAL_MIN_AGE_DAYS;
@@ -198,11 +215,11 @@ function classFloorDays(entryClass: CacheEntryClass): number | undefined {
     case "browser-profile":
       return BROWSER_PROFILE_MIN_AGE_DAYS;
     case "browser-registry":
-      return undefined;
+      return GLOBAL_MIN_AGE_DAYS;
     case "generic":
       return GENERIC_MIN_AGE_DAYS;
     case "tmp-entry":
-      return TMP_MIN_AGE_DAYS;
+      return GLOBAL_MIN_AGE_DAYS;
   }
 }
 
@@ -246,14 +263,16 @@ export function verdictFor(
   if (!liveness.processTreeReadable) {
     return { kind: "protected", reason: { kind: "process-tree-unreadable" } };
   }
+  if (!liveness.processListReadable) {
+    return { kind: "protected", reason: { kind: "process-list-unavailable" } };
+  }
   if (entry.entryClass.kind === "browser-registry") {
     return { kind: "protected", reason: { kind: "class-never-pruned" } };
   }
   if (entry.entryClass.kind === "tmp-entry" && isTmpDenyListed(entry.entryClass.name)) {
     return { kind: "protected", reason: { kind: "class-never-pruned" } };
   }
-  const floorDays = classFloorDays(entry.entryClass);
-  const effectiveFloor = Math.max(GLOBAL_MIN_AGE_DAYS, floorDays ?? GLOBAL_MIN_AGE_DAYS);
+  const effectiveFloor = Math.max(GLOBAL_MIN_AGE_DAYS, classFloorDays(entry.entryClass));
   if (entry.ageDays < effectiveFloor) {
     return {
       kind: "protected",
@@ -261,7 +280,10 @@ export function verdictFor(
     };
   }
   if (entry.entryClass.kind === "browser-revision") {
-    if (liveness.pinSourceCount === 0) {
+    // Fail closed on either signal: zero resolved `browsers.json` sources,
+    // or no instance config at all (which P2/P3 — every configured
+    // project/worktree — depend on; see resolvePins).
+    if (!liveness.instanceConfigOk || liveness.pinSourceCount === 0) {
       return { kind: "protected", reason: { kind: "pin-unresolved" } };
     }
     if (liveness.pinnedDirNames.has(entry.entryClass.dirName)) {
@@ -487,33 +509,52 @@ async function collectLiveness(
   home: string,
   instanceConfig: InstanceConfigReadResult,
 ): Promise<LivenessSnapshot> {
-  const processes = await listProcesses();
+  const rawProcesses = await listProcesses();
+  const processListReadable = rawProcesses !== null;
+  const processes = rawProcesses ?? [];
   const processTreeReadable = await canReadProcessTree(process.pid);
   const { pinnedDirNames, pinSourceCount } = await resolvePins(home, instanceConfig);
 
   const sessionCwds: LiveSessionCwd[] = [];
   if (instanceConfig.status === "ok") {
+    // Read-only measurement path: `setTmuxSocketName` mutates a process-wide
+    // global (see runtime-tmux.ts), so the prior value is restored once this
+    // block is done rather than left clobbered for whatever else runs later
+    // in the same process.
+    const previousTmuxSocketName = getTmuxSocketName();
     setTmuxSocketName(instanceConfig.config.tmux.socketName);
-    const liveSessions = listSessions(instanceConfig.config.dataDir).filter(
-      (session) => session.status === "running" || session.status === "spawning",
-    );
-    for (const session of liveSessions) {
-      const panePid = await getTmuxPanePid(session.tmuxSession);
-      if (panePid === null) continue;
-      const descendants = collectDescendants(panePid, processes);
-      for (const pid of descendants) {
-        try {
-          const cwd = await readlink(`/proc/${pid}/cwd`);
-          sessionCwds.push({ pid, cwd });
-        } catch {
-          // Process exited between the ps snapshot and this readlink, or no
-          // procfs — not a liveness signal either way.
+    try {
+      const liveSessions = listSessions(instanceConfig.config.dataDir).filter(
+        (session) => session.status === "running" || session.status === "spawning",
+      );
+      for (const session of liveSessions) {
+        const panePid = await getTmuxPanePid(session.tmuxSession);
+        if (panePid === null) continue;
+        const descendants = collectDescendants(panePid, processes);
+        for (const pid of descendants) {
+          try {
+            const cwd = await readlink(`/proc/${pid}/cwd`);
+            sessionCwds.push({ pid, cwd });
+          } catch {
+            // Process exited between the ps snapshot and this readlink, or no
+            // procfs — not a liveness signal either way.
+          }
         }
       }
+    } finally {
+      setTmuxSocketName(previousTmuxSocketName ?? undefined);
     }
   }
 
-  return { processTreeReadable, processes, sessionCwds, pinnedDirNames, pinSourceCount };
+  return {
+    processTreeReadable,
+    processListReadable,
+    processes,
+    sessionCwds,
+    pinnedDirNames,
+    pinSourceCount,
+    instanceConfigOk: instanceConfig.status === "ok",
+  };
 }
 
 interface RawEntry {
@@ -541,7 +582,36 @@ async function listRawEntries(root: CacheRoot): Promise<RawEntry[] | "absent"> {
     .map((name) => ({ path: join(root.path, name), entryClass: classifyEntry(root.id, name) }));
 }
 
-async function duSizesKb(paths: string[]): Promise<Map<string, number> | undefined> {
+interface DuExecFailure {
+  killed?: boolean;
+  signal?: string | null;
+  stdout?: unknown;
+}
+
+function isDuExecFailure(error: unknown): error is DuExecFailure {
+  return typeof error === "object" && error !== null;
+}
+
+// `du` exits non-zero when even one entry in the chunk is unreadable
+// (permission denied), while still writing correct size lines to stdout for
+// every other entry in the chunk. Node's promisified `execFile` attaches
+// `stdout` (and `killed`/`signal`) to the rejection error, so a
+// partial-failure chunk is recoverable from its `stdout` instead of being
+// discarded outright — discarding it previously zeroed the whole root's
+// measurement over a single unreadable subdirectory anywhere inside it.
+// Only a genuine timeout/abort (`killed`, or a `signal`) or a chunk with no
+// usable stdout at all is treated as unmeasurable.
+function partialDuStdout(error: unknown): string | undefined {
+  if (!isDuExecFailure(error)) return undefined;
+  if (error.killed || error.signal) return undefined;
+  if (typeof error.stdout !== "string" || error.stdout.trim() === "") return undefined;
+  return error.stdout;
+}
+
+async function duSizesKb(
+  paths: string[],
+  signal?: AbortSignal,
+): Promise<Map<string, number> | undefined> {
   const sizes = new Map<string, number>();
   for (let i = 0; i < paths.length; i += DU_CHUNK_SIZE) {
     const chunk = paths.slice(i, i + DU_CHUNK_SIZE);
@@ -550,9 +620,14 @@ async function duSizesKb(paths: string[]): Promise<Map<string, number> | undefin
       ({ stdout } = await execFileAsync("du", ["-skx", ...chunk], {
         timeout: CACHE_MEASURE_TIMEOUT_MS,
         maxBuffer: 64 * 1024 * 1024,
+        ...(signal ? { signal } : {}),
       }));
-    } catch {
-      return undefined;
+    } catch (error) {
+      const partial = partialDuStdout(error);
+      if (partial === undefined) {
+        return undefined;
+      }
+      stdout = partial;
     }
     for (const line of stdout.split("\n")) {
       const match = /^(\d+)\t(.+)$/.exec(line);
@@ -571,6 +646,7 @@ interface StatFacts extends EntryOwnership {
 async function measureRoot(
   root: CacheRoot,
   nowMs: number,
+  signal?: AbortSignal,
 ): Promise<{
   measurement: CacheRootMeasurement;
   entries: CacheEntry[];
@@ -615,7 +691,10 @@ async function measureRoot(
     ownership.set(path, { uid: fact.uid, isSymlink: fact.isSymlink });
   }
 
-  const sizes = await duSizesKb(statted.map((item) => item.path));
+  const sizes = await duSizesKb(
+    statted.map((item) => item.path),
+    signal,
+  );
   if (sizes === undefined) {
     return {
       measurement: {
@@ -635,7 +714,12 @@ async function measureRoot(
   for (const item of statted) {
     const fact = facts.get(item.path);
     if (!fact) continue;
-    const sizeKb = sizes.get(item.path) ?? 0;
+    const sizeKb = sizes.get(item.path);
+    // No size line came back for this specific entry (e.g. it was the one
+    // permission-denied entry in an otherwise-successful `du` chunk) — it is
+    // simply unmeasured, not a reason to report it at size 0 or to drop the
+    // whole root (see partialDuStdout above).
+    if (sizeKb === undefined) continue;
     const newestChangeMs = Math.max(fact.mtimeMs, fact.ctimeMs);
     const ageDays = ageDaysFor(fact.mtimeMs, fact.ctimeMs, nowMs);
     entries.push({
@@ -668,7 +752,12 @@ export interface PlanCachePruneOptions {
   // "/tmp"; never exposed as a CLI flag or config key.
   tmpPath?: string;
   instanceConfig?: InstanceConfigReadResult;
-  freeKbBefore?: number;
+  // Bounds the `du` children the measurement spawns — a caller (host-install.ts's
+  // `reclaimable-caches` doctor check) that races this against its own budget
+  // needs the in-flight children actually killed on timeout, not just its own
+  // await abandoned, or a wedged/slow `du` keeps the event loop (and `spur
+  // doctor`'s exit) alive well past the budget.
+  signal?: AbortSignal;
 }
 
 export async function planCachePrune(options: PlanCachePruneOptions = {}): Promise<CachePlan> {
@@ -684,7 +773,7 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
   let reclaimableKb = 0;
 
   for (const root of cacheRoots(home, options.tmpPath)) {
-    const { measurement, entries, ownership } = await measureRoot(root, nowMs);
+    const { measurement, entries, ownership } = await measureRoot(root, nowMs, options.signal);
     roots.push(measurement);
     for (const entry of entries) {
       const own = ownership.get(entry.path);
@@ -699,11 +788,10 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
-    ...(options.freeKbBefore !== undefined ? { freeKbBefore: options.freeKbBefore } : {}),
     roots,
     candidates,
     reclaimableKb,
-    processTreeReadable: liveness.processTreeReadable,
+    processTreeReadable: liveness.processTreeReadable && liveness.processListReadable,
     pinSourceCount: liveness.pinSourceCount,
   };
 }
@@ -714,10 +802,12 @@ function isWithin(parentReal: string, targetReal: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"));
 }
 
-// Deletion guard: re-`lstat` (skip if now a symlink or missing), assert the
-// resolved path stays inside its own root (no symlink-escape) and outside
-// `dataDir`/`worktreeDir`, then `fs.promises.rm`. Failures are collected,
-// never thrown — one bad candidate must never abort the rest of the sweep.
+// Deletion guard: re-`lstat` (skip if now a symlink or missing), refuse
+// anything that no longer clears its own age floor, re-check liveness
+// against a fresh process listing, assert the resolved path stays inside its
+// own root (no symlink-escape) and outside `dataDir`/`worktreeDir`, then
+// `fs.promises.rm`. Failures are collected, never thrown — one bad candidate
+// must never abort the rest of the sweep.
 export async function executePrune(
   candidates: CacheCandidate[],
   guard: { dataDir?: string; worktreeDir?: string; home?: string; tmpPath?: string },
@@ -725,18 +815,67 @@ export async function executePrune(
   const removed: { path: string; sizeKb: number }[] = [];
   const failures: { path: string; message: string }[] = [];
   const roots = cacheRoots(guard.home ?? homedir(), guard.tmpPath);
+  const nowMs = Date.now();
+
+  // The liveness snapshot and every per-entry stat driving `candidates` were
+  // captured at the START of a measurement that can take tens of seconds —
+  // long enough for an `npm install` or a reused `mcp-chrome-*` profile to
+  // start mid-sweep. Re-running the listing ONCE right before deletion
+  // starts (rather than trusting the stale snapshot) lets a process that
+  // started after planning still veto its own deletion. `null` (ps
+  // unavailable) gets the same fail-closed treatment as planCachePrune's
+  // processTreeReadable check: refuse every remaining candidate rather than
+  // delete blind.
+  const freshProcesses = await listProcesses();
 
   for (const candidate of candidates) {
     if (candidate.verdict.kind !== "prunable") continue;
-    const { path, rootId, sizeKb } = candidate.entry;
+    const { path, rootId, sizeKb, entryClass } = candidate.entry;
     try {
+      if (freshProcesses === null) {
+        failures.push({ path, message: "refused: process listing unavailable at delete time" });
+        continue;
+      }
       const st = await lstat(path);
       if (st.isSymbolicLink()) {
         failures.push({ path, message: "refused: now a symlink" });
         continue;
       }
+      // Age can only have grown since planning — a shrink would mean the
+      // entry was touched, which is exactly what this refuses on.
+      const ageDays = ageDaysFor(st.mtimeMs, st.ctimeMs, nowMs);
+      const floorDays = Math.max(GLOBAL_MIN_AGE_DAYS, classFloorDays(entryClass));
+      if (ageDays < floorDays) {
+        failures.push({
+          path,
+          message: `refused: no longer old enough at delete time (${ageDays}d < ${floorDays}d)`,
+        });
+        continue;
+      }
+      if (entryClass.kind === "vendor-cache") {
+        const pm = freshProcesses.find(isPackageManagerProcess);
+        if (pm) {
+          failures.push({
+            path,
+            message: `refused: package manager active at delete time (pid ${pm.pid})`,
+          });
+          continue;
+        }
+      }
+      const argvMatch = freshProcesses.find((proc) => proc.args.includes(path));
+      if (argvMatch) {
+        failures.push({
+          path,
+          message: `refused: in use at delete time (pid ${argvMatch.pid})`,
+        });
+        continue;
+      }
       const root = roots.find((r) => r.id === rootId);
-      const rootDir = root?.mode === "whole-root" ? dirname(path) : (root?.path ?? dirname(path));
+      if (!root) {
+        failures.push({ path, message: `refused: unknown cache root ${rootId}` });
+        continue;
+      }
+      const rootDir = root.mode === "whole-root" ? dirname(path) : root.path;
       const rootRealPath = await realpath(rootDir);
       const targetRealPath = await realpath(path);
       // Must resolve strictly inside its own root (a "" relative would mean
@@ -771,4 +910,27 @@ export async function executePrune(
   }
 
   return { removed, failures, freedKb: removed.reduce((sum, item) => sum + item.sizeKb, 0) };
+}
+
+// Shared rendering helpers — both cli.ts's `spur cache` report and
+// host-install.ts's `reclaimable-caches` doctor detail need "prunable
+// candidates, biggest first" and a human GB size; one implementation here
+// rather than each renderer keeping its own copy.
+export function formatCacheSizeGb(sizeKb: number): string {
+  return `${(sizeKb / (1024 * 1024)).toFixed(2)}GB`;
+}
+
+export function byEntrySizeDesc(a: CacheCandidate, b: CacheCandidate): number {
+  return b.entry.sizeKb - a.entry.sizeKb;
+}
+
+export function prunableCandidates(
+  plan: CachePlan,
+): (CacheCandidate & { verdict: { kind: "prunable" } })[] {
+  return plan.candidates
+    .filter(
+      (candidate): candidate is CacheCandidate & { verdict: { kind: "prunable" } } =>
+        candidate.verdict.kind === "prunable",
+    )
+    .sort(byEntrySizeDesc);
 }
