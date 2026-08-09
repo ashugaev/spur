@@ -119,7 +119,7 @@ import {
   type UserInputKind,
 } from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
-import { readFreeKb } from "./disk-space.js";
+import { DISK_PROBE_TIMEOUT_MS, readFreeKb } from "./disk-space.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
   NPM_GLOBALCONFIG_ENV,
@@ -2705,7 +2705,6 @@ export class SessionService {
   }
 
   private static readonly HOST_DISK_PROBE_TTL_MS = 60_000;
-  private static readonly HOST_DISK_PROBE_TIMEOUT_MS = 2_000;
 
   // Report-only: never throws, never blocks or fails a spawn. `readFreeKb`
   // already swallows its own `df` failure and returns `undefined`, so when
@@ -2718,10 +2717,7 @@ export class SessionService {
       !this.hostDiskProbe ||
       now - this.hostDiskProbe.checkedAtMs >= SessionService.HOST_DISK_PROBE_TTL_MS
     ) {
-      const freeKb = await readFreeKb(
-        this.config.dataDir,
-        SessionService.HOST_DISK_PROBE_TIMEOUT_MS,
-      );
+      const freeKb = await readFreeKb(this.config.dataDir, DISK_PROBE_TIMEOUT_MS);
       this.hostDiskProbe = { checkedAtMs: now, freeKb };
     }
     const freeKb = this.hostDiskProbe.freeKb;

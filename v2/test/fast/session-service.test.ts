@@ -423,6 +423,7 @@ vi.mock("../../src/port-probe.js", () => ({
 
 vi.mock("../../src/disk-space.js", () => ({
   readFreeKb: readFreeKbMock,
+  DISK_PROBE_TIMEOUT_MS: 2_000,
 }));
 
 vi.mock("../../src/runtime-tmux.js", () => ({
