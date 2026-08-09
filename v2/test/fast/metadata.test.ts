@@ -567,7 +567,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("persists a native session.pr binding when reading a legacy GitHub pr slot", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });
@@ -626,7 +626,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("does not rewrite non-GitHub pr links into native bindings", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });
@@ -657,7 +657,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("rewrites legacy github-pr GitLab links into generic pr slots", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });

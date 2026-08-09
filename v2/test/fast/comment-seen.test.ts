@@ -1,8 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { rm } from "node:fs/promises";
+import { afterEach, describe, expect, it } from "vitest";
 import { recordReviewCommentsSeen } from "../../src/comment-seen.js";
 import { readCommentSeenRegistry } from "../../src/metadata.js";
 import type { ProjectConfig, SourceConfig } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
+
+const tempDirs: string[] = [];
+
+// Not redundant with the setupFiles net (test/setup/temp-dirs.ts): afterEach
+// reclaims disk between tests in THIS file; the net only sweeps at the end
+// of the whole file. Without this, a long-running file would hold every dir
+// it ever created until the file finishes.
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function newDataDir(): Promise<string> {
+  const dir = await createTempDir("spur-comment-seen-");
+  tempDirs.push(dir);
+  return dir;
+}
 
 function githubSource(): SourceConfig {
   return { type: "github", runOnStart: false, intervalMs: 60_000, emitExisting: false };
@@ -29,7 +46,7 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
 
 describe("recordReviewCommentsSeen", () => {
   it("records namespaced review-comment ids for every github source", async () => {
-    const dataDir = await createTempDir("spur-comment-seen-");
+    const dataDir = await newDataDir();
     const projects = {
       api: project({ "pr-watch": githubSource(), "pr-watch-2": githubSource() }),
     };
@@ -46,7 +63,7 @@ describe("recordReviewCommentsSeen", () => {
   });
 
   it("skips non-github sources", async () => {
-    const dataDir = await createTempDir("spur-comment-seen-");
+    const dataDir = await newDataDir();
     const projects = { api: project({ gl: gitlabSource() }) };
 
     recordReviewCommentsSeen({ dataDir, projects }, "api", [7001]);
@@ -55,13 +72,13 @@ describe("recordReviewCommentsSeen", () => {
   });
 
   it("is a no-op when the project has no github sources", async () => {
-    const dataDir = await createTempDir("spur-comment-seen-");
+    const dataDir = await newDataDir();
     const projects = { api: project({}) };
     expect(() => recordReviewCommentsSeen({ dataDir, projects }, "api", [7001])).not.toThrow();
   });
 
   it("throws for an unknown project", async () => {
-    const dataDir = await createTempDir("spur-comment-seen-");
+    const dataDir = await newDataDir();
     const projects = { api: project({ "pr-watch": githubSource() }) };
     expect(() => recordReviewCommentsSeen({ dataDir, projects }, "other", [7001])).toThrow(
       /Unknown project/,
