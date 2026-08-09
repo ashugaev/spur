@@ -596,7 +596,7 @@ function checkHomeDiskHeadroom(home: string, warnFreeGb: number): HostInstallChe
     detail: ok
       ? `${home} has ${availGb}GB free (>= ${warnFreeGb}GB floor)`
       : `${home} has only ${availGb}GB free (below the ${warnFreeGb}GB floor)`,
-    ...(ok ? {} : { fix: "spur cache --prune --yes" }),
+    ...(ok ? {} : { fix: "spur cache" }),
   };
 }
 

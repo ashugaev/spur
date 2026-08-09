@@ -1406,7 +1406,7 @@ describe("collectHostInstallChecks: home-disk-headroom", () => {
     expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
       ok: false,
       severity: "warn",
-      fix: "spur cache --prune --yes",
+      fix: "spur cache",
     });
     expect(hasErrorSeverity(checks)).toBe(false);
   });
