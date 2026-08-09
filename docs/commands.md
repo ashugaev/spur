@@ -40,12 +40,6 @@ Freed bytes come from `du -s --block-size=1` measured before removal. A file har
 
 Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
 
-## daemon
-
-`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
-
-Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
-
 ## cache
 
 ```bash
@@ -67,6 +61,12 @@ Prunable classes and age floors (a global 7-day floor applies to every class on 
 - `tmp-entry` (`/tmp`) — 7d (the global floor, no extra grace); a fixed deny-list (`systemd-private-*`, `tmux-*`, `.X11-unix`, `snap-private-*`, `spur*`, etc.) is never a candidate regardless of age.
 
 Every class also protects a symlink, an entry not owned by the invoking uid, and any entry when the process tree isn't readable (the whole plan degrades to report-only in that case).
+
+## daemon
+
+`daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
+
+Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
 ## spawn
 
