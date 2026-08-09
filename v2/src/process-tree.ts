@@ -86,13 +86,24 @@ export interface ProcessInfo {
  * Moved here (from sidecars/playwright.ts) as the module that already owns
  * process ancestry — cache-retention.ts and playwright.ts both import it
  * rather than either copying it or importing a sidecar module.
+ *
+ * Returns `null` — never `[]` — when the listing itself could not be
+ * trusted: `ps` failed to run, or it produced zero parseable rows (a real
+ * `ps -eo` always lists at least init and itself, so an empty table is
+ * itself a signal something is wrong, not evidence the host has no
+ * processes). Callers that use this as a liveness/in-use signal (notably
+ * cache-retention.ts) must treat `null` as "unknown", never as "nothing is
+ * running" — the two are indistinguishable from a bare `[]` and conflating
+ * them is a fail-open hole. Callers that only use it for best-effort cleanup
+ * (playwright.ts's leak sweep) may fall back to `[]` explicitly at the call
+ * site instead, since missing a cleanup opportunity is safe.
  */
-export async function listProcesses(): Promise<ProcessInfo[]> {
+export async function listProcesses(): Promise<ProcessInfo[] | null> {
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="]));
   } catch {
-    return [];
+    return null;
   }
   const processes: ProcessInfo[] = [];
   for (const line of stdout.split("\n")) {
@@ -106,7 +117,7 @@ export async function listProcesses(): Promise<ProcessInfo[]> {
     if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
     processes.push({ pid, ppid, args });
   }
-  return processes;
+  return processes.length > 0 ? processes : null;
 }
 
 export function collectDescendants(rootPid: number, processes: readonly ProcessInfo[]): number[] {

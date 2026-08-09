@@ -191,7 +191,10 @@ const KILL_TREE_GRACE_MS = 1000;
  * grace period, then SIGKILL survivors. Guards ESRCH for already-dead pids.
  */
 async function killProcessTree(pid: number): Promise<void> {
-  const processes = await listProcesses();
+  // `null` (ps unavailable/unparseable) is treated as "no known descendants"
+  // here — a missed teardown kill is safe (the reaper's next tick retries),
+  // unlike cache-retention.ts's use of the same signal as a deletion guard.
+  const processes = (await listProcesses()) ?? [];
   const tree = collectDescendants(pid, processes);
   // Kill leaves first so parents do not respawn children mid-teardown.
   for (const target of [...tree].reverse()) {
@@ -221,7 +224,8 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
-  const processes = await listProcesses();
+  // Same fail-open-is-safe reasoning as killProcessTree above.
+  const processes = (await listProcesses()) ?? [];
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
     await killProcessTree(proc.pid);
