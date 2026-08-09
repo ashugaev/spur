@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { planCachePrune, type CachePlan } from "./cache-retention.js";
+import {
+  formatCacheSizeGb,
+  planCachePrune,
+  prunableCandidates,
+  type CachePlan,
+} from "./cache-retention.js";
 import { dimText } from "./cli-view.js";
 import {
   DEFAULT_DISK_RETENTION,
@@ -12,6 +17,7 @@ import {
 } from "./config.js";
 import { parseDfField } from "./disk-space.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { withTimeout } from "./promise-timeout.js";
 import {
   NPM_PIN_SANITIZE_ENV_KEYS,
   ensureNpmPinFile,
@@ -553,36 +559,17 @@ function checkHomeDiskHeadroom(home: string, warnFreeGb: number): HostInstallChe
 // Bounds the whole `planCachePrune` measurement, independent of any single
 // `du` chunk's own CACHE_MEASURE_TIMEOUT_MS (30s) — a host with several
 // large, unresponsive roots could otherwise chain multiple per-root
-// timeouts into a much longer `spur doctor` hang. Rejecting here never
-// aborts the underlying `du`/readdir work already in flight; it only stops
-// this check from waiting on it, so doctor can still finish and print.
-const RECLAIMABLE_CACHES_BUDGET_MS = 20_000;
+// timeouts into a much longer `spur doctor` hang. Above a cold-cache full
+// sweep on a heavily-used host (measured ~24s), with headroom: the budget
+// also drives an AbortController that actually kills the in-flight `du`
+// child on expiry (see `signal` below), so raising it doesn't risk `spur
+// doctor` hanging past it — it only gives a cold run enough room to finish
+// and report a real number instead of "skipped" every time.
+const RECLAIMABLE_CACHES_BUDGET_MS = 45_000;
 const RECLAIMABLE_CACHES_TOP_N = 5;
 
-function withBudget<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("measurement budget exceeded")), timeoutMs);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
-  });
-}
-
-function formatCacheGb(sizeKb: number): string {
-  return `${(sizeKb / (1024 * 1024)).toFixed(2)}GB`;
-}
-
 function renderReclaimableDetail(plan: CachePlan): string {
-  const prunable = plan.candidates
-    .filter((candidate) => candidate.verdict.kind === "prunable")
-    .sort((a, b) => b.entry.sizeKb - a.entry.sizeKb);
+  const prunable = prunableCandidates(plan);
   if (prunable.length === 0) {
     return "no reclaimable caches found";
   }
@@ -590,10 +577,10 @@ function renderReclaimableDetail(plan: CachePlan): string {
     .slice(0, RECLAIMABLE_CACHES_TOP_N)
     .map(
       (candidate) =>
-        `${formatCacheGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
+        `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
     )
     .join("; ");
-  return `${formatCacheGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
+  return `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
 }
 
 // Ungated, like `home-disk-headroom` — always `ok:true, severity:"info"`, so
@@ -606,14 +593,25 @@ async function checkReclaimableCaches(
   instanceConfig: InstanceConfigReadResult,
 ): Promise<HostInstallCheck> {
   const id = "reclaimable-caches";
+  // The abort actually kills the in-flight `du` child on budget expiry
+  // (planCachePrune threads `signal` down to `execFile`) so a wedged/slow
+  // measurement can never keep `spur doctor`'s process alive past the
+  // budget — `withTimeout` alone only abandons the await, it does not stop
+  // the underlying work.
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), RECLAIMABLE_CACHES_BUDGET_MS);
+  abortTimer.unref();
   try {
-    const plan = await withBudget(
-      planCachePrune({ home, instanceConfig }),
+    const plan = await withTimeout(
+      planCachePrune({ home, instanceConfig, signal: controller.signal }),
       RECLAIMABLE_CACHES_BUDGET_MS,
+      "measurement budget exceeded",
     );
     return { id, ok: true, severity: "info", detail: renderReclaimableDetail(plan) };
   } catch {
     return { id, ok: true, severity: "info", detail: "skipped — measurement budget exceeded" };
+  } finally {
+    clearTimeout(abortTimer);
   }
 }
 
