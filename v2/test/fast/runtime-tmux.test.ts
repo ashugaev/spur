@@ -519,8 +519,7 @@ describe("runtime-tmux", () => {
   });
 
   it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
-    const resumedPane =
-      "some replayed history line\nanother replayed line\n→ Add a follow-up";
+    const resumedPane = "some replayed history line\nanother replayed line\n→ Add a follow-up";
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "capture-pane") {
         return { stdout: resumedPane, stderr: "" };
@@ -547,9 +546,8 @@ describe("runtime-tmux", () => {
     });
 
     try {
-      const { waitForTmuxReady, PromptReadyTimeoutError } = await import(
-        "../../src/runtime-tmux.js"
-      );
+      const { waitForTmuxReady, PromptReadyTimeoutError } =
+        await import("../../src/runtime-tmux.js");
 
       await expect(
         waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" }),
