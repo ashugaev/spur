@@ -28,6 +28,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
+  CURSOR_RESUME_READY_MARKER,
   buildCursorPlan,
   buildCursorRestorePlan,
   buildCursorResumePlan,
@@ -107,7 +108,7 @@ describe("buildCursorResumePlan", () => {
     expect(plan.launchCommand).toBe(
       "'/opt/cursor agent' --resume 'chat-123' --force --sandbox disabled",
     );
-    expect(plan.readyMarkers).toEqual(["Add a follow-up"]);
+    expect(plan.readyMarkers).toEqual([CURSOR_RESUME_READY_MARKER]);
   });
 
   it("adds --plan when requested", () => {
@@ -290,7 +291,7 @@ describe("buildCursorRestorePlan", () => {
     expect(plan).not.toBeNull();
     expect(plan?.launchCommand).toBe("'agent' --resume 'chat-123' --force --sandbox disabled");
     expect(plan?.initialMessage).toBe("restore prompt");
-    expect(plan?.readyMarkers).toEqual(["Add a follow-up"]);
+    expect(plan?.readyMarkers).toEqual([CURSOR_RESUME_READY_MARKER]);
   });
 
   it("uses an explicit Cursor config dir when restoring", async () => {
