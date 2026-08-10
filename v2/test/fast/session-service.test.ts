@@ -25,6 +25,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
+import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import type { ProcSnapshot } from "../../src/sidecars/reap.js";
 import type {
   AgentName,
@@ -521,28 +522,32 @@ vi.mock("../../src/sidecars/reap.js", async (importOriginal) => {
   return { ...actual, snapshotProcesses: snapshotProcessesMock };
 });
 
-vi.mock("../../src/runtime-tmux.js", () => ({
-  captureTmuxPane: captureTmuxPaneMock,
-  createTmuxSession: createTmuxSessionMock,
-  createTmuxCommandSession: createTmuxCommandSessionMock,
-  createTmuxSidecarSession: createTmuxSidecarSessionMock,
-  sidecarTmuxAlive: sidecarTmuxAliveMock,
-  sidecarTmuxSession: sidecarTmuxSessionMock,
-  listTmuxSessionNames: listTmuxSessionNamesMock,
-  getTmuxSessionActivity: getTmuxSessionActivityMock,
-  getTmuxPanePid: getTmuxPanePidMock,
-  getFleetSessionRssBytes: getFleetSessionRssBytesMock,
-  isProcessRunningInTmux: isProcessRunningInTmuxMock,
-  killTmuxSession: killTmuxSessionMock,
-  killTmuxSessionTree: killTmuxSessionTreeMock,
-  setTmuxSocketName: setTmuxSocketNameMock,
-  sendMessageToTmux: sendMessageToTmuxMock,
-  sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
-  sendMenuSelectionKeys: sendMenuSelectionKeysMock,
-  tmuxPaneDead: tmuxPaneDeadMock,
-  tmuxSessionExists: tmuxSessionExistsMock,
-  waitForTmuxReady: waitForTmuxReadyMock,
-}));
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof runtimeTmuxModule>();
+  return {
+    PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
+    captureTmuxPane: captureTmuxPaneMock,
+    createTmuxSession: createTmuxSessionMock,
+    createTmuxCommandSession: createTmuxCommandSessionMock,
+    createTmuxSidecarSession: createTmuxSidecarSessionMock,
+    sidecarTmuxAlive: sidecarTmuxAliveMock,
+    sidecarTmuxSession: sidecarTmuxSessionMock,
+    listTmuxSessionNames: listTmuxSessionNamesMock,
+    getTmuxSessionActivity: getTmuxSessionActivityMock,
+    getTmuxPanePid: getTmuxPanePidMock,
+    getFleetSessionRssBytes: getFleetSessionRssBytesMock,
+    isProcessRunningInTmux: isProcessRunningInTmuxMock,
+    killTmuxSession: killTmuxSessionMock,
+    killTmuxSessionTree: killTmuxSessionTreeMock,
+    setTmuxSocketName: setTmuxSocketNameMock,
+    sendMessageToTmux: sendMessageToTmuxMock,
+    sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
+    sendMenuSelectionKeys: sendMenuSelectionKeysMock,
+    tmuxPaneDead: tmuxPaneDeadMock,
+    tmuxSessionExists: tmuxSessionExistsMock,
+    waitForTmuxReady: waitForTmuxReadyMock,
+  };
+});
 
 vi.mock("../../src/host-memory.js", () => ({
   isSystemdOomdPresent: isSystemdOomdPresentMock,
@@ -20360,6 +20365,7 @@ describe("SessionService", () => {
         event: "session.restore.recovered",
         level: "warn",
         sessionId: "api-1",
+        details: expect.objectContaining({ reason: "submit_ack_timeout" }),
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
@@ -20417,6 +20423,108 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  it("continues restore when prompt readiness times out but the agent process is live", async () => {
+    const sessions = createSessionStore();
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage: "restore prompt",
+      readyMarkers: ["❯"],
+    });
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      error: "old stop",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let restoredTmuxCreated = false;
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { PromptReadyTimeoutError } = await import("../../src/runtime-tmux.js");
+    waitForTmuxReadyMock.mockRejectedValueOnce(
+      new PromptReadyTimeoutError({ sessionName: "api-1", elapsedMs: 30_000, detail: "" }),
+    );
+
+    const service = await createDisposedSessionService();
+    const restored = await service.restore("api-1");
+
+    expect(restored.status).toBe("running");
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.restore.recovered",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({ reason: "ready_timeout" }),
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.restore.failed" }),
+    );
+  });
+
+  it("fails restore when prompt readiness times out and the agent process is gone", async () => {
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage: "restore prompt",
+      readyMarkers: ["❯"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let restoredTmuxCreated = false;
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const { PromptReadyTimeoutError } = await import("../../src/runtime-tmux.js");
+    waitForTmuxReadyMock.mockRejectedValueOnce(
+      new PromptReadyTimeoutError({ sessionName: "api-1", elapsedMs: 30_000, detail: "" }),
+    );
+
+    const service = await createDisposedSessionService();
+
+    await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.restore.failed",
+        level: "error",
+        sessionId: "api-1",
+      }),
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
   });
 
   it("startSidecar rejects when project has no matching sidecar configured", async () => {

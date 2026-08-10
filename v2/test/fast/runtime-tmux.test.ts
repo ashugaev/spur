@@ -517,6 +517,38 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
+  it("throws PromptReadyTimeoutError when the pane never reaches the prompt", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        now += 10_000;
+        return { stdout: "Starting...", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { waitForTmuxReady, PromptReadyTimeoutError } = await import(
+        "../../src/runtime-tmux.js"
+      );
+
+      await expect(
+        waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" }),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof PromptReadyTimeoutError &&
+          err.message.startsWith(
+            `Timed out waiting for tmux session "api-1" to reach the agent prompt`,
+          ) &&
+          err.elapsedMs > 0
+        );
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
     let now = 0;
     let captureCount = 0;

@@ -220,6 +220,7 @@ import {
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
+  PromptReadyTimeoutError,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -10467,9 +10468,37 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
-        agent: current.agent,
-      });
+      try {
+        await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
+          agent: current.agent,
+        });
+      } catch (error) {
+        if (!(error instanceof PromptReadyTimeoutError)) {
+          throw error;
+        }
+        // fresh:true — this pane was just created by createTmuxSession above.
+        if (
+          !(await isProcessRunningInTmux(
+            current.tmuxSession,
+            agentProcessMatchers(current.agent, restoreLaunchCommand),
+            { fresh: true },
+          ))
+        ) {
+          throw error;
+        }
+        this.logEvent("session.restore.recovered", {
+          level: "warn",
+          sessionId,
+          projectId: current.project,
+          message: `Prompt readiness timed out for ${sessionId} but the agent process is live; continuing restore`,
+          details: {
+            reason: "ready_timeout",
+            agent: current.agent,
+            elapsedMs: error.elapsedMs,
+            processAlive: true,
+          },
+        });
+      }
       // fresh:true — this pane was just created by createTmuxSession above
       // and may postdate the last fleet-pane snapshot.
       if (
@@ -10535,6 +10564,7 @@ export class SessionService {
           projectId: current.project,
           message: `Recovered ${sessionId} after submit ack timeout with live agent process`,
           details: {
+            reason: "submit_ack_timeout",
             agent: error.agent,
             lastScannedFile: error.lastScannedFile,
             elapsedMs: error.elapsedMs,
