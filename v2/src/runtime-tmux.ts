@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode } from "./agents/index.js";
+import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -752,7 +752,11 @@ export async function sendMessageToTmux(
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  if (options?.interrupt) {
+  const sendInterruptKey =
+    options?.interrupt === true &&
+    options.agent !== undefined &&
+    agentSendsInterruptKey(options.agent);
+  if (sendInterruptKey) {
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
