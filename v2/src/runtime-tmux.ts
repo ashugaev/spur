@@ -812,6 +812,18 @@ function tmuxReadyPollJitterMs(sessionName: string): number {
   return hash % AGENT_READY_POLL_JITTER_MAX_MS;
 }
 
+export class PromptReadyTimeoutError extends Error {
+  readonly elapsedMs: number;
+
+  constructor(args: { sessionName: string; elapsedMs: number; detail: string }) {
+    super(
+      `Timed out waiting for tmux session "${args.sessionName}" to reach the agent prompt${args.detail}`,
+    );
+    this.name = "PromptReadyTimeoutError";
+    this.elapsedMs = args.elapsedMs;
+  }
+}
+
 export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
@@ -876,9 +888,7 @@ export async function waitForTmuxReady(
   const detail = lastCapture.trim()
     ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
     : "";
-  throw new Error(
-    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt${detail}`,
-  );
+  throw new PromptReadyTimeoutError({ sessionName, elapsedMs: Date.now() - startedAt, detail });
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {

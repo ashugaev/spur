@@ -1,6 +1,7 @@
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
 
 type ExecFileAsync = (
   file: string,
@@ -515,6 +516,53 @@ describe("runtime-tmux", () => {
       ),
     ).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(1_000);
+  });
+
+  it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
+    const resumedPane = "some replayed history line\nanother replayed line\n→ Add a follow-up";
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        return { stdout: resumedPane, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      waitForTmuxReady("api-1", [CURSOR_RESUME_READY_MARKER], 5_000, { agent: "cursor" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws PromptReadyTimeoutError when the pane never reaches the prompt", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        now += 10_000;
+        return { stdout: "Starting...", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { waitForTmuxReady, PromptReadyTimeoutError } =
+        await import("../../src/runtime-tmux.js");
+
+      await expect(
+        waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" }),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof PromptReadyTimeoutError &&
+          err.message.startsWith(
+            `Timed out waiting for tmux session "api-1" to reach the agent prompt`,
+          ) &&
+          err.elapsedMs > 0
+        );
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
