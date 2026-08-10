@@ -17,7 +17,7 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
-import { spawnDraftStorageKey, writeSpawnDraft } from "@/lib/spawn-draft";
+import { SPAWN_DRAFT_STORAGE_KEY, writeSpawnDraft } from "@/lib/spawn-draft";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -397,7 +397,7 @@ describe("Dashboard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
         "Edited checkout instructions",
       );
     });
@@ -1293,7 +1293,6 @@ describe("Dashboard", () => {
 
   it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
     writeSpawnDraft({
-      projectId: "spur-shepherd",
       prompt: "Stale Shepherd prompt",
       agent: "codex",
       model: "gpt-5.6-codex",
@@ -1306,6 +1305,7 @@ describe("Dashboard", () => {
       selfDestructConditions: "",
       steps: ["Stale step"],
       trackerUrl: null,
+      sessionMode: null,
     });
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -2124,7 +2124,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("step 1"), { target: { value: "Run tests" } });
 
     await waitFor(() => {
-      const stored = window.localStorage.getItem(spawnDraftStorageKey("api"));
+      const stored = window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY);
       expect(stored).toContain("Keep this draft");
       expect(stored).not.toContain("attachments");
     });
@@ -2144,12 +2144,13 @@ describe("Dashboard", () => {
     render(<Dashboard />);
     await screen.findByRole("button", { name: "Spawn Session" });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
     resolveHeldSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
     });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
     expect(screen.getByLabelText("branch name")).toHaveValue("feature/keep-draft");
     expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
@@ -2184,22 +2185,22 @@ describe("Dashboard", () => {
     const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
     fireEvent.change(prompt, { target: { value: "First edit" } });
     fireEvent.change(prompt, { target: { value: "Latest edit" } });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(499);
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Latest edit");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Latest edit");
 
     fireEvent.change(prompt, { target: { value: "Close now" } });
     const removeCallCount = windowRemoveListenerSpy.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Close now");
     const preEditEscapeHandlers = windowRemoveListenerSpy.mock.calls
       .slice(removeCallCount)
       .filter(([type]) => type === "keydown")
@@ -2214,7 +2215,7 @@ describe("Dashboard", () => {
         handler(new KeyboardEvent("keydown", { key: "Escape" }));
       }
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Escape now");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Escape now");
     expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -2238,7 +2239,6 @@ describe("Dashboard", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
     writeSpawnDraft({
-      projectId: "api",
       prompt: "Keep the chosen branch",
       agent: "claude",
       model: null,
@@ -2251,6 +2251,7 @@ describe("Dashboard", () => {
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2336,7 +2337,6 @@ describe("Dashboard", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
     writeSpawnDraft({
-      projectId: "api",
       prompt: "Stored prompt",
       agent: "claude",
       model: null,
@@ -2349,6 +2349,7 @@ describe("Dashboard", () => {
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2365,13 +2366,13 @@ describe("Dashboard", () => {
       "Typed while loading",
     );
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
         "Typed while loading",
       );
     });
   });
 
-  it("does not carry a removed project's dirty draft into the fallback project", async () => {
+  it("draft persists when project is removed and fallback is selected", async () => {
     let projects = [
       { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
       { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
@@ -2391,21 +2392,6 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       throw new Error(`Unexpected fetch: ${url}`);
     });
-    writeSpawnDraft({
-      projectId: "sp",
-      prompt: "Saved Spur draft",
-      agent: "claude",
-      model: null,
-      branch: "feature/sp-draft",
-      branchIsExplicit: true,
-      workspaceMode: "default",
-      defaultBranch: "",
-      planMode: false,
-      selfDestruct: false,
-      selfDestructConditions: "",
-      steps: [],
-      trackerUrl: null,
-    });
     const client = createTestQueryClient();
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -2419,7 +2405,7 @@ describe("Dashboard", () => {
       target: { value: "API-only edits" },
     });
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("API-only edits");
     });
 
     projects = [{ id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" }];
@@ -2430,10 +2416,53 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
     });
-    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Saved Spur draft");
-    expect(screen.getByLabelText("branch name")).toHaveValue("feature/sp-draft");
-    expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).not.toContain("API-only edits");
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("API-only edits");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("API-only edits");
+  });
+
+  it("project switch preserves current form fields", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(
+          JSON.stringify({
+            ...sessionsPayload(),
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+            ],
+          }),
+          { status: 200 },
+        );
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "My draft text" },
+    });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/my-branch" },
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "sp" },
+    });
+
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("My draft text");
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/my-branch");
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
   });
 
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
@@ -2500,7 +2529,7 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
-      expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).toBeNull();
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
@@ -2677,7 +2706,7 @@ describe("Dashboard", () => {
       expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
       expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
       expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
         "Keep this prompt",
       );
     });
@@ -3116,7 +3145,6 @@ describe("Dashboard", () => {
       });
       window.localStorage.setItem("spur:last-spawn-project", "moded");
       writeSpawnDraft({
-        projectId: "moded",
         prompt: "Stale mode draft",
         agent: "claude",
         model: null,

@@ -1065,7 +1065,6 @@ export function Dashboard() {
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
-  const spawnDraftDirtyRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
@@ -1083,7 +1082,6 @@ export function Dashboard() {
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) => {
-      spawnDraftDirtyRef.current = true;
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
     },
   });
@@ -1539,13 +1537,6 @@ export function Dashboard() {
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
-    spawnDraftDirtyRef.current = false;
-  };
-
-  const restoreSpawnDraft = (nextProjectId: string) => {
-    const draft = readSpawnDraft(nextProjectId);
-    applySpawnDraft(nextProjectId, draft);
-    return draft;
   };
 
   useEffect(() => {
@@ -1562,21 +1553,14 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
-      if (spawnOpen && !carriesUnscopedEdits) {
-        restoreSpawnDraft(nextProjectId);
-      } else {
-        setSpawnProjectId(nextProjectId);
-      }
+      setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnOpen, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    if (normalizedProjectId !== spawnProjectId) {
-      restoreSpawnDraft(normalizedProjectId);
-    }
+    setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1585,10 +1569,8 @@ export function Dashboard() {
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
 
-  const spawnDraft = useMemo<SpawnDraft | null>(() => {
-    if (!spawnProjectId) return null;
+  const spawnDraft = useMemo<SpawnDraft>(() => {
     return {
-      projectId: spawnProjectId,
       prompt: spawnPrompt,
       agent: spawnAgent,
       model: spawnModel,
@@ -1608,9 +1590,7 @@ export function Dashboard() {
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
-    spawnOpen,
     spawnPlanMode,
-    spawnProjectId,
     spawnPrompt,
     spawnSelfDestruct,
     spawnSelfDestructConditions,
@@ -1623,13 +1603,13 @@ export function Dashboard() {
   spawnDraftRef.current = spawnDraft;
 
   useEffect(() => {
-    if (!spawnOpen || !spawnDraft) return;
+    if (!spawnOpen) return;
     const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
     return () => clearTimeout(timer);
   }, [spawnDraft, spawnOpen]);
 
   const closeSpawnModal = useCallback(() => {
-    if (spawnDraftRef.current) writeSpawnDraft(spawnDraftRef.current);
+    writeSpawnDraft(spawnDraftRef.current);
     setSpawnOpen(false);
   }, []);
 
@@ -1698,15 +1678,12 @@ export function Dashboard() {
   );
 
   const addStep = () => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
   const removeStep = (id: number) => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
   };
   const updateStep = (id: number, value: string) => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
   };
 
@@ -1818,7 +1795,7 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
-      clearSpawnDraft(nextProjectId);
+      clearSpawnDraft();
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -2200,7 +2177,7 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    restoreSpawnDraft(resolvePreferredSpawnProjectId());
+    applySpawnDraft(resolvePreferredSpawnProjectId(), readSpawnDraft());
     setSpawnOpen(true);
   };
 
@@ -2212,7 +2189,7 @@ export function Dashboard() {
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    const draft = readSpawnDraft(item.projectId);
+    const draft = readSpawnDraft();
     if (draft?.trackerUrl === item.url) {
       applySpawnDraft(item.projectId, draft);
     } else {
@@ -2225,7 +2202,6 @@ export function Dashboard() {
 
   const addSpawnFiles = useCallback(
     (files: FileList | File[] | null) => {
-      spawnDraftDirtyRef.current = true;
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
@@ -2561,7 +2537,6 @@ export function Dashboard() {
               history={{
                 entries: spawnHistory.entries,
                 onSelect: (next) => {
-                  spawnDraftDirtyRef.current = true;
                   setSpawnPrompt(next);
                 },
               }}
@@ -2578,7 +2553,6 @@ export function Dashboard() {
                 model: {
                   value: spawnModel,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnModel(next);
                   },
                 },
@@ -2587,7 +2561,6 @@ export function Dashboard() {
                       sessionMode: {
                         value: effectiveSessionMode ?? "",
                         onChange: (next: string) => {
-                          spawnDraftDirtyRef.current = true;
                           setSpawnSessionMode(next === "" ? null : next);
                         },
                         options: spawnModeOptions,
@@ -2597,7 +2570,6 @@ export function Dashboard() {
                 branch: {
                   value: spawnBranch,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     spawnBranchExplicitRef.current = next.trim().length > 0;
                     setSpawnBranch(next);
                   },
@@ -2610,21 +2582,18 @@ export function Dashboard() {
                 workspaceMode: {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnWorkspaceMode(next);
                   },
                 },
                 planMode: {
                   value: spawnPlanMode,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnPlanMode(next);
                   },
                 },
                 selfDestruct: {
                   value: spawnSelfDestruct,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnSelfDestruct(next);
                   },
                 },
@@ -2664,7 +2633,6 @@ export function Dashboard() {
                     aria-label="Self-destruct conditions"
                     className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
                     onChange={(event) => {
-                      spawnDraftDirtyRef.current = true;
                       setSpawnSelfDestructConditions(event.target.value);
                     }}
                     placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
@@ -2676,7 +2644,6 @@ export function Dashboard() {
                     <input
                       className={`w-full ${INPUT_CLASS}`}
                       onChange={(event) => {
-                        spawnDraftDirtyRef.current = true;
                         setSpawnDefaultBranch(event.target.value);
                       }}
                       placeholder="Base branch"
@@ -2686,17 +2653,14 @@ export function Dashboard() {
               }}
               onAddFiles={addSpawnFiles}
               onAgentChange={(next) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnAgent(next);
                 setSpawnModel(null);
               }}
               onClose={closeSpawnModal}
               onPromptChange={(next) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnPrompt(next);
               }}
               onRemoveAttachment={(index) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnAttachments((current) =>
                   current.filter((_, currentIndex) => currentIndex !== index),
                 );
