@@ -384,7 +384,7 @@ export function buildCursorResumePlan(
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
-    readyMarkers: [...CURSOR_READY_MARKERS],
+    readyMarkers: ["Add a follow-up"],
   };
 }
 
