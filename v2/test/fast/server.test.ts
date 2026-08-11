@@ -3154,7 +3154,7 @@ describe("startServer", () => {
     }
   });
 
-  it("drops a registered project directory at boot and connects a directory path to spur.yaml", async () => {
+  it("drops a registered project directory at boot and rejects connecting one with 400", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -3214,7 +3214,7 @@ describe("startServer", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ configPath: extraProjectDir }),
       });
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(400);
       const finalRegistry = readConfigRegistryFile(dataDir);
       expect(finalRegistry.configPaths).not.toContain(extraProjectDir);
       expect(finalRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));

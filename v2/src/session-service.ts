@@ -315,7 +315,6 @@ import {
   ConfigRegistryScanner,
   dropWorktreeInternalPaths,
   isExistingDirectory,
-  isExistingFile,
   isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
@@ -3499,27 +3498,20 @@ export class SessionService {
     if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
       throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
     }
-    const resolvedConfigPath = this.resolveConnectConfigPath(configPath);
-    const canonicalPath = this.registryScanner.canonicalizePath(resolvedConfigPath);
+    // A directory never becomes a config file, so it must not enter the
+    // registry. A missing path still may: the scanner keeps it while its
+    // parent is alive.
+    if (isExistingDirectory(configPath)) {
+      throw new InvalidConfigPathError(
+        `configPath must be a spur config file, not a directory: ${configPath}`,
+      );
+    }
+    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
     return this.previewRegistryPaths(
       this.registryPaths.includes(canonicalPath)
         ? this.registryPaths
         : [...this.registryPaths, canonicalPath],
     );
-  }
-
-  private resolveConnectConfigPath(configPath: string): string {
-    if (isExistingFile(configPath)) {
-      return configPath;
-    }
-    if (isExistingDirectory(configPath)) {
-      const projectConfigPath = findProjectConfigPathInDirectory(configPath);
-      if (projectConfigPath && isExistingFile(projectConfigPath)) {
-        return projectConfigPath;
-      }
-      throw new InvalidConfigPathError(`configPath must be a spur config file: ${configPath}`);
-    }
-    return configPath;
   }
 
   previewConfigDisconnect(configPath: string): {
