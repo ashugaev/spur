@@ -14,7 +14,7 @@ import {
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
-import { LoadingBar } from "@/components/LoadingBar";
+import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -3880,7 +3880,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <LoadingBar className="mt-5" label="Loading session" />
+        <CenteredLoader className="min-h-[calc(100dvh-5rem)]" label="Loading session" />
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>

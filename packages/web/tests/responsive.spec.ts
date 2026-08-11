@@ -258,9 +258,12 @@ test.describe("R1: Mobile viewport", () => {
       window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
     });
     await page.reload();
-    await page.waitForFunction(() => !document.querySelector(".loader-bar"), {
+    await page.waitForFunction(
+      () => !document.querySelector(".loader-bar, .loader-centered-mark"),
+      {
       timeout: 8000,
-    });
+      },
+    );
 
     const zoneToggle = page
       .locator("section button")

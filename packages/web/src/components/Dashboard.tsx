@@ -12,12 +12,12 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { BusyContent } from "@/components/BusyContent";
+import { CenteredLoader } from "@/components/CenteredLoader";
 import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
-import { LoadingBar } from "@/components/LoadingBar";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FiltersModal } from "@/components/FiltersModal";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
@@ -2696,7 +2696,12 @@ export function Dashboard() {
           />
         ) : null}
 
-        {loading ? <LoadingBar className="mt-4" label="Loading dashboard" /> : null}
+        {loading ? (
+          <CenteredLoader
+            className="min-h-[calc(100dvh-5rem)]"
+            label="Loading dashboard"
+          />
+        ) : null}
 
         {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
           <section className="mt-5">

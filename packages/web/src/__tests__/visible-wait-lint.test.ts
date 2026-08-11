@@ -44,9 +44,22 @@ describe("visible wait text lint rule", () => {
     expect(messages).toHaveLength(1);
   });
 
-  it("allows tests, accessibility attributes, placeholders, connection states, and truncation", async () => {
+  it("rejects visible placeholders and variable-held wait text", async () => {
+    const placeholder = await lint(
+      'export function Probe() { return <input placeholder="Please wait..." />; }',
+      "packages/web/src/probe.tsx",
+    );
+    const variable = await lint(
+      'const status = "Loading..."; export function Probe() { return <p>{status}</p>; }',
+      "packages/web/src/probe.tsx",
+    );
+    expect(placeholder).toHaveLength(1);
+    expect(variable).toHaveLength(1);
+  });
+
+  it("allows tests, accessibility attributes, connection states, and truncation", async () => {
     const production = await lint(
-      'export function Probe() { return <><div aria-label="Loading account..." /><input placeholder="Please wait..." /><p>Connecting…</p><p>Retrying…</p><p>name...</p></>; }',
+      'export function Probe() { return <><div aria-label="Loading account..." /><p>Connecting…</p><p>Retrying…</p><p>name...</p></>; }',
       "packages/web/src/probe.tsx",
     );
     const testSource = await lint(

@@ -290,7 +290,7 @@ async function dispatchPointerPinch(
 
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
-  test("maps the session boot wait to a loading bar", async ({ page }, testInfo) => {
+  test("maps the session boot wait to a centered loader", async ({ page }, testInfo) => {
     const session = makeWorkingSession({ id: "detail-loading-bar" });
     let releaseSession: (() => void) | undefined;
     const sessionReady = new Promise<void>((resolve) => {
@@ -308,9 +308,9 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
     const loader = page.getByRole("status", { name: "Loading session" });
     await expect(loader).toBeVisible();
-    await expect(loader.locator(".loader-bar-segment")).toHaveCSS(
+    await expect(loader.locator(".loader-centered-mark > span").first()).toHaveCSS(
       "animation-name",
-      "loader-bar-sweep",
+      "loader-centered-pulse",
     );
     await page.screenshot({ path: testInfo.outputPath("session-loading.png") });
     releaseSession?.();

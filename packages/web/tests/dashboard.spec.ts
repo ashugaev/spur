@@ -3403,9 +3403,18 @@ test.describe("D8: Loading feedback", () => {
     await page.goto("/");
     const dashboardLoader = page.getByRole("status", { name: "Loading dashboard" });
     await expect(dashboardLoader).toBeVisible();
-    await expect(dashboardLoader.locator(".loader-bar-segment")).toHaveCSS(
+    await expect(dashboardLoader.locator(".loader-centered-mark > span").first()).toHaveCSS(
       "animation-name",
-      "loader-bar-sweep",
+      "loader-centered-pulse",
+    );
+    const dashboardLoaderBox = await dashboardLoader.locator(".loader-centered-mark").boundingBox();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(dashboardLoader.locator(".loader-centered-mark > span").first()).toHaveCSS(
+      "animation-name",
+      "none",
+    );
+    expect(await dashboardLoader.locator(".loader-centered-mark").boundingBox()).toEqual(
+      dashboardLoaderBox,
     );
     await page.screenshot({ path: testInfo.outputPath("dashboard-loading.png") });
 
@@ -3429,7 +3438,68 @@ test.describe("D8: Loading feedback", () => {
     await expect(page.getByRole("status", { name: "Loading models" })).toHaveClass(
       /loader-skeleton/,
     );
+    await expect(page.getByRole("status", { name: "Loading models" })).toHaveCSS(
+      "animation-name",
+      "none",
+    );
     releaseModels?.();
+  });
+
+  test("stops button and panel loader motion when reduced motion is requested", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("**/api/runtime/info", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ version: "1.4.0" }),
+      });
+    });
+    await page.route("**/api/runtime/versions", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current: "1.4.0",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-08-11T00:00:00.000Z" },
+            { tag: "1.4.0", publishedAt: "2026-08-01T00:00:00.000Z" },
+          ],
+        }),
+      });
+    });
+    let releaseSwitch: (() => void) | undefined;
+    const switchReady = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+    await page.route("**/api/runtime/versions/switch", async (route) => {
+      await switchReady;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ accepted: true, version: "1.5.0" }),
+      });
+    });
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /Show Spur version information/ })).toContainText(
+      "1.4.0",
+    );
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+    await page.getByRole("button", { name: "Switch Spur to 1.5.0" }).click();
+    const dialog = page.getByRole("dialog", { name: "Switch Spur version" });
+    await dialog.getByRole("button", { name: "Switch", exact: true }).click();
+    const switchingButton = dialog.getByRole("button", { name: "Switching version" });
+    await expect(switchingButton.locator(".voice-spinner")).toHaveCSS("animation-name", "none");
+
+    releaseSwitch?.();
+    const loadingBar = page.getByRole("status", { name: "Updating Spur" });
+    await expect(loadingBar).toBeVisible();
+    const loadingBarBox = await loadingBar.boundingBox();
+    await expect(loadingBar.locator(".loader-bar-segment")).toHaveCSS("animation-name", "none");
+    expect(await loadingBar.boundingBox()).toEqual(loadingBarBox);
   });
 
   test("keeps the desktop spawn button width while busy", async ({ page }, testInfo) => {
