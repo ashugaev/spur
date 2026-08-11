@@ -65,9 +65,19 @@ fi
 npm_install_args+=("$PACKAGE@$VERSION")
 
 PREVIOUS_VERSION=""
+_VALIDATOR_TMP=""
+trap '[ -n "${_VALIDATOR_TMP:-}" ] && rm -rf "$_VALIDATOR_TMP"' EXIT
 if [ -n "$INSTALL_PREFIX" ]; then
   _prev_pkg="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/package.json"
   PREVIOUS_VERSION="$(node -e 'try{console.log(require(process.argv[1]).version)}catch(_){}' "$_prev_pkg" 2>/dev/null || true)"
+  _prev_validator="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/scripts/verify-package-files.sh"
+  _prev_list="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/required-package-files.txt"
+  if [ -f "$_prev_validator" ] && [ -f "$_prev_list" ]; then
+    _VALIDATOR_TMP="$(mktemp -d)"
+    mkdir -p "$_VALIDATOR_TMP/scripts"
+    cp "$_prev_validator" "$_VALIDATOR_TMP/scripts/"
+    cp "$_prev_list" "$_VALIDATOR_TMP/"
+  fi
 fi
 
 "$NPM" "${npm_install_args[@]}"
@@ -77,9 +87,9 @@ if [ "$install_rc" -ne 0 ]; then
   exit "$install_rc"
 fi
 
-if [ -n "$INSTALL_PREFIX" ]; then
+if [ -n "$INSTALL_PREFIX" ] && [ -n "$_VALIDATOR_TMP" ]; then
   PKG_ROOT="$INSTALL_PREFIX/lib/node_modules/$PACKAGE"
-  if ! bash "$PKG_ROOT/scripts/verify-package-files.sh" "$PKG_ROOT"; then
+  if ! bash "$_VALIDATOR_TMP/scripts/verify-package-files.sh" "$PKG_ROOT"; then
     echo "$(date -u +%FT%TZ) install-and-restart package validation failed"
     if [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")

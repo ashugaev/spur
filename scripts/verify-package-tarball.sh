@@ -17,7 +17,7 @@ fi
 
 while IFS= read -r entry || [[ -n "$entry" ]]; do
   [[ -z "$entry" ]] && continue
-  if ! tar -tzf "$TARBALL" | grep -qF "package/$entry"; then
+  if ! tar -tzf "$TARBALL" | grep -qxF "package/$entry"; then
     echo "verify-package-tarball: tarball missing: package/$entry" >&2
     exit 1
   fi

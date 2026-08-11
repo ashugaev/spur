@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
 rm -rf v2/web
 mkdir -p v2/web
 # In a pnpm monorepo, Next emits standalone/<workspace-path>/server.js.

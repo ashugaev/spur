@@ -14,7 +14,7 @@ else
   PREFIX="$WORK_DIR/prefix"
 fi
 
-if [[ "$PREFIX" = "$HOME/.local" ]]; then
+if [[ "$(realpath -m "$PREFIX")" = "$(realpath -m "$HOME/.local")" ]]; then
   echo "test-deploy: refusing production npm prefix $HOME/.local — use a throwaway prefix, e.g. SPUR_TEST_DEPLOY_PREFIX=\$(mktemp -d)/prefix" >&2
   exit 1
 fi

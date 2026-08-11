@@ -294,4 +294,58 @@ if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   exit 1
 fi
 
+# Case 11: downgrade to a version whose tree lacks scripts/verify-package-files.sh.
+# The validator was copied from the current (pre-install) package into a temp dir
+# before the install, so validation still runs and passes, and reinit is reached.
+PREFIX_DIR11="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10" "$PREFIX_DIR11"' EXIT
+PKG_DIR11="$PREFIX_DIR11/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR11="$PKG_DIR11/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR11" "$PKG_DIR11/deploy" "$PKG_DIR11/dist" "$PKG_DIR11/web/dist-server" "$PREFIX_DIR11/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR11/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR11/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR11/required-package-files.txt"
+: >"$PKG_DIR11/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR11/deploy/spur-web.npm.service"
+: >"$PKG_DIR11/dist/cli.js"
+: >"$PKG_DIR11/web/dist-server/web-server.js"
+printf '{"version":"1.5.0"}' >"$PKG_DIR11/package.json"
+cat >"$PREFIX_DIR11/bin/spur" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+EOF
+chmod +x "$PREFIX_DIR11/bin/spur"
+
+FAKE_NPM11="$(mktemp)"
+cat >"$FAKE_NPM11" <<EOF
+#!/usr/bin/env bash
+echo "\$@"
+rm -f "$PKG_DIR11/scripts/verify-package-files.sh"
+rm -f "$PKG_DIR11/required-package-files.txt"
+EOF
+chmod +x "$FAKE_NPM11"
+
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM="$FAKE_NPM11" \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR11/install-and-restart.sh" 0.9.0
+rc11=$?
+set -e
+rm -f "$FAKE_NPM11"
+if [ "$rc11" -ne 0 ]; then
+  echo "FAIL: case 11 expected exit 0 for downgrade (validator from pre-install copy), got $rc11" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -q "spur reinit rc=0" "$LOG_FILE"; then
+  echo "FAIL: case 11 log missing spur reinit rc=0 (downgrade must still reach reinit)" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "package validation failed" "$LOG_FILE"; then
+  echo "FAIL: case 11 log must not contain package validation failed (pre-install copy should have been used)" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
 echo "install-and-restart.test.sh: OK"
