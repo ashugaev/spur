@@ -44,6 +44,7 @@ OUTPUT
     Conclusion: <ship/hold decision in one sentence>
 
 RULES
+  - Reviewer/test deploys go through `scripts/test-deploy.sh`, never a bare `npm install -g`.
   - Never APPROVE with open MUST FIX or failing checks.
   - Never APPROVE if requirements uncovered.
   - Use the PR conclusion comment structure exactly.
