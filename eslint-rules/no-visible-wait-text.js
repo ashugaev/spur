@@ -35,7 +35,9 @@ function isVisibleJsxValue(node) {
   while (parent) {
     if (parent.type === "JSXAttribute") return parent.name.name === "placeholder";
     if (parent.type === "JSXExpressionContainer") {
-      return parent.parent?.type !== "JSXAttribute";
+      return (
+        parent.parent?.type !== "JSXAttribute" || parent.parent.name.name === "placeholder"
+      );
     }
     if (parent.type === "VariableDeclarator" || parent.type === "Program") return false;
     parent = parent.parent;

@@ -49,11 +49,16 @@ describe("visible wait text lint rule", () => {
       'export function Probe() { return <input placeholder="Please wait..." />; }',
       "packages/web/src/probe.tsx",
     );
+    const placeholderVariable = await lint(
+      'const status = "Please wait..."; export function Probe() { return <input placeholder={status} />; }',
+      "packages/web/src/probe.tsx",
+    );
     const variable = await lint(
       'const status = "Loading..."; export function Probe() { return <p>{status}</p>; }',
       "packages/web/src/probe.tsx",
     );
     expect(placeholder).toHaveLength(1);
+    expect(placeholderVariable).toHaveLength(1);
     expect(variable).toHaveLength(1);
   });
 
