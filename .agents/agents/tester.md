@@ -25,6 +25,7 @@ OUTPUT
   Verdict: PASS | FAIL
 
 RULES
+  - Reviewer/test deploys go through `scripts/test-deploy.sh`, never a bare `npm install -g`.
   - Never PASS with failing build, test, or scenario checks.
   - Never PASS when a Spur backend change skipped required CLI validation.
   - Never PASS when an impacted `real-agent smoke` scenario wasn't run and the suite didn't explicitly skip it for missing `tmux`, binaries, or agent auth.
