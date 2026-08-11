@@ -62,6 +62,8 @@ export type ProtectedReason =
   | { kind: "package-manager-active"; pid: number }
   | { kind: "pinned-revision"; dirName: string }
   | { kind: "pin-unresolved" }
+  | { kind: "pin-source" }
+  | { kind: "spur-owned" }
   | { kind: "class-never-pruned" }
   | { kind: "process-tree-unreadable" }
   | { kind: "process-list-unavailable" }
@@ -115,6 +117,10 @@ export interface LivenessSnapshot {
   // without it, so a missing/invalid config must fail closed the same way
   // zero resolved sources does, not silently rely on whatever P1/P4 found.
   instanceConfigOk: boolean;
+  // The set of `~/.npm/_npx/<hash>` directory names that supplied at least
+  // one parsed `browsers.json` pin source (P4). An `npx-package` entry
+  // whose hash is in this set is a pin source and must not be deleted.
+  pinSourceNpxHashes: ReadonlySet<string>;
 }
 
 export interface CachePlan {
@@ -137,34 +143,8 @@ export interface PruneOutcome {
 export const GLOBAL_MIN_AGE_DAYS = 7;
 export const NPX_MIN_AGE_DAYS = 30;
 export const BROWSER_REVISION_MIN_AGE_DAYS = 30;
-export const BROWSER_PROFILE_MIN_AGE_DAYS = 7;
-// CORR-C: generic ~/.cache entries are regenerable XDG cache data, not a
-// never-pruned class — measured AND prunable, at a slightly higher floor
-// than the global one since there is no liveness signal for them beyond
-// argv/cwd.
-export const GENERIC_MIN_AGE_DAYS = 30;
 export const CACHE_MEASURE_TIMEOUT_MS = 30_000;
 export const DU_CHUNK_SIZE = 500;
-
-// CORR-A name deny-list: never a deletion candidate regardless of age/owner,
-// independent of the uid check (root-owned lock dirs the invoking user
-// happens to own are still off-limits; systemd/tmux/X11 sockets other
-// processes depend on; /tmp/spur.yaml is a known landmine, and any other
-// `spur*` path is the sibling ~/.spur-retention session's territory, not
-// this one's).
-const TMP_DENY_PATTERNS: RegExp[] = [
-  /^systemd-private-/,
-  /^tmux-/,
-  /^\.X11-unix$/,
-  /^\.font-unix$/,
-  /^\.ICE-unix$/,
-  /^snap-private-/,
-  /^spur/,
-];
-
-function isTmpDenyListed(name: string): boolean {
-  return TMP_DENY_PATTERNS.some((pattern) => pattern.test(name));
-}
 
 // `~/.cache/ms-playwright` and `~/.cache/ms-playwright-mcp` share this
 // classifier: `b` (and any other non-matching name) is the running-browser
@@ -213,11 +193,8 @@ function classFloorDays(entryClass: CacheEntryClass): number {
     case "browser-revision":
       return BROWSER_REVISION_MIN_AGE_DAYS;
     case "browser-profile":
-      return BROWSER_PROFILE_MIN_AGE_DAYS;
     case "browser-registry":
-      return GLOBAL_MIN_AGE_DAYS;
     case "generic":
-      return GENERIC_MIN_AGE_DAYS;
     case "tmp-entry":
       return GLOBAL_MIN_AGE_DAYS;
   }
@@ -266,11 +243,19 @@ export function verdictFor(
   if (!liveness.processListReadable) {
     return { kind: "protected", reason: { kind: "process-list-unavailable" } };
   }
-  if (entry.entryClass.kind === "browser-registry") {
+  if (
+    entry.entryClass.kind === "browser-registry" ||
+    entry.entryClass.kind === "tmp-entry" ||
+    entry.entryClass.kind === "generic" ||
+    entry.entryClass.kind === "browser-profile"
+  ) {
     return { kind: "protected", reason: { kind: "class-never-pruned" } };
   }
-  if (entry.entryClass.kind === "tmp-entry" && isTmpDenyListed(entry.entryClass.name)) {
-    return { kind: "protected", reason: { kind: "class-never-pruned" } };
+  if (
+    entry.entryClass.kind === "npx-package" &&
+    liveness.pinSourceNpxHashes.has(entry.entryClass.hash)
+  ) {
+    return { kind: "protected", reason: { kind: "pin-source" } };
   }
   const effectiveFloor = Math.max(GLOBAL_MIN_AGE_DAYS, classFloorDays(entry.entryClass));
   if (entry.ageDays < effectiveFloor) {
@@ -388,8 +373,9 @@ async function readBrowsersJsonViaRequire(fromModulePath: string): Promise<unkno
 async function resolvePins(
   home: string,
   instanceConfig: InstanceConfigReadResult,
-): Promise<{ pinnedDirNames: Set<string>; pinSourceCount: number }> {
+): Promise<{ pinnedDirNames: Set<string>; pinSourceCount: number; pinSourceNpxHashes: Set<string> }> {
   const pinnedDirNames = new Set<string>();
+  const pinSourceNpxHashes = new Set<string>();
   let pinSourceCount = 0;
 
   const addFrom = (parsed: unknown | undefined): void => {
@@ -444,17 +430,19 @@ async function resolvePins(
   try {
     const hashes = await readdir(npxDir);
     for (const hash of hashes) {
-      addFrom(
-        await readBrowsersJson(
-          join(npxDir, hash, "node_modules", "playwright-core", "browsers.json"),
-        ),
+      const parsed = await readBrowsersJson(
+        join(npxDir, hash, "node_modules", "playwright-core", "browsers.json"),
       );
+      if (parsed !== undefined) {
+        pinSourceNpxHashes.add(hash);
+        addFrom(parsed);
+      }
     }
   } catch {
     // ~/.npm/_npx absent or unreadable — no npx-installed pins.
   }
 
-  return { pinnedDirNames, pinSourceCount };
+  return { pinnedDirNames, pinSourceCount, pinSourceNpxHashes };
 }
 
 async function readPnpmStorePins(rootPath: string): Promise<unknown | undefined> {
@@ -513,7 +501,7 @@ async function collectLiveness(
   const processListReadable = rawProcesses !== null;
   const processes = rawProcesses ?? [];
   const processTreeReadable = await canReadProcessTree(process.pid);
-  const { pinnedDirNames, pinSourceCount } = await resolvePins(home, instanceConfig);
+  const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(home, instanceConfig);
 
   const sessionCwds: LiveSessionCwd[] = [];
   if (instanceConfig.status === "ok") {
@@ -554,6 +542,7 @@ async function collectLiveness(
     pinnedDirNames,
     pinSourceCount,
     instanceConfigOk: instanceConfig.status === "ok",
+    pinSourceNpxHashes,
   };
 }
 
@@ -768,6 +757,17 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
   const liveness = await collectLiveness(home, instanceConfig);
   const myUid = process.getuid?.();
 
+  let dataDirReal: string | undefined;
+  let worktreeDirReal: string | undefined;
+  if (instanceConfig.status === "ok") {
+    dataDirReal = await realpath(instanceConfig.config.dataDir).catch(
+      () => instanceConfig.config.dataDir,
+    );
+    worktreeDirReal = await realpath(instanceConfig.config.worktreeDir).catch(
+      () => instanceConfig.config.worktreeDir,
+    );
+  }
+
   const roots: CacheRootMeasurement[] = [];
   const candidates: CacheCandidate[] = [];
   let reclaimableKb = 0;
@@ -778,7 +778,17 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
     for (const entry of entries) {
       const own = ownership.get(entry.path);
       if (!own) continue;
-      const verdict = verdictFor(entry, own, liveness, myUid);
+      let verdict = verdictFor(entry, own, liveness, myUid);
+      if (verdict.kind === "prunable" && (dataDirReal ?? worktreeDirReal)) {
+        try {
+          const targetReal = await realpath(entry.path);
+          if (isSpurOwnedReal(targetReal, dataDirReal, worktreeDirReal)) {
+            verdict = { kind: "protected", reason: { kind: "spur-owned" } };
+          }
+        } catch {
+          // vanished between stat and realpath — leave verdict as prunable
+        }
+      }
       candidates.push({ entry, verdict });
       if (verdict.kind === "prunable") {
         reclaimableKb += entry.sizeKb;
@@ -802,71 +812,58 @@ function isWithin(parentReal: string, targetReal: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"));
 }
 
-// Deletion guard: re-`lstat` (skip if now a symlink or missing), refuse
-// anything that no longer clears its own age floor, re-check liveness
-// against a fresh process listing, assert the resolved path stays inside its
-// own root (no symlink-escape) and outside `dataDir`/`worktreeDir`, then
-// `fs.promises.rm`. Failures are collected, never thrown — one bad candidate
-// must never abort the rest of the sweep.
+function isSpurOwnedReal(
+  targetReal: string,
+  dataDirReal: string | undefined,
+  worktreeDirReal: string | undefined,
+): boolean {
+  if (dataDirReal && isWithin(dataDirReal, targetReal)) return true;
+  if (worktreeDirReal && isWithin(worktreeDirReal, targetReal)) return true;
+  return false;
+}
+
+// Deletion guard: re-`lstat` each candidate to rebuild age and ownership,
+// decide through `verdictFor` against a single fresh liveness snapshot,
+// assert the resolved path stays inside its own root (no symlink-escape)
+// and outside `dataDir`/`worktreeDir`, then `fs.promises.rm`. Failures are
+// collected, never thrown — one bad candidate must never abort the rest of
+// the sweep.
 export async function executePrune(
   candidates: CacheCandidate[],
-  guard: { dataDir?: string; worktreeDir?: string; home?: string; tmpPath?: string },
+  instanceConfig: InstanceConfigReadResult & { status: "ok" },
+  seams?: { home?: string; tmpPath?: string },
 ): Promise<PruneOutcome> {
   const removed: { path: string; sizeKb: number }[] = [];
   const failures: { path: string; message: string }[] = [];
-  const roots = cacheRoots(guard.home ?? homedir(), guard.tmpPath);
+  const home = seams?.home ?? homedir();
+  const roots = cacheRoots(home, seams?.tmpPath);
   const nowMs = Date.now();
 
-  // The liveness snapshot and every per-entry stat driving `candidates` were
-  // captured at the START of a measurement that can take tens of seconds —
-  // long enough for an `npm install` or a reused `mcp-chrome-*` profile to
-  // start mid-sweep. Re-running the listing ONCE right before deletion
-  // starts (rather than trusting the stale snapshot) lets a process that
-  // started after planning still veto its own deletion. `null` (ps
-  // unavailable) gets the same fail-closed treatment as planCachePrune's
-  // processTreeReadable check: refuse every remaining candidate rather than
-  // delete blind.
-  const freshProcesses = await listProcesses();
+  const freshLiveness = await collectLiveness(home, instanceConfig);
+  const myUid = process.getuid?.();
+
+  const dataDirReal = await realpath(instanceConfig.config.dataDir).catch(
+    () => instanceConfig.config.dataDir,
+  );
+  const worktreeDirReal = await realpath(instanceConfig.config.worktreeDir).catch(
+    () => instanceConfig.config.worktreeDir,
+  );
 
   for (const candidate of candidates) {
     if (candidate.verdict.kind !== "prunable") continue;
-    const { path, rootId, sizeKb, entryClass } = candidate.entry;
+    const { path, rootId, sizeKb } = candidate.entry;
     try {
-      if (freshProcesses === null) {
-        failures.push({ path, message: "refused: process listing unavailable at delete time" });
-        continue;
-      }
       const st = await lstat(path);
-      if (st.isSymbolicLink()) {
-        failures.push({ path, message: "refused: now a symlink" });
-        continue;
-      }
-      // Age can only have grown since planning — a shrink would mean the
-      // entry was touched, which is exactly what this refuses on.
-      const ageDays = ageDaysFor(st.mtimeMs, st.ctimeMs, nowMs);
-      const floorDays = Math.max(GLOBAL_MIN_AGE_DAYS, classFloorDays(entryClass));
-      if (ageDays < floorDays) {
+      const freshEntry = {
+        ...candidate.entry,
+        ageDays: ageDaysFor(st.mtimeMs, st.ctimeMs, nowMs),
+      };
+      const freshOwnership = { uid: st.uid, isSymlink: st.isSymbolicLink() };
+      const verdict = verdictFor(freshEntry, freshOwnership, freshLiveness, myUid);
+      if (verdict.kind !== "prunable") {
         failures.push({
           path,
-          message: `refused: no longer old enough at delete time (${ageDays}d < ${floorDays}d)`,
-        });
-        continue;
-      }
-      if (entryClass.kind === "vendor-cache") {
-        const pm = freshProcesses.find(isPackageManagerProcess);
-        if (pm) {
-          failures.push({
-            path,
-            message: `refused: package manager active at delete time (pid ${pm.pid})`,
-          });
-          continue;
-        }
-      }
-      const argvMatch = freshProcesses.find((proc) => proc.args.includes(path));
-      if (argvMatch) {
-        failures.push({
-          path,
-          message: `refused: in use at delete time (pid ${argvMatch.pid})`,
+          message: `refused at delete time: ${verdict.reason.kind}`,
         });
         continue;
       }
@@ -886,21 +883,9 @@ export async function executePrune(
         failures.push({ path, message: "refused: resolves outside its cache root" });
         continue;
       }
-      if (guard.dataDir) {
-        const dataDirReal = await realpath(guard.dataDir).catch(() => guard.dataDir as string);
-        if (isWithin(dataDirReal, targetRealPath)) {
-          failures.push({ path, message: "refused: resolves inside dataDir" });
-          continue;
-        }
-      }
-      if (guard.worktreeDir) {
-        const worktreeDirReal = await realpath(guard.worktreeDir).catch(
-          () => guard.worktreeDir as string,
-        );
-        if (isWithin(worktreeDirReal, targetRealPath)) {
-          failures.push({ path, message: "refused: resolves inside worktreeDir" });
-          continue;
-        }
+      if (isSpurOwnedReal(targetRealPath, dataDirReal, worktreeDirReal)) {
+        failures.push({ path, message: "refused: resolves inside Spur data directory" });
+        continue;
       }
       await rm(path, { recursive: true, force: true });
       removed.push({ path, sizeKb });

@@ -46,21 +46,24 @@ Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-refe
 spur cache [--json] [--prune] [--yes]
 ```
 
-Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` deletes every entry verdicted `prunable`. Never starts or calls the daemon; works with the daemon stopped.
+Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` deletes every entry verdicted `prunable`. Requires a resolved instance config; aborts non-zero if the config is absent or invalid. Never starts or calls the daemon; works with the daemon stopped.
 
 Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, the rest of `~/.cache`, and `/tmp` — never `~/.spur` (`dataDir`/`worktreeDir`), which a sibling retention path owns.
 
-Prunable classes and age floors (a global 7-day floor applies to every class on top of its own):
+Prunable classes (definitionally regenerable; all other classes are report-only, measured but never deleted):
 
 - `vendor-cache` (`~/.npm/_cacache`, one unit) — 7d; protected while any package-manager process (npm/pnpm/npx/yarn) is running.
-- `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if its path appears in a live process's argv.
-- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when either zero `browsers.json` sources resolve at all, or the instance config itself does not resolve (every `browsers.json` source depends on it).
-- `browser-profile` (`mcp-*` dirs under either playwright cache root) — 7d; protected by argv or a live session descendant's cwd.
-- `browser-registry` (`~/.cache/ms-playwright/b`) — never pruned, measured and reported only.
-- `generic` (every other `~/.cache` entry) — 30d; prunable. No pin key like `browser-revision` — protected only by argv match, a live session descendant's cwd, ownership, and age.
-- `tmp-entry` (`/tmp`) — 7d (the global floor, no extra grace); a fixed deny-list (`systemd-private-*`, `tmux-*`, `.X11-unix`, `snap-private-*`, `spur*`, etc.) is never a candidate regardless of age.
+- `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if the hash supplied a parsed `browsers.json` pin source (`pin-source` reason) or if its path appears in a live process's argv.
+- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when either zero `browsers.json` sources resolve at all, or the instance config itself does not resolve.
 
-Every class also protects a symlink, an entry not owned by the invoking uid, and any entry when the process tree isn't readable (the whole plan degrades to report-only in that case).
+Report-only classes (never deleted, always reported):
+
+- `browser-profile` (`mcp-*` dirs under either playwright cache root) — measured and reported; never pruned (carries cookies and logged-in sessions).
+- `browser-registry` (`~/.cache/ms-playwright/b` and similar) — measured and reported; never pruned (browser revision provenance).
+- `generic` (every other `~/.cache` entry, including `whisper.cpp`) — measured and reported; never pruned.
+- `tmp-entry` (`/tmp`) — measured and reported; never pruned.
+
+Every prunable class also protects a symlink, an entry not owned by the invoking uid, an entry resolving inside `dataDir`/`worktreeDir` (`spur-owned`), and any entry when the process tree is not readable (the whole plan degrades to report-only in that case). `executePrune` takes a fresh liveness snapshot and re-derives each verdict from a fresh `lstat` before deleting.
 
 ## daemon
 

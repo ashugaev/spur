@@ -4,20 +4,29 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CacheRetentionModule from "../../src/cache-retention.js";
 import type { CachePlan } from "../../src/cache-retention.js";
+import type * as ConfigModule from "../../src/config.js";
 
-const { planCachePruneMock, rmMock, writeStdoutMock } = vi.hoisted(() => ({
+const {
+  planCachePruneMock,
+  executePruneMock,
+  rmMock,
+  writeStdoutMock,
+  loadInstanceConfigReadOnlyMock,
+} = vi.hoisted(() => ({
   planCachePruneMock: vi.fn(),
+  executePruneMock: vi.fn(),
   rmMock: vi.fn(),
   writeStdoutMock: vi.fn(),
+  loadInstanceConfigReadOnlyMock: vi.fn(),
 }));
 
 // Only `planCachePrune` (the measurement path) is replaced with a fixed
-// fixture — `executePrune` stays real so the flag matrix exercises the
-// actual deletion guard against a synthetic mkdtemp tree. Never mocked away:
-// this is the one piece of behavior AC10/AC11 need to prove.
+// fixture — `executePrune` is mocked separately to allow testing the CLI
+// wiring without running real deletion. The actual deletion guard is
+// exercised by cache-retention.test.ts at the unit boundary.
 vi.mock("../../src/cache-retention.js", async () => {
   const actual = await vi.importActual<typeof CacheRetentionModule>("../../src/cache-retention.js");
-  return { ...actual, planCachePrune: planCachePruneMock };
+  return { ...actual, planCachePrune: planCachePruneMock, executePrune: executePruneMock };
 });
 
 // `rm` is the only real filesystem mutation `executePrune` can perform;
@@ -32,6 +41,11 @@ vi.mock("../../src/io.js", () => ({
   writeStderr: vi.fn(),
   writeStdout: writeStdoutMock,
 }));
+
+vi.mock("../../src/config.js", async () => {
+  const actual = await vi.importActual<typeof ConfigModule>("../../src/config.js");
+  return { ...actual, loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock };
+});
 
 async function parseCache(args: string[]): Promise<void> {
   const { createProgram } = await import("../../src/cli.js");
@@ -49,13 +63,21 @@ let smallPath: string;
 function makePlan(): CachePlan {
   return {
     generatedAt: "2026-01-01T00:00:00.000Z",
-    roots: [{ rootId: "tmp", path: "/tmp", status: "measured", totalKb: 600, entryCount: 3 }],
+    roots: [
+      {
+        rootId: "npm-cacache",
+        path: "/tmp",
+        status: "measured",
+        totalKb: 600,
+        entryCount: 3,
+      },
+    ],
     candidates: [
       {
         entry: {
           path: smallPath,
-          rootId: "tmp",
-          entryClass: { kind: "tmp-entry", name: "small" },
+          rootId: "npm-cacache",
+          entryClass: { kind: "vendor-cache" },
           sizeKb: 100,
           newestChangeMs: Date.now(),
           ageDays: 40,
@@ -65,8 +87,8 @@ function makePlan(): CachePlan {
       {
         entry: {
           path: bigPath,
-          rootId: "tmp",
-          entryClass: { kind: "tmp-entry", name: "big" },
+          rootId: "npm-cacache",
+          entryClass: { kind: "vendor-cache" },
           sizeKb: 500,
           newestChangeMs: Date.now(),
           ageDays: 40,
@@ -76,8 +98,8 @@ function makePlan(): CachePlan {
       {
         entry: {
           path: join(tempDir, "kept"),
-          rootId: "tmp",
-          entryClass: { kind: "tmp-entry", name: "kept" },
+          rootId: "npm-cacache",
+          entryClass: { kind: "vendor-cache" },
           sizeKb: 999_999,
           newestChangeMs: Date.now(),
           ageDays: 1,
@@ -95,9 +117,11 @@ describe("spur cache CLI", () => {
   beforeEach(() => {
     vi.resetModules();
     planCachePruneMock.mockReset();
+    executePruneMock.mockReset();
     rmMock.mockReset();
     rmMock.mockResolvedValue(undefined);
     writeStdoutMock.mockReset();
+    loadInstanceConfigReadOnlyMock.mockReset();
     tempDir = mkdtempSync("/tmp/spur-cache-cli-test-");
     process.env["TMPDIR"] = tempDir;
     process.env["SPUR_CONFIG"] = join(tempDir, "config-does-not-exist.yaml");
@@ -106,6 +130,24 @@ describe("spur cache CLI", () => {
     writeFileSync(smallPath, "x");
     writeFileSync(bigPath, "x");
     planCachePruneMock.mockResolvedValue(makePlan());
+    executePruneMock.mockResolvedValue({
+      removed: [
+        { path: smallPath, sizeKb: 100 },
+        { path: bigPath, sizeKb: 500 },
+      ],
+      failures: [],
+      freedKb: 600,
+    });
+    loadInstanceConfigReadOnlyMock.mockReturnValue({
+      status: "ok",
+      config: {
+        configPath: join(tempDir, "config.yaml"),
+        dataDir: join(tempDir, ".spur"),
+        worktreeDir: join(tempDir, ".spur", "worktrees"),
+        tmux: { socketName: "spur-test" },
+        projects: {},
+      },
+    });
   });
 
   afterEach(() => {
@@ -115,33 +157,34 @@ describe("spur cache CLI", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("never calls rm with no flags (dry-run)", async () => {
+  it("never calls executePrune with no flags (dry-run)", async () => {
     await parseCache([]);
-    expect(rmMock).not.toHaveBeenCalled();
+    expect(executePruneMock).not.toHaveBeenCalled();
   });
 
-  it("never calls rm with --prune alone, and prints the --yes hint", async () => {
+  it("never calls executePrune with --prune alone, and prints the --yes hint", async () => {
     await parseCache(["--prune"]);
-    expect(rmMock).not.toHaveBeenCalled();
+    expect(executePruneMock).not.toHaveBeenCalled();
     const output = writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(output).toContain("re-run with --prune --yes");
   });
 
-  it("calls rm exactly once per prunable candidate with --prune --yes", async () => {
-    // executePrune's delete-time re-check (F3) recomputes age from a fresh
-    // `lstat`, and `ctime` cannot be back-dated on a file `writeFileSync`
-    // just created — advance the clock instead so the fixture reads as
-    // genuinely old at delete time, same as the fixed plan's declared
-    // `ageDays: 40` claims.
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 41 * 86_400_000);
-    try {
-      await parseCache(["--prune", "--yes"]);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(rmMock).toHaveBeenCalledTimes(2);
-    const removedPaths = rmMock.mock.calls.map((call) => call[0]);
+  it("AC5: --prune --yes throws before planning when instance config is absent", async () => {
+    loadInstanceConfigReadOnlyMock.mockReturnValue({ status: "absent" });
+    await expect(parseCache(["--prune", "--yes"])).rejects.toThrow(
+      "requires a resolved instance config",
+    );
+    expect(planCachePruneMock).not.toHaveBeenCalled();
+    expect(executePruneMock).not.toHaveBeenCalled();
+  });
+
+  it("calls executePrune with the prunable candidates with --prune --yes", async () => {
+    await parseCache(["--prune", "--yes"]);
+    expect(executePruneMock).toHaveBeenCalledTimes(1);
+    const [candidates] = executePruneMock.mock.calls[0] as [{ entry: { path: string } }[]];
+    const removedPaths = candidates
+      .filter((c) => (c as { verdict: { kind: string } }).verdict.kind === "prunable")
+      .map((c) => c.entry.path);
     expect(removedPaths).toEqual(expect.arrayContaining([smallPath, bigPath]));
   });
 
@@ -155,7 +198,7 @@ describe("spur cache CLI", () => {
 
   it("prints the raw plan as JSON with --json", async () => {
     await parseCache(["--json"]);
-    expect(rmMock).not.toHaveBeenCalled();
+    expect(executePruneMock).not.toHaveBeenCalled();
     const printed = writeStdoutMock.mock.calls
       .map((call) => String(call[0]))
       .find((line) => line.startsWith("{"));
@@ -171,13 +214,7 @@ describe("spur cache CLI", () => {
   });
 
   it("includes the prune outcome in --json output when executed", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 41 * 86_400_000);
-    try {
-      await parseCache(["--json", "--prune", "--yes"]);
-    } finally {
-      vi.useRealTimers();
-    }
+    await parseCache(["--json", "--prune", "--yes"]);
     const printed = writeStdoutMock.mock.calls
       .map((call) => String(call[0]))
       .find((line) => line.startsWith("{"));

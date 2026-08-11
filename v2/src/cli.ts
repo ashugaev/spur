@@ -19,8 +19,7 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -896,6 +895,10 @@ function formatProtectedReason(candidate: CacheCandidate): string {
       return `pinned browser revision (${reason.dirName})`;
     case "pin-unresolved":
       return "no browsers.json pin sources resolved";
+    case "pin-source":
+      return "npx-package is a browsers.json pin source";
+    case "spur-owned":
+      return "resolves inside Spur data directory";
     case "class-never-pruned":
       return "never pruned (this class is report-only)";
     case "process-tree-unreadable":
@@ -1264,8 +1267,9 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "cache") {
     return [
       "Dry-run by default: no flags, or `--prune` alone, only report — never deletes. `--prune --yes` deletes prunable entries.",
-      "Covers ~/.npm, ~/.cache, ~/.cache/ms-playwright(-mcp), and /tmp — never ~/.spur (dataDir/worktreeDir), which a sibling retention path owns.",
-      "Never starts or calls the daemon; works with the daemon stopped.",
+      "Prunable classes: vendor-cache (~/.npm/_cacache), npx-package (~/.npm/_npx), browser-revision (~/.cache/ms-playwright(-mcp)). All other classes are report-only.",
+      "`--prune --yes` requires a resolved instance config; aborts non-zero if the config is absent or invalid.",
+      "Never deletes ~/.spur (dataDir/worktreeDir) or an npx-package hash that supplies a browsers.json pin source.",
     ];
   }
   if (command.name() === "doctor") {
@@ -2169,25 +2173,18 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--yes", "Confirm --prune non-interactively; required to actually delete anything")
     .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }) => {
       const instanceConfig = loadInstanceConfigReadOnly();
+      if (options.prune && options.yes && instanceConfig.status !== "ok") {
+        throw new Error(
+          `--prune --yes requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,
+        );
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "measuring host caches",
         action: async (): Promise<CacheActionResult> => {
           const plan = await planCachePrune({ instanceConfig });
-          if (options.prune && options.yes) {
-            // Instance config not resolving must not drop the dataDir/worktreeDir
-            // exclusion guard — fall back to the same defaults `config.ts` bootstraps
-            // (~/.spur, ~/.spur/worktrees) rather than passing nothing.
-            const outcome = await executePrune(plan.candidates, {
-              dataDir:
-                instanceConfig.status === "ok"
-                  ? instanceConfig.config.dataDir
-                  : join(homedir(), ".spur"),
-              worktreeDir:
-                instanceConfig.status === "ok"
-                  ? instanceConfig.config.worktreeDir
-                  : join(homedir(), ".spur", "worktrees"),
-            });
+          if (options.prune && options.yes && instanceConfig.status === "ok") {
+            const outcome = await executePrune(plan.candidates, instanceConfig);
             return { plan, outcome, wouldPrune: false };
           }
           return { plan, wouldPrune: Boolean(options.prune) };

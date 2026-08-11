@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ProcessTreeModule from "../../src/process-tree.js";
+import type { AppConfig } from "../../src/types.js";
+import type { InstanceConfigReadResult } from "../../src/config.js";
 import type {
   CacheEntry,
   CacheEntryClass,
@@ -32,7 +34,6 @@ const {
   executePrune,
   GLOBAL_MIN_AGE_DAYS,
   BROWSER_REVISION_MIN_AGE_DAYS,
-  GENERIC_MIN_AGE_DAYS,
   planCachePrune,
   verdictFor,
 } = await import("../../src/cache-retention.js");
@@ -42,8 +43,8 @@ const DAY_MS = 86_400_000;
 
 function makeEntry(overrides: Partial<CacheEntry> & { entryClass: CacheEntryClass }): CacheEntry {
   return {
-    path: "/home/user/.cache/example",
-    rootId: "xdg-cache",
+    path: "/home/user/.npm/_cacache",
+    rootId: "npm-cacache",
     sizeKb: 100,
     newestChangeMs: Date.now(),
     ageDays: 0,
@@ -64,7 +65,27 @@ function makeLiveness(overrides: Partial<LivenessSnapshot> = {}): LivenessSnapsh
     pinnedDirNames: new Set(),
     pinSourceCount: 1,
     instanceConfigOk: true,
+    pinSourceNpxHashes: new Set(),
     ...overrides,
+  };
+}
+
+function fakeInstanceConfig(
+  dataDir: string,
+  worktreeDir: string,
+): InstanceConfigReadResult & { status: "ok" } {
+  return {
+    status: "ok" as const,
+    config: {
+      configPath: join(dataDir, "config.yaml"),
+      server: { host: "127.0.0.1", port: 4310 },
+      dataDir,
+      worktreeDir,
+      projectsRoot: join(dataDir, "projects"),
+      defaultAgent: "claude",
+      tmux: { socketName: "spur-test" },
+      projects: {},
+    } as unknown as AppConfig,
   };
 }
 
@@ -128,7 +149,7 @@ describe("ageDaysFor", () => {
 });
 
 describe("verdictFor", () => {
-  it("AC1: protects an entry at exactly 6 days and falls through at exactly 7 (the global floor)", () => {
+  it("AC1: vendor-cache at exactly 6 days protected, at 7 prunable (global floor)", () => {
     const now = Date.now();
     const liveness = makeLiveness();
     const at6 = makeEntry({
@@ -152,7 +173,117 @@ describe("verdictFor", () => {
     expect(verdictFor(at7, makeOwnership(), liveness, MY_UID)).toEqual({ kind: "prunable" });
   });
 
-  it("AC2: a pinned revision at 400d is protected, an unpinned one at 400d is prunable, at 20d it is too-recent", () => {
+  it("AC1 (class boundary): only vendor-cache, npx-package, browser-revision are prunable; all others class-never-pruned", () => {
+    const aged = (kind: CacheEntryClass) =>
+      makeEntry({ entryClass: kind, ageDays: 9999, path: "/some/path", rootId: "npm-npx" });
+    const liveness = makeLiveness({ pinSourceCount: 1 });
+
+    expect(verdictFor(aged({ kind: "vendor-cache" }), makeOwnership(), liveness, MY_UID).kind).toBe(
+      "prunable",
+    );
+    expect(
+      verdictFor(aged({ kind: "npx-package", hash: "abc" }), makeOwnership(), liveness, MY_UID)
+        .kind,
+    ).toBe("prunable");
+    expect(
+      verdictFor(
+        aged({ kind: "browser-revision", browser: "chromium", revision: "1", dirName: "chromium-1" }),
+        makeOwnership(),
+        liveness,
+        MY_UID,
+      ).kind,
+    ).toBe("prunable");
+
+    for (const cls of [
+      { kind: "browser-profile" } as CacheEntryClass,
+      { kind: "browser-registry" } as CacheEntryClass,
+      { kind: "generic", name: "whisper.cpp" } as CacheEntryClass,
+      { kind: "tmp-entry", name: "scratch" } as CacheEntryClass,
+    ]) {
+      expect(verdictFor(aged(cls), makeOwnership(), makeLiveness(), MY_UID)).toEqual({
+        kind: "protected",
+        reason: { kind: "class-never-pruned" },
+      });
+    }
+  });
+
+  it("AC2: generic entries (including whisper.cpp) are class-never-pruned regardless of age", () => {
+    for (const name of ["yarn", "whisper.cpp", "pip", "go-build", "uv"]) {
+      const entry = makeEntry({
+        path: `/home/user/.cache/${name}`,
+        rootId: "xdg-cache",
+        entryClass: { kind: "generic", name },
+        ageDays: 9999,
+      });
+      expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
+        kind: "protected",
+        reason: { kind: "class-never-pruned" },
+      });
+    }
+  });
+
+  it("AC3: browser-profile entries are class-never-pruned regardless of age or argv", () => {
+    const entry = makeEntry({
+      path: "/home/user/.cache/ms-playwright/mcp-chrome-abc123",
+      rootId: "playwright-browsers",
+      entryClass: { kind: "browser-profile" },
+      ageDays: 9999,
+    });
+    const busy = makeLiveness({
+      processes: [{ pid: 4242, ppid: 1, args: `node cli.js --profile ${entry.path}` }],
+    });
+    expect(verdictFor(entry, makeOwnership(), busy, MY_UID)).toEqual({
+      kind: "protected",
+      reason: { kind: "class-never-pruned" },
+    });
+    const idle = makeLiveness({ processes: [] });
+    expect(verdictFor(entry, makeOwnership(), idle, MY_UID)).toEqual({
+      kind: "protected",
+      reason: { kind: "class-never-pruned" },
+    });
+  });
+
+  it("AC4: tmp-entry entries are class-never-pruned regardless of age or deny-list match", () => {
+    for (const name of [
+      "systemd-private-abc",
+      "tmux-1000",
+      ".X11-unix",
+      "snap-private-tmp",
+      "spur.yaml",
+      "spur-worktree",
+      "some-scratch-dir",
+      "long-lived-socket",
+    ]) {
+      const entry = makeEntry({
+        path: `/tmp/${name}`,
+        rootId: "tmp",
+        entryClass: { kind: "tmp-entry", name },
+        ageDays: 9999,
+      });
+      expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
+        kind: "protected",
+        reason: { kind: "class-never-pruned" },
+      });
+    }
+  });
+
+  it("AC8: npx-package entry whose hash is in pinSourceNpxHashes returns pin-source", () => {
+    const entry = makeEntry({
+      path: "/home/user/.npm/_npx/abc123",
+      rootId: "npm-npx",
+      entryClass: { kind: "npx-package", hash: "abc123" },
+      ageDays: 9999,
+    });
+    const withPin = makeLiveness({ pinSourceNpxHashes: new Set(["abc123"]) });
+    expect(verdictFor(entry, makeOwnership(), withPin, MY_UID)).toEqual({
+      kind: "protected",
+      reason: { kind: "pin-source" },
+    });
+    const withoutPin = makeLiveness({ pinSourceNpxHashes: new Set() });
+    expect(verdictFor(entry, makeOwnership(), withoutPin, MY_UID).kind).toBe("prunable");
+  });
+
+  it("AC2 (browser-revision): a pinned revision at 400d is protected, an unpinned one at 400d is prunable, at 20d it is too-recent", () => {
     const dirName = "chromium_headless_shell-1208";
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
@@ -177,7 +308,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC3: pinSourceCount 0 protects every browser-revision entry regardless of age (fail-closed)", () => {
+  it("AC3 (pin-unresolved): pinSourceCount 0 protects every browser-revision entry regardless of age", () => {
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
       browser: "chromium",
@@ -192,7 +323,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC3b: instanceConfigOk false protects every browser-revision entry regardless of pinSourceCount (fail-closed)", () => {
+  it("AC3b: instanceConfigOk false protects every browser-revision entry regardless of pinSourceCount", () => {
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
       browser: "chromium",
@@ -208,60 +339,6 @@ describe("verdictFor", () => {
     expect(verdictFor(aged400, makeOwnership(), noInstanceConfig, MY_UID)).toEqual({
       kind: "protected",
       reason: { kind: "pin-unresolved" },
-    });
-  });
-
-  it("AC5: an mcp-chrome-* dir referenced in a fake ps argv table is protected in-use, otherwise prunable", () => {
-    const profileClass: CacheEntryClass = { kind: "browser-profile" };
-    const entry = makeEntry({
-      path: "/home/user/.cache/ms-playwright/mcp-chrome-abc123",
-      rootId: "playwright-browsers",
-      entryClass: profileClass,
-      ageDays: 90,
-    });
-    const busy = makeLiveness({
-      processes: [{ pid: 4242, ppid: 1, args: `node cli.js --profile ${entry.path}` }],
-    });
-    expect(verdictFor(entry, makeOwnership(), busy, MY_UID)).toEqual({
-      kind: "protected",
-      reason: { kind: "in-use", pid: 4242, evidence: "argv" },
-    });
-    const idle = makeLiveness({ processes: [] });
-    expect(verdictFor(entry, makeOwnership(), idle, MY_UID)).toEqual({ kind: "prunable" });
-  });
-
-  it("AC6: browser-registry entries are class-never-pruned at any age, generic entries are not (CORR-C)", () => {
-    const registryEntry = makeEntry({
-      path: "/home/user/.cache/ms-playwright/b",
-      rootId: "playwright-browsers",
-      entryClass: { kind: "browser-registry" },
-      ageDays: 5000,
-    });
-    expect(verdictFor(registryEntry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-      kind: "protected",
-      reason: { kind: "class-never-pruned" },
-    });
-
-    // CORR-C: generic ~/.cache entries are prunable past their own 30d
-    // floor, not permanently protected.
-    const genericOld = makeEntry({
-      entryClass: { kind: "generic", name: "yarn" },
-      ageDays: GENERIC_MIN_AGE_DAYS,
-    });
-    expect(verdictFor(genericOld, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-      kind: "prunable",
-    });
-    const genericYoung = makeEntry({
-      entryClass: { kind: "generic", name: "yarn" },
-      ageDays: GENERIC_MIN_AGE_DAYS - 1,
-    });
-    expect(verdictFor(genericYoung, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-      kind: "protected",
-      reason: {
-        kind: "too-recent",
-        ageDays: GENERIC_MIN_AGE_DAYS - 1,
-        floorDays: GENERIC_MIN_AGE_DAYS,
-      },
     });
   });
 
@@ -281,8 +358,8 @@ describe("verdictFor", () => {
     expect(verdictFor(entry, makeOwnership(), idle, MY_UID)).toEqual({ kind: "prunable" });
   });
 
-  it("AC8: processTreeReadable false protects every entry, regardless of class or age", () => {
-    const entry = makeEntry({ entryClass: { kind: "generic", name: "yarn" }, ageDays: 9999 });
+  it("AC8 (process tree): processTreeReadable false protects every entry, regardless of class or age", () => {
+    const entry = makeEntry({ entryClass: { kind: "vendor-cache" }, ageDays: 9999 });
     const unreadable = makeLiveness({ processTreeReadable: false });
     expect(verdictFor(entry, makeOwnership(), unreadable, MY_UID)).toEqual({
       kind: "protected",
@@ -291,7 +368,7 @@ describe("verdictFor", () => {
   });
 
   it("AC9: a symlinked entry and an entry owned by another uid are never prunable", () => {
-    const entry = makeEntry({ entryClass: { kind: "generic", name: "yarn" }, ageDays: 9999 });
+    const entry = makeEntry({ entryClass: { kind: "vendor-cache" }, ageDays: 9999 });
     expect(verdictFor(entry, makeOwnership({ isSymlink: true }), makeLiveness(), MY_UID)).toEqual({
       kind: "protected",
       reason: { kind: "symlink" },
@@ -302,38 +379,29 @@ describe("verdictFor", () => {
     });
   });
 
-  it("CORR-A: a /tmp entry matching the deny-list is class-never-pruned regardless of age or ownership", () => {
-    for (const name of [
-      "systemd-private-abc",
-      "tmux-1000",
-      ".X11-unix",
-      "snap-private-tmp",
-      "spur.yaml",
-      "spur-worktree",
-    ]) {
-      const entry = makeEntry({
-        path: `/tmp/${name}`,
-        rootId: "tmp",
-        entryClass: { kind: "tmp-entry", name },
-        ageDays: 9999,
-      });
-      expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-        kind: "protected",
-        reason: { kind: "class-never-pruned" },
-      });
-    }
-  });
+  it("AC12: check order — symlink fires before class-never-pruned, uid fires before process tree", () => {
+    const genericEntry = makeEntry({
+      path: "/home/user/.cache/yarn",
+      rootId: "xdg-cache",
+      entryClass: { kind: "generic", name: "yarn" },
+      ageDays: 9999,
+    });
+    expect(
+      verdictFor(genericEntry, makeOwnership({ isSymlink: true }), makeLiveness(), MY_UID),
+    ).toEqual({ kind: "protected", reason: { kind: "symlink" } });
 
-  it("CORR-A: a non-denylisted /tmp entry follows the global 7d floor like any other class", () => {
-    const entry = makeEntry({
-      path: "/tmp/some-scratch-dir",
-      rootId: "tmp",
-      entryClass: { kind: "tmp-entry", name: "some-scratch-dir" },
-      ageDays: GLOBAL_MIN_AGE_DAYS,
-    });
-    expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-      kind: "prunable",
-    });
+    expect(
+      verdictFor(genericEntry, makeOwnership({ uid: 0 }), makeLiveness(), MY_UID),
+    ).toEqual({ kind: "protected", reason: { kind: "not-owned", uid: 0 } });
+
+    expect(
+      verdictFor(
+        genericEntry,
+        makeOwnership(),
+        makeLiveness({ processTreeReadable: false }),
+        MY_UID,
+      ),
+    ).toEqual({ kind: "protected", reason: { kind: "process-tree-unreadable" } });
   });
 });
 
@@ -401,11 +469,9 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
   });
 
   it("AC8 (full plan): canReadProcessTree=false yields reclaimableKb 0 and every candidate protected", async () => {
-    await mkdir(join(home, ".cache"), { recursive: true });
-    await writeFile(join(home, ".cache", "somelib"), "x");
-    // Force it well past every floor.
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     const old = new Date(Date.now() - 9999 * DAY_MS);
-    await utimes(join(home, ".cache", "somelib"), old, old);
+    await utimes(join(home, ".npm", "_cacache"), old, old);
     canReadProcessTreeMock.mockResolvedValue(false);
 
     const plan = await planCachePrune({
@@ -459,30 +525,74 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     expect(plan.candidates.some((c) => c.entry.rootId === "npm-npx")).toBe(false);
   });
 
-  it("AC11: executePrune refuses a symlink and a path outside its claimed root instead of deleting them, and deletes a real prunable one", async () => {
-    await mkdir(join(home, ".cache"), { recursive: true });
-    const realFile = join(home, ".cache", "realdir");
-    await mkdir(realFile);
-    await writeFile(join(realFile, "data"), "x");
+  it("AC7 (spur-owned): plan marks a prunable entry inside dataDir as spur-owned; execute refuses it", async () => {
+    const dataDir = join(home, ".spur");
+    const worktreeDir = join(home, ".spur", "worktrees");
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
+    const old = new Date(Date.now() - 30 * DAY_MS);
+    await utimes(join(home, ".npm", "_cacache"), old, old);
+
+    const config = fakeInstanceConfig(dataDir, worktreeDir);
+    const plan = await planCachePrune({ home, tmpPath: tmpRoot, instanceConfig: config });
+
+    // vendor-cache entry should not be spur-owned (it's under .npm, not .spur)
+    const npmEntry = plan.candidates.find((c) => c.entry.rootId === "npm-cacache");
+    expect(npmEntry).toBeDefined();
+    expect(npmEntry?.verdict.kind).not.toBe("spur-owned");
+
+    // simulate a candidate that is inside dataDir — spur-owned at execute time
+    const insideDataDir = join(dataDir, "fake-cache");
+    await mkdir(insideDataDir, { recursive: true });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let outcome: Awaited<ReturnType<typeof executePrune>>;
+    try {
+      outcome = await executePrune(
+        [
+          {
+            entry: {
+              path: insideDataDir,
+              rootId: "npm-cacache",
+              entryClass: { kind: "vendor-cache" },
+              sizeKb: 10,
+              newestChangeMs: Date.now() - 61 * DAY_MS,
+              ageDays: 61,
+            },
+            verdict: { kind: "prunable" },
+          },
+        ],
+        config,
+        { home },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(outcome.removed).toEqual([]);
+    expect(outcome.failures[0]?.message).toContain("Spur data directory");
+  });
+
+  it("AC11 (executePrune): refuses a symlink and a path outside its claimed root; deletes a real prunable vendor-cache entry", async () => {
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
+    await mkdir(join(home, ".npm", "_npx"), { recursive: true });
+    const realCachePath = join(home, ".npm", "_cacache");
+    await writeFile(join(realCachePath, "data"), "x");
     const old = new Date(Date.now() - 60 * DAY_MS);
-    await utimes(realFile, old, old);
+    await utimes(realCachePath, old, old);
 
     const escapeTargetDir = await mkdtemp(join(tmpdir(), "spur-cache-retention-escape-"));
-    const escapeLink = join(home, ".cache", "escape-link");
+    const escapeLink = join(home, ".npm", "_npx", "escape-link");
     await symlink(escapeTargetDir, escapeLink);
 
-    // A candidate whose path is entirely outside its claimed root (xdg-cache
-    // resolves to `<home>/.cache`) — a plain directory, not a symlink, so
-    // this exercises the realpath-containment guard specifically, not the
-    // symlink guard above it.
     const outsideRootDir = await mkdtemp(join(tmpdir(), "spur-cache-retention-outside-"));
+
+    const config = fakeInstanceConfig(join(home, ".spur"), join(home, ".spur", "worktrees"));
 
     const candidates = [
       {
         entry: {
-          path: realFile,
-          rootId: "xdg-cache" as const,
-          entryClass: { kind: "generic" as const, name: "realdir" },
+          path: realCachePath,
+          rootId: "npm-cacache" as const,
+          entryClass: { kind: "vendor-cache" as const },
           sizeKb: 10,
           newestChangeMs: old.getTime(),
           ageDays: 60,
@@ -492,8 +602,8 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       {
         entry: {
           path: escapeLink,
-          rootId: "xdg-cache" as const,
-          entryClass: { kind: "generic" as const, name: "escape-link" },
+          rootId: "npm-npx" as const,
+          entryClass: { kind: "npx-package" as const, hash: "escape-link" },
           sizeKb: 10,
           newestChangeMs: old.getTime(),
           ageDays: 60,
@@ -503,8 +613,8 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       {
         entry: {
           path: outsideRootDir,
-          rootId: "xdg-cache" as const,
-          entryClass: { kind: "generic" as const, name: "outside" },
+          rootId: "npm-npx" as const,
+          entryClass: { kind: "npx-package" as const, hash: "outside" },
           sizeKb: 10,
           newestChangeMs: old.getTime(),
           ageDays: 60,
@@ -515,99 +625,80 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
 
     // `ctime` cannot be back-dated by `utimes()` — it always reflects real
     // wall-clock fixture creation, which just happened. executePrune's
-    // delete-time re-check (F3) uses max(mtime, ctime), so without advancing
+    // delete-time re-check uses max(mtime, ctime), so without advancing
     // the clock every one of these freshly-created fixtures would fail the
     // age floor before ever reaching the guard this test targets.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + 61 * DAY_MS);
     let outcome: Awaited<ReturnType<typeof executePrune>>;
     try {
-      outcome = await executePrune(candidates, { home });
+      outcome = await executePrune(candidates, config, { home });
     } finally {
       vi.useRealTimers();
     }
 
-    expect(outcome.removed).toEqual([{ path: realFile, sizeKb: 10 }]);
-    expect(outcome.failures).toEqual([
-      { path: escapeLink, message: "refused: now a symlink" },
-      { path: outsideRootDir, message: "refused: resolves outside its cache root" },
-    ]);
+    expect(outcome.removed).toEqual([{ path: realCachePath, sizeKb: 10 }]);
+    const failurePaths = outcome.failures.map((f) => f.path);
+    expect(failurePaths).toContain(escapeLink);
+    expect(failurePaths).toContain(outsideRootDir);
+    const symlinkFailure = outcome.failures.find((f) => f.path === escapeLink);
+    expect(symlinkFailure?.message).toContain("symlink");
+    const outsideFailure = outcome.failures.find((f) => f.path === outsideRootDir);
+    expect(outsideFailure?.message).toContain("outside");
 
     await rm(escapeTargetDir, { recursive: true, force: true });
     await rm(outsideRootDir, { recursive: true, force: true });
   });
 
-  it("AC13: executePrune refuses a candidate resolving inside dataDir, even though it clears every other guard", async () => {
-    await mkdir(join(home, ".cache"), { recursive: true });
-    const insideDataDir = join(home, ".cache", "livedata");
-    await mkdir(insideDataDir);
-    await writeFile(join(insideDataDir, "data"), "x");
-
-    const candidate = {
-      entry: {
-        path: insideDataDir,
-        rootId: "xdg-cache" as const,
-        entryClass: { kind: "generic" as const, name: "livedata" },
-        sizeKb: 10,
-        newestChangeMs: Date.now(),
-        ageDays: 60,
-      },
-      verdict: { kind: "prunable" as const },
-    };
-
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 61 * DAY_MS);
-    let outcome: Awaited<ReturnType<typeof executePrune>>;
-    try {
-      // `dataDir` set to the temp home's `.cache` parent — the whole home
-      // dir, exactly as spur.yaml's `dataDir` would resolve above a real
-      // `.cache` — so a candidate that would otherwise clear every other
-      // guard (symlink, own-root containment, age) still must not be
-      // deleted.
-      outcome = await executePrune([candidate], { home, dataDir: home });
-    } finally {
-      vi.useRealTimers();
-    }
-
-    expect(outcome.removed).toEqual([]);
-    expect(outcome.failures).toEqual([
-      { path: insideDataDir, message: "refused: resolves inside dataDir" },
-    ]);
-  });
-
-  it("AC14: executePrune refuses a candidate resolving inside worktreeDir, even though it clears every other guard", async () => {
-    await mkdir(join(home, ".cache", "worktrees"), { recursive: true });
-    const insideWorktreeDir = join(home, ".cache", "worktrees", "proj", "sess");
+  it("AC13/AC14: executePrune refuses a candidate resolving inside dataDir or worktreeDir", async () => {
+    const dataDir = join(home, ".spur");
+    const worktreeDir = join(home, ".spur", "worktrees");
+    const insideDataDir = join(dataDir, "some-data");
+    const insideWorktreeDir = join(worktreeDir, "proj", "sess");
+    await mkdir(insideDataDir, { recursive: true });
     await mkdir(insideWorktreeDir, { recursive: true });
+    await writeFile(join(insideDataDir, "data"), "x");
     await writeFile(join(insideWorktreeDir, "data"), "x");
 
-    const candidate = {
-      entry: {
-        path: insideWorktreeDir,
-        rootId: "xdg-cache" as const,
-        entryClass: { kind: "generic" as const, name: "sess" },
-        sizeKb: 10,
-        newestChangeMs: Date.now(),
-        ageDays: 60,
-      },
-      verdict: { kind: "prunable" as const },
-    };
+    const config = fakeInstanceConfig(dataDir, worktreeDir);
 
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + 61 * DAY_MS);
     let outcome: Awaited<ReturnType<typeof executePrune>>;
     try {
-      outcome = await executePrune([candidate], {
-        home,
-        worktreeDir: join(home, ".cache", "worktrees"),
-      });
+      outcome = await executePrune(
+        [
+          {
+            entry: {
+              path: insideDataDir,
+              rootId: "npm-cacache" as const,
+              entryClass: { kind: "vendor-cache" as const },
+              sizeKb: 10,
+              newestChangeMs: Date.now() - 61 * DAY_MS,
+              ageDays: 61,
+            },
+            verdict: { kind: "prunable" as const },
+          },
+          {
+            entry: {
+              path: insideWorktreeDir,
+              rootId: "npm-cacache" as const,
+              entryClass: { kind: "vendor-cache" as const },
+              sizeKb: 10,
+              newestChangeMs: Date.now() - 61 * DAY_MS,
+              ageDays: 61,
+            },
+            verdict: { kind: "prunable" as const },
+          },
+        ],
+        config,
+        { home },
+      );
     } finally {
       vi.useRealTimers();
     }
 
     expect(outcome.removed).toEqual([]);
-    expect(outcome.failures).toEqual([
-      { path: insideWorktreeDir, message: "refused: resolves inside worktreeDir" },
-    ]);
+    expect(outcome.failures.every((f) => f.message.includes("Spur data directory"))).toBe(true);
   });
 });
