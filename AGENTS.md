@@ -104,7 +104,7 @@ ALWAYS-ON RULES
   Use `Spur` in code, config, docs, and CLI surfaces.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
   Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.agents/skills/spur/SKILL.md` Safety and In this repo for detail.
-  Reviewer/test deploys go through `scripts/test-deploy.sh`, never a bare `npm install -g`.
+  Deploy for review or test with `scripts/test-deploy.sh`, never `npm install -g` by hand.
   Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
   Capture what the task taught before closing it. Route by scope: reusable across projects -> global rules; specific to this repo -> the owning `SKILL.md` or `spur memory --scope project`. Skip what git history, the code, or an existing rule already records.
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
