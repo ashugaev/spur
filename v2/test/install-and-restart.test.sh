@@ -149,9 +149,17 @@ fi
 # freshly installed binary under that prefix.
 PREFIX_DIR="$(mktemp -d)"
 trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR"' EXIT
-PKG_SCRIPTS_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/spur/scripts"
-mkdir -p "$PKG_SCRIPTS_DIR" "$PREFIX_DIR/bin"
+PKG_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR="$PKG_DIR/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR" "$PKG_DIR/deploy" "$PKG_DIR/dist" "$PKG_DIR/web/dist-server" "$PREFIX_DIR/bin"
 cp "$HELPER" "$PKG_SCRIPTS_DIR/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR/required-package-files.txt"
+: >"$PKG_DIR/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR/deploy/spur-web.npm.service"
+: >"$PKG_DIR/dist/cli.js"
+: >"$PKG_DIR/web/dist-server/web-server.js"
+printf '{"version":"1.2.3"}' >"$PKG_DIR/package.json"
 cat >"$PREFIX_DIR/bin/spur" <<'EOF'
 #!/usr/bin/env bash
 echo "$@"
@@ -181,6 +189,107 @@ if ! grep -q -- "install -g --prefix $PREFIX_DIR @shugaev/spur@1.2.3" "$LOG_FILE
 fi
 if ! grep -q "spur reinit rc=0" "$LOG_FILE"; then
   echo "FAIL: log missing spur reinit rc=0 from the prefix-resolved binary" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+# Case 9: install layout with required files missing -> non-zero exit, rollback
+# install logged, no spur reinit, no systemctl restart.
+PREFIX_DIR9="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9"' EXIT
+PKG_DIR9="$PREFIX_DIR9/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR9="$PKG_DIR9/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR9" "$PKG_DIR9/deploy" "$PKG_DIR9/dist" "$PKG_DIR9/web/dist-server" "$PREFIX_DIR9/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR9/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR9/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR9/required-package-files.txt"
+: >"$PKG_DIR9/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR9/deploy/spur-web.npm.service"
+: >"$PKG_DIR9/dist/cli.js"
+printf '{"version":"1.2.3"}' >"$PKG_DIR9/package.json"
+cat >"$PREFIX_DIR9/bin/spur" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+EOF
+chmod +x "$PREFIX_DIR9/bin/spur"
+
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR9/install-and-restart.sh" 1.3.0
+rc9=$?
+set -e
+if [ "$rc9" -eq 0 ]; then
+  echo "FAIL: case 9 expected non-zero exit for missing required file, got 0" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -q "web/dist-server/web-server.js" "$LOG_FILE"; then
+  echo "FAIL: case 9 log does not name the missing file web/dist-server/web-server.js" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -q -- "install -g --prefix $PREFIX_DIR9 @shugaev/spur@1.2.3" "$LOG_FILE"; then
+  echo "FAIL: case 9 log missing rollback install line" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "spur reinit" "$LOG_FILE"; then
+  echo "FAIL: case 9 log must not contain spur reinit" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
+  echo "FAIL: case 9 log must not contain systemctl restart" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+# Case 10: all required files present, spur exits 1 -> health rollback: rollback
+# install of 1.0.0, second reinit, exit non-zero. Two spur reinit rc= log lines.
+PREFIX_DIR10="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10"' EXIT
+PKG_DIR10="$PREFIX_DIR10/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR10="$PKG_DIR10/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR10" "$PKG_DIR10/deploy" "$PKG_DIR10/dist" "$PKG_DIR10/web/dist-server" "$PREFIX_DIR10/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR10/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR10/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR10/required-package-files.txt"
+: >"$PKG_DIR10/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR10/deploy/spur-web.npm.service"
+: >"$PKG_DIR10/dist/cli.js"
+: >"$PKG_DIR10/web/dist-server/web-server.js"
+printf '{"version":"1.0.0"}' >"$PKG_DIR10/package.json"
+cat >"$PREFIX_DIR10/bin/spur" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$PREFIX_DIR10/bin/spur"
+
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
+rc10=$?
+set -e
+if [ "$rc10" -eq 0 ]; then
+  echo "FAIL: case 10 expected non-zero exit when reinit fails, got 0" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -q -- "install -g --prefix $PREFIX_DIR10 @shugaev/spur@1.0.0" "$LOG_FILE"; then
+  echo "FAIL: case 10 log missing rollback install of 1.0.0" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+reinit_lines="$(grep -c "install-and-restart spur reinit rc=" "$LOG_FILE" || true)"
+if [ "$reinit_lines" -ne 2 ]; then
+  echo "FAIL: case 10 expected 2 spur reinit rc= log lines, got $reinit_lines" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
+  echo "FAIL: case 10 log must not contain bare systemctl restart" >&2
   cat "$LOG_FILE" >&2
   exit 1
 fi
