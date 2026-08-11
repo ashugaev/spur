@@ -565,7 +565,7 @@ describe("runtime-tmux", () => {
     }
   });
 
-  it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
+  it("waits past the previous 30-second cutoff for a slow agent prompt by default", async () => {
     let now = 0;
     let captureCount = 0;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -584,7 +584,7 @@ describe("runtime-tmux", () => {
     try {
       const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
 
-      await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, { agent: "claude" });
+      await waitForTmuxReady("api-1", ["Claude Code", "❯"]);
 
       expect(captureCount).toBe(5);
       expect(sleepMock.mock.calls.slice(0, 4)).toEqual([[728], [1_228], [2_228], [2_228]]);
