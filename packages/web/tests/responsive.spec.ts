@@ -261,7 +261,7 @@ test.describe("R1: Mobile viewport", () => {
     await page.waitForFunction(
       () => !document.querySelector(".loader-bar, .loader-centered-mark"),
       {
-      timeout: 8000,
+        timeout: 8000,
       },
     );
 

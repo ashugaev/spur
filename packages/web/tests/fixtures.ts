@@ -369,10 +369,7 @@ export async function gotoMocked(
   await mockSessions(page, sessions, projects);
   await page.goto(path);
   // Wait for route-level feedback to clear before interacting with content.
-  await page.waitForFunction(
-    () => !document.querySelector(".loader-bar, .loader-centered-mark"),
-    {
-      timeout: 8000,
-    },
-  );
+  await page.waitForFunction(() => !document.querySelector(".loader-bar, .loader-centered-mark"), {
+    timeout: 8000,
+  });
 }

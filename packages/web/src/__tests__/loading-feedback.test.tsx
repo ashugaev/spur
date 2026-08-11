@@ -34,9 +34,9 @@ describe("loading feedback", () => {
       "justify-center",
     );
     expect(
-      screen.getByRole("status", { name: "Loading session" }).querySelector(
-        ".loader-centered-mark",
-      ),
+      screen
+        .getByRole("status", { name: "Loading session" })
+        .querySelector(".loader-centered-mark"),
     ).not.toBeNull();
   });
 });
