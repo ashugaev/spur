@@ -84,6 +84,22 @@ sudo systemctl enable --now spur-daemon.service spur-web.service
 
 Subsequent releases: `pnpm main:deploy` only (don't `pnpm build` or `systemctl restart` by hand).
 
+### Test deploy (sandbox verification)
+
+Run the full pack-and-install cycle against a throwaway prefix — never against the production prefix:
+
+```bash
+bash scripts/test-deploy.sh
+```
+
+Override the prefix via `SPUR_TEST_DEPLOY_PREFIX`:
+
+```bash
+SPUR_TEST_DEPLOY_PREFIX="$(mktemp -d)/prefix" bash scripts/test-deploy.sh
+```
+
+The script refuses when the resolved prefix equals `$HOME/.local` (the production npm prefix). It never invokes `systemctl` and never binds a fixed port — the ephemeral web-server probe picks a free OS port and exits after the HTTP 200 check.
+
 ## Reverse proxy
 
 Bind `nginx` only to addresses you want exposed (substitute `<private-ip>` for the VM's private/Tailscale/VPN address; drop that line for loopback-only):
