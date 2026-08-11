@@ -6,6 +6,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { TerminalModal } from "@/components/TerminalModal";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
+import { BusyContent } from "@/components/BusyContent";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import type { ClaudeAccountSummary, DashboardSession } from "@/lib/types";
 
@@ -307,13 +308,15 @@ export function ClaudeAccountsMenu() {
               onChange={(event) => setLabel(event.target.value)}
             />
             <button
+              aria-busy={addMutation.isPending || undefined}
+              aria-label={addMutation.isPending ? "Adding account" : undefined}
               className="border border-[var(--color-border-default)] px-2 py-1 font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               data-testid="add-account"
               disabled={addMutation.isPending}
               type="button"
               onClick={() => addMutation.mutate(label.trim())}
             >
-              {addMutation.isPending ? "Adding…" : "Add account"}
+              <BusyContent busy={addMutation.isPending}>Add account</BusyContent>
             </button>
           </div>
           {addError ? (

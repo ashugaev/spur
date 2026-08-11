@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { BusyContent } from "@/components/BusyContent";
 import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
@@ -256,7 +257,7 @@ export function VoiceControls({
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
   if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
-  if (voice.recording) return <>Recording... {VOICE_TOGGLE_HINT} to stop</>;
+  if (voice.recording) return <>Recording — {VOICE_TOGGLE_HINT} to stop</>;
   return null;
 }
 
@@ -444,7 +445,8 @@ export function VoiceConfirmModal({
             </button>
             {onQueue ? (
               <button
-                aria-label="Add to queue"
+                aria-busy={voice.voiceBusy === "sending" || undefined}
+                aria-label={voice.voiceBusy === "sending" ? "Queueing voice input" : "Add to queue"}
                 className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 disabled={
                   (!voice.voiceDraft.trim() && !hasAttachments) ||
@@ -454,13 +456,12 @@ export function VoiceConfirmModal({
                 onClick={queueDraft}
                 type="button"
               >
-                {voice.voiceBusy === "sending" ? (
-                  <Spinner className="h-3 w-3" strokeWidth={1.5} />
-                ) : null}
-                <span>{voice.voiceBusy === "sending" ? "Queueing..." : "Queue"}</span>
+                <BusyContent busy={voice.voiceBusy === "sending"}>Queue</BusyContent>
               </button>
             ) : null}
             <button
+              aria-busy={voice.voiceBusy === "sending" || undefined}
+              aria-label={voice.voiceBusy === "sending" ? "Inserting voice input" : undefined}
               className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
               disabled={
                 (!voice.voiceDraft.trim() && !hasAttachments) ||
@@ -470,18 +471,15 @@ export function VoiceConfirmModal({
               onClick={confirmDraft}
               type="button"
             >
-              {voice.voiceBusy === "sending" ? (
-                <Spinner className="h-3 w-3" strokeWidth={1.5} />
-              ) : null}
-              <span>{voice.voiceBusy === "sending" ? "Inserting..." : "Insert"}</span>
-              {voice.voiceBusy !== "sending" ? (
+              <BusyContent busy={voice.voiceBusy === "sending"}>
+                <span>Insert</span>
                 <span
                   aria-hidden="true"
                   className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
-              ) : null}
+              </BusyContent>
             </button>
           </div>
         </div>

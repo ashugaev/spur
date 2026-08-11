@@ -218,7 +218,7 @@ test.describe("R1: Mobile viewport", () => {
       window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
     });
     await page.reload();
-    await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
+    await page.waitForFunction(() => !document.querySelector(".loader-bar"), {
       timeout: 8000,
     });
 

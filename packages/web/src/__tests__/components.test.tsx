@@ -558,7 +558,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });

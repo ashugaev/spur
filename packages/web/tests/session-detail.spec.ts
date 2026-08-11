@@ -302,7 +302,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(page.getByText("Loading...")).toHaveCount(0);
+    await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
   });
 
   test("back link visible", async ({ page }) => {

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   VoiceButton,
@@ -73,13 +73,13 @@ describe("VoiceInput", () => {
       <VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} onQueue={vi.fn()} voice={voice} />,
     );
 
-    const insertButton = screen.getByRole("button", { name: "Inserting..." });
-    const queueButton = screen.getByRole("button", { name: "Add to queue" });
+    const insertButton = screen.getByRole("button", { name: "Inserting voice input" });
+    const queueButton = screen.getByRole("button", { name: "Queueing voice input" });
     const cancelButton = screen.getByRole("button", { name: "Cancel" });
 
     expect(insertButton.querySelector(".voice-spinner")).not.toBeNull();
     expect(insertButton).toBeDisabled();
-    expect(queueButton).toHaveTextContent("Queueing...");
+    expect(within(queueButton).getByText("Queue")).toHaveClass("invisible");
     expect(queueButton.querySelector(".voice-spinner")).not.toBeNull();
     expect(queueButton).toBeDisabled();
     expect(cancelButton).toBeDisabled();

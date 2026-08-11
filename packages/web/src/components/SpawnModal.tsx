@@ -2,10 +2,10 @@
 
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
+import { BusyContent } from "@/components/BusyContent";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
-import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -87,7 +87,7 @@ interface SpawnModalProps {
   onSubmit: () => void;
   submitting: boolean;
   submitLabel: string;
-  submitBusyLabel: string;
+  submitBusyAriaLabel: string;
   submitDisabled: boolean;
   showCancel: boolean;
   // Agent
@@ -285,7 +285,7 @@ export function SpawnModal({
   onSubmit,
   submitting,
   submitLabel,
-  submitBusyLabel,
+  submitBusyAriaLabel,
   submitDisabled,
   showCancel,
   agent,
@@ -392,21 +392,22 @@ export function SpawnModal({
               </button>
             ) : null}
             <button
+              aria-busy={submitting || undefined}
+              aria-label={submitting ? submitBusyAriaLabel : undefined}
               className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
               disabled={submitDisabled}
               onClick={onSubmit}
               type="button"
             >
-              {submitting ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
-              <span>{submitting ? submitBusyLabel : submitLabel}</span>
-              {!submitting ? (
+              <BusyContent busy={submitting}>
+                <span>{submitLabel}</span>
                 <span
                   aria-hidden="true"
                   className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
-              ) : null}
+              </BusyContent>
             </button>
           </div>
         </div>

@@ -3358,7 +3358,9 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     });
 
     await page.goto("/");
-    await expect(page.getByText("Loading...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("status", { name: "Loading dashboard" })).not.toBeVisible({
+      timeout: 10_000,
+    });
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
 
     // Delay any subsequent /api/sessions call so that, if the dashboard were to
@@ -3374,7 +3376,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
 
     await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
-    await expect(page.getByText("Loading...")).toHaveCount(0);
+    await expect(page.getByRole("status", { name: "Loading dashboard" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });

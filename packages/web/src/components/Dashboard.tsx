@@ -11,11 +11,13 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { BusyContent } from "@/components/BusyContent";
 import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadingBar } from "@/components/LoadingBar";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FiltersModal } from "@/components/FiltersModal";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
@@ -821,12 +823,14 @@ function NewProjectModal({
             Cancel
           </button>
           <button
+            aria-busy={submitting || undefined}
+            aria-label={submitting ? "Creating project" : undefined}
             className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
             disabled={submitting}
             onClick={onSubmit}
             type="button"
           >
-            {submitting ? "Creating…" : "Create"}
+            <BusyContent busy={submitting}>Create</BusyContent>
           </button>
         </div>
       </div>
@@ -974,13 +978,17 @@ function EditProjectModal({
                 Cancel {deleteLabel}
               </button>
               <button
+                aria-busy={deleting || undefined}
+                aria-label={deleting ? `${deleteLabel} in progress` : undefined}
                 className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={deleting}
                 onClick={onDelete}
                 type="button"
               >
-                <IconTrash />
-                {deleting ? "Deleting…" : `Confirm ${deleteLabel}`}
+                <BusyContent busy={deleting}>
+                  <IconTrash />
+                  {`Confirm ${deleteLabel}`}
+                </BusyContent>
               </button>
             </div>
           </div>
@@ -1009,12 +1017,14 @@ function EditProjectModal({
             </button>
             {editable ? (
               <button
+                aria-busy={submitting || undefined}
+                aria-label={submitting ? "Saving project" : undefined}
                 className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={submitting}
                 onClick={onSubmit}
                 type="button"
               >
-                {submitting ? "Saving…" : "Save"}
+                <BusyContent busy={submitting}>Save</BusyContent>
               </button>
             ) : null}
           </div>
@@ -2677,7 +2687,7 @@ export function Dashboard() {
                 ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
                 : null
             }
-            submitBusyLabel="Spawning..."
+            submitBusyAriaLabel="Spawning session"
             submitDisabled={spawning || !spawnProjectId.trim()}
             submitLabel="Spawn"
             submitting={spawning}
@@ -2686,9 +2696,7 @@ export function Dashboard() {
           />
         ) : null}
 
-        {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
-        ) : null}
+        {loading ? <LoadingBar className="mt-4" label="Loading dashboard" /> : null}
 
         {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
           <section className="mt-5">

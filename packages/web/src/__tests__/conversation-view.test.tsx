@@ -202,7 +202,7 @@ describe("ConversationView", () => {
     expect(onAnswer).toHaveBeenCalledWith(1);
     expect(yesButton).toBeDisabled();
     expect(noButton).toBeDisabled();
-    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Sending answer" })).toBeInTheDocument();
   });
 
   it("moves a question from pending to answered when onAnswer resolves, keeping buttons disabled", async () => {
@@ -238,7 +238,7 @@ describe("ConversationView", () => {
 
     const yesButton = screen.getByRole("button", { name: /yes/i });
     fireEvent.click(yesButton);
-    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Sending answer" })).toBeInTheDocument();
 
     resolveAnswer?.();
     await screen.findByText("Answered: Yes");
@@ -274,7 +274,7 @@ describe("ConversationView", () => {
 
     const yesButton = screen.getByRole("button", { name: /yes/i });
     fireEvent.click(yesButton);
-    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Sending answer" })).toBeInTheDocument();
 
     await screen.findByText(/couldn't send/i);
 
@@ -283,7 +283,7 @@ describe("ConversationView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /yes/i }));
     expect(onAnswer).toHaveBeenCalledTimes(2);
-    expect(screen.getByText(/answering/i)).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Sending answer" })).toBeInTheDocument();
 
     await screen.findByText(/couldn't send/i);
   });

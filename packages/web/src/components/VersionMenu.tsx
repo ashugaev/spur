@@ -7,6 +7,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
+import { Spinner } from "@/components/icons/Spinner";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
@@ -77,8 +78,7 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
   return "Switch failed. Check the daemon log and try again.";
 }
 
-function switchStatusMessage(phase: "switching" | "done" | "failed", target: string): string {
-  if (phase === "switching") return `Switching Spur to ${target}…`;
+function switchStatusMessage(phase: "done" | "failed", target: string): string {
   if (phase === "done") return `Spur is now running ${target}.`;
   return versionSwitchFailedMessage(target);
 }
@@ -223,6 +223,7 @@ export function VersionMenu() {
       </button>
       {switchPhase !== "idle" && switchTarget ? (
         <div
+          aria-label={switchPhase === "switching" ? `Switching Spur to ${switchTarget}` : undefined}
           aria-live="polite"
           className={`absolute bottom-full right-0 z-50 mb-1.5 flex w-[min(20rem,calc(100vw-1rem))] items-start justify-between gap-2 border bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] ${
             switchPhase === "failed"
@@ -232,7 +233,13 @@ export function VersionMenu() {
           data-testid="version-switch-status"
           role="status"
         >
-          <span>{switchStatusMessage(switchPhase, switchTarget)}</span>
+          <span>
+            {switchPhase === "switching" ? (
+              <Spinner className="h-4 w-4" strokeWidth={1.5} />
+            ) : (
+              switchStatusMessage(switchPhase, switchTarget)
+            )}
+          </span>
           {switchPhase !== "switching" ? (
             <button
               aria-label="Dismiss version switch status"
