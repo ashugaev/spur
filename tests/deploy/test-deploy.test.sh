@@ -41,6 +41,42 @@ make_tarball() {
   echo "$tgz"
 }
 
+# a-large: all four required entries present at the START, followed by enough
+# filler entries to exceed the 64 KiB pipe buffer (grep exits on the first
+# match, SIGPIPEs tar, pipefail makes the broken pipe appear as a failure).
+# The verifier MUST accept this tarball.
+make_large_tarball() {
+  local name="$1"
+  local dir="$WORK_DIR/$name"
+  local pkg_dir="$dir/package"
+  mkdir -p "$pkg_dir/deploy" "$pkg_dir/dist" "$pkg_dir/web/dist-server" "$pkg_dir/filler"
+  touch "$pkg_dir/deploy/spur-daemon.npm.service"
+  touch "$pkg_dir/deploy/spur-web.npm.service"
+  touch "$pkg_dir/dist/cli.js"
+  touch "$pkg_dir/web/dist-server/web-server.js"
+  local i=0
+  while [ "$i" -lt 5000 ]; do
+    printf '%0.s_%.0s' {1..100} >"$pkg_dir/filler/$i.txt"
+    i=$((i + 1))
+  done
+  local tgz="$WORK_DIR/$name.tgz"
+  tar -czf "$tgz" -C "$dir" package
+  echo "$tgz"
+}
+
+tgz_large="$(make_large_tarball large)"
+
+set +e
+out_large="$(bash "$verify_script" "$tgz_large" 2>&1)"
+rc_large=$?
+set -e
+
+if [[ "$rc_large" -eq 0 ]]; then
+  ok "a-large: verify-package-tarball.sh accepts large tarball (no SIGPIPE false rejection)"
+else
+  bad "a-large: verify-package-tarball.sh rejected large tarball (got: $out_large)"
+fi
+
 # a1: missing web/dist-server/web-server.js -> non-zero, names the file
 tgz_a1="$(make_tarball a1 \
   deploy/spur-daemon.npm.service \
