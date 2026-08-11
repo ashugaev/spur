@@ -162,6 +162,14 @@ export function isExistingFile(path: string): boolean {
   }
 }
 
+export function isExistingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // Pure, read-only filter: drops blank entries and entries inside
 // `worktreeDir`. Dead-file pruning and canonical-alias dedupe belong to
 // `ConfigRegistryScanner` now — this filter only keeps a worktree-internal
