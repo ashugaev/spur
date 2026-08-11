@@ -84,21 +84,17 @@ sudo systemctl enable --now spur-daemon.service spur-web.service
 
 Subsequent releases: `pnpm main:deploy` only (don't `pnpm build` or `systemctl restart` by hand).
 
-### Test deploy (sandbox verification)
+### Test deploy
 
-Run the full pack-and-install cycle against a throwaway prefix — never against the production prefix:
+Verify a packaged install without touching the production one:
 
 ```bash
 bash scripts/test-deploy.sh
 ```
 
-Override the prefix via `SPUR_TEST_DEPLOY_PREFIX`:
+Builds `packages/web`, bundles it into `v2/`, packs the tarball, validates its contents, installs to a temp prefix (removed on exit), boots `web-server.js` on an OS-assigned port until it answers `200`, then runs `spur --version`. Never calls `systemctl`.
 
-```bash
-SPUR_TEST_DEPLOY_PREFIX="$(mktemp -d)/prefix" bash scripts/test-deploy.sh
-```
-
-The script refuses when the resolved prefix equals `$HOME/.local` (the production npm prefix). It never invokes `systemctl` and never binds a fixed port — the ephemeral web-server probe picks a free OS port and exits after the HTTP 200 check.
+`SPUR_TEST_DEPLOY_PREFIX=<dir>` installs to `<dir>` instead of the temp prefix. Either way the script refuses a prefix equal to `$HOME/.local` — the production npm prefix.
 
 ## Reverse proxy
 
