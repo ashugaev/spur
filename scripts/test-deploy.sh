@@ -14,6 +14,10 @@ else
   PREFIX="$WORK_DIR/prefix"
 fi
 
+# Strip leading/trailing whitespace so a padded value cannot bypass the guard.
+PREFIX="${PREFIX#"${PREFIX%%[![:space:]]*}"}"
+PREFIX="${PREFIX%"${PREFIX##*[![:space:]]}"}"
+
 if [[ "$(realpath -m "$PREFIX")" = "$(realpath -m "$HOME/.local")" ]]; then
   echo "test-deploy: refusing production npm prefix $HOME/.local — use a throwaway prefix, e.g. SPUR_TEST_DEPLOY_PREFIX=\$(mktemp -d)/prefix" >&2
   exit 1
