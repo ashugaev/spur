@@ -60,6 +60,26 @@ else
   bad "a1: output did not name web/dist-server/web-server.js (got: $out_a1)"
 fi
 
+# a1b: tarball with web-server.js.map but no web-server.js -> rejected (unanchored-match hole)
+tgz_a1b="$(make_tarball a1b \
+  deploy/spur-daemon.npm.service \
+  deploy/spur-web.npm.service \
+  dist/cli.js \
+  "web/dist-server/web-server.js.map")"
+
+set +e
+out_a1b="$(bash "$verify_script" "$tgz_a1b" 2>&1)"
+rc_a1b=$?
+set -e
+
+if [[ "$rc_a1b" -eq 0 ]]; then
+  bad "a1b: tarball with only web-server.js.map should be rejected"
+elif echo "$out_a1b" | grep -qF "web/dist-server/web-server.js"; then
+  ok "a1b: verify-package-tarball.sh rejects .map-only tarball, names missing file"
+else
+  bad "a1b: output did not name web/dist-server/web-server.js (got: $out_a1b)"
+fi
+
 # a2: all four present -> exit 0
 tgz_a2="$(make_tarball a2 \
   deploy/spur-daemon.npm.service \
@@ -79,11 +99,14 @@ else
 fi
 
 # b: SPUR_TEST_DEPLOY_PREFIX == HOME/.local -> refusal before any build/install
+# Tests four bypass forms: exact, trailing slash, path traversal, dot suffix, symlink.
 FAKE_HOME="$WORK_DIR/b-home"
-mkdir -p "$FAKE_HOME"
+mkdir -p "$FAKE_HOME/.local"
 FAKE_BIN="$WORK_DIR/b-bin"
 mkdir -p "$FAKE_BIN"
 MARKER="$WORK_DIR/b-marker"
+FAKE_SYM="$WORK_DIR/b-sym"
+ln -s "$FAKE_HOME/.local" "$FAKE_SYM"
 
 cat >"$FAKE_BIN/npm" <<EOF
 #!/usr/bin/env bash
@@ -97,21 +120,32 @@ exit 0
 EOF
 chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/pnpm"
 
-set +e
-out_b="$(HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$FAKE_HOME/.local" \
-  PATH="$FAKE_BIN:$PATH" bash "$test_deploy_script" 2>&1)"
-rc_b=$?
-set -e
+run_b() {
+  local label="$1"
+  local prefix="$2"
+  rm -f "$MARKER"
+  set +e
+  local out
+  out="$(HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$prefix" \
+    PATH="$FAKE_BIN:$PATH" bash "$test_deploy_script" 2>&1)"
+  local rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    bad "$label: should exit non-zero (got 0)"
+  elif [[ -f "$MARKER" ]]; then
+    bad "$label: stub was invoked before refusal (marker exists)"
+  elif echo "$out" | grep -q "refusing production npm prefix"; then
+    ok "$label: refuses production prefix"
+  else
+    bad "$label: refusal message not found (got: $out)"
+  fi
+}
 
-if [[ "$rc_b" -eq 0 ]]; then
-  bad "b: test-deploy.sh should exit non-zero when prefix equals HOME/.local"
-elif [[ -f "$MARKER" ]]; then
-  bad "b: stub npm/pnpm was invoked before the prefix refusal (marker exists)"
-elif echo "$out_b" | grep -q "refusing production npm prefix"; then
-  ok "b: test-deploy.sh refuses production prefix before any build or install"
-else
-  bad "b: refusal message not found in output (got: $out_b)"
-fi
+run_b "b-exact"    "$FAKE_HOME/.local"
+run_b "b-slash"    "$FAKE_HOME/.local/"
+run_b "b-traverse" "$FAKE_HOME/.local/../.local"
+run_b "b-dot"      "$FAKE_HOME/.local/."
+run_b "b-symlink"  "$FAKE_SYM"
 
 echo ""
 echo "test-deploy.test.sh: pass=$pass fail=$fail"

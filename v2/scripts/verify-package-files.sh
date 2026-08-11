@@ -7,9 +7,10 @@ if [[ -z "$PKG_ROOT" ]]; then
   exit 1
 fi
 
-LIST="$PKG_ROOT/required-package-files.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIST="$SCRIPT_DIR/../required-package-files.txt"
 if [[ ! -f "$LIST" ]]; then
-  echo "verify-package-files: required-package-files.txt missing from $PKG_ROOT" >&2
+  echo "verify-package-files: required-package-files.txt missing from $SCRIPT_DIR/.." >&2
   exit 1
 fi
 
