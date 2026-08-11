@@ -25,6 +25,8 @@
     "deploy",
     "scripts/install-and-restart.sh",
     "scripts/npm-init.sh",
+    "scripts/verify-package-files.sh",
+    "required-package-files.txt",
     "NOTICE",
     "spur.yaml.example",
     "tmux.conf"

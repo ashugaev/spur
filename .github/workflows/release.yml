@@ -74,12 +74,14 @@ jobs:
           # exercises the moved prebuild — fail the release if it can't load.
           (cd v2/web && node -e "require('node-pty')") \
             || { echo "bundled node-pty prebuild failed to load"; exit 1; }
-      - name: Verify node-pty prebuild is packed
+      - name: Verify packed tarball contents
         run: |
           cd v2
+          tgz="$(npm pack --pack-destination "$RUNNER_TEMP" 2>/dev/null | tail -1)"
+          tgz="$RUNNER_TEMP/$tgz"
+          bash "$GITHUB_WORKSPACE/scripts/verify-package-tarball.sh" "$tgz"
           arch="$(node -p process.arch)"
-          pack_list="$(npm pack --dry-run 2>&1)"
-          echo "$pack_list" | grep -q "web/node_modules/node-pty/prebuilds/linux-$arch/pty.node" || {
+          tar -tzf "$tgz" | grep -q "package/web/node_modules/node-pty/prebuilds/linux-$arch/pty.node" || {
             echo "packed tarball is missing node-pty/prebuilds/linux-$arch/pty.node"
             exit 1
           }
