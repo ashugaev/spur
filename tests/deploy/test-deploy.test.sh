@@ -177,11 +177,13 @@ run_b() {
   fi
 }
 
-run_b "b-exact"    "$FAKE_HOME/.local"
-run_b "b-slash"    "$FAKE_HOME/.local/"
-run_b "b-traverse" "$FAKE_HOME/.local/../.local"
-run_b "b-dot"      "$FAKE_HOME/.local/."
-run_b "b-symlink"  "$FAKE_SYM"
+run_b "b-exact"          "$FAKE_HOME/.local"
+run_b "b-slash"          "$FAKE_HOME/.local/"
+run_b "b-traverse"       "$FAKE_HOME/.local/../.local"
+run_b "b-dot"            "$FAKE_HOME/.local/."
+run_b "b-symlink"        "$FAKE_SYM"
+run_b "b-leading-space"  " $FAKE_HOME/.local"
+run_b "b-trailing-space" "$FAKE_HOME/.local "
 
 echo ""
 echo "test-deploy.test.sh: pass=$pass fail=$fail"
