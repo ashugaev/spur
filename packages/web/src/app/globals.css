@@ -318,6 +318,10 @@ textarea::placeholder {
     transform: none;
   }
 
+  .loader-skeleton {
+    background-image: none;
+  }
+
   .loader-bar-segment {
     width: 100%;
     opacity: 0.4;

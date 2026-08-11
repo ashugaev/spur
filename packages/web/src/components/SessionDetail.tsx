@@ -2552,7 +2552,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
-    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+    <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
       <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
@@ -3880,7 +3880,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <CenteredLoader className="min-h-[calc(100dvh-5rem)]" label="Loading session" />
+        <CenteredLoader className="flex-1" label="Loading session" />
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>

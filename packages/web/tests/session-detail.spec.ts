@@ -312,6 +312,28 @@ test.describe("S1: Session detail header", () => {
       "animation-name",
       "loader-centered-pulse",
     );
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const center = await page.evaluate(() => {
+        const mark = document.querySelector(".loader-centered-mark")?.getBoundingClientRect();
+        const back = document.querySelector("main > a")?.getBoundingClientRect();
+        const main = document.querySelector("main");
+        if (!mark || !back || !main) return null;
+        const paddingBottom = Number.parseFloat(getComputedStyle(main).paddingBottom);
+        return {
+          actualX: mark.left + mark.width / 2,
+          actualY: mark.top + mark.height / 2,
+          expectedX: window.innerWidth / 2,
+          expectedY: (back.bottom + window.innerHeight - paddingBottom) / 2,
+        };
+      });
+      expect(center).not.toBeNull();
+      expect(Math.abs((center?.actualX ?? 0) - (center?.expectedX ?? 0))).toBeLessThanOrEqual(1);
+      expect(Math.abs((center?.actualY ?? 0) - (center?.expectedY ?? 0))).toBeLessThanOrEqual(1);
+    }
     await page.screenshot({ path: testInfo.outputPath("session-loading.png") });
     releaseSession?.();
     await expect(loader).toHaveCount(0);

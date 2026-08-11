@@ -3407,6 +3407,27 @@ test.describe("D8: Loading feedback", () => {
       "animation-name",
       "loader-centered-pulse",
     );
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const center = await page.evaluate(() => {
+        const mark = document.querySelector(".loader-centered-mark")?.getBoundingClientRect();
+        const header = document.querySelector("body > div header")?.getBoundingClientRect();
+        const footer = document.querySelector("body footer")?.getBoundingClientRect();
+        if (!mark || !header || !footer) return null;
+        return {
+          actualX: mark.left + mark.width / 2,
+          actualY: mark.top + mark.height / 2,
+          expectedX: window.innerWidth / 2,
+          expectedY: (header.bottom + footer.top) / 2,
+        };
+      });
+      expect(center).not.toBeNull();
+      expect(Math.abs((center?.actualX ?? 0) - (center?.expectedX ?? 0))).toBeLessThanOrEqual(1);
+      expect(Math.abs((center?.actualY ?? 0) - (center?.expectedY ?? 0))).toBeLessThanOrEqual(8);
+    }
     const dashboardLoaderBox = await dashboardLoader.locator(".loader-centered-mark").boundingBox();
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(dashboardLoader.locator(".loader-centered-mark > span").first()).toHaveCSS(
@@ -3438,10 +3459,11 @@ test.describe("D8: Loading feedback", () => {
     await expect(page.getByRole("status", { name: "Loading models" })).toHaveClass(
       /loader-skeleton/,
     );
-    await expect(page.getByRole("status", { name: "Loading models" })).toHaveCSS(
-      "animation-name",
-      "none",
-    );
+    const modelSkeleton = page.getByRole("status", { name: "Loading models" });
+    const modelSkeletonBox = await modelSkeleton.boundingBox();
+    await expect(modelSkeleton).toHaveCSS("animation-name", "none");
+    await expect(modelSkeleton).toHaveCSS("background-image", "none");
+    expect(await modelSkeleton.boundingBox()).toEqual(modelSkeletonBox);
     releaseModels?.();
   });
 

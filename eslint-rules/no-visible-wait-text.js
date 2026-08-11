@@ -21,7 +21,7 @@ function identifierText(context, node) {
   while (scope) {
     const variable = scope.set.get(node.name);
     const definition = variable?.defs[0];
-    if (definition?.type === "Variable") {
+    if (definition?.type === "Variable" && definition.node.parent?.kind === "const") {
       return literalText(definition.node.init);
     }
     scope = scope.upper;
@@ -35,9 +35,7 @@ function isVisibleJsxValue(node) {
   while (parent) {
     if (parent.type === "JSXAttribute") return parent.name.name === "placeholder";
     if (parent.type === "JSXExpressionContainer") {
-      return (
-        parent.parent?.type !== "JSXAttribute" || parent.parent.name.name === "placeholder"
-      );
+      return parent.parent?.type !== "JSXAttribute" || parent.parent.name.name === "placeholder";
     }
     if (parent.type === "VariableDeclarator" || parent.type === "Program") return false;
     parent = parent.parent;

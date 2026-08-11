@@ -71,7 +71,12 @@ describe("visible wait text lint rule", () => {
       "export function Probe() { return <p>Loading...</p>; }",
       "packages/web/src/__tests__/probe.test.tsx",
     );
+    const mutableVariable = await lint(
+      'let status = "Loading..."; status = "Ready"; export function Probe() { return <p>{status}</p>; }',
+      "packages/web/src/probe.tsx",
+    );
     expect(production).toHaveLength(0);
     expect(testSource).toHaveLength(0);
+    expect(mutableVariable).toHaveLength(0);
   });
 });
