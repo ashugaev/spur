@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
 
 WORK_DIR="$(mktemp -d)"
 WEB_PID=""
@@ -18,13 +19,13 @@ if [[ "$PREFIX" = "$HOME/.local" ]]; then
   exit 1
 fi
 
-pnpm --dir "$REPO_ROOT/packages/web" build
+pnpm --dir packages/web build
 
 bash "$REPO_ROOT/scripts/bundle-web.sh"
 
-pnpm --dir "$REPO_ROOT/v2" build
+pnpm --dir v2 build
 
-TGZ_NAME="$(cd "$REPO_ROOT/v2" && npm pack --pack-destination "$WORK_DIR" 2>/dev/null | tail -1)"
+TGZ_NAME="$(cd v2 && npm pack --pack-destination "$WORK_DIR" 2>/dev/null | tail -1)"
 TGZ="$WORK_DIR/$TGZ_NAME"
 
 bash "$REPO_ROOT/scripts/verify-package-tarball.sh" "$TGZ"

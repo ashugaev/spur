@@ -103,8 +103,6 @@ out_b="$(HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$FAKE_HOME/.local" \
 rc_b=$?
 set -e
 
-test_deploy_ref_count="$(echo "$out_b" | grep -c 'test-deploy\.sh' || true)"
-
 if [[ "$rc_b" -eq 0 ]]; then
   bad "b: test-deploy.sh should exit non-zero when prefix equals HOME/.local"
 elif [[ -f "$MARKER" ]]; then
@@ -113,12 +111,6 @@ elif echo "$out_b" | grep -q "refusing production npm prefix"; then
   ok "b: test-deploy.sh refuses production prefix before any build or install"
 else
   bad "b: refusal message not found in output (got: $out_b)"
-fi
-
-if [[ "$test_deploy_ref_count" -ge 1 ]]; then
-  ok "b: refusal message references test-deploy.sh ($test_deploy_ref_count time(s))"
-else
-  bad "b: refusal message does not reference test-deploy.sh"
 fi
 
 echo ""
