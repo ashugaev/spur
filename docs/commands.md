@@ -46,7 +46,7 @@ Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-refe
 spur cache [--json] [--prune] [--yes]
 ```
 
-Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` deletes every entry verdicted `prunable`. Requires a resolved instance config; aborts non-zero if the config is absent or invalid. Never starts or calls the daemon; works with the daemon stopped.
+Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` attempts deletion of entries verdicted `prunable`; it requires a resolved instance config and aborts non-zero before planning if the config is absent or invalid. Never starts or calls the daemon; works with the daemon stopped.
 
 Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, the rest of `~/.cache`, and `/tmp` — never `~/.spur` (`dataDir`/`worktreeDir`), which a sibling retention path owns.
 
