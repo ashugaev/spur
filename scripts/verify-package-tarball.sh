@@ -15,10 +15,14 @@ if [[ ! -f "$LIST" ]]; then
   exit 1
 fi
 
+LISTING="$(mktemp)"
+trap 'rm -f "$LISTING"' EXIT
+tar -tzf "$TARBALL" >"$LISTING"
+
 while IFS= read -r entry || [[ -n "$entry" ]]; do
   [[ -z "$entry" ]] && continue
-  if ! tar -tzf "$TARBALL" | grep -qxF "package/$entry"; then
+  grep -qxF "package/$entry" "$LISTING" || {
     echo "verify-package-tarball: tarball missing: package/$entry" >&2
     exit 1
-  fi
+  }
 done <"$LIST"

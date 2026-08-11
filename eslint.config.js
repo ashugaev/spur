@@ -18,6 +18,7 @@ export default tseslint.config(
       "packages/web/next.config.js",
       "packages/web/postcss.config.mjs",
       ".claude/worktrees/**",
+      "v2/web/**",
     ],
   },
 
