@@ -2854,7 +2854,9 @@ describe("SessionService", () => {
       '`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>` to stop one.',
     );
     expect(sent).toContain("Do not start app, dev server, or test helper processes directly");
-    expect(sent).toContain("Auto-start applies only when the main session spawns.");
+    expect(sent).toContain(
+      "Auto-start applies when the main session spawns, restores, or recovers.",
+    );
     expect(sent).toContain(
       "From inside a sidecar, nested sidecars are manual-only and stop after one more level.",
     );
@@ -2941,10 +2943,63 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     mockExitedThenRestoredProcess();
+    // A sidecar can take tens of seconds to come up: the running record must
+    // already be on disk when it starts, or a crash in that window leaves a
+    // stopped record behind a live agent pane.
+    let runningPersistedBeforeSidecar = false;
+    createTmuxSidecarSessionMock.mockImplementation(async () => {
+      runningPersistedBeforeSidecar = writeSessionMock.mock.calls.some(
+        ([, written]) => written.id === "api-1" && written.status === "running",
+      );
+    });
 
     const service = await createDisposedSessionService();
     await service.restore("api-1");
 
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+    expect(runningPersistedBeforeSidecar).toBe(true);
+  });
+
+  it("starts autoStart non-MCP sidecars when recovering a dead agent on send", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: "session-uuid",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+    const result = await service.send("api-1", { message: "resume work" });
+
+    expect(result.status).toBe("running");
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({ sidecarName: "dev" }),
     );
