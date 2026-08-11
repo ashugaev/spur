@@ -55,7 +55,9 @@ echo ""
 # On a correctly configured Spur host this script is a no-op from now on;
 # use scripts/test-deploy.sh for reviewer/test deploys.
 npm_prefix="$(npm config get prefix 2>/dev/null || true)"
-if [[ "$npm_prefix" = "$HOME/.local" ]]; then
+npm_prefix="${npm_prefix#"${npm_prefix%%[![:space:]]*}"}"
+npm_prefix="${npm_prefix%"${npm_prefix##*[![:space:]]}"}"
+if [[ -n "$npm_prefix" ]] && [[ "$(realpath -m "$npm_prefix")" = "$(realpath -m "$HOME/.local")" ]]; then
   echo "onboarding-test: refusing production npm prefix"
   echo "  use scripts/test-deploy.sh for reviewer/test deploys"
   exit 1

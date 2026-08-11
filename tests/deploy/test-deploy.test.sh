@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Hermetic tests for scripts/verify-package-tarball.sh and the production-prefix
-# refusal in scripts/test-deploy.sh.
+# refusal in scripts/test-deploy.sh and tests/integration/onboarding-test.sh.
 #
-# a1/a2 invoke verify-package-tarball.sh directly — no build, no install.
-# b    drives test-deploy.sh's prefix-refusal with stub npm/pnpm on PATH.
+# a1/a1b/a2/a-large  invoke verify-package-tarball.sh directly — no build, no install.
+# b                  drives test-deploy.sh's prefix-refusal with stub npm/pnpm on PATH.
+# c                  drives onboarding-test.sh's prefix-refusal with stub npm on PATH.
 #
 # Run directly: bash tests/deploy/test-deploy.test.sh
 
@@ -135,7 +136,7 @@ else
 fi
 
 # b: SPUR_TEST_DEPLOY_PREFIX == HOME/.local -> refusal before any build/install
-# Tests four bypass forms: exact, trailing slash, path traversal, dot suffix, symlink.
+# Covers: exact, trailing slash, path traversal, dot suffix, symlink, leading space, trailing space.
 FAKE_HOME="$WORK_DIR/b-home"
 mkdir -p "$FAKE_HOME/.local"
 FAKE_BIN="$WORK_DIR/b-bin"
@@ -184,6 +185,43 @@ run_b "b-dot"            "$FAKE_HOME/.local/."
 run_b "b-symlink"        "$FAKE_SYM"
 run_b "b-leading-space"  " $FAKE_HOME/.local"
 run_b "b-trailing-space" "$FAKE_HOME/.local "
+
+# c: onboarding-test.sh guard — npm prefix == HOME/.local with trailing slash
+# Placed here because it tests the same prefix-refusal boundary as the b-cases.
+ONBOARDING_SCRIPT="$repo_root/tests/integration/onboarding-test.sh"
+C_HOME="$WORK_DIR/c-home"
+mkdir -p "$C_HOME/.local"
+C_BIN="$WORK_DIR/c-bin"
+mkdir -p "$C_BIN"
+C_MARKER="$WORK_DIR/c-marker"
+
+# Stub npm: return the trailing-slash prefix for "config get prefix"; touch marker otherwise.
+cat >"$C_BIN/npm" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" = "config" && "\$2" = "get" && "\$3" = "prefix" ]]; then
+  echo "$C_HOME/.local/"
+  exit 0
+fi
+touch "$C_MARKER"
+exit 0
+EOF
+chmod +x "$C_BIN/npm"
+
+rm -f "$C_MARKER"
+set +e
+c_out="$(HOME="$C_HOME" PATH="$C_BIN:$PATH" timeout 10 bash "$ONBOARDING_SCRIPT" 2>&1)"
+c_rc=$?
+set -e
+
+if [[ "$c_rc" -eq 0 ]]; then
+  bad "c-slash: onboarding-test.sh should exit non-zero for trailing-slash prefix (got 0)"
+elif [[ -f "$C_MARKER" ]]; then
+  bad "c-slash: npm stub was invoked after refusal (marker exists)"
+elif echo "$c_out" | grep -q "onboarding-test: refusing production npm prefix"; then
+  ok "c-slash: onboarding-test.sh refuses trailing-slash production prefix"
+else
+  bad "c-slash: refusal marker line not found (got: $c_out)"
+fi
 
 echo ""
 echo "test-deploy.test.sh: pass=$pass fail=$fail"
