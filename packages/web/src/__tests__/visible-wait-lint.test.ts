@@ -11,20 +11,26 @@ async function lint(source: string, filePath: string) {
 }
 
 describe("visible wait text lint rule", () => {
-  it.each(["Loading...", "Loading…", "Loading preview", "Saving…", "Starting microphone..."])(
-    "rejects %s in production web source",
-    async (text) => {
-      const messages = await lint(
-        `export const value = ${JSON.stringify(text)};`,
-        "packages/web/src/probe.tsx",
-      );
-      expect(messages).toHaveLength(1);
-    },
-  );
+  it.each([
+    "Loading",
+    "Loading...",
+    "Loading…",
+    "Loading preview",
+    "Loading account...",
+    "Please wait...",
+    "Saving…",
+    "Starting microphone...",
+  ])("rejects %s in production web source", async (text) => {
+    const messages = await lint(
+      `export function Probe() { return <p>${text}</p>; }`,
+      "packages/web/src/probe.tsx",
+    );
+    expect(messages).toHaveLength(1);
+  });
 
   it("rejects action template literals", async () => {
     const messages = await lint(
-      "export const value = `Switching Spur to $" + "{target}…`;",
+      "export function Probe({ name }) { return <p>{`Loading $" + "{name}...`}</p>; }",
       "packages/web/src/probe.tsx",
     );
     expect(messages).toHaveLength(1);
@@ -38,13 +44,13 @@ describe("visible wait text lint rule", () => {
     expect(messages).toHaveLength(1);
   });
 
-  it("allows tests, accessibility labels, connection states, and truncation", async () => {
+  it("allows tests, accessibility attributes, placeholders, connection states, and truncation", async () => {
     const production = await lint(
-      'export const values = ["Loading dashboard", "Connecting…", "Retrying…", "name..."];',
+      'export function Probe() { return <><div aria-label="Loading account..." /><input placeholder="Please wait..." /><p>Connecting…</p><p>Retrying…</p><p>name...</p></>; }',
       "packages/web/src/probe.tsx",
     );
     const testSource = await lint(
-      'export const value = "Loading...";',
+      "export function Probe() { return <p>Loading...</p>; }",
       "packages/web/src/__tests__/probe.test.tsx",
     );
     expect(production).toHaveLength(0);

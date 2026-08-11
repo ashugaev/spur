@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { BlockingOverlayShell } from "@/components/BlockingOverlayShell";
 import { BusyContent } from "@/components/BusyContent";
-import { Spinner } from "@/components/icons/Spinner";
+import { LoadingBar } from "@/components/LoadingBar";
 import { useVersionSwitch, versionSwitchFailedMessage } from "@/lib/version-switch-context";
 
 type DiagnoseState = "idle" | "spawning" | "spawned" | "error";
@@ -51,16 +51,14 @@ export function VersionSwitchOverlay() {
       testId="version-switch-overlay"
     >
       {phase === "switching" ? (
-        <div aria-busy="true" aria-label="Updating Spur" className="flex items-center gap-3">
-          <Spinner className="h-5 w-5" />
-          <div>
-            <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
-              Spur update
-            </p>
-            <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              Switching to {target}. The page will reload automatically once the daemon is back.
-            </p>
-          </div>
+        <div aria-busy="true" className="space-y-3">
+          <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
+            Spur update
+          </p>
+          <LoadingBar label="Updating Spur" />
+          <p className="normal-case tracking-normal text-[var(--color-text-secondary)]">
+            Switching to {target}. The page will reload automatically once the daemon is back.
+          </p>
         </div>
       ) : (
         <div>

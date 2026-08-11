@@ -290,6 +290,34 @@ async function dispatchPointerPinch(
 
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
+  test("maps the session boot wait to a loading bar", async ({ page }, testInfo) => {
+    const session = makeWorkingSession({ id: "detail-loading-bar" });
+    let releaseSession: (() => void) | undefined;
+    const sessionReady = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}`, async (route) => {
+      await sessionReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    const loader = page.getByRole("status", { name: "Loading session" });
+    await expect(loader).toBeVisible();
+    await expect(loader.locator(".loader-bar-segment")).toHaveCSS(
+      "animation-name",
+      "loader-bar-sweep",
+    );
+    await page.screenshot({ path: testInfo.outputPath("session-loading.png") });
+    releaseSession?.();
+    await expect(loader).toHaveCount(0);
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+  });
+
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
     await page.route("**/api/sessions/detail-missing", (route) => {
       void route.fulfill({

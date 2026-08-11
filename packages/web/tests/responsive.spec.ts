@@ -37,6 +37,46 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("busy spawn keeps its mobile width and stops motion when reduced", async ({
+    page,
+  }, testInfo) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.route("**/api/preflight", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/mobile-loader" }),
+      });
+    });
+    let releaseSpawn: (() => void) | undefined;
+    const spawnReady = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    await page.route("**/api/spawn", async (route) => {
+      await spawnReady;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeWorkingSession({ id: "mobile-loader" })),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const idleButton = page.getByRole("button", { name: /^spawn$/i });
+    const idleBox = await idleButton.boundingBox();
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await idleButton.click();
+    const busyButton = page.getByRole("button", { name: "Spawning session" });
+    const busyBox = await busyButton.boundingBox();
+    expect(idleBox?.width).toBe(busyBox?.width);
+    expect(idleBox?.height).toBe(busyBox?.height);
+    await expect(busyButton.locator(".voice-spinner")).toHaveCSS("animation-name", "none");
+    await page.screenshot({ path: testInfo.outputPath("spawn-busy-mobile-reduced.png") });
+    releaseSpawn?.();
+  });
+
   test("spawn draft survives mobile close and full reload", async ({ page }) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
     let settledPreflights = 0;

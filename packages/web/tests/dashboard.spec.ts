@@ -3380,3 +3380,88 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });
+
+test.describe("D8: Loading feedback", () => {
+  test("maps dashboard and model waits to animated loaders", async ({ page }, testInfo) => {
+    let releaseSessions: (() => void) | undefined;
+    const sessionsReady = new Promise<void>((resolve) => {
+      releaseSessions = resolve;
+    });
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
+      await sessionsReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sessions: [],
+          projects: [{ id: "my-project", name: "my-project", configured: true }],
+          backlog: [],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    const dashboardLoader = page.getByRole("status", { name: "Loading dashboard" });
+    await expect(dashboardLoader).toBeVisible();
+    await expect(dashboardLoader.locator(".loader-bar-segment")).toHaveCSS(
+      "animation-name",
+      "loader-bar-sweep",
+    );
+    await page.screenshot({ path: testInfo.outputPath("dashboard-loading.png") });
+
+    releaseSessions?.();
+    await expect(dashboardLoader).toHaveCount(0);
+
+    let releaseModels: (() => void) | undefined;
+    const modelsReady = new Promise<void>((resolve) => {
+      releaseModels = resolve;
+    });
+    await page.route("**/api/models?agent=claude", async (route) => {
+      await modelsReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ models: [] }),
+      });
+    });
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("button", { name: "Spawn model" }).click();
+    await expect(page.getByRole("status", { name: "Loading models" })).toHaveClass(
+      /loader-skeleton/,
+    );
+    releaseModels?.();
+  });
+
+  test("keeps the desktop spawn button width while busy", async ({ page }, testInfo) => {
+    await openSpawnModal(page);
+    await page.route("**/api/preflight", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/loader-width" }),
+      });
+    });
+    let releaseSpawn: (() => void) | undefined;
+    const spawnReady = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    await page.route("**/api/spawn", async (route) => {
+      await spawnReady;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "loader-width" })),
+      });
+    });
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const idleButton = page.getByRole("button", { name: /^spawn$/i });
+    const idleBox = await idleButton.boundingBox();
+    await idleButton.click();
+    const busyButton = page.getByRole("button", { name: "Spawning session" });
+    await expect(busyButton).toHaveAttribute("aria-busy", "true");
+    const busyBox = await busyButton.boundingBox();
+    expect(idleBox?.width).toBe(busyBox?.width);
+    await page.screenshot({ path: testInfo.outputPath("spawn-busy-desktop.png") });
+    releaseSpawn?.();
+  });
+});

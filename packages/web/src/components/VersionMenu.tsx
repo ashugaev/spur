@@ -7,7 +7,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
-import { Spinner } from "@/components/icons/Spinner";
+import { LoadingBar } from "@/components/LoadingBar";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
@@ -223,7 +223,6 @@ export function VersionMenu() {
       </button>
       {switchPhase !== "idle" && switchTarget ? (
         <div
-          aria-label={switchPhase === "switching" ? `Switching Spur to ${switchTarget}` : undefined}
           aria-live="polite"
           className={`absolute bottom-full right-0 z-50 mb-1.5 flex w-[min(20rem,calc(100vw-1rem))] items-start justify-between gap-2 border bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] ${
             switchPhase === "failed"
@@ -231,11 +230,11 @@ export function VersionMenu() {
               : "border-[var(--color-status-attention)] text-[var(--color-status-attention)]"
           }`}
           data-testid="version-switch-status"
-          role="status"
+          role={switchPhase === "switching" ? undefined : "status"}
         >
-          <span>
+          <span className={switchPhase === "switching" ? "w-full" : undefined}>
             {switchPhase === "switching" ? (
-              <Spinner className="h-4 w-4" strokeWidth={1.5} />
+              <LoadingBar label={`Switching Spur to ${switchTarget}`} />
             ) : (
               switchStatusMessage(switchPhase, switchTarget)
             )}

@@ -284,7 +284,9 @@ describe("VersionMenu", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "Switching Spur to 1.5.0" })).toBeInTheDocument();
+      expect(screen.getByRole("status", { name: "Switching Spur to 1.5.0" })).toHaveClass(
+        "loader-bar",
+      );
     });
     expect(switchCalls).toEqual([{ body: { version: "1.5.0" } }]);
   });
@@ -317,7 +319,9 @@ describe("VersionMenu", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    expect(screen.getByRole("status", { name: "Switching Spur to 1.5.0" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Switching Spur to 1.5.0" })).toHaveClass(
+      "loader-bar",
+    );
 
     liveVersion = "1.5.0";
     await act(async () => {

@@ -1,5 +1,5 @@
 const WAIT_TEXT =
-  /^(?:Loading(?:\.{3}|…)|Loading preview|Please wait|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing|Starting|Transcribing)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
+  /^(?:Loading(?:\s[^\n.…]+)?(?:\.{3}|…)?|Please wait(?:\.{3}|…)?|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing|Starting|Transcribing)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
 
 function literalText(node) {
   if (node.type === "Literal") return typeof node.value === "string" ? node.value : null;
@@ -10,9 +10,23 @@ function literalText(node) {
 }
 
 function reportWaitText(context, node, value) {
-  if (value && WAIT_TEXT.test(value.trim())) {
+  if (value && isVisibleJsxValue(node) && WAIT_TEXT.test(value.trim())) {
     context.report({ node, messageId: "replaceWithMotion" });
   }
+}
+
+function isVisibleJsxValue(node) {
+  if (node.type === "JSXText") return true;
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "JSXAttribute") return false;
+    if (parent.type === "JSXExpressionContainer") {
+      return parent.parent?.type !== "JSXAttribute";
+    }
+    if (parent.type === "VariableDeclarator" || parent.type === "Program") return false;
+    parent = parent.parent;
+  }
+  return false;
 }
 
 export const noVisibleWaitText = {

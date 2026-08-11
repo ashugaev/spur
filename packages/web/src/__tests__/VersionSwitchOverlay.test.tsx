@@ -65,8 +65,12 @@ describe("VersionSwitchOverlay", () => {
     expect(overlay).toBeInTheDocument();
     expect(overlay).toHaveAttribute("role", "alertdialog");
     expect(overlay).toHaveAttribute("aria-modal", "true");
-    expect(within(overlay).getByLabelText("Updating Spur")).toHaveAttribute("aria-busy", "true");
-    expect(overlay.querySelector(".voice-spinner")).not.toBeNull();
+    expect(within(overlay).getByRole("status", { name: "Updating Spur" })).toHaveClass(
+      "loader-bar",
+    );
+    expect(
+      within(overlay).getByRole("status", { name: "Updating Spur" }).parentElement,
+    ).toHaveAttribute("aria-busy", "true");
     expect(within(overlay).queryAllByRole("button")).toHaveLength(0);
   });
 
