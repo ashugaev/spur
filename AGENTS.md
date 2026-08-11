@@ -1,6 +1,6 @@
 AGENTS.md
 
-Every task starts with `$manager`. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
+Every task starts in `manager` mode unless spawn requested another, see MODES. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
 
 
 MIRROR
@@ -48,6 +48,13 @@ Capabilities loaded by description match. Source: .agents/skills/
   pr-comments-fix     .agents/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .agents/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
   clean-install-test  .agents/skills/clean-install-test/SKILL.md  Clean-room test the npm server install on a throwaway cloud VM before release
+
+
+MODES
+
+  One mode per session: a prompt suffix naming the skill that session follows. Resolved once at spawn; config shape in `docs/configuration.md` Modes. Prompt-level and advisory — anything mandatory belongs in hooks or the daemon.
+
+  manager  .agents/skills/manager/SKILL.md  Default for every repo task
 
 
 RESPONSE STYLE

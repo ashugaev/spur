@@ -56,6 +56,11 @@ export type SpawnModalMode =
       kind: "spawn";
       project: ProjectControl;
       model: FieldControl<string | null>;
+      sessionMode?: {
+        value: string;
+        onChange: (next: string) => void;
+        options: { value: string; label: string }[];
+      };
       branch: FieldControl<string>;
       workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
@@ -159,7 +164,7 @@ function ModeFields({
   if (mode.kind === "spawn") {
     return (
       <>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <select
             aria-label="Spawn project"
             className={`flex-1 ${INPUT_CLASS}`}
@@ -182,6 +187,20 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
+          {mode.sessionMode ? (
+            <select
+              aria-label="Spawn session mode"
+              className={`min-w-24 flex-1 ${INPUT_CLASS}`}
+              onChange={(event) => mode.sessionMode?.onChange(event.target.value)}
+              value={mode.sessionMode.value}
+            >
+              {mode.sessionMode.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <input

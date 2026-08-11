@@ -43,6 +43,7 @@ import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
+  formatSidecarAge,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
@@ -3332,6 +3333,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 :{port.port}
                               </span>
                             ))}
+                            {sc.ageSeconds !== undefined ? (
+                              <span
+                                className={`shrink-0 ${sc.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
+                                data-testid={`sidecar-age-${sc.name}`}
+                              >
+                                {formatSidecarAge(sc.ageSeconds)}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
                             {sc.alive && canAttach ? (

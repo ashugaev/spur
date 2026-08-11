@@ -360,6 +360,8 @@ export interface SidecarConfig {
   agents?: AgentName[];
   /** Present when this sidecar exposes an MCP server to the launching agent. */
   mcp?: SidecarMcpConfig;
+  /** Overrides sidecarGc.idleTtlMinutes for this sidecar only. */
+  idleTtlMinutes?: number;
 }
 
 export interface SidecarPortConfig {
@@ -408,6 +410,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -538,6 +541,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface SessionModeConfig {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -554,6 +562,7 @@ export interface ProjectConfig {
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
+  modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
@@ -698,6 +707,11 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  sidecarGc: {
+    enabled: boolean;
+    idleTtlMinutes: number;
+    maxAgeWarnMinutes: number;
+  };
   admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
@@ -798,6 +812,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -889,6 +904,10 @@ export interface SessionSidecarView {
   alive: boolean;
   ports: SidecarPortView[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
+  ageWarn?: boolean;
 }
 
 export interface SessionView extends SessionRecord {
@@ -962,6 +981,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -1114,6 +1134,7 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
 }
 
 export interface CreateProjectRequest {

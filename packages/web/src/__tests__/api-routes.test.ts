@@ -357,7 +357,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct, mode", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -372,6 +372,7 @@ describe("Spur web API routes", () => {
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
           selfDestruct: { enabled: true, conditions: "daemon trims this" },
+          mode: "manager",
         }),
       }),
     );
@@ -391,7 +392,23 @@ describe("Spur web API routes", () => {
       selfDestruct: { enabled: true, conditions: "daemon trims this" },
       steps: ["step 1", "step 2"],
       overrides: { worktree: true },
+      mode: "manager",
     });
+  });
+
+  it("POST /api/spawn omits mode when absent or blank", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Do work", agent: "claude", mode: "  " }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).not.toHaveProperty("mode");
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {

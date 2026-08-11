@@ -10,6 +10,7 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
 export const DEFAULT_CURSOR_MODEL = "auto";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
+export const CURSOR_RESUME_READY_MARKER = "→ Add a follow-up";
 
 /** Env gate a materialized guard script checks before denying anything. */
 export const CURSOR_RESTRICT_WRITES_ENV = "SPUR_CURSOR_RESTRICT_WRITES";
@@ -384,7 +385,7 @@ export function buildCursorResumePlan(
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
-    readyMarkers: [...CURSOR_READY_MARKERS],
+    readyMarkers: [CURSOR_RESUME_READY_MARKER],
   };
 }
 

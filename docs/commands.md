@@ -47,7 +47,7 @@ Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs 
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -56,6 +56,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
 - `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, or `cursor models`.
+- `--mode <name>` picks a session mode from `projects.<id>.modes`, overriding the project default. Unknown name fails the spawn. See [Modes](configuration.md#modes).
 - `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.
@@ -90,6 +91,8 @@ spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message..
 TTY opens a live selector: `Enter` attach in place, `l` log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns to the selector. Non-TTY prints a one-shot summary.
 
 Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex signals. The log view combines key session events with a live tail of the main agent pane.
+
+A session with one or more sidecars whose age is resolvable shows a compact `sidecar <name> <age>` fact, naming only the oldest sidecar (`+N more` when others are running); a `!` suffix marks one already past `sidecarGc.maxAgeWarnMinutes` ([Sidecar reaping](configuration.md#sidecar-reaping)). A session with no sidecars, or none with a resolvable age, renders unchanged.
 
 `pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace (shepherd excepted, see above), so `killed` and `completed` sessions are never restorable.
 
@@ -186,6 +189,8 @@ Commands run through `sh -lc` with no `exec`, so login-shell init still applies 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
 Stop and restart reap the sidecar's whole tmux pane process tree, not just the pane's direct child — a supervisor (nodemon, tsx watch) that `setsid`s a worker into its own process group no longer leaves that worker behind. `spur sidecar sweep` reports sidecar process trees no live session claims (pid, rss, age, worktree); nothing is killed unless you pass `--reap`.
+
+The daemon also reaps idle sidecars on its own policy, and refuses to start a duplicate one across workspaces — see [Sidecar reaping](configuration.md#sidecar-reaping).
 
 ### Built-in MCP sidecars
 

@@ -357,6 +357,24 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
   });
 
+  it("prunes a registered project directory, keeping the real spur config file", async () => {
+    const rootDir = await createTempDir("spur-scanner-directory-");
+    tempDirs.push(rootDir);
+    const fixture = await setupScannerFixture(rootDir);
+    const projectDir = join(rootDir, "repo-live");
+    mkdirSync(projectDir, { recursive: true });
+    const scanner = new ConfigRegistryScanner();
+
+    const result = scanner.scan({
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath, projectDir, fixture.livePath],
+      protectedPaths: [fixture.basePath],
+    });
+
+    expect(result.configPaths).toEqual([fixture.basePath, fixture.livePath]);
+    expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
+  });
+
   it("forgets pruned canonical paths before an orphan becomes a symlink", async () => {
     const rootDir = await createTempDir("spur-scanner-pruned-alias-");
     tempDirs.push(rootDir);
@@ -483,7 +501,7 @@ describe("registry.ConfigRegistryScanner", () => {
         if (path === fixture.missingParentAlivePath) childStats += 1;
         if (path === dirname(fixture.missingParentAlivePath)) parentStats += 1;
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -563,7 +581,7 @@ describe("registry.ConfigRegistryScanner", () => {
           throw error;
         }
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -671,12 +689,12 @@ describe("registry.ConfigRegistryScanner", () => {
     const fixture = await setupScannerFixture(rootDir);
     const invalidPath = join(rootDir, "invalid.yaml");
     await writeFile(invalidPath, "projects: [broken]\n", "utf8");
-    let candidateStamp = { mtimeMs: 1, size: 1 };
+    let candidateStamp = { mtimeMs: 1, size: 1, isFile: true };
     const scanner = new ConfigRegistryScanner({
       stat: (path) => {
         if (path === invalidPath) return candidateStamp;
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -701,7 +719,7 @@ describe("registry.ConfigRegistryScanner", () => {
     );
     expect(scanner.scan(options).config.projects["valid"]).toBeUndefined();
 
-    candidateStamp = { mtimeMs: 2, size: 1 };
+    candidateStamp = { mtimeMs: 2, size: 1, isFile: true };
     expect(scanner.scan(options).config.projects["valid"]).toBeDefined();
   });
 });

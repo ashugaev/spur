@@ -162,6 +162,14 @@ export function isExistingFile(path: string): boolean {
   }
 }
 
+export function isExistingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // Pure, read-only filter: drops blank entries and entries inside
 // `worktreeDir`. Dead-file pruning and canonical-alias dedupe belong to
 // `ConfigRegistryScanner` now — this filter only keeps a worktree-internal
@@ -320,11 +328,14 @@ export interface RegistryScanResult {
   newDiagnostics: RegistryDiagnostic[];
 }
 
-type FileStamp = { mtimeMs: number; size: number };
+type FileStamp = { mtimeMs: number; size: number; isFile: boolean };
 type ParentState = { kind: "present"; mtimeMs: number } | { kind: "enoent" } | { kind: "error" };
 type PathLoad =
   | { kind: "loaded"; stamp: FileStamp; config: AppConfig }
   | { kind: "invalid"; stamp: FileStamp; diagnostic: RegistryDiagnostic }
+  // Present on disk but not a regular file — a project directory registered
+  // instead of its spur.yaml. Never a config, so it carries no diagnostic.
+  | { kind: "notfile"; stamp: FileStamp }
   | {
       kind: "missing";
       parentPath: string;
@@ -340,7 +351,7 @@ interface RegistryScannerFs {
 const scannerFs: RegistryScannerFs = {
   stat: (path) => {
     const stat = statSync(path);
-    return { mtimeMs: stat.mtimeMs, size: stat.size };
+    return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
   },
   realpath: (path) => realpathSync(path),
 };
@@ -393,6 +404,9 @@ export class ConfigRegistryScanner {
       [bootstrapPath, ...options.protectedPaths].map((path) => this.canonicalizePath(path)),
     );
     const baseLoad = this.loadPath(bootstrapPath, undefined, parentStates);
+    if (baseLoad.kind === "notfile") {
+      throw new Error(`Config file not found: ${bootstrapPath} is not a file`);
+    }
     if (baseLoad.kind !== "loaded") {
       throw new Error(baseLoad.diagnostic.message);
     }
@@ -433,6 +447,14 @@ export class ConfigRegistryScanner {
           this.invalidateCanonicalPath(canonicalPath);
           continue;
         }
+      }
+
+      // Drop silently like an orphan: a directory can never become a config,
+      // unlike a missing path with a live parent, which stays registered so a
+      // temporarily removed spur.yaml can return.
+      if (load.kind === "notfile") {
+        this.invalidateCanonicalPath(canonicalPath);
+        continue;
       }
 
       keptPaths.push(canonicalPath);
@@ -489,6 +511,10 @@ export class ConfigRegistryScanner {
       };
       if (parentState.kind === "present") this.loads.set(path, missing);
       return missing;
+    }
+
+    if (!stamp.isFile) {
+      return { kind: "notfile", stamp };
     }
 
     const cached = this.loads.get(path);

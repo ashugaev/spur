@@ -2417,6 +2417,57 @@ describe("startServer", () => {
     }
   });
 
+  it("GET /projects carries modes through the HTTP boundary and omits them for a modes-less project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const plainRepoDir = join(root, "plain-repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(plainRepoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    modes:",
+        "      manager:",
+        "        skill: manager",
+        "        default: true",
+        "  plain:",
+        `    path: ${plainRepoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await response.json()) as Array<{
+        id: string;
+        modes?: Record<string, { skill: string; default?: boolean }>;
+      }>;
+      expect(listed.find((p) => p.id === "demo")?.modes).toEqual({
+        manager: { skill: "manager", default: true },
+      });
+      expect(listed.find((p) => p.id === "plain")).not.toHaveProperty("modes");
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects returns 400 when path does not exist without createMissing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -3098,6 +3149,75 @@ describe("startServer", () => {
       });
       expect(response.status).toBe(400);
       expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(worktreeConfigPath);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("drops a registered project directory at boot and rejects connecting one with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const extraProjectDir = join(root, "extra-project");
+    const extraConfigPath = join(extraProjectDir, "spur.yaml");
+    await mkdir(extraProjectDir, { recursive: true });
+    await writeFile(
+      extraConfigPath,
+      [
+        "projects:",
+        "  extra:",
+        `    path: ${extraProjectDir}`,
+        "    sessionPrefix: extra",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [extraProjectDir, extraConfigPath],
+      unconfiguredProjects: [],
+    });
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(bootRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraProjectDir }),
+      });
+      expect(response.status).toBe(400);
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
     } finally {
       await server.stop();
     }

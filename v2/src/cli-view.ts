@@ -4,6 +4,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceState,
   ServiceInstanceView,
+  SessionSidecarView,
   SessionState,
   SessionView,
 } from "./types.js";
@@ -128,6 +129,39 @@ function formatRelativeTime(input: string): string {
   return `${diffDays}d ago`;
 }
 
+// Largest unit only, no "ago" suffix — the caller prefixes it with the
+// sidecar name, so "sidecar front-local 13h" reads as a duration, not a
+// timestamp. Mirrors packages/web's own formatSidecarAge; not shared code
+// (CLI and web are separate deployables), same shape by convention only.
+function formatSidecarAgeSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+// Compact indicator so a stale sidecar is visible in `spur list` without a
+// second command — quiet (no fact added) when no sidecar has a resolvable
+// age, so a session with no sidecars, or sidecars whose age cannot be
+// resolved, renders unchanged. Names only the single oldest sidecar even
+// when several are running, keeping the facts line terse; the count for
+// the rest is folded into "+N more".
+function describeSidecarAge(session: SessionView): string | null {
+  const aged = session.sidecars.filter(
+    (sidecar): sidecar is SessionSidecarView & { ageSeconds: number } =>
+      sidecar.ageSeconds !== undefined,
+  );
+  if (aged.length === 0) return null;
+  const oldest = aged.reduce((a, b) => (b.ageSeconds > a.ageSeconds ? b : a));
+  const rest = aged.length - 1;
+  const warnMark = oldest.ageWarn ? "!" : "";
+  const suffix = rest > 0 ? ` +${rest} more` : "";
+  return `sidecar ${oldest.name} ${formatSidecarAgeSeconds(oldest.ageSeconds)}${warnMark}${suffix}`;
+}
+
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
@@ -230,6 +264,10 @@ export function describeSession(session: SessionView): string {
     }
   } else if (liveServices.length > 1) {
     facts.push(`${liveServices.length} services live`);
+  }
+  const sidecarAge = describeSidecarAge(session);
+  if (sidecarAge) {
+    facts.push(sidecarAge);
   }
   facts.push(...formatSessionAssociations(session));
 
