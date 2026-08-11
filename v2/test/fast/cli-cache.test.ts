@@ -69,7 +69,7 @@ function makePlan(): CachePlan {
         path: "/tmp",
         status: "measured",
         totalKb: 600,
-        entryCount: 3,
+        entryCount: 5,
       },
     ],
     candidates: [
@@ -105,6 +105,28 @@ function makePlan(): CachePlan {
           ageDays: 1,
         },
         verdict: { kind: "protected", reason: { kind: "too-recent", ageDays: 1, floorDays: 7 } },
+      },
+      {
+        entry: {
+          path: join(tempDir, "pin-src-hash"),
+          rootId: "npm-npx",
+          entryClass: { kind: "npx-package", hash: "pin-src-hash" },
+          sizeKb: 200,
+          newestChangeMs: Date.now(),
+          ageDays: 60,
+        },
+        verdict: { kind: "protected", reason: { kind: "pin-source" } },
+      },
+      {
+        entry: {
+          path: join(tempDir, ".spur", "sessions"),
+          rootId: "xdg-cache",
+          entryClass: { kind: "generic", name: "sessions" },
+          sizeKb: 300,
+          newestChangeMs: Date.now(),
+          ageDays: 60,
+        },
+        verdict: { kind: "protected", reason: { kind: "spur-owned" } },
       },
     ],
     reclaimableKb: 600,
@@ -194,6 +216,8 @@ describe("spur cache CLI", () => {
     expect(output.indexOf(bigPath)).toBeGreaterThanOrEqual(0);
     expect(output.indexOf(bigPath)).toBeLessThan(output.indexOf(smallPath));
     expect(output).toContain("too recent");
+    expect(output).toContain("npx-package is a browsers.json pin source");
+    expect(output).toContain("resolves inside Spur data directory");
   });
 
   it("prints the raw plan as JSON with --json", async () => {
@@ -208,7 +232,7 @@ describe("spur cache CLI", () => {
       wouldPrune: boolean;
       outcome?: unknown;
     };
-    expect(parsed.plan.candidates).toHaveLength(3);
+    expect(parsed.plan.candidates).toHaveLength(5);
     expect(parsed.wouldPrune).toBe(false);
     expect(parsed.outcome).toBeUndefined();
   });
