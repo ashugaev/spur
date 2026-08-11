@@ -10245,17 +10245,20 @@ export class SessionService {
 
     this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    return this.applyReservedSidecars(
-      {
-        ...recoveredBase,
-        planMode,
-        restrictWrites,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-        launchCommand: persistedLaunchCommand,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      mcpSidecarUpdate,
+    return this.startAutoStartSidecars(
+      this.applyReservedSidecars(
+        {
+          ...recoveredBase,
+          planMode,
+          restrictWrites,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+          launchCommand: persistedLaunchCommand,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        mcpSidecarUpdate,
+      ),
+      project,
     );
   }
 
@@ -10605,12 +10608,16 @@ export class SessionService {
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
-    writeSession(this.config.dataDir, persistedRestored);
-    await this.refreshDashboardCacheEntry(persistedRestored);
+    const restoredWithSidecars = await this.startAutoStartSidecars(
+      persistedRestored,
+      this.getProject(current.project),
+    );
+    writeSession(this.config.dataDir, restoredWithSidecars);
+    await this.refreshDashboardCacheEntry(restoredWithSidecars);
     requestGitHubMergeConflictRestoreReplays(
       this.config,
-      persistedRestored.project,
-      persistedRestored.id,
+      restoredWithSidecars.project,
+      restoredWithSidecars.id,
     );
     this.logEvent("session.restore.completed", {
       level: "info",
@@ -10619,15 +10626,15 @@ export class SessionService {
       message: `Restored ${sessionId}`,
       details: {
         agent: current.agent,
-        agentSessionId: persistedRestored.agentSessionId ?? null,
+        agentSessionId: restoredWithSidecars.agentSessionId ?? null,
       },
     });
     this.stateCache.delete(sessionId);
     this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
-    if (this.shouldRunDelivery(persistedRestored)) {
-      this.scheduleDeliveryRunner(persistedRestored.id);
+    if (this.shouldRunDelivery(restoredWithSidecars)) {
+      this.scheduleDeliveryRunner(restoredWithSidecars.id);
     }
-    return this.enrich(persistedRestored);
+    return this.enrich(restoredWithSidecars);
   }
 
   // Brings a `completed` session back to life on the same id: rebuild the
