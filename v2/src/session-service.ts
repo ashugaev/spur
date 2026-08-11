@@ -314,6 +314,7 @@ import {
   canonicalConfigKey,
   ConfigRegistryScanner,
   dropWorktreeInternalPaths,
+  isExistingFile,
   isInsideWorktreeDir,
   mutateConfigRegistry,
   readConfigRegistryFile,
@@ -3497,12 +3498,24 @@ export class SessionService {
     if (isInsideWorktreeDir(configPath, this.config.worktreeDir)) {
       throw new InvalidConfigPathError(`configPath must not be inside worktreeDir: ${configPath}`);
     }
-    const canonicalPath = this.registryScanner.canonicalizePath(configPath);
+    const resolvedConfigPath = this.resolveConnectConfigPath(configPath);
+    const canonicalPath = this.registryScanner.canonicalizePath(resolvedConfigPath);
     return this.previewRegistryPaths(
       this.registryPaths.includes(canonicalPath)
         ? this.registryPaths
         : [...this.registryPaths, canonicalPath],
     );
+  }
+
+  private resolveConnectConfigPath(configPath: string): string {
+    if (isExistingFile(configPath)) {
+      return configPath;
+    }
+    const projectConfigPath = findProjectConfigPathInDirectory(configPath);
+    if (projectConfigPath && isExistingFile(projectConfigPath)) {
+      return projectConfigPath;
+    }
+    throw new InvalidConfigPathError(`configPath must be a spur config file: ${configPath}`);
   }
 
   previewConfigDisconnect(configPath: string): {

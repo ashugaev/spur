@@ -435,6 +435,18 @@ export class ConfigRegistryScanner {
         }
       }
 
+      // A project directory registered instead of spur.yaml/yml stays on disk
+      // but is not a config file. Drop it; missing paths with a live parent
+      // stay registered so a temporarily removed spur.yaml can return.
+      if (
+        !protectedPaths.has(canonicalPath) &&
+        load.kind !== "missing" &&
+        !isExistingFile(canonicalPath)
+      ) {
+        this.invalidateCanonicalPath(canonicalPath);
+        continue;
+      }
+
       keptPaths.push(canonicalPath);
       if (load.kind !== "loaded") {
         this.reportOnce(load.diagnostic, newDiagnostics);

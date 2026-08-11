@@ -357,6 +357,24 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
   });
 
+  it("prunes a registered project directory, keeping the real spur config file", async () => {
+    const rootDir = await createTempDir("spur-scanner-directory-");
+    tempDirs.push(rootDir);
+    const fixture = await setupScannerFixture(rootDir);
+    const projectDir = join(rootDir, "repo-live");
+    mkdirSync(projectDir, { recursive: true });
+    const scanner = new ConfigRegistryScanner();
+
+    const result = scanner.scan({
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath, projectDir, fixture.livePath],
+      protectedPaths: [fixture.basePath],
+    });
+
+    expect(result.configPaths).toEqual([fixture.basePath, fixture.livePath]);
+    expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
+  });
+
   it("forgets pruned canonical paths before an orphan becomes a symlink", async () => {
     const rootDir = await createTempDir("spur-scanner-pruned-alias-");
     tempDirs.push(rootDir);
