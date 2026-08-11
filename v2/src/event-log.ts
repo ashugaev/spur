@@ -45,20 +45,23 @@ export interface UserInputLogRequest {
 const EVENT_LOG_FILE = "events.jsonl";
 const SESSIONS_DIR = "sessions";
 
-export const DEFAULT_EVENT_LOG_HOT_BYTES = 500 * 1024 * 1024;
-export const DEFAULT_EVENT_LOG_SHARD_HOT_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_EVENT_LOG_HOT_BYTES = 128 * 1024 * 1024;
+export const DEFAULT_EVENT_LOG_SHARD_HOT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_EVENT_LOG_RETAIN_ARCHIVES = 5;
+export const DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS = 60_000;
 
 export interface EventLogConfig {
   hotBytes: number;
   shardHotBytes: number;
   retainArchives: number;
+  collapseWindowMs: number;
 }
 
 export const DEFAULT_EVENT_LOG_CONFIG: EventLogConfig = {
   hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
   shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
   retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  collapseWindowMs: DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
 };
 
 let eventLogConfig: EventLogConfig = DEFAULT_EVENT_LOG_CONFIG;
@@ -111,8 +114,107 @@ export function appendEventLog(dataDir: string, entry: SpurLogEntryInput): void 
   }
 }
 
+// Repeated warn/error events (e.g. a wake-retry loop) can dominate a shard.
+// Collapse keeps every occurrence accounted for without writing each one:
+// the first occurrence of a key writes immediately, repeats within
+// collapseWindowMs are counted but not written, and the first occurrence past
+// the window flushes a summary line (details.suppressedCount/suppressedSince)
+// before writing itself. info is never routed through this map. Sized for
+// ~300 terminal + running sessions x a handful of distinct warn/error events
+// each (measured hot set ~600-900 keys) — under FIFO eviction a key
+// surviving less than the collapse window degrades the mechanism toward a
+// no-op on a busy host.
+const EVENT_LOG_COLLAPSE_MAX_KEYS = 4096;
+
+interface CollapseEntry {
+  dataDir: string;
+  entry: SpurLogEntryInput;
+  firstAt: number;
+  suppressedCount: number;
+}
+
+const collapseState = new Map<string, CollapseEntry>();
+
+function collapseKey(entry: SpurLogEntryInput): string {
+  return `${entry.level}\0${entry.event}\0${entry.sessionId ?? ""}`;
+}
+
+// Writes the retained summary (if anything was actually suppressed) and
+// removes the entry. Never throws: called from the write hot path, the
+// reaper tick, and shutdown alike.
+function flushCollapseEntry(key: string, state: CollapseEntry): void {
+  collapseState.delete(key);
+  if (state.suppressedCount === 0) {
+    return;
+  }
+  const { timestamp: _timestamp, ...rest } = state.entry;
+  try {
+    appendEventLog(state.dataDir, {
+      ...rest,
+      details: {
+        ...(state.entry.details ?? {}),
+        suppressedCount: state.suppressedCount,
+        suppressedSince: new Date(state.firstAt).toISOString(),
+      },
+    });
+  } catch {
+    // A flush failure must never block the reaper tick or shutdown.
+  }
+}
+
+function collapseOrAppend(dataDir: string, entry: SpurLogEntryInput): void {
+  const windowMs = eventLogConfig.collapseWindowMs;
+  if (windowMs <= 0) {
+    appendEventLog(dataDir, entry);
+    return;
+  }
+  const key = collapseKey(entry);
+  const now = Date.now();
+  const existing = collapseState.get(key);
+  if (existing && now - existing.firstAt < windowMs) {
+    existing.suppressedCount += 1;
+    existing.entry = entry;
+    return;
+  }
+  if (existing) {
+    flushCollapseEntry(key, existing);
+  }
+  appendEventLog(dataDir, entry);
+  collapseState.set(key, { dataDir, entry, firstAt: now, suppressedCount: 0 });
+  if (collapseState.size > EVENT_LOG_COLLAPSE_MAX_KEYS) {
+    const oldestKey = collapseState.keys().next().value;
+    if (oldestKey !== undefined) {
+      const oldestState = collapseState.get(oldestKey);
+      if (oldestState) {
+        flushCollapseEntry(oldestKey, oldestState);
+      }
+    }
+  }
+}
+
+// Flushes every pending collapse summary written against `dataDir` and
+// clears those map entries. Called from the reaper tick and from
+// `shutdown()` right before the final `daemon.stopped` log, so a
+// mid-teardown warn spike is still counted before the process exits.
+export function flushEventLogCollapse(dataDir: string): void {
+  for (const [key, state] of [...collapseState.entries()]) {
+    if (state.dataDir === dataDir) {
+      flushCollapseEntry(key, state);
+    }
+  }
+}
+
+// Test-bleed guard only: clears pending collapse state without writing.
+export function resetEventLogCollapse(): void {
+  collapseState.clear();
+}
+
 export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   try {
+    if (entry.level === "warn" || entry.level === "error") {
+      collapseOrAppend(dataDir, entry);
+      return;
+    }
     appendEventLog(dataDir, entry);
   } catch {
     // Logging must never block Spur runtime behavior.

@@ -1,8 +1,13 @@
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
 
-type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options?: { timeout?: number; maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
 const execFileMock: ((...args: unknown[]) => void) & {
@@ -34,6 +39,25 @@ describe("runtime-tmux", () => {
       process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = originalSystemdScope;
     }
     vi.resetModules();
+  });
+
+  it("does not confirm tree shutdown when the fresh fleet probe fails", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("kill-session")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw new Error("fleet probe failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { killTmuxSessionTree } = await import("../../src/runtime-tmux.js");
+
+    await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
   });
 
   it("starts tmux sessions with the Spur-specific config", async () => {
@@ -494,6 +518,53 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
+  it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
+    const resumedPane = "some replayed history line\nanother replayed line\n→ Add a follow-up";
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        return { stdout: resumedPane, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      waitForTmuxReady("api-1", [CURSOR_RESUME_READY_MARKER], 5_000, { agent: "cursor" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws PromptReadyTimeoutError when the pane never reaches the prompt", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        now += 10_000;
+        return { stdout: "Starting...", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { waitForTmuxReady, PromptReadyTimeoutError } =
+        await import("../../src/runtime-tmux.js");
+
+      await expect(
+        waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" }),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof PromptReadyTimeoutError &&
+          err.message.startsWith(
+            `Timed out waiting for tmux session "api-1" to reach the agent prompt`,
+          ) &&
+          err.elapsedMs > 0
+        );
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
     let now = 0;
     let captureCount = 0;
@@ -556,5 +627,52 @@ describe("runtime-tmux", () => {
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-X"))).toBe(false);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(false);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+  });
+
+  it("getTmuxPanePid fresh forks a second list-panes instead of reusing the cached fleet snapshot", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return { stdout: "api-1 1 1 0 4242 /dev/pts/1", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { getTmuxPanePid } = await import("../../src/runtime-tmux.js");
+
+    const first = await getTmuxPanePid("api-1");
+    const second = await getTmuxPanePid("api-1", { fresh: true });
+
+    expect(first).toBe(4242);
+    expect(second).toBe(4242);
+    const listPanesCalls = execFileAsyncMock.mock.calls.filter(
+      ([, args]) => args[0] === "list-panes",
+    );
+    expect(listPanesCalls).toHaveLength(2);
+  });
+
+  it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: "api-1 1700000000", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "1234 pts/0 node agent", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    await isProcessRunningInTmux("api-1", ["node"]);
+
+    const psCall = execFileAsyncMock.mock.calls.find(([file]) => file === "ps");
+    if (!psCall) {
+      throw new Error("Expected a ps invocation");
+    }
+    const [, , options] = psCall;
+    expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
+    expect(options?.timeout).toBe(5_000);
   });
 });

@@ -1,3 +1,5 @@
+import type { HostMemory } from "./host-memory.js";
+
 export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 3;
 
@@ -234,7 +236,14 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   draft?: boolean;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export interface GitHubAdaptivePollConfig {
+  slowIntervalMs: number;
+  activeGraceMs: number;
+}
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
+  adaptivePoll?: GitHubAdaptivePollConfig;
+};
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
@@ -351,6 +360,8 @@ export interface SidecarConfig {
   agents?: AgentName[];
   /** Present when this sidecar exposes an MCP server to the launching agent. */
   mcp?: SidecarMcpConfig;
+  /** Overrides sidecarGc.idleTtlMinutes for this sidecar only. */
+  idleTtlMinutes?: number;
 }
 
 export interface SidecarPortConfig {
@@ -399,6 +410,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -435,6 +447,28 @@ export interface ReviewSignal {
   key: string;
   kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
+}
+
+// The PR/MR the snapshot's signals were collected from. `null` covers legacy
+// on-disk snapshots (bare array, no PR identity) so callers cannot mistake
+// "unknown" for a real number via `=== undefined`.
+export interface ReviewSnapshot {
+  prNumber: number | null;
+  signals: Map<string, ReviewSignal>;
+}
+
+// The baseline to diff the next poll's signals against: the stored snapshot's
+// signals when it was collected from the same PR/MR, otherwise `undefined` so
+// the caller takes the existing first-observation path. A rebind (or a legacy
+// snapshot with no recorded PR) must never diff against a different PR's
+// signals — `changes_requested`, `ready_for_review`, `approved:<login>`, etc.
+// are not PR-unique text, so a stale match would silently suppress the new
+// PR's identical-text signal.
+export function reviewSnapshotBaseline(
+  stored: ReviewSnapshot | undefined,
+  prNumber: number,
+): Map<string, ReviewSignal> | undefined {
+  return stored && stored.prNumber === prNumber ? stored.signals : undefined;
 }
 
 export interface ReviewEventData {
@@ -507,6 +541,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface SessionModeConfig {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -516,16 +555,84 @@ export interface ProjectConfig {
   restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
+  reasoningEffort?: AgentReasoningEffortConfig;
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
+  modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
+  maxLiveSessions?: number;
+}
+
+export type ProviderReasoningEffort = "low" | "medium" | "high";
+export type AgentReasoningEffortConfig = Partial<
+  Record<"claude" | "codex", ProviderReasoningEffort>
+>;
+
+export type AdmissionCapSource = "default" | "config" | "derived";
+
+// Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
+// `admission` block is ignored before semantic parsing, same footgun as
+// rateLimitReactivation/authRotation/tags. All fields are resolved
+// (defaults already applied) so callers never re-derive them.
+export interface AdmissionConfig {
+  enabled: boolean;
+  maxLiveSessions: number;
+  // Set once at the config boundary (parseAdmission), never re-derived downstream.
+  maxLiveSessionsSource: AdmissionCapSource;
+  perSessionBytes: number;
+  reserveFraction: number;
+  memoryGuard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    shedEnabled: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    shedSwapUsedFraction: number;
+  };
+}
+
+export interface HeadroomReport {
+  cap: {
+    global: number;
+    source: AdmissionCapSource;
+    perSessionBytes: number;
+    reserveFraction: number;
+  };
+  projectCaps: Record<string, number>;
+  live: {
+    count: number;
+    byProject: Record<string, number>;
+  };
+  projectedRoom: number;
+  sessions: Array<{
+    id: string;
+    project: string;
+    status: SessionStatus;
+    rssBytes: number;
+  }>;
+  memory: HostMemory | null;
+  guard: {
+    enforce: boolean;
+    enforceFloors: boolean;
+    minAvailableBytes: number;
+    minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    crossed: boolean;
+  };
 }
 
 export interface AppConfig {
@@ -543,6 +650,9 @@ export interface AppConfig {
   };
   ui: {
     port: number;
+  };
+  models: {
+    codexHome: string;
   };
   voice:
     | {
@@ -575,6 +685,7 @@ export interface AppConfig {
     hotBytes: number;
     shardHotBytes: number;
     retainArchives: number;
+    collapseWindowMs: number;
   };
   userActionLog?: {
     hotBytes: number;
@@ -589,9 +700,27 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  sessionGc: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxGroupsPerSweep: number;
+    statuses: SessionGcStatus[];
+  };
+  sidecarGc: {
+    enabled: boolean;
+    idleTtlMinutes: number;
+    maxAgeWarnMinutes: number;
+  };
+  admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
+
+// The only statuses session GC ever reclaims: a session still `running`,
+// `spawning`, `paused`, or `errored` may resume work in its worktree, so GC
+// must never treat it as a candidate regardless of age.
+export type SessionGcStatus = "completed" | "killed" | "stopped";
 
 export interface SessionPipelineState {
   steps: string[];
@@ -651,6 +780,18 @@ export interface SessionStateSubscriptionRecordResponse {
   record: SessionStateSubscription;
 }
 
+export interface SidecarProcessIdentity {
+  /** tmux pane pid at start. On Linux this is also the pane's pgid and sid. */
+  pid: number;
+  /** Process group id of the pane at start. Signal target for a leaked tree. */
+  pgid: number;
+  /**
+   * /proc/<pid>/stat field 22 (starttime, clock ticks since boot). The only
+   * pid-reuse guard: a wall-clock timestamp cannot distinguish a reused pid.
+   */
+  starttime: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -671,6 +812,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -696,6 +838,12 @@ export interface SessionRecord {
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
+  /**
+   * Pane identity of each sidecar's CURRENT instance, keyed by sidecar name.
+   * Written on the sidecar OWNER's record (the workspace anchor for a
+   * desk-shared sidecar, the session itself for an mcp sidecar).
+   */
+  sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
@@ -705,6 +853,14 @@ export interface SessionRecord {
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+}
+
+// Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
+// and reap.ts's sidecar-claims sweep — one definition, never two copies.
+export function isTerminalSessionStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
 }
 
 export interface ServiceInstanceRecord {
@@ -748,6 +904,10 @@ export interface SessionSidecarView {
   alive: boolean;
   ports: SidecarPortView[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
+  ageWarn?: boolean;
 }
 
 export interface SessionView extends SessionRecord {
@@ -821,6 +981,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -973,6 +1134,7 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
 }
 
 export interface CreateProjectRequest {

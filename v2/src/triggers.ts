@@ -87,7 +87,11 @@ const CI_FAILED_MAX_ATTEMPTS = 3;
 // acknowledges). Without these, the flush loop would retry every 5s forever.
 // Start short so a session that was only briefly busy stays responsive, then
 // double the backoff on each failure (10s, 20s, 40s, ... 640s) and give up
-// after 8 attempts (~21 min total elapsed), dropping and logging the batch.
+// after 8 attempts, dropping and logging the batch. Backoff alone sums to
+// 1270s; each attempt can also block up to the submit-ack window
+// (agents/index.ts DEFAULT_SUBMIT_ACK_WINDOW_MS x (1 + resends)) and, on a
+// busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
+// so worst case elapsed time is unbounded, not just the backoff sum.
 const DELIVERY_RETRY_BASE_MS = 10_000;
 const DELIVERY_MAX_ATTEMPTS = 8;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
@@ -98,9 +102,10 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "needs_input",
 ]);
 
-// A running claude session whose live state is "error" is wedged on a
-// transient Claude server error (session-service.ts's reactivation nudge
-// self-clears it once it recovers), not actually closed or dead — the same
+// A running session whose live state is "error" is wedged on a transient
+// last-turn failure — a Claude server error (session-service.ts's
+// reactivation nudge self-clears it once it recovers) or a Cursor
+// terminalError record — not actually closed or dead — the same
 // "still alive, just blocked" shape as rate_limited. Scoped to
 // status === "running" because a genuinely closed session (status stopped,
 // errored, or killed) can also carry state "error", and that case IS closed.
@@ -301,6 +306,7 @@ async function runSpawnTrigger(
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),
+          ...(block.mode !== undefined ? { mode: block.mode } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),

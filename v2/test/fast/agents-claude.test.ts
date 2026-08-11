@@ -85,6 +85,11 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--dangerously-skip-permissions");
   });
 
+  it("includes configured reasoning effort", () => {
+    const plan = buildClaudePlan("prompt", { reasoningEffort: "medium" });
+    expect(plan.launchCommand).toContain("--effort medium");
+  });
+
   it("uses SPUR_CLAUDE_BIN override", () => {
     process.env["SPUR_CLAUDE_BIN"] = "/opt/claude-bin";
     const plan = buildClaudePlan("prompt");
@@ -258,6 +263,11 @@ describe("buildClaudeResumePlan", () => {
   it("includes --permission-mode plan when planMode is true", () => {
     const plan = buildClaudeResumePlan("session-123", "claude", { planMode: true });
     expect(plan.launchCommand).toContain("--permission-mode plan");
+  });
+
+  it("includes --effort when reasoningEffort is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", { reasoningEffort: "high" });
+    expect(plan.launchCommand).toContain("--effort high");
   });
 
   it("does not include initialMessage", () => {

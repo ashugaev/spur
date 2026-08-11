@@ -693,7 +693,7 @@ describe("DirectTerminal scroll integration", () => {
 
   it("keeps the agent label on the title row, right-aligned and never truncated", async () => {
     await mountTerminal({
-      model: "claude-opus-4-8",
+      model: "claude-model-id",
       onClose: vi.fn(),
       title: "Very long terminal header title for isolated sidecar sessions",
     });

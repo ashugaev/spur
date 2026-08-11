@@ -118,18 +118,118 @@ test.describe("spawn modal capture", () => {
     });
   });
 
+  test("session mode picker preselects the project default", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    const modedProjects: ProjectInfo[] = [
+      {
+        id: "council-project",
+        name: "council-project",
+        modes: {
+          manager: { skill: "manager", default: true },
+          council: { skill: "council" },
+        },
+      },
+    ];
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "capture-spawn-mode-1", project: "council-project" })],
+      modedProjects,
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("council-project");
+
+    const modeSelect = page.getByRole("combobox", { name: "Spawn session mode" });
+    await expect(modeSelect).toHaveValue("manager");
+    await expect(modeSelect.locator("option")).toHaveCount(2);
+    await modalShot(page, /spawn session/i, "spawn-modal-07-session-mode.png");
+  });
+
+  test("session mode select stays within the viewport with a long mode name across breakpoints", async ({
+    page,
+  }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    const longModeProjects: ProjectInfo[] = [
+      {
+        id: "council-project",
+        name: "council-project",
+        modes: {
+          manager: { skill: "manager", default: true },
+          council: { skill: "council" },
+          "principal-engineering-review-committee": { skill: "review" },
+        },
+      },
+    ];
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "capture-spawn-mode-viewport", project: "council-project" })],
+      longModeProjects,
+    );
+
+    const viewports = [
+      { width: 390, height: 844, label: "mobile" },
+      { width: 768, height: 900, label: "tablet" },
+      { width: 1440, height: 900, label: "desktop" },
+    ];
+
+    for (const viewport of viewports) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto("/");
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+      await page.getByRole("combobox", { name: "Spawn project" }).selectOption("council-project");
+
+      const modeSelect = page.getByRole("combobox", { name: "Spawn session mode" });
+      await expect(modeSelect).toHaveValue("manager");
+      const box = await modeSelect.boundingBox();
+      expect(box).not.toBeNull();
+      if (box) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+      }
+
+      const overflow = await page.evaluate(
+        () => document.body.scrollWidth - document.body.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(1);
+
+      const modal = page
+        .getByRole("heading", { name: /spawn session/i })
+        .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
+      await modal.screenshot({
+        path: join(ARTIFACTS_DIR, `spawn-modal-08-session-mode-${viewport.label}.png`),
+      });
+
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+    }
+  });
+
   test("mobile spawn modal stays in viewport", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockModels(page);
     await mockSlashCommands(page);
+    const mobileModedProjects: ProjectInfo[] = [
+      {
+        id: "my-project",
+        name: "my-project",
+        modes: { manager: { skill: "manager", default: true } },
+      },
+    ];
     await mockSessions(
       page,
       [makeWorkingSession({ id: "capture-spawn-mobile", project: "my-project" })],
-      DEFAULT_PROJECTS,
+      mobileModedProjects,
     );
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Spawn session mode" })).toHaveValue("manager");
     const modal = page
       .getByRole("heading", { name: /spawn session/i })
       .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");

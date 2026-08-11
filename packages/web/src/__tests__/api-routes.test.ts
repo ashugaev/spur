@@ -357,7 +357,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct, mode", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -372,6 +372,7 @@ describe("Spur web API routes", () => {
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
           selfDestruct: { enabled: true, conditions: "daemon trims this" },
+          mode: "manager",
         }),
       }),
     );
@@ -391,7 +392,23 @@ describe("Spur web API routes", () => {
       selfDestruct: { enabled: true, conditions: "daemon trims this" },
       steps: ["step 1", "step 2"],
       overrides: { worktree: true },
+      mode: "manager",
     });
+  });
+
+  it("POST /api/spawn omits mode when absent or blank", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Do work", agent: "claude", mode: "  " }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).not.toHaveProperty("mode");
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -1022,7 +1039,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           agent: "cursor",
-          model: "gpt-5.3-codex",
+          model: "codex-model-id",
           notes: "Continue UI polish",
         }),
       }),
@@ -1037,7 +1054,7 @@ describe("Spur web API routes", () => {
     expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
       {
         agent: "cursor",
-        model: "gpt-5.3-codex",
+        model: "codex-model-id",
         notes: "Continue UI polish",
       },
     );
@@ -2021,6 +2038,7 @@ describe("Spur web API routes", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
       delete process.env["GITHUB_TOKEN"];
+      delete process.env["GITLAB_TOKEN"];
     });
 
     function makePrGql(overrides: Record<string, unknown> = {}) {
@@ -2100,6 +2118,78 @@ describe("Spur web API routes", () => {
       expect(typeof payload.fetchedAt).toBe("number");
     });
 
+    it("returns closed state for a closed draft GitLab MR (closed outranks draft)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/43",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft GitLab MR (merged outranks draft and closed)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: "2026-01-01T00:00:00Z",
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/44",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("merged");
+    });
+
+    it("returns draft state for an open draft GitLab MR", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "opened",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/45",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("draft");
+    });
+
     it("returns 400 for a GitHub URL without a PR number", async () => {
       const response = await getPrStatus(
         new NextRequest("http://localhost:3000/api/pr-status?url=https://github.com/owner/repo"),
@@ -2152,6 +2242,30 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { state: string };
 
       expect(payload.state).toBe("closed");
+    });
+
+    it("returns closed state for a closed draft PR (closed outranks draft)", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ state: "CLOSED", isDraft: true })));
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft PR (merged outranks draft and closed)", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ state: "CLOSED", merged: true, isDraft: true })),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("merged");
     });
 
     it("returns approved reviewDecision from GitHub without inferring it", async () => {

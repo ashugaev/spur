@@ -14,6 +14,7 @@ const {
   platformMock,
   probeMock,
   probeInfoMock,
+  probeHeadroomMock,
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
@@ -22,6 +23,7 @@ const {
   platformMock: vi.fn(),
   probeMock: vi.fn(),
   probeInfoMock: vi.fn(),
+  probeHeadroomMock: vi.fn(),
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
@@ -49,7 +51,12 @@ vi.mock("node:fs", async () => {
 
 vi.mock("../../src/update-health.js", async () => {
   const actual = await vi.importActual<typeof UpdateHealth>("../../src/update-health.js");
-  return { ...actual, probe: probeMock, probeInfo: probeInfoMock };
+  return {
+    ...actual,
+    probe: probeMock,
+    probeInfo: probeInfoMock,
+    probeHeadroom: probeHeadroomMock,
+  };
 });
 
 vi.mock("../../src/port-probe.js", async () => {
@@ -58,6 +65,7 @@ vi.mock("../../src/port-probe.js", async () => {
 });
 
 import {
+  checkConfigRegistry,
   checkServiceHealth,
   checkSpurOnPath,
   checkVersionDrift,
@@ -107,6 +115,9 @@ interface ExecState {
   dfKbLine: string;
   dfILine: string;
   nodePtyOk: boolean;
+  // data-dir-log-bytes seam: `du -sk <dataDir>/sessions` first line.
+  duAvailable: boolean;
+  duKbLine: string;
 }
 
 let execState: ExecState;
@@ -142,6 +153,8 @@ beforeEach(() => {
     dfKbLine: "/dev/sda1 100000000 5000000 90000000 10% /",
     dfILine: "/dev/sda1 1000000 200000 800000 20% /",
     nodePtyOk: true,
+    duAvailable: true,
+    duKbLine: "1000\t/data/sessions",
   };
   execFileSyncMock.mockReset();
   execFileSyncMock.mockImplementation((file: string, args: string[]) => {
@@ -171,6 +184,10 @@ beforeEach(() => {
     if (file === "node") {
       if (!execState.nodePtyOk) throw new Error('Failed to load native module "node-pty"');
       return "";
+    }
+    if (file === "du") {
+      if (!execState.duAvailable) throw new Error("du not found");
+      return execState.duKbLine;
     }
     if (file === "systemctl") {
       if (!execState.systemctlAvailable) throw new Error("systemctl not available");
@@ -229,6 +246,8 @@ beforeEach(() => {
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
   probeInfoMock.mockReset();
   probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+  probeHeadroomMock.mockReset();
+  probeHeadroomMock.mockResolvedValue({ ok: false });
   isHostPortFreeMock.mockReset();
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
@@ -242,6 +261,141 @@ afterEach(() => {
   } else {
     process.env["SPUR_CONFIG"] = initialSpurConfig;
   }
+});
+
+describe("checkConfigRegistry", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("warns on dead, worktree-internal, and over-cap registry entries", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    const fillerDeadPaths = Array.from({ length: 22 }, (_, index) =>
+      join(rootDir, `filler-${index}.yaml`),
+    );
+
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({
+        configPaths: [livePath, deadPath, worktreeInternalPath, ...fillerDeadPaths],
+        unconfiguredProjects: [],
+      }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.id).toBe("config-registry");
+    expect(check.severity).toBe("warn");
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain(deadPath);
+    // Both dead and worktree-internal offenders are present, so the fix
+    // hint must cover both — and never resolve to a bare `undefined`.
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).toContain("restart the daemon");
+    expect(check.fix).not.toContain("undefined");
+  });
+
+  it("omits fix and points at the count in detail when only the cap is over, with no dead or worktree-internal offenders", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-cap-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+
+    const livePaths = await Promise.all(
+      Array.from({ length: 25 }, async (_, index) => {
+        const path = join(rootDir, `live-${index}.yaml`);
+        await writeFile(path, "stub: true\n", "utf8");
+        return path;
+      }),
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: livePaths, unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("over the");
+    expect(check.detail).not.toContain(": ");
+    expect(check.fix).toBeUndefined();
+  });
+
+  it("points only at spur disconnect, never a daemon restart, when every offender is dead", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-dead-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const deadPath = join(rootDir, "missing.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [deadPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).not.toContain("restart the daemon");
+  });
+
+  it("points only at a daemon restart, never spur disconnect, when every offender is worktree-internal", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-worktree-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [worktreeInternalPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toBe("restart the daemon to prune worktree-internal entries at boot");
+    expect(check.fix).not.toContain("spur disconnect");
+  });
+
+  it("reports ok when every registered path is live, outside worktreeDir, and under cap", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-ok-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [livePath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+  });
 });
 
 describe("collectHostInstallChecks", () => {
@@ -781,6 +935,139 @@ describe("checkServiceHealth", () => {
       severity: "info",
     });
   });
+
+  describe("session-headroom", () => {
+    it("reports ok:true severity:warn when reachable with room", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 3, byProject: { demo: 3 } },
+          projectedRoom: 7,
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_610_612_736 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 536_870_912 },
+            { id: "demo-3", project: "demo", status: "running", rssBytes: 0 },
+          ],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: true, severity: "warn" });
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        [
+          "[ok] 3/10 live sessions, room for 7 more",
+          "Measured RSS per live session:",
+          "  demo-1: 1.5 GiB",
+          "  demo-2: 512.0 MiB",
+          "  demo-3: 0 B",
+        ].join("\n"),
+      );
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("reports ok:false severity:warn with candidate ids in fix when reachable and full", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 2,
+            source: "config",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 2, byProject: { demo: 2 } },
+          projectedRoom: 0,
+          sessions: [
+            { id: "demo-1", project: "demo", status: "running", rssBytes: 1_073_741_824 },
+            { id: "demo-2", project: "demo", status: "running", rssBytes: 805_306_368 },
+          ],
+          memory: null,
+          guard: { enforce: false, minAvailableBytes: 0, minFreeSwapBytes: 0, crossed: false },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.detail).toContain("  demo-1: 1.0 GiB");
+      expect(check?.detail).toContain("  demo-2: 768.0 MiB");
+      expect(check?.fix).toContain("demo-1");
+      expect(check?.fix).toContain("demo-2");
+      expect(renderHostInstallChecks(result.checks)).toContain(
+        "\n  fix: raise admission.maxLiveSessions",
+      );
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("reports memory guard remediation without an empty stop-sessions suffix", async () => {
+      probeInfoMock.mockResolvedValue({ ok: true, version });
+      probeHeadroomMock.mockResolvedValue({
+        ok: true,
+        body: {
+          cap: {
+            global: 10,
+            source: "derived",
+            perSessionBytes: 1_610_612_736,
+            reserveFraction: 0.7,
+          },
+          projectCaps: {},
+          live: { count: 0, byProject: {} },
+          projectedRoom: 10,
+          sessions: [],
+          memory: {
+            totalBytes: 68_719_476_736,
+            availableBytes: 536_870_912,
+            swapTotalBytes: 8_589_934_592,
+            swapFreeBytes: 268_435_456,
+          },
+          guard: {
+            enforce: false,
+            minAvailableBytes: 1_073_741_824,
+            minFreeSwapBytes: 536_870_912,
+            crossed: true,
+          },
+        },
+      });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      const check = result.checks.find((entry) => entry.id === "session-headroom");
+      expect(check).toMatchObject({
+        ok: false,
+        severity: "warn",
+        fix: "free host memory or swap, or adjust admission.memoryGuard.minAvailableBytes or admission.memoryGuard.minFreeSwapBytes in ~/.spur/config.yaml",
+      });
+      expect(check?.detail).toContain("memory guard crossed");
+      expect(check?.fix).not.toContain("stop sessions:");
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+
+    it("emits no session-headroom check when the daemon is unreachable", async () => {
+      probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+      probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+
+      const result = await checkServiceHealth(scope, false, false, false);
+
+      expect(result.checks.find((entry) => entry.id === "session-headroom")).toBeUndefined();
+      expect(probeHeadroomMock).not.toHaveBeenCalled();
+      expect(hasErrorSeverity(result.checks)).toBe(false);
+    });
+  });
 });
 
 async function writeFakeUnits(daemonBody: string, webBody: string): Promise<string> {
@@ -996,12 +1283,174 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     });
   });
 
+  it("reports data-dir-log-bytes warn when du reports usage above the 5GB threshold", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duKbLine = `6000000\t${join(dataDir, "sessions")}`;
+    const checks = await collectHostInstallChecks(fakeHome);
+    const check = checks.find((check) => check.id === "data-dir-log-bytes");
+    expect(check).toMatchObject({ ok: false, severity: "warn" });
+    // The reported total spans both shard families, so the hint must name both
+    // knobs — lowering only eventLog.* cannot bring a user-action-heavy dataDir
+    // back under the threshold.
+    expect(check?.fix).toContain("eventLog.shardHotBytes");
+    expect(check?.fix).toContain("eventLog.retainArchives");
+    expect(check?.fix).toContain("userActionLog.shardHotBytes");
+    expect(check?.fix).toContain("userActionLog.retainArchives");
+    // Log growth must never fail `spur doctor` on its own: cli.ts exits 1 only
+    // on error severity, and this check tops out at warn.
+    expect(hasErrorSeverity(checks.filter((c) => c.id === "data-dir-log-bytes"))).toBe(false);
+  });
+
+  it("skips (info) data-dir-log-bytes when du is unavailable", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duAvailable = false;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+
+  it("reports data-dir-log-bytes as 0KB (not skipped) when <dataDir>/sessions does not exist yet", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    // du is never invoked here: a fresh instance's <dataDir>/sessions does not
+    // exist yet, so it should short-circuit to 0KB instead of reading as "du
+    // unavailable or non-numeric".
+    execState.duAvailable = false;
+    const check = (await collectHostInstallChecks(fakeHome)).find(
+      (c) => c.id === "data-dir-log-bytes",
+    );
+    expect(check).toMatchObject({ ok: true, severity: "warn" });
+    expect(check?.detail).not.toContain("skipped");
+  });
+
   it("never pushes worktree/data-dir checks on a never-initialized host (no instance config)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-never-init-c");
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: sidecar-orphans", () => {
+  it("reports ok:true when no leaked sidecar process trees exist", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+  });
+
+  it("degrades to ok:true when the worktree dir itself is unreadable, instead of reporting a leak", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        "worktreeDir: /nonexistent/spur-host-install-worktree-dir",
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    });
+  });
+
+  it("never writes or signals — collectHostInstallChecks stays read-only", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const killSpy = vi.spyOn(process, "kill");
+
+    await collectHostInstallChecks(fakeHome);
+
+    expect(killSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
   });
 });
 
@@ -1047,6 +1496,7 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
     expect(probeInfoMock).toHaveBeenCalledWith(
       expect.objectContaining({ url: expect.stringContaining(":4310/info") }),

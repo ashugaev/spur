@@ -99,6 +99,37 @@ describe("SpawnModal", () => {
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
   });
 
+  it("spawn mode renders no session mode combobox when sessionMode is undefined", () => {
+    renderModal(spawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+  });
+
+  it("spawn mode renders the session mode combobox with options and fires onChange", () => {
+    const onChange = vi.fn();
+    renderModal({
+      ...spawnMode,
+      sessionMode: {
+        value: "manager",
+        onChange,
+        options: [
+          { value: "manager", label: "manager" },
+          { value: "council", label: "council" },
+        ],
+      },
+    });
+    const select = screen.getByRole("combobox", { name: "Spawn session mode" });
+    expect(select).toHaveValue("manager");
+    fireEvent.change(select, { target: { value: "council" } });
+    expect(onChange).toHaveBeenCalledWith("council");
+  });
+
+  it("respawn and desk modes render no session mode combobox", () => {
+    renderModal(respawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+    renderModal(deskMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+  });
+
   it("respawn mode renders agent + model + prompt only", () => {
     renderModal(respawnMode);
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();

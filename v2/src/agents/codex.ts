@@ -16,7 +16,7 @@ import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -415,6 +415,15 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexReasoningEffort(
+  command: string,
+  reasoningEffort: ProviderReasoningEffort | undefined,
+): string {
+  return reasoningEffort
+    ? `${command} -c ${shellEscape(`model_reasoning_effort="${reasoningEffort}"`)}`
+    : command;
+}
+
 function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
   if (!imagePaths || imagePaths.length === 0) {
     return command;
@@ -441,6 +450,7 @@ export function buildCodexPlan(
   options?: {
     codexHomePath?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
     startupImagePaths?: string[];
     restrictWrites?: boolean;
     model?: string;
@@ -449,9 +459,12 @@ export function buildCodexPlan(
   const command = withCodexHome(
     appendCodexImages(
       appendCodexModel(
-        appendCodexArgs(
-          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
-          options?.codexArgs,
+        appendCodexReasoningEffort(
+          appendCodexArgs(
+            `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+            options?.codexArgs,
+          ),
+          options?.reasoningEffort,
         ),
         options?.model,
       ),
@@ -476,13 +489,21 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      appendCodexArgs(
-        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
-        options?.codexArgs,
+      appendCodexReasoningEffort(
+        appendCodexArgs(
+          `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
+          options?.codexArgs,
+        ),
+        options?.reasoningEffort,
       ),
       options?.codexHomePath,
     ),
@@ -493,7 +514,12 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -617,7 +643,11 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; mcpBindings?: SidecarMcpBinding[] },
+  options?: {
+    restrictWrites?: boolean;
+    mcpBindings?: SidecarMcpBinding[];
+    modelsCacheHome?: string;
+  },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -632,6 +662,18 @@ export async function ensureCodexHooksConfig(
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
+  if (options?.modelsCacheHome) {
+    await cp(
+      join(options.modelsCacheHome, "models_cache.json"),
+      join(codexDir, "models_cache.json"),
+      {
+        force: true,
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    });
+  }
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
@@ -812,6 +854,16 @@ interface CodexRolloutCandidate {
   mtimeMs: number;
 }
 
+interface CodexRolloutFileFingerprint {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface CodexRolloutReaderState {
+  files: Map<string, CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }>;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -961,8 +1013,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    // Rollout files are re-scanned on every dashboard poll, so each line is
-    // parsed once here and shared by all three extractors below.
+    // Parse each changed rollout line once and share it across the extractors.
     let parsed: unknown;
     try {
       parsed = JSON.parse(lines[index] ?? "");
@@ -997,7 +1048,10 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
-export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
+export async function readCodexRolloutState(
+  sessionsDir: string,
+  reader?: CodexRolloutReaderState,
+): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
@@ -1008,8 +1062,29 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
   // same instant, so filesystem mtime stops reflecting content recency. Rank by
   // the newest in-content state timestamp instead (heal preserves those), and
   // keep mtime only as a deterministic tie-breaker.
+  const nextFiles = new Map<
+    string,
+    CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }
+  >();
   const candidates = await Promise.all(
     files.map(async (filePath) => {
+      let fingerprint: CodexRolloutFileFingerprint | null = null;
+      try {
+        const fileStat = await stat(filePath);
+        fingerprint = { ino: fileStat.ino, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+      } catch {
+        // Preserve the existing best-effort read below for a stat/read race.
+      }
+      const cached = reader?.files.get(filePath);
+      if (
+        fingerprint &&
+        cached?.ino === fingerprint.ino &&
+        cached.mtimeMs === fingerprint.mtimeMs &&
+        cached.size === fingerprint.size
+      ) {
+        nextFiles.set(filePath, cached);
+        return cached.candidate;
+      }
       let content: string;
       try {
         content = await readFile(filePath, "utf8");
@@ -1019,17 +1094,19 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
       if (!result.rollout && !result.rateLimit && !result.model) {
+        if (fingerprint) {
+          nextFiles.set(filePath, { ...fingerprint, candidate: null });
+        }
         return null;
       }
-      let mtimeMs: number;
-      try {
-        mtimeMs = (await stat(filePath)).mtimeMs;
-      } catch {
-        mtimeMs = 0;
+      const candidate = { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
+      if (fingerprint) {
+        nextFiles.set(filePath, { ...fingerprint, candidate });
       }
-      return { result, mtimeMs };
+      return candidate;
     }),
   );
+  if (reader) reader.files = nextFiles;
   const existing = candidates.filter(
     (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );

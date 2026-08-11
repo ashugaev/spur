@@ -212,7 +212,7 @@ describe("SessionDetail header", () => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture({ model: "claude-opus-4-8" })), {
+        return new Response(JSON.stringify(sessionFixture({ model: "claude-model-id" })), {
           status: 200,
         });
       }
@@ -227,7 +227,7 @@ describe("SessionDetail header", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("claude-opus-4-8")).toBeInTheDocument();
+      expect(screen.getByText("claude-model-id")).toBeInTheDocument();
     });
   });
 
@@ -1920,10 +1920,16 @@ describe("SessionDetail voice input", () => {
     expect(dialogSection).not.toBeNull();
     expect(queuedSection).not.toBeNull();
 
-    const dialogText = within(dialogSection as HTMLElement).getByText(longToken);
+    // The Dialog heading renders as soon as ConversationView mounts (e.g. while
+    // isWorking), which can be before the /conversation fetch resolves, so the
+    // assistant text must be awaited rather than queried synchronously.
+    const dialogText = await within(dialogSection as HTMLElement).findByText(longToken);
     expect(dialogText).toHaveClass("[overflow-wrap:anywhere]");
     expect(dialogText.parentElement).toHaveClass("min-w-0");
 
+    // The queued-messages heading and its text both come from the same
+    // /api/sessions/api-a1 fetch (session.queuedMessages), so once the
+    // heading is in the DOM the text is already there too — no race here.
     const queuedText = within(queuedSection as HTMLElement).getByText(longToken);
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });

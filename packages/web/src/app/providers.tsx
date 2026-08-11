@@ -10,9 +10,9 @@ import { useVersionSwitch, VersionSwitchProvider } from "@/lib/version-switch-co
 
 // Marks the background app tree `inert` while a blocking overlay is shown,
 // so keyboard/pointer interaction can't reach controls behind it (native
-// `inert` also removes focus from any element already focused inside). Only
-// wraps children in the extra `<div>` while actually blocking — otherwise it
-// renders a `Fragment` so the app's DOM structure is unchanged when idle.
+// `inert` also removes focus from any element already focused inside). Keep
+// one wrapper across both states so opening the overlay never remounts the
+// app tree and discards local state. `contents` removes its idle layout box.
 function AppContent({ children }: { children: ReactNode }) {
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const { phase: backendPhase } = useBackendConnection();
@@ -20,8 +20,11 @@ function AppContent({ children }: { children: ReactNode }) {
     versionSwitchPhase === "switching" ||
     versionSwitchPhase === "failed" ||
     backendPhase === "disconnected";
-  if (!blocking) return <>{children}</>;
-  return <div inert>{children}</div>;
+  return (
+    <div className={blocking ? undefined : "contents"} inert={blocking ? true : undefined}>
+      {children}
+    </div>
+  );
 }
 
 export default function Providers({ children }: { children: ReactNode }) {
