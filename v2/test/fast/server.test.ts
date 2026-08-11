@@ -3154,6 +3154,75 @@ describe("startServer", () => {
     }
   });
 
+  it("drops a registered project directory at boot and rejects connecting one with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const extraProjectDir = join(root, "extra-project");
+    const extraConfigPath = join(extraProjectDir, "spur.yaml");
+    await mkdir(extraProjectDir, { recursive: true });
+    await writeFile(
+      extraConfigPath,
+      [
+        "projects:",
+        "  extra:",
+        `    path: ${extraProjectDir}`,
+        "    sessionPrefix: extra",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [extraProjectDir, extraConfigPath],
+      unconfiguredProjects: [],
+    });
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(bootRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraProjectDir }),
+      });
+      expect(response.status).toBe(400);
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("rejects POST /projects/disconnect for a relative configPath with 400 instead of resolving it against the daemon cwd", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
