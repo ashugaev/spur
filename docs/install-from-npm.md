@@ -2,7 +2,9 @@
 
 > Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
 
-Run Spur on a fresh Linux server. Package ships the web UI prebuilt — no on-box build. Dev/maintainer setup instead: [install-from-source.md](install-from-source.md).
+Run Spur on a fresh Linux server. This is the required path for coding-agent installs. Use source only for contributors/maintainers, and only when the user explicitly asks for source: [install-from-source.md](install-from-source.md).
+
+Package ships the web UI prebuilt — no on-box build.
 
 Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (Ubuntu's apt build is too old — use nodesource or nvm).
 
