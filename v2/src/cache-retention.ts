@@ -373,7 +373,11 @@ async function readBrowsersJsonViaRequire(fromModulePath: string): Promise<unkno
 async function resolvePins(
   home: string,
   instanceConfig: InstanceConfigReadResult,
-): Promise<{ pinnedDirNames: Set<string>; pinSourceCount: number; pinSourceNpxHashes: Set<string> }> {
+): Promise<{
+  pinnedDirNames: Set<string>;
+  pinSourceCount: number;
+  pinSourceNpxHashes: Set<string>;
+}> {
   const pinnedDirNames = new Set<string>();
   const pinSourceNpxHashes = new Set<string>();
   let pinSourceCount = 0;
@@ -501,7 +505,10 @@ async function collectLiveness(
   const processListReadable = rawProcesses !== null;
   const processes = rawProcesses ?? [];
   const processTreeReadable = await canReadProcessTree(process.pid);
-  const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(home, instanceConfig);
+  const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(
+    home,
+    instanceConfig,
+  );
 
   const sessionCwds: LiveSessionCwd[] = [];
   if (instanceConfig.status === "ok") {
@@ -756,17 +763,8 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
 
   const liveness = await collectLiveness(home, instanceConfig);
   const myUid = process.getuid?.();
-
-  let dataDirReal: string | undefined;
-  let worktreeDirReal: string | undefined;
-  if (instanceConfig.status === "ok") {
-    dataDirReal = await realpath(instanceConfig.config.dataDir).catch(
-      () => instanceConfig.config.dataDir,
-    );
-    worktreeDirReal = await realpath(instanceConfig.config.worktreeDir).catch(
-      () => instanceConfig.config.worktreeDir,
-    );
-  }
+  const spurOwnedDirs =
+    instanceConfig.status === "ok" ? await resolveSpurOwnedDirs(instanceConfig) : [];
 
   const roots: CacheRootMeasurement[] = [];
   const candidates: CacheCandidate[] = [];
@@ -779,10 +777,10 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
       const own = ownership.get(entry.path);
       if (!own) continue;
       let verdict = verdictFor(entry, own, liveness, myUid);
-      if (verdict.kind === "prunable" && (dataDirReal ?? worktreeDirReal)) {
+      if (verdict.kind === "prunable" && spurOwnedDirs.length > 0) {
         try {
           const targetReal = await realpath(entry.path);
-          if (isSpurOwnedReal(targetReal, dataDirReal, worktreeDirReal)) {
+          if (isSpurOwnedReal(targetReal, spurOwnedDirs)) {
             verdict = { kind: "protected", reason: { kind: "spur-owned" } };
           }
         } catch {
@@ -812,14 +810,18 @@ function isWithin(parentReal: string, targetReal: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"));
 }
 
-function isSpurOwnedReal(
-  targetReal: string,
-  dataDirReal: string | undefined,
-  worktreeDirReal: string | undefined,
-): boolean {
-  if (dataDirReal && isWithin(dataDirReal, targetReal)) return true;
-  if (worktreeDirReal && isWithin(worktreeDirReal, targetReal)) return true;
-  return false;
+async function resolveSpurOwnedDirs(
+  instanceConfig: Extract<InstanceConfigReadResult, { status: "ok" }>,
+): Promise<string[]> {
+  return Promise.all(
+    [instanceConfig.config.dataDir, instanceConfig.config.worktreeDir].map((path) =>
+      realpath(path).catch(() => path),
+    ),
+  );
+}
+
+function isSpurOwnedReal(targetReal: string, spurOwnedDirs: readonly string[]): boolean {
+  return spurOwnedDirs.some((dir) => isWithin(dir, targetReal));
 }
 
 // Deletion guard: re-`lstat` each candidate to rebuild age and ownership,
@@ -830,7 +832,7 @@ function isSpurOwnedReal(
 // the sweep.
 export async function executePrune(
   candidates: CacheCandidate[],
-  instanceConfig: InstanceConfigReadResult & { status: "ok" },
+  instanceConfig: Extract<InstanceConfigReadResult, { status: "ok" }>,
   seams?: { home?: string; tmpPath?: string },
 ): Promise<PruneOutcome> {
   const removed: { path: string; sizeKb: number }[] = [];
@@ -841,13 +843,7 @@ export async function executePrune(
 
   const freshLiveness = await collectLiveness(home, instanceConfig);
   const myUid = process.getuid?.();
-
-  const dataDirReal = await realpath(instanceConfig.config.dataDir).catch(
-    () => instanceConfig.config.dataDir,
-  );
-  const worktreeDirReal = await realpath(instanceConfig.config.worktreeDir).catch(
-    () => instanceConfig.config.worktreeDir,
-  );
+  const spurOwnedDirs = await resolveSpurOwnedDirs(instanceConfig);
 
   for (const candidate of candidates) {
     if (candidate.verdict.kind !== "prunable") continue;
@@ -883,7 +879,7 @@ export async function executePrune(
         failures.push({ path, message: "refused: resolves outside its cache root" });
         continue;
       }
-      if (isSpurOwnedReal(targetRealPath, dataDirReal, worktreeDirReal)) {
+      if (isSpurOwnedReal(targetRealPath, spurOwnedDirs)) {
         failures.push({ path, message: "refused: resolves inside Spur data directory" });
         continue;
       }

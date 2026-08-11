@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CacheRetentionModule from "../../src/cache-retention.js";
-import type { CachePlan } from "../../src/cache-retention.js";
+import type { CacheCandidate, CachePlan } from "../../src/cache-retention.js";
 import type * as ConfigModule from "../../src/config.js";
 
 const {
@@ -181,10 +181,10 @@ describe("spur cache CLI", () => {
   it("calls executePrune with the prunable candidates with --prune --yes", async () => {
     await parseCache(["--prune", "--yes"]);
     expect(executePruneMock).toHaveBeenCalledTimes(1);
-    const [candidates] = executePruneMock.mock.calls[0] as [{ entry: { path: string } }[]];
+    const [candidates] = executePruneMock.mock.calls[0] as [CacheCandidate[]];
     const removedPaths = candidates
-      .filter((c) => (c as { verdict: { kind: string } }).verdict.kind === "prunable")
-      .map((c) => c.entry.path);
+      .filter((candidate) => candidate.verdict.kind === "prunable")
+      .map((candidate) => candidate.entry.path);
     expect(removedPaths).toEqual(expect.arrayContaining([smallPath, bigPath]));
   });
 

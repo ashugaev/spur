@@ -73,7 +73,7 @@ function makeLiveness(overrides: Partial<LivenessSnapshot> = {}): LivenessSnapsh
 function fakeInstanceConfig(
   dataDir: string,
   worktreeDir: string,
-): InstanceConfigReadResult & { status: "ok" } {
+): Extract<InstanceConfigReadResult, { status: "ok" }> {
   return {
     status: "ok" as const,
     config: {
@@ -149,7 +149,7 @@ describe("ageDaysFor", () => {
 });
 
 describe("verdictFor", () => {
-  it("AC1: vendor-cache at exactly 6 days protected, at 7 prunable (global floor)", () => {
+  it("protects vendor-cache at 6 days and marks it prunable at the 7-day floor", () => {
     const now = Date.now();
     const liveness = makeLiveness();
     const at6 = makeEntry({
@@ -187,7 +187,12 @@ describe("verdictFor", () => {
     ).toBe("prunable");
     expect(
       verdictFor(
-        aged({ kind: "browser-revision", browser: "chromium", revision: "1", dirName: "chromium-1" }),
+        aged({
+          kind: "browser-revision",
+          browser: "chromium",
+          revision: "1",
+          dirName: "chromium-1",
+        }),
         makeOwnership(),
         liveness,
         MY_UID,
@@ -283,7 +288,7 @@ describe("verdictFor", () => {
     expect(verdictFor(entry, makeOwnership(), withoutPin, MY_UID).kind).toBe("prunable");
   });
 
-  it("AC2 (browser-revision): a pinned revision at 400d is protected, an unpinned one at 400d is prunable, at 20d it is too-recent", () => {
+  it("protects pinned and recent browser revisions while allowing aged unpinned revisions", () => {
     const dirName = "chromium_headless_shell-1208";
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
@@ -308,7 +313,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC3 (pin-unresolved): pinSourceCount 0 protects every browser-revision entry regardless of age", () => {
+  it("protects browser revisions when no pin source resolves", () => {
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
       browser: "chromium",
@@ -323,7 +328,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC3b: instanceConfigOk false protects every browser-revision entry regardless of pinSourceCount", () => {
+  it("protects browser revisions when instance config does not resolve", () => {
     const revisionClass: CacheEntryClass = {
       kind: "browser-revision",
       browser: "chromium",
@@ -342,7 +347,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC7: vendor-cache is package-manager-active when a fake ps table has an npm/pnpm/npx/yarn process, prunable otherwise", () => {
+  it("AC12: protects vendor-cache while a package manager is active", () => {
     const entry = makeEntry({
       path: "/home/user/.npm/_cacache",
       rootId: "npm-cacache",
@@ -358,7 +363,7 @@ describe("verdictFor", () => {
     expect(verdictFor(entry, makeOwnership(), idle, MY_UID)).toEqual({ kind: "prunable" });
   });
 
-  it("AC8 (process tree): processTreeReadable false protects every entry, regardless of class or age", () => {
+  it("AC12: protects every entry when the process tree is unreadable", () => {
     const entry = makeEntry({ entryClass: { kind: "vendor-cache" }, ageDays: 9999 });
     const unreadable = makeLiveness({ processTreeReadable: false });
     expect(verdictFor(entry, makeOwnership(), unreadable, MY_UID)).toEqual({
@@ -367,7 +372,7 @@ describe("verdictFor", () => {
     });
   });
 
-  it("AC9: a symlinked entry and an entry owned by another uid are never prunable", () => {
+  it("AC12: protects symlinked and foreign-owned entries", () => {
     const entry = makeEntry({ entryClass: { kind: "vendor-cache" }, ageDays: 9999 });
     expect(verdictFor(entry, makeOwnership({ isSymlink: true }), makeLiveness(), MY_UID)).toEqual({
       kind: "protected",
@@ -390,9 +395,10 @@ describe("verdictFor", () => {
       verdictFor(genericEntry, makeOwnership({ isSymlink: true }), makeLiveness(), MY_UID),
     ).toEqual({ kind: "protected", reason: { kind: "symlink" } });
 
-    expect(
-      verdictFor(genericEntry, makeOwnership({ uid: 0 }), makeLiveness(), MY_UID),
-    ).toEqual({ kind: "protected", reason: { kind: "not-owned", uid: 0 } });
+    expect(verdictFor(genericEntry, makeOwnership({ uid: 0 }), makeLiveness(), MY_UID)).toEqual({
+      kind: "protected",
+      reason: { kind: "not-owned", uid: 0 },
+    });
 
     expect(
       verdictFor(
@@ -468,7 +474,7 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     vi.restoreAllMocks();
   });
 
-  it("AC8 (full plan): canReadProcessTree=false yields reclaimableKb 0 and every candidate protected", async () => {
+  it("AC12: an unreadable process tree protects every planned candidate", async () => {
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     const old = new Date(Date.now() - 9999 * DAY_MS);
     await utimes(join(home, ".npm", "_cacache"), old, old);
@@ -491,7 +497,7 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     }
   });
 
-  it("AC12: a du timeout marks that root skipped, contributes no candidates, and never rejects the plan", async () => {
+  it("a du timeout skips the root without rejecting the plan", async () => {
     await mkdir(join(home, ".npm", "_npx", "somehash"), { recursive: true });
     const old = new Date(Date.now() - 60 * DAY_MS);
     await utimes(join(home, ".npm", "_npx", "somehash"), old, old);
@@ -526,25 +532,26 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
   });
 
   it("AC7 (spur-owned): plan marks a prunable entry inside dataDir as spur-owned; execute refuses it", async () => {
-    const dataDir = join(home, ".spur");
-    const worktreeDir = join(home, ".spur", "worktrees");
+    const dataDir = join(home, ".npm");
+    const worktreeDir = join(dataDir, "worktrees");
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     const old = new Date(Date.now() - 30 * DAY_MS);
     await utimes(join(home, ".npm", "_cacache"), old, old);
 
     const config = fakeInstanceConfig(dataDir, worktreeDir);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
     const plan = await planCachePrune({ home, tmpPath: tmpRoot, instanceConfig: config });
 
-    // vendor-cache entry should not be spur-owned (it's under .npm, not .spur)
     const npmEntry = plan.candidates.find((c) => c.entry.rootId === "npm-cacache");
-    expect(npmEntry).toBeDefined();
-    expect(npmEntry?.verdict.kind).not.toBe("spur-owned");
+    expect(npmEntry?.verdict).toEqual({
+      kind: "protected",
+      reason: { kind: "spur-owned" },
+    });
 
     // simulate a candidate that is inside dataDir — spur-owned at execute time
     const insideDataDir = join(dataDir, "fake-cache");
     await mkdir(insideDataDir, { recursive: true });
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 61 * DAY_MS);
     let outcome: Awaited<ReturnType<typeof executePrune>>;
     try {
       outcome = await executePrune(
@@ -571,7 +578,7 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     expect(outcome.failures[0]?.message).toContain("Spur data directory");
   });
 
-  it("AC11 (executePrune): refuses a symlink and a path outside its claimed root; deletes a real prunable vendor-cache entry", async () => {
+  it("AC6/AC12/AC14: executePrune rechecks candidates and deletes only the eligible vendor cache", async () => {
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     await mkdir(join(home, ".npm", "_npx"), { recursive: true });
     const realCachePath = join(home, ".npm", "_cacache");
@@ -650,7 +657,7 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     await rm(outsideRootDir, { recursive: true, force: true });
   });
 
-  it("AC13/AC14: executePrune refuses a candidate resolving inside dataDir or worktreeDir", async () => {
+  it("AC7: executePrune refuses candidates inside dataDir or worktreeDir", async () => {
     const dataDir = join(home, ".spur");
     const worktreeDir = join(home, ".spur", "worktrees");
     const insideDataDir = join(dataDir, "some-data");
