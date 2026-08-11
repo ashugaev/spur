@@ -255,8 +255,20 @@ export function VoiceControls({
 }
 
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
-  if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
-  if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
+  if (voice.voiceBusy === "starting") {
+    return (
+      <span aria-label="Starting microphone" role="status">
+        <Spinner className="h-3 w-3" strokeWidth={1.5} />
+      </span>
+    );
+  }
+  if (voice.voiceBusy === "transcribing") {
+    return (
+      <span aria-label="Transcribing audio" role="status">
+        <Spinner className="h-3 w-3" strokeWidth={1.5} />
+      </span>
+    );
+  }
   if (voice.recording) return <>Recording — {VOICE_TOGGLE_HINT} to stop</>;
   return null;
 }

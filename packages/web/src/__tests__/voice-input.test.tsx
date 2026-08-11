@@ -45,6 +45,14 @@ describe("VoiceInput", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("uses motion-only voice busy status", () => {
+    render(<VoiceStatusHint voice={createVoice({ voiceBusy: "starting" })} />);
+
+    const status = screen.getByRole("status", { name: "Starting microphone" });
+    expect(status.querySelector(".voice-spinner")).not.toBeNull();
+    expect(screen.queryByText("Starting microphone...")).not.toBeInTheDocument();
+  });
+
   it("submits the confirmation modal with Cmd+Enter", () => {
     const voice = createVoice();
     const onInsert = vi.fn();

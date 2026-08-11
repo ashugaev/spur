@@ -1,5 +1,5 @@
 const WAIT_TEXT =
-  /^(?:Loading(?:\.{3}|…)|Loading preview|Please wait|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
+  /^(?:Loading(?:\.{3}|…)|Loading preview|Please wait|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing|Starting|Transcribing)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
 
 function literalText(node) {
   if (node.type === "Literal") return typeof node.value === "string" ? node.value : null;
@@ -7,6 +7,12 @@ function literalText(node) {
     return node.quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw).join("placeholder");
   }
   return null;
+}
+
+function reportWaitText(context, node, value) {
+  if (value && WAIT_TEXT.test(value.trim())) {
+    context.report({ node, messageId: "replaceWithMotion" });
+  }
 }
 
 export const noVisibleWaitText = {
@@ -19,16 +25,13 @@ export const noVisibleWaitText = {
   create(context) {
     return {
       Literal(node) {
-        const value = literalText(node);
-        if (value && WAIT_TEXT.test(value.trim())) {
-          context.report({ node, messageId: "replaceWithMotion" });
-        }
+        reportWaitText(context, node, literalText(node));
       },
       TemplateLiteral(node) {
-        const value = literalText(node);
-        if (value && WAIT_TEXT.test(value.trim())) {
-          context.report({ node, messageId: "replaceWithMotion" });
-        }
+        reportWaitText(context, node, literalText(node));
+      },
+      JSXText(node) {
+        reportWaitText(context, node, node.value);
       },
     };
   },

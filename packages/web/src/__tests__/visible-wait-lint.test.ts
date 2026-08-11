@@ -11,7 +11,7 @@ async function lint(source: string, filePath: string) {
 }
 
 describe("visible wait text lint rule", () => {
-  it.each(["Loading...", "Loading…", "Loading preview", "Saving…"])(
+  it.each(["Loading...", "Loading…", "Loading preview", "Saving…", "Starting microphone..."])(
     "rejects %s in production web source",
     async (text) => {
       const messages = await lint(
@@ -25,6 +25,14 @@ describe("visible wait text lint rule", () => {
   it("rejects action template literals", async () => {
     const messages = await lint(
       "export const value = `Switching Spur to $" + "{target}…`;",
+      "packages/web/src/probe.tsx",
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("rejects raw JSX wait text", async () => {
+    const messages = await lint(
+      "export function Probe() { return <p>Transcribing audio...</p>; }",
       "packages/web/src/probe.tsx",
     );
     expect(messages).toHaveLength(1);
