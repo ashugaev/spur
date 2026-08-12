@@ -490,6 +490,35 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
+  it("skips the interrupt keystroke for cursor sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "cursor" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(false);
+    expect(sleepMock).not.toHaveBeenCalledWith(500);
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
+  it("keeps the interrupt keystroke for claude sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "claude" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
+    expect(sleepMock).toHaveBeenCalledWith(500);
+  });
+
   it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
     let captureCount = 0;
     execFileAsyncMock.mockImplementation(async (_file, args) => {
