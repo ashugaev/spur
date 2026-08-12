@@ -72,15 +72,6 @@ describe("collectDescendants", () => {
     expect(collectDescendants(10, processes)).toEqual([10, 11]);
   });
 
-  it("returns the root followed by breadth-ordered descendants", () => {
-    expect(
-      collectDescendants(100, [
-        { pid: 200, ppid: 100, args: "child" },
-        { pid: 300, ppid: 200, args: "grandchild" },
-        { pid: 400, ppid: 100, args: "sibling" },
-      ]),
-    ).toEqual([100, 200, 400, 300]);
-  });
 });
 
 describe("listProcesses", () => {

@@ -614,17 +614,29 @@ const RECLAIMABLE_CACHES_TOP_N = 5;
 
 function renderReclaimableDetail(plan: CachePlan): string {
   const prunable = prunableCandidates(plan);
+  let summary: string;
   if (prunable.length === 0) {
-    return "no reclaimable caches found";
+    summary = "no reclaimable caches found";
+  } else {
+    const top = prunable
+      .slice(0, RECLAIMABLE_CACHES_TOP_N)
+      .map(
+        (candidate) =>
+          `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
+      )
+      .join("; ");
+    summary = `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
   }
-  const top = prunable
-    .slice(0, RECLAIMABLE_CACHES_TOP_N)
-    .map(
-      (candidate) =>
-        `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
-    )
-    .join("; ");
-  return `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
+  const rootRows =
+    plan.roots.length === 0
+      ? "roots: none"
+      : plan.roots
+          .map(
+            (r) =>
+              `${r.rootId} ${r.status} ${formatCacheSizeGb(r.totalKb)} ${r.entryCount} ${r.path}`,
+          )
+          .join("; ");
+  return `${summary}; ${rootRows}`;
 }
 
 // Ungated, like `home-disk-headroom` — always `ok:true, severity:"info"`, so

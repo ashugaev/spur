@@ -212,14 +212,20 @@ describe("verdictFor", () => {
     }
   });
 
-  it("AC2: generic entries (including whisper.cpp) are class-never-pruned regardless of age", () => {
-    for (const name of ["yarn", "whisper.cpp", "pip", "go-build", "uv"]) {
-      const entry = makeEntry({
-        path: `/home/user/.cache/${name}`,
-        rootId: "xdg-cache",
-        entryClass: { kind: "generic", name },
-        ageDays: 9999,
-      });
+  it("AC2/AC4: generic and tmp-entry names are class-never-pruned regardless of age", () => {
+    for (const [rootId, path, entryClass] of [
+      ...["yarn", "whisper.cpp", "pip", "go-build", "uv"].map((name) => [
+        "xdg-cache",
+        `/home/user/.cache/${name}`,
+        { kind: "generic", name },
+      ]),
+      ...["systemd-private-abc", "tmux-1000", ".X11-unix", "snap-private-tmp", "spur.yaml", "spur-worktree", "some-scratch-dir", "long-lived-socket"].map((name) => [
+        "tmp",
+        `/tmp/${name}`,
+        { kind: "tmp-entry", name },
+      ]),
+    ] as [string, string, CacheEntryClass][]) {
+      const entry = makeEntry({ path, rootId: rootId as "xdg-cache" | "tmp", entryClass, ageDays: 9999 });
       expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
         kind: "protected",
         reason: { kind: "class-never-pruned" },
@@ -246,30 +252,6 @@ describe("verdictFor", () => {
       kind: "protected",
       reason: { kind: "class-never-pruned" },
     });
-  });
-
-  it("AC4: tmp-entry entries are class-never-pruned regardless of age or deny-list match", () => {
-    for (const name of [
-      "systemd-private-abc",
-      "tmux-1000",
-      ".X11-unix",
-      "snap-private-tmp",
-      "spur.yaml",
-      "spur-worktree",
-      "some-scratch-dir",
-      "long-lived-socket",
-    ]) {
-      const entry = makeEntry({
-        path: `/tmp/${name}`,
-        rootId: "tmp",
-        entryClass: { kind: "tmp-entry", name },
-        ageDays: 9999,
-      });
-      expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
-        kind: "protected",
-        reason: { kind: "class-never-pruned" },
-      });
-    }
   });
 
   it("AC8: npx-package entry whose hash is in pinSourceNpxHashes returns pin-source", () => {

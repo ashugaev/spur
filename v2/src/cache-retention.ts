@@ -179,12 +179,13 @@ export function classifyEntry(rootId: CacheRootId, name: string): CacheEntryClas
   }
 }
 
-// Total over every CacheEntryClass so callers never need an `?? GLOBAL_MIN_AGE_DAYS`
-// fallback. `browser-registry`'s case is unreachable in practice — C4: it is
-// class-never-pruned before this is ever consulted (verdictFor short-circuits
-// on it, and it can never be a `prunable` candidate reaching executePrune
-// either) — but the switch stays exhaustive rather than partial.
-function classFloorDays(entryClass: CacheEntryClass): number {
+// Only the three prunable kinds reach this; verdictFor short-circuits
+// all report-only classes before the floor is consulted.
+type PrunableEntryClass = Extract<
+  CacheEntryClass,
+  { kind: "vendor-cache" | "npx-package" | "browser-revision" }
+>;
+function classFloorDays(entryClass: PrunableEntryClass): number {
   switch (entryClass.kind) {
     case "vendor-cache":
       return GLOBAL_MIN_AGE_DAYS;
@@ -192,11 +193,6 @@ function classFloorDays(entryClass: CacheEntryClass): number {
       return NPX_MIN_AGE_DAYS;
     case "browser-revision":
       return BROWSER_REVISION_MIN_AGE_DAYS;
-    case "browser-profile":
-    case "browser-registry":
-    case "generic":
-    case "tmp-entry":
-      return GLOBAL_MIN_AGE_DAYS;
   }
 }
 
@@ -639,6 +635,20 @@ interface StatFacts extends EntryOwnership {
   ctimeMs: number;
 }
 
+function makeRootResult(
+  root: CacheRoot,
+  status: CacheRootMeasurement["status"],
+  totalKb: number,
+  entries: CacheEntry[],
+  ownership: ReadonlyMap<string, EntryOwnership>,
+) {
+  return {
+    measurement: { rootId: root.id, path: root.path, status, totalKb, entryCount: entries.length },
+    entries,
+    ownership,
+  };
+}
+
 async function measureRoot(
   root: CacheRoot,
   nowMs: number,
@@ -646,21 +656,11 @@ async function measureRoot(
 ): Promise<{
   measurement: CacheRootMeasurement;
   entries: CacheEntry[];
-  ownership: Map<string, EntryOwnership>;
+  ownership: ReadonlyMap<string, EntryOwnership>;
 }> {
   const raw = await listRawEntries(root);
   if (raw === "absent") {
-    return {
-      measurement: {
-        rootId: root.id,
-        path: root.path,
-        status: "absent",
-        totalKb: 0,
-        entryCount: 0,
-      },
-      entries: [],
-      ownership: new Map(),
-    };
+    return makeRootResult(root, "absent", 0, [], new Map());
   }
 
   const facts = new Map<string, StatFacts>();
@@ -682,27 +682,12 @@ async function measureRoot(
     }),
   );
 
-  const ownership = new Map<string, EntryOwnership>();
-  for (const [path, fact] of facts) {
-    ownership.set(path, { uid: fact.uid, isSymlink: fact.isSymlink });
-  }
-
   const sizes = await duSizesKb(
     statted.map((item) => item.path),
     signal,
   );
   if (sizes === undefined) {
-    return {
-      measurement: {
-        rootId: root.id,
-        path: root.path,
-        status: "skipped",
-        totalKb: 0,
-        entryCount: 0,
-      },
-      entries: [],
-      ownership,
-    };
+    return makeRootResult(root, "skipped", 0, [], facts);
   }
 
   const entries: CacheEntry[] = [];
@@ -729,17 +714,7 @@ async function measureRoot(
     totalKb += sizeKb;
   }
 
-  return {
-    measurement: {
-      rootId: root.id,
-      path: root.path,
-      status: "measured",
-      totalKb,
-      entryCount: entries.length,
-    },
-    entries,
-    ownership,
-  };
+  return makeRootResult(root, "measured", totalKb, entries, facts);
 }
 
 export interface PlanCachePruneOptions {

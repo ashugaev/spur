@@ -14,7 +14,7 @@ Read-only. Checks host install, config validity, and daemon/web health; exits no
 
 When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
 
-Two checks are `warn`/`info` only, so a low-disk host never flips the exit code: `home-disk-headroom` (`df` on `$HOME`, `warn` below [`diskRetention.warnFreeGb`](configuration.md), default 10GB) and `reclaimable-caches` (an info-only `spur cache` measurement, top 5 prunable entries by size, degrades to "skipped" if it exceeds its own measurement budget).
+Two checks are `warn`/`info` only, so a low-disk host never flips the exit code: `home-disk-headroom` (`df` on `$HOME`, `warn` below [`diskRetention.warnFreeGb`](configuration.md), default 10GB) and `reclaimable-caches` (an info-only `spur cache` measurement; detail shows the reclaimable summary, top 5 prunable entries by size, and one row per scanned root with its `rootId`, status, size, entry count, and path; degrades to "skipped" if it exceeds its own measurement budget).
 
 ## gc
 

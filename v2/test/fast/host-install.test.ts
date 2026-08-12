@@ -1437,10 +1437,14 @@ describe("collectHostInstallChecks: home-disk-headroom", () => {
 });
 
 describe("collectHostInstallChecks: reclaimable-caches", () => {
-  it("is present, ok:true, severity:info, ranked by size descending, ungated like home-disk-headroom", async () => {
+  it("is present, ok:true, severity:info, ranked by size descending, includes per-root rows", async () => {
     planCachePruneMock.mockResolvedValue({
       generatedAt: new Date(0).toISOString(),
-      roots: [],
+      roots: [
+        { rootId: "npm-cacache", path: "/home/user/.npm/_cacache", status: "measured", totalKb: 20_000_000, entryCount: 1 },
+        { rootId: "npm-npx", path: "/home/user/.npm/_npx", status: "measured", totalKb: 1_000_000, entryCount: 1 },
+        { rootId: "playwright-browsers", path: "/home/user/.cache/ms-playwright", status: "absent", totalKb: 0, entryCount: 0 },
+      ],
       candidates: [
         {
           entry: {
@@ -1492,14 +1496,86 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
     const check = checks.find((c) => c.id === "reclaimable-caches");
     expect(check).toMatchObject({ ok: true, severity: "info" });
     expect(hasErrorSeverity(checks)).toBe(false);
-    // Ranked by size descending: _cacache (20_000_000KB) before the npx entry
-    // (1_000_000KB), regardless of the order planCachePrune returned them in.
+    // Summary: ranked by size descending
     expect(check?.detail.indexOf("/home/user/.npm/_cacache")).toBeGreaterThanOrEqual(0);
     expect(check?.detail.indexOf("/home/user/.npm/_cacache")).toBeLessThan(
       check?.detail.indexOf("/home/user/.npm/_npx/small") ?? -1,
     );
     expect(check?.detail).toContain("age 40d");
     expect(check?.detail).toContain("20.03GB reclaimable");
+    // Root rows: rootId, status, size, entryCount, path in plan order
+    expect(check?.detail).toContain("npm-cacache");
+    expect(check?.detail).toContain("measured");
+    expect(check?.detail).toContain("/home/user/.npm/_cacache");
+    expect(check?.detail).toContain("npm-npx");
+    expect(check?.detail).toContain("/home/user/.npm/_npx");
+    expect(check?.detail).toContain("playwright-browsers");
+    expect(check?.detail).toContain("absent");
+    expect(check?.detail).toContain("/home/user/.cache/ms-playwright");
+    // Plan order: npm-cacache row before npm-npx row
+    expect(check?.detail.indexOf("npm-cacache measured")).toBeLessThan(
+      check?.detail.indexOf("npm-npx measured") ?? -1,
+    );
+  });
+
+  it("still renders root rows when prunable set is empty (S13)", async () => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots: [
+        { rootId: "npm-cacache", path: "/home/user/.npm/_cacache", status: "measured", totalKb: 500_000, entryCount: 1 },
+        { rootId: "npm-npx", path: "/home/user/.npm/_npx", status: "absent", totalKb: 0, entryCount: 0 },
+      ],
+      candidates: [],
+      reclaimableKb: 0,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checks = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-empty",
+    );
+    const check = checks.find((c) => c.id === "reclaimable-caches");
+    expect(check).toMatchObject({ ok: true, severity: "info" });
+    expect(check?.detail).toContain("no reclaimable caches found");
+    // Root rows still rendered even when prunable set is empty
+    expect(check?.detail).toContain("npm-cacache");
+    expect(check?.detail).toContain("measured");
+    expect(check?.detail).toContain("/home/user/.npm/_cacache");
+    expect(check?.detail).toContain("npm-npx");
+    expect(check?.detail).toContain("absent");
+  });
+
+  it("renders zero-size root row and 'roots: none' when plan has no measured roots (S15)", async () => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots: [
+        { rootId: "npm-cacache", path: "/home/user/.npm/_cacache", status: "measured", totalKb: 0, entryCount: 0 },
+      ],
+      candidates: [],
+      reclaimableKb: 0,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checksWithZero = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-zero",
+    );
+    const checkWithZero = checksWithZero.find((c) => c.id === "reclaimable-caches");
+    // Zero-size root renders its row
+    expect(checkWithZero?.detail).toContain("npm-cacache");
+    expect(checkWithZero?.detail).toContain("0.00GB");
+
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots: [],
+      candidates: [],
+      reclaimableKb: 0,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checksNoRoots = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-none",
+    );
+    const checkNoRoots = checksNoRoots.find((c) => c.id === "reclaimable-caches");
+    expect(checkNoRoots?.detail).toContain("roots: none");
   });
 
   it("is present even when unitsInstalled is false (ungated)", async () => {
