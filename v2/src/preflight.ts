@@ -127,7 +127,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   ].join("\n");
 }
 
-const BRANCH_RESULT = /^\{\s*"branch"\s*:\s*("(?:[^"\\\u0000-\u001F]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")\s*\}$/;
+const BRANCH_RESULT = /^\{\s*"branch"\s*:\s*("(?:[^"\\]|\\.)*")\s*\}$/;
 const NO_PROJECT_BRANCH_REQUIREMENTS_RESULT =
   /^\{\s*"noProjectBranchRequirements"\s*:\s*true\s*\}$/;
 
@@ -138,8 +138,12 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   }
   const branchMatch = BRANCH_RESULT.exec(trimmed);
   if (branchMatch?.[1]) {
-    const branch = JSON.parse(branchMatch[1]) as string;
-    if (isPlausibleGitRef(branch)) return { branch };
+    try {
+      const branch = JSON.parse(branchMatch[1]) as unknown;
+      if (typeof branch === "string" && isPlausibleGitRef(branch)) return { branch };
+    } catch {
+      // Reject invalid JSON string escapes.
+    }
   }
   throw new Error(`Spawn preflight must return exactly one valid JSON result: ${trimmed}`);
 }
