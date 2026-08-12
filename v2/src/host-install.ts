@@ -614,19 +614,17 @@ const RECLAIMABLE_CACHES_TOP_N = 5;
 
 function renderReclaimableDetail(plan: CachePlan): string {
   const prunable = prunableCandidates(plan);
-  let summary: string;
-  if (prunable.length === 0) {
-    summary = "no reclaimable caches found";
-  } else {
-    const top = prunable
-      .slice(0, RECLAIMABLE_CACHES_TOP_N)
-      .map(
-        (candidate) =>
-          `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
-      )
-      .join("; ");
-    summary = `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
-  }
+  const top = prunable
+    .slice(0, RECLAIMABLE_CACHES_TOP_N)
+    .map(
+      (candidate) =>
+        `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
+    )
+    .join("; ");
+  const summary =
+    prunable.length === 0
+      ? "no reclaimable caches found"
+      : `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
   const rootRows =
     plan.roots.length === 0
       ? "roots: none"

@@ -185,15 +185,14 @@ type PrunableEntryClass = Extract<
   CacheEntryClass,
   { kind: "vendor-cache" | "npx-package" | "browser-revision" }
 >;
+const CLASS_FLOOR_DAYS: Record<PrunableEntryClass["kind"], number> = {
+  "vendor-cache": GLOBAL_MIN_AGE_DAYS,
+  "npx-package": NPX_MIN_AGE_DAYS,
+  "browser-revision": BROWSER_REVISION_MIN_AGE_DAYS,
+};
+
 function classFloorDays(entryClass: PrunableEntryClass): number {
-  switch (entryClass.kind) {
-    case "vendor-cache":
-      return GLOBAL_MIN_AGE_DAYS;
-    case "npx-package":
-      return NPX_MIN_AGE_DAYS;
-    case "browser-revision":
-      return BROWSER_REVISION_MIN_AGE_DAYS;
-  }
+  return CLASS_FLOOR_DAYS[entryClass.kind];
 }
 
 // C1: age is `max(mtimeMs, ctimeMs)` ONLY — never atime. On this host a
