@@ -10135,12 +10135,10 @@ export class SessionService {
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
-    // A pinned claude keeps its native id on a fresh relaunch via --session-id so
-    // later state reads stay bound to the same transcript instead of a new one.
-    const pinnedClaudeId =
-      session.agent === "claude" && sessionWithAgentId.agentSessionId
-        ? sessionWithAgentId.agentSessionId
-        : undefined;
+    // A pinned claude resumes via --session-id on the native-resume attempt below;
+    // only the fresh-launch fallback (on resume failure) mints a new id, since
+    // claude rejects --session-id on a transcript that may already exist.
+    const isPinnedClaude = session.agent === "claude" && Boolean(sessionWithAgentId.agentSessionId);
     let persistedLaunchCommand = baseLaunchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
@@ -10220,10 +10218,9 @@ export class SessionService {
       });
       await killTmuxSession(session.tmuxSession);
       // Mint a fresh claude id for the fallback launch (fresh per attempt so a
-      // retry never reuses a possibly-existing transcript id) — the pinned id's
-      // transcript already exists (that's why --resume was attempted), so
-      // --session-id on it would always be rejected by claude.
-      const freshClaudeId = pinnedClaudeId ? randomUUID() : undefined;
+      // retry never reuses a possibly-existing transcript id) — the pinned id
+      // may already own a transcript, and claude rejects --session-id on it.
+      const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
       const freshPlan = freshClaudeId
         ? buildAgentLaunchPlan(session.agent, session.prompt, {
             ...planOptions,
@@ -10260,6 +10257,12 @@ export class SessionService {
     }
 
     this.stateCache.delete(session.id);
+    if (recoveredAgentSessionId !== sessionWithAgentId.agentSessionId) {
+      // The fallback minted a fresh claude id: any cached jsonl reader still
+      // points at the dead transcript and would otherwise win over the new
+      // id in readClaudeJsonlState's fallback lookup.
+      this.claudeJsonlReaders.delete(session.id);
+    }
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     return this.applyReservedSidecars(
       {
