@@ -8280,7 +8280,8 @@ export class SessionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
-      const finalFailure = terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      const finalFailure =
+        terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
       if (terminalPreflightFailure) {
         this.logEvent("session.preflight.failed", {
