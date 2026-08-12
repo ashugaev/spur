@@ -569,7 +569,7 @@ describe("runSpawnPreflight", () => {
     '{"noProjectBranchRequirements":false}',
     '{"branch":null}',
     '{"branch":""}',
-    '[]',
+    "[]",
   ])("rejects an invalid strict result: %s", async (stdout) => {
     mockExecFileAsync.mockResolvedValueOnce({ stdout, stderr: "" });
 
