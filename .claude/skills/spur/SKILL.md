@@ -26,6 +26,7 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Spawn preflight returns strict JSON. Only an explicit no-project-branch-requirements result bypasses fallback `branchNaming`; malformed or failed results exhaust preflight retries then fail spawn. Contract: `docs/commands.md`.
   Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
   Sidecar reap: `sidecarGc` (on by default) kills an idle or unowned non-MCP project sidecar, workspace-wide; an established connection on a reserved port vetoes every reap rule. Rule order `docs/configuration.md#sidecar-reaping`; implementation `v2/src/sidecars/policy.ts`.

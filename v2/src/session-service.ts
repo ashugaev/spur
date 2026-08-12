@@ -185,12 +185,7 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import {
-  PreflightBranchValidationError,
-  runSpawnPreflight,
-  type SpawnPreflightResult,
-} from "./preflight.js";
-import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
+import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -805,6 +800,19 @@ type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
+
+export class SpawnPreflightError extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly lastError: Error,
+  ) {
+    super(`Spawn preflight failed after ${attempts} attempts: ${lastError.message}`, {
+      cause: lastError,
+    });
+    this.name = "SpawnPreflightError";
+  }
+}
+
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -1806,36 +1814,9 @@ type SpawnPreflightSelection =
       attempts: number;
     }
   | {
-      outcome: "fallback-branch";
-      branch: string;
+      outcome: "no-project-branch-requirements";
       attempts: number;
-      deferReason?: string;
-    }
-  | {
-      outcome: "defer";
-      attempts: number;
-      deferReason?: string;
-      unvalidated?: true;
     };
-
-function spawnPreflightDeferLogMessage(
-  preflight: Extract<SpawnPreflightSelection, { outcome: "defer" }>,
-): string {
-  if (!preflight.deferReason) {
-    return "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming";
-  }
-  if (preflight.attempts < SPAWN_PREFLIGHT_MAX_ATTEMPTS) {
-    return `Spawn preflight failed; deferring to default naming: ${preflight.deferReason}`;
-  }
-  return `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`;
-}
-
-function isFeedbackRetryablePreflightError(message: string): boolean {
-  return (
-    message.startsWith("preflight branch ") ||
-    message.startsWith("Spawn preflight must return exactly one branch name")
-  );
-}
 
 interface PreparedSpawn {
   request: SpawnSessionRequest;
@@ -2030,7 +2011,6 @@ async function runSpawnPreflightForSpawn(args: {
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
-  let lastProposedBranch: string | undefined;
 
   const branchRule = args.project.branchNaming?.regex;
   const ruleHint = branchRule
@@ -2052,51 +2032,34 @@ async function runSpawnPreflightForSpawn(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
-      if (error instanceof PreflightBranchValidationError) {
-        lastProposedBranch = error.branch;
-      }
-      if (!isFeedbackRetryablePreflightError(message)) {
-        return {
-          outcome: "defer",
-          attempts: attempt,
-          deferReason: message,
-        };
-      }
-      feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      feedback = `${message}.${ruleHint} Return a corrected JSON result.`;
       continue;
     }
 
-    if (!preflight.branch) {
-      return { outcome: "defer", attempts: attempt, unvalidated: true };
+    if (preflight.noProjectBranchRequirements) {
+      return { outcome: "no-project-branch-requirements", attempts: attempt };
     }
 
-    const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
+    const branch = preflight.branch;
+    if (!branch) {
+      lastError = new Error("Spawn preflight returned no branch result");
+      feedback = `${lastError.message}.${ruleHint} Return a corrected JSON result.`;
+      continue;
+    }
+    const branchConflictPath = await findWorktreePathForBranch(args.project.path, branch);
     if (!branchConflictPath) {
-      return { outcome: "branch", branch: preflight.branch, attempts: attempt };
+      return { outcome: "branch", branch, attempts: attempt };
     }
 
-    lastProposedBranch = preflight.branch;
-    const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
+    const message = `preflight branch "${branch}" is already checked out in worktree ${branchConflictPath}`;
     lastError = new Error(message);
     feedback = `${message}.${ruleHint} Return a different branch name that is not checked out in another worktree.`;
   }
 
-  const deferReason = lastError instanceof Error ? lastError.message : String(lastError);
-  if (lastProposedBranch) {
-    return {
-      outcome: "fallback-branch",
-      branch: lastProposedBranch,
-      attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
-      deferReason,
-    };
-  }
-
-  return {
-    outcome: "defer",
-    attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
-    deferReason,
-    unvalidated: true,
-  };
+  throw new SpawnPreflightError(
+    SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+    lastError ?? new Error("Spawn preflight returned no result"),
+  );
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -6932,9 +6895,9 @@ export class SessionService {
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
-    let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
+    let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
     let preflightBranch: string | undefined;
-    let preflightUnvalidatedBranch = false;
+    let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     let reuseCtx: {
@@ -6985,34 +6948,8 @@ export class SessionService {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
-        } else if (preflight.outcome === "fallback-branch") {
-          preflightBranch = preflight.branch;
-          effectiveBranch = preflight.branch;
-          effectiveBranchSource = "preflight";
-          preflightUnvalidatedBranch = true;
-          this.logEvent("session.preflight.deferred", {
-            level: "warn",
-            projectId: request.project,
-            message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
-            details: {
-              attempts: preflight.attempts,
-              reason: preflight.deferReason,
-              branch: preflight.branch,
-              unvalidated: true,
-            },
-          });
         } else {
-          preflightUnvalidatedBranch = preflight.unvalidated === true;
-          this.logEvent("session.preflight.deferred", {
-            level: "warn",
-            projectId: request.project,
-            message: spawnPreflightDeferLogMessage(preflight),
-            details: {
-              attempts: preflight.attempts,
-              branch: null,
-              reason: preflight.deferReason ?? null,
-            },
-          });
+          preflightNoProjectBranchRequirements = true;
         }
       }
       // Preflight phase is done. Reserve/branch resolution below is the same
@@ -7032,9 +6969,9 @@ export class SessionService {
           sessionId,
           projectId: request.project,
           message:
-            preflightOutcome !== "defer"
+            preflightOutcome === "branch"
               ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
-              : `Spawn preflight deferred branch selection for ${sessionId}`,
+              : `Spawn preflight found no project branch requirements for ${sessionId}`,
           details: {
             outcome: preflightOutcome,
             branch: preflightBranch ?? null,
@@ -7044,8 +6981,7 @@ export class SessionService {
         });
       }
       if (!reuseCtx) {
-        const skipBranchNamingValidation =
-          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
+        const skipBranchNamingValidation = preflightNoProjectBranchRequirements;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -7078,6 +7014,7 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -7489,6 +7426,7 @@ export class SessionService {
           projectId: request.project,
           message: `Spawn preflight failed for ${request.project}: ${message}`,
           details: {
+            ...(error instanceof SpawnPreflightError ? { attempts: error.attempts } : {}),
             requestedAgent: request.agent ?? null,
           },
         });
@@ -8014,9 +7952,9 @@ export class SessionService {
     let initialPromptSent = false;
     try {
       let resolvedBranch = prepared.resolvedBranch;
-      let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
+      let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
-      let preflightUnvalidatedBranch = false;
+      let preflightNoProjectBranchRequirements = false;
       let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
@@ -8037,36 +7975,8 @@ export class SessionService {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
-          } else if (preflight.outcome === "fallback-branch") {
-            preflightBranch = preflight.branch;
-            effectiveBranch = preflight.branch;
-            effectiveBranchSource = "preflight";
-            preflightUnvalidatedBranch = true;
-            this.logEvent("session.preflight.deferred", {
-              level: "warn",
-              sessionId,
-              projectId: request.project,
-              message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
-              details: {
-                attempts: preflight.attempts,
-                reason: preflight.deferReason,
-                branch: preflight.branch,
-                unvalidated: true,
-              },
-            });
           } else {
-            preflightUnvalidatedBranch = preflight.unvalidated === true;
-            this.logEvent("session.preflight.deferred", {
-              level: "warn",
-              sessionId,
-              projectId: request.project,
-              message: spawnPreflightDeferLogMessage(preflight),
-              details: {
-                attempts: preflight.attempts,
-                branch: null,
-                reason: preflight.deferReason ?? null,
-              },
-            });
+            preflightNoProjectBranchRequirements = true;
           }
         }
         if (preflightOutcome) {
@@ -8075,9 +7985,9 @@ export class SessionService {
             sessionId,
             projectId: request.project,
             message:
-              preflightOutcome !== "defer"
+              preflightOutcome === "branch"
                 ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
-                : `Spawn preflight deferred branch selection for ${sessionId}`,
+                : `Spawn preflight found no project branch requirements for ${sessionId}`,
             details: {
               outcome: preflightOutcome,
               branch: preflightBranch ?? null,
@@ -8091,8 +8001,7 @@ export class SessionService {
         // resolveSpawnBranch failure is not mislabeled as a preflight failure.
         // Mirror: foreground spawn() ~3238.
         stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
-        const skipBranchNamingValidation =
-          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
+        const skipBranchNamingValidation = preflightNoProjectBranchRequirements;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -8126,6 +8035,7 @@ export class SessionService {
                 attempt,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -8369,8 +8279,21 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const finalFailure = attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      const terminalPreflightFailure = error instanceof SpawnPreflightError;
+      const finalFailure = terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      if (terminalPreflightFailure) {
+        this.logEvent("session.preflight.failed", {
+          level: "error",
+          sessionId,
+          projectId: request.project,
+          message: `Spawn preflight failed for ${request.project}: ${message}`,
+          details: {
+            attempts: error.attempts,
+            requestedAgent: request.agent ?? null,
+          },
+        });
+      }
       if (!finalFailure) {
         writeSession(this.config.dataDir, {
           ...prepared.placeholder,

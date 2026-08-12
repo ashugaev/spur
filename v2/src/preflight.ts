@@ -11,7 +11,6 @@ import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents
 import { cursorCommand } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
-import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
 const PREFLIGHT_TIMEOUT_MS = 60_000;
@@ -80,6 +79,7 @@ export class PreflightBranchValidationError extends Error {
 }
 
 export interface SpawnPreflightResult {
+  noProjectBranchRequirements?: true;
   branch?: string;
 }
 
@@ -107,10 +107,9 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
   return [
     "You are running a Spur spawn preflight before worktree creation.",
-    `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
-    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions define no branch-naming rules, OR when they do but this task gives you no information to construct a name that satisfies them; in those cases Spur uses its default naming. Otherwise return a branch name that satisfies the rules.`,
-    "Do not include JSON, markdown, quotes, or prose.",
-    "If you return a branch, return only the branch name.",
+    'Return exactly one JSON object: {"branch":"<git branch name>"} or {"noProjectBranchRequirements":true}.',
+    'Return {"noProjectBranchRequirements":true} only when the project instructions define no branch-naming rules. Otherwise return a branch that satisfies the rules.',
+    "Do not include markdown, quotes, prose, extra keys, or another JSON shape.",
     "",
     "Project instructions:",
     args.project.preflight?.prompt ?? "",
@@ -119,7 +118,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
           "",
           "Previous attempt feedback:",
           args.feedback,
-          "Return a corrected branch name, or defer if the project rules do not define one.",
+          'Return a corrected JSON object. Use {"noProjectBranchRequirements":true} only when the project defines no branch-naming rules.',
         ]
       : []),
     "",
@@ -128,25 +127,21 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   ].join("\n");
 }
 
+const BRANCH_RESULT = /^\{\s*"branch"\s*:\s*("(?:[^"\\\u0000-\u001F]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")\s*\}$/;
+const NO_PROJECT_BRANCH_REQUIREMENTS_RESULT =
+  /^\{\s*"noProjectBranchRequirements"\s*:\s*true\s*\}$/;
+
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
-  if (!/\s/.test(trimmed)) return { branch: trimmed };
-  // Salvage: the model put prose around the answer. Scan non-empty lines
-  // bottom-up (the answer is usually last) for a bare single-token git ref.
-  const lines = trimmed
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!line) continue;
-    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
-    if (isPlausibleGitRef(line)) return { branch: line };
+  if (NO_PROJECT_BRANCH_REQUIREMENTS_RESULT.test(trimmed)) {
+    return { noProjectBranchRequirements: true };
   }
-  throw new Error(
-    `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
-  );
+  const branchMatch = BRANCH_RESULT.exec(trimmed);
+  if (branchMatch?.[1]) {
+    const branch = JSON.parse(branchMatch[1]) as string;
+    if (isPlausibleGitRef(branch)) return { branch };
+  }
+  throw new Error(`Spawn preflight must return exactly one valid JSON result: ${trimmed}`);
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
