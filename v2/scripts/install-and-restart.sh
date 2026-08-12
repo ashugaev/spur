@@ -20,6 +20,7 @@
 #   NPM, SYSTEMCTL — substitute commands (used by tests)
 #   SPUR_INSTALL_LOG_DIR — override the log directory
 #   SPUR_INSTALL_LOCK_FILE — override the cross-process update lock (used by tests)
+#   SPUR_INSTALL_STATUS_FILE — durable deploy status written by the daemon
 
 set -u
 
@@ -41,6 +42,30 @@ fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "$(date -u +%FT%TZ) install-and-restart invalid version: $VERSION"
   exit 2
+fi
+
+STATUS_FILE="${SPUR_INSTALL_STATUS_FILE:-}"
+STATUS_STARTED_AT="$(date -u +%FT%TZ)"
+if [ -n "$STATUS_FILE" ]; then
+  for _ in $(seq 1 200); do
+    if [ -f "$STATUS_FILE" ] && \
+      grep -q '"phase":"running"' "$STATUS_FILE" && \
+      grep -q "\"pid\":$$" "$STATUS_FILE" && \
+      grep -q "\"version\":\"$VERSION\"" "$STATUS_FILE"; then
+      break
+    fi
+    sleep 0.01
+  done
+  write_terminal_status() {
+    status_rc=$?
+    status_phase="failed"
+    [ "$status_rc" -eq 0 ] && status_phase="succeeded"
+    status_tmp="$STATUS_FILE.tmp.$$"
+    printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s}\n' \
+      "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" >"$status_tmp"
+    mv -f "$status_tmp" "$STATUS_FILE"
+  }
+  trap write_terminal_status EXIT
 fi
 
 # Derive the npm prefix from where this script (shipped inside the package at
@@ -77,17 +102,13 @@ install_output="$(mktemp "$LOG_DIR/install-output.XXXXXX")"
 install_rc=${PIPESTATUS[0]}
 if [ "$install_rc" -ne 0 ] && grep -q 'ENOTEMPTY' "$install_output" && [ -n "$INSTALL_PREFIX" ]; then
   scope_dir="$INSTALL_PREFIX/lib/node_modules/@shugaev"
-  removed_stale=0
-  for candidate in "$scope_dir"/.spur-*; do
-    [ -d "$candidate" ] || continue
-    case "$candidate" in
-      "$scope_dir"/.spur-*)
-        rm -rf -- "$candidate"
-        removed_stale=1
-        ;;
-    esac
-  done
-  if [ "$removed_stale" -eq 1 ]; then
+  stale_dest="$(sed -n -E 's/^npm (ERR!|error) dest (.*)$/\2/p' "$install_output" | tail -1)"
+  stale_name="${stale_dest##*/}"
+  if [[ "$stale_name" =~ ^\.spur-[A-Za-z0-9]{6,12}$ ]] && \
+    [ "$stale_dest" = "$scope_dir/$stale_name" ] && \
+    [ -f "$stale_dest/package.json" ] && \
+    grep -Eq '"name"[[:space:]]*:[[:space:]]*"@shugaev/spur"' "$stale_dest/package.json"; then
+    rm -rf -- "$stale_dest"
     echo "$(date -u +%FT%TZ) install-and-restart removed stale npm rename directories; retrying once"
     "$NPM" "${npm_install_args[@]}" 2>&1 | tee "$install_output"
     install_rc=${PIPESTATUS[0]}

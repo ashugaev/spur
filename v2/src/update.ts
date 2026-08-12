@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -66,6 +66,33 @@ export interface UpdateDeps {
   pidAlive(pid: number): boolean;
   unitActive(unit: string): boolean;
   log(message: string): void;
+  acquireUpdateLock(): () => void;
+}
+
+export function acquireUpdateLock(home = homedir()): () => void {
+  const lockPath = join(home, ".spur", "install-and-restart.lock");
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const fd = openSync(lockPath, "w");
+  try {
+    execFileSync("flock", ["--nonblock", "9"], {
+      stdio: [
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        "ignore",
+        fd,
+      ],
+    });
+  } catch (error) {
+    closeSync(fd);
+    throw new Error("another Spur update is already running", { cause: error });
+  }
+  return () => closeSync(fd);
 }
 
 function readInstalledVersion(cliEntrypoint: string): string {
@@ -214,6 +241,7 @@ export function createRealUpdateDeps(
     pidAlive: (pid) => realPidAlive(pid),
     unitActive: (unit) => isActive(scope.ctl, unit),
     log: (message) => writeStdout(`${message}\n`),
+    acquireUpdateLock: () => acquireUpdateLock(),
   };
 }
 
@@ -263,91 +291,106 @@ export async function runUpdate(
   assertNotSourceCheckout();
   const force = options.force === true;
   const target = await resolveTargetVersion(options.version);
+  const releaseUpdateLock = deps.acquireUpdateLock();
 
-  const state = deps.readState();
-  if (state.inProgress) {
-    const live = isMonitorLive(state.inProgress.monitor, {
-      pidAlive: deps.pidAlive,
-      unitActive: deps.unitActive,
+  try {
+    const state = deps.readState();
+    if (state.inProgress) {
+      const live = isMonitorLive(state.inProgress.monitor, {
+        pidAlive: deps.pidAlive,
+        unitActive: deps.unitActive,
+      });
+      if (live && !force) {
+        throw new Error("an update monitor is already running; pass --force to supersede it");
+      }
+      if (live && state.inProgress.monitor) {
+        deps.stopMonitor(state.inProgress.monitor);
+      }
+    }
+
+    const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
+    const [daemonH, webH] = await Promise.all([
+      deps.probe(targets.daemon),
+      deps.probe(targets.web),
+    ]);
+    const preflight: Record<ServiceId, ProbeResult> = {
+      daemon: daemonH,
+      web: webH,
+    };
+    const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
+    if (!allHealthy && !force) {
+      const failing = SERVICE_IDS.filter((id) => !preflight[id].ok).join(", ");
+      throw new Error(`preflight health check failed for: ${failing}; pass --force to override`);
+    }
+
+    const startedAt = new Date(deps.now()).toISOString();
+    // Only a fully healthy preflight may (re)record the rollback anchor; a forced
+    // update on an unhealthy host keeps the previous known-good version. Also
+    // require a real release version: `assertNotSourceCheckout` normally rules
+    // out a git-describe-shaped `currentVersion` reaching here, but under
+    // SPUR_UPDATE_FORCE=1 it wouldn't be -- and a non-release anchor can never
+    // be reinstalled by `installVersion` on rollback, so keep the previous
+    // known-good instead of recording one that would break rollback.
+    const lastKnownGood =
+      allHealthy && isReleaseVersion(deps.currentVersion)
+        ? { version: deps.currentVersion, healthyAt: startedAt }
+        : state.lastKnownGood;
+    const inProgress: UpdateInProgress = {
+      fromVersion: deps.currentVersion,
+      toVersion: target,
+      monitor: null,
+      startedAt,
+      phase: "installing",
+    };
+    deps.writeState({ version: 1, lastKnownGood, inProgress });
+
+    deps.installVersion(target);
+    deps.reinit();
+
+    const monitor = deps.launch();
+    deps.writeState({
+      version: 1,
+      lastKnownGood,
+      inProgress: { ...inProgress, monitor, phase: "monitoring" },
     });
-    if (live && !force) {
-      throw new Error("an update monitor is already running; pass --force to supersede it");
-    }
-    if (live && state.inProgress.monitor) {
-      deps.stopMonitor(state.inProgress.monitor);
-    }
+
+    deps.log(
+      `Update to ${target} installed; monitoring health for rollback. Inspect: ` +
+        "journalctl --user -u spur-update-monitor -f  or  ~/.spur/logs/update-monitor.log",
+    );
+  } finally {
+    releaseUpdateLock();
   }
-
-  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [daemonH, webH] = await Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]);
-  const preflight: Record<ServiceId, ProbeResult> = {
-    daemon: daemonH,
-    web: webH,
-  };
-  const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
-  if (!allHealthy && !force) {
-    const failing = SERVICE_IDS.filter((id) => !preflight[id].ok).join(", ");
-    throw new Error(`preflight health check failed for: ${failing}; pass --force to override`);
-  }
-
-  const startedAt = new Date(deps.now()).toISOString();
-  // Only a fully healthy preflight may (re)record the rollback anchor; a forced
-  // update on an unhealthy host keeps the previous known-good version. Also
-  // require a real release version: `assertNotSourceCheckout` normally rules
-  // out a git-describe-shaped `currentVersion` reaching here, but under
-  // SPUR_UPDATE_FORCE=1 it wouldn't be -- and a non-release anchor can never
-  // be reinstalled by `installVersion` on rollback, so keep the previous
-  // known-good instead of recording one that would break rollback.
-  const lastKnownGood =
-    allHealthy && isReleaseVersion(deps.currentVersion)
-      ? { version: deps.currentVersion, healthyAt: startedAt }
-      : state.lastKnownGood;
-  const inProgress: UpdateInProgress = {
-    fromVersion: deps.currentVersion,
-    toVersion: target,
-    monitor: null,
-    startedAt,
-    phase: "installing",
-  };
-  deps.writeState({ version: 1, lastKnownGood, inProgress });
-
-  deps.installVersion(target);
-  deps.reinit();
-
-  const monitor = deps.launch();
-  deps.writeState({
-    version: 1,
-    lastKnownGood,
-    inProgress: { ...inProgress, monitor, phase: "monitoring" },
-  });
-
-  deps.log(
-    `Update to ${target} installed; monitoring health for rollback. Inspect: ` +
-      "journalctl --user -u spur-update-monitor -f  or  ~/.spur/logs/update-monitor.log",
-  );
 }
 
 async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig): Promise<void> {
-  const state = deps.readState();
-  const good = state.lastKnownGood;
-  deps.log(`Rolling back: ${reason}`);
-  if (state.inProgress) {
-    deps.writeState({ ...state, inProgress: { ...state.inProgress, phase: "rolling-back" } });
-  }
-  if (!good) {
-    deps.log("No known-good version recorded; clearing update state without reinstalling.");
+  const releaseUpdateLock = deps.acquireUpdateLock();
+  try {
+    const state = deps.readState();
+    const good = state.lastKnownGood;
+    deps.log(`Rolling back: ${reason}`);
+    if (state.inProgress) {
+      deps.writeState({ ...state, inProgress: { ...state.inProgress, phase: "rolling-back" } });
+    }
+    if (!good) {
+      deps.log("No known-good version recorded; clearing update state without reinstalling.");
+      deps.writeState({ ...deps.readState(), inProgress: null });
+      return;
+    }
+    if (good.version === deps.readInstalledVersion()) {
+      deps.log(
+        `Installed version already matches known-good ${good.version}; nothing to reinstall.`,
+      );
+      deps.writeState({ ...deps.readState(), inProgress: null });
+      return;
+    }
+    deps.installVersion(good.version);
+    deps.reinit();
+    await verifyRollback(deps, cfg);
     deps.writeState({ ...deps.readState(), inProgress: null });
-    return;
+  } finally {
+    releaseUpdateLock();
   }
-  if (good.version === deps.readInstalledVersion()) {
-    deps.log(`Installed version already matches known-good ${good.version}; nothing to reinstall.`);
-    deps.writeState({ ...deps.readState(), inProgress: null });
-    return;
-  }
-  deps.installVersion(good.version);
-  deps.reinit();
-  await verifyRollback(deps, cfg);
-  deps.writeState({ ...deps.readState(), inProgress: null });
 }
 
 async function verifyRollback(deps: UpdateDeps, cfg: DecisionConfig): Promise<void> {

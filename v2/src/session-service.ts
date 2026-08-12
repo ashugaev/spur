@@ -7323,6 +7323,11 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
+      const latestPlaceholder = readSession(this.config.dataDir, updatedRecord.id);
+      if (latestPlaceholder && hasQueuedMessages(latestPlaceholder)) {
+        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestPlaceholder), true);
+      }
+
       writeSession(this.config.dataDir, updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -8407,7 +8412,14 @@ export class SessionService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {
       let session: SessionView;
-      if (prompt && reusable.status !== "spawning") {
+      if (prompt && reusable.status === "spawning") {
+        const queued = queuedMessages(reusable);
+        const updated = queued.includes(prompt)
+          ? reusable
+          : withQueuedMessages({ ...reusable, updatedAt: nowIso() }, [...queued, prompt], true);
+        if (updated !== reusable) writeSession(this.config.dataDir, updated);
+        session = await this.enrich(updated);
+      } else if (prompt) {
         session = await this.send(reusable.id, { message: prompt });
       } else {
         session = await this.enrich(reusable);

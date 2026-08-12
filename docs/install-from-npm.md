@@ -104,7 +104,7 @@ spur spawn <project-id> --branch <branch> "smoke test" --json
 spur update
 ```
 
-`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). `install-and-restart.sh` and `POST /deploy/switch` restart only — they don't refresh units.
+`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). `POST /deploy/switch` runs `install-and-restart.sh`; default user-scope installs converge on `spur reinit` after npm install, preserving the configured web port and refreshing units.
 
 ## Security
 

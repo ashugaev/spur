@@ -8,6 +8,8 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
+`POST /deploy/switch` starts a detached install-and-restart helper and returns `202 { accepted: true, version }`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
+
 ## doctor
 
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything.

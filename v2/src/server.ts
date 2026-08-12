@@ -7,6 +7,12 @@ import { listAgentModels } from "./agents/models.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import {
+  deploySwitchStatePath,
+  readProcessStartTime,
+  reconcileDeploySwitchState,
+  writeDeploySwitchState,
+} from "./deploy-switch-state.js";
+import {
   DEFAULT_EVENT_LOG_CONFIG,
   flushEventLogCollapse,
   logSpurEvent,
@@ -454,6 +460,7 @@ export async function startServer(
   assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
+  const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
@@ -671,11 +678,25 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/switch/status") {
+        sendJson(response, 200, reconcileDeploySwitchState(switchStatePath) ?? { phase: "idle" });
+        return;
+      }
+
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
         if (!isReleaseVersion(requestedVersion)) {
           sendError(response, 400, "invalid version");
+          return;
+        }
+        const activeSwitch = reconcileDeploySwitchState(switchStatePath);
+        if (activeSwitch?.phase === "running") {
+          sendJson(response, 409, {
+            error: `deploy switch already in progress for ${activeSwitch.version}`,
+            inProgress: true,
+            version: activeSwitch.version,
+          });
           return;
         }
         // Guard: refuse to run when the daemon is executing from a source
@@ -702,6 +723,44 @@ export async function startServer(
         const child = spawn("bash", [helperPath, requestedVersion], {
           detached: true,
           stdio: "ignore",
+          env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
+        });
+        if (child.pid === undefined) {
+          sendError(response, 500, "failed to start deploy switch");
+          return;
+        }
+        const startedAt = new Date().toISOString();
+        const processStartTime = readProcessStartTime(child.pid);
+        if (!processStartTime) {
+          sendError(response, 500, "failed to identify deploy switch process");
+          return;
+        }
+        writeDeploySwitchState(switchStatePath, {
+          phase: "running",
+          version: requestedVersion,
+          pid: child.pid,
+          processStartTime,
+          startedAt,
+        });
+        child.once("error", () => {
+          writeDeploySwitchState(switchStatePath, {
+            phase: "failed",
+            version: requestedVersion,
+            pid: child.pid ?? process.pid,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            exitCode: -1,
+          });
+        });
+        child.once("exit", (code) => {
+          writeDeploySwitchState(switchStatePath, {
+            phase: code === 0 ? "succeeded" : "failed",
+            version: requestedVersion,
+            pid: child.pid ?? process.pid,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            exitCode: code ?? -1,
+          });
         });
         child.unref();
         sendJson(response, 202, { accepted: true, version: requestedVersion });

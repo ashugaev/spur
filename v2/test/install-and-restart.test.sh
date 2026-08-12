@@ -189,9 +189,16 @@ fi
 # Case 9: npm ENOTEMPTY removes only scoped stale rename directories and retries once.
 NPM_STUB="$PREFIX_DIR/npm-stub"
 NPM_COUNT="$PREFIX_DIR/npm-count"
-STALE_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-stale"
+STALE_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-pMSp82au"
+KEEP_MATCHING_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-notours"
+KEEP_UNSHAPED_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-stale-dir-name"
+KEEP_OWNED_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-AbCd1234"
 KEEP_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/not-spur-stale"
-mkdir -p "$STALE_DIR" "$KEEP_DIR"
+mkdir -p "$STALE_DIR" "$KEEP_MATCHING_DIR" "$KEEP_UNSHAPED_DIR" "$KEEP_OWNED_DIR" "$KEEP_DIR"
+printf '%s\n' '{"name":"@shugaev/spur"}' >"$STALE_DIR/package.json"
+printf '%s\n' '{"name":"not-spur"}' >"$KEEP_MATCHING_DIR/package.json"
+printf '%s\n' '{"name":"@shugaev/spur"}' >"$KEEP_UNSHAPED_DIR/package.json"
+printf '%s\n' '{"name":"@shugaev/spur"}' >"$KEEP_OWNED_DIR/package.json"
 cat >"$NPM_STUB" <<'EOF'
 #!/usr/bin/env bash
 count=0
@@ -200,15 +207,19 @@ count=$((count + 1))
 printf '%s\n' "$count" >"$NPM_COUNT"
 if [ "$count" -eq 1 ]; then
   echo "npm ERR! code ENOTEMPTY"
+  echo "npm ERR! dest $NPM_STALE_DEST"
   exit 217
 fi
 echo "installed"
 EOF
 chmod +x "$NPM_STUB"
 rm -f "$LOG_FILE"
-NPM_COUNT="$NPM_COUNT" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+NPM_COUNT="$NPM_COUNT" NPM_STALE_DEST="$STALE_DIR" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
   NPM="$NPM_STUB" SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 [ ! -d "$STALE_DIR" ] || fail "stale npm rename directory was not removed"
+[ -d "$KEEP_MATCHING_DIR" ] || fail "cleanup removed a matching-name non-Spur directory"
+[ -d "$KEEP_UNSHAPED_DIR" ] || fail "cleanup removed an unshaped Spur directory"
+[ -d "$KEEP_OWNED_DIR" ] || fail "cleanup removed an owned temp directory npm did not report"
 [ -d "$KEEP_DIR" ] || fail "cleanup removed a non-matching directory"
 [ "$(cat "$NPM_COUNT")" -eq 2 ] || fail "npm install was not retried exactly once"
 
@@ -231,5 +242,14 @@ LOCK_TRACE="$LOCK_TRACE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE=
 second_pid=$!
 wait "$first_pid" "$second_pid"
 [ "$(tr '\n' ' ' <"$LOCK_TRACE")" = "start end start end " ] || fail "concurrent installs overlapped"
+
+# Case 11: detached deploy runs replace the durable running record with terminal status.
+STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
+printf '%s\n' '{"phase":"running"}' >"$STATUS_FILE"
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
+  SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo \
+  bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
+grep -q '"phase":"succeeded"' "$STATUS_FILE" || fail "helper did not persist success status"
+grep -q '"version":"1.2.3"' "$STATUS_FILE" || fail "helper status lost target version"
 
 echo "install-and-restart.test.sh: OK"

@@ -427,4 +427,35 @@ describe("VersionMenu", () => {
     });
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
+
+  it("renders the validated active target from an in-progress 409 response", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [{ tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" }],
+        },
+      },
+      switch: {
+        status: 409,
+        payload: {
+          error: "deploy switch already in progress for 1.4.9",
+          inProgress: true,
+          version: "1.4.9",
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("switch-version-error")).toHaveTextContent(
+        "Update to 1.4.9 is already in progress.",
+      );
+    });
+  });
 });

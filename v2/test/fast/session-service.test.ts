@@ -26389,6 +26389,65 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("spawnShepherd queues a prompt when the reused Shepherd is still spawning", async () => {
+      const sessions = createSessionStore();
+      seedRunningShepherdSession(sessions);
+      const spawning = sessions.get("shp-1");
+      if (!spawning) throw new Error("missing Shepherd fixture");
+      sessions.set("shp-1", { ...spawning, status: "spawning" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawnShepherd({
+        prompt: "Diagnose update",
+        reportDisposition: true,
+      });
+
+      expect(result.disposition).toBe("reused");
+      expect(result.session.id).toBe("shp-1");
+      expect(result.session.queuedMessages).toEqual({
+        messages: ["Diagnose update"],
+        awaitingPrompt: true,
+      });
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("preserves a queued reused-Shepherd prompt when background spawn becomes ready", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-queued-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const sessions = createSessionStore();
+      mockClaudeJsonlState("waiting");
+      let releaseReady: (() => void) | undefined;
+      waitForTmuxReadyMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolveReady) => {
+            releaseReady = resolveReady;
+          }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-queued");
+
+      await service.spawnShepherd({ prompt: "Initial Shepherd task" });
+      const reused = await service.spawnShepherd({
+        prompt: "Diagnose update",
+        reportDisposition: true,
+      });
+      expect(reused.disposition).toBe("reused");
+      releaseReady?.();
+
+      await vi.waitFor(() => {
+        const record = sessions.get("shp-queued");
+        const delivered = sendMessageToTmuxMock.mock.calls.some((call) =>
+          String(call[1]).includes("Diagnose update"),
+        );
+        const queued = record?.queuedMessages?.messages.includes("Diagnose update") === true;
+        expect(delivered || queued).toBe(true);
+      });
+      service.dispose();
+    });
+
     async function expectScheduleWakeValidationError(
       request: ScheduleSessionWakeRequest,
       errorMessage: string,
