@@ -1769,7 +1769,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 
-    expect(within(dialog).getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Clearing conflicting port" }),
+    ).toBeDisabled();
     expect(
       within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" }),
     ).toBeDisabled();

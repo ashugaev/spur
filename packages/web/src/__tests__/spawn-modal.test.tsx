@@ -63,7 +63,7 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
     onSubmit,
     submitting: false,
     submitLabel: "Go",
-    submitBusyLabel: "Going...",
+    submitBusyAriaLabel: "Going",
     submitDisabled: false,
     showCancel: false,
     agent: "claude" as const,
@@ -190,10 +190,12 @@ describe("SpawnModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a spinner and busy label on the submit button while submitting", () => {
+  it("shows a spinner and accessible verb on the submit button while submitting", () => {
     renderModal(deskMode, { submitting: true, submitDisabled: true });
-    const submitButton = screen.getByRole("button", { name: "Going..." });
+    const submitButton = screen.getByRole("button", { name: "Going" });
     expect(submitButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(screen.getByText("Go").parentElement).toHaveClass("invisible");
+    expect(submitButton).toHaveAttribute("aria-busy", "true");
     expect(submitButton).toBeDisabled();
   });
 

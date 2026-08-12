@@ -2,14 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { BlockingOverlayShell } from "@/components/BlockingOverlayShell";
-import { Spinner } from "@/components/icons/Spinner";
+import { BusyContent } from "@/components/BusyContent";
+import { LoadingBar } from "@/components/LoadingBar";
 import { useVersionSwitch, versionSwitchFailedMessage } from "@/lib/version-switch-context";
 
 type DiagnoseState = "idle" | "spawning" | "spawned" | "error";
 
 const DIAGNOSE_LABEL: Record<DiagnoseState, string> = {
   idle: "Diagnose update",
-  spawning: "Spawning…",
+  spawning: "Diagnose update",
   spawned: "Agent spawned",
   error: "Retry diagnose",
 };
@@ -50,16 +51,14 @@ export function VersionSwitchOverlay() {
       testId="version-switch-overlay"
     >
       {phase === "switching" ? (
-        <div className="flex items-center gap-3">
-          <Spinner className="h-5 w-5" />
-          <div>
-            <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
-              Updating Spur…
-            </p>
-            <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              Switching to {target}. The page will reload automatically once the daemon is back.
-            </p>
-          </div>
+        <div aria-busy="true" className="space-y-3">
+          <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
+            Spur update
+          </p>
+          <LoadingBar label="Updating Spur" />
+          <p className="normal-case tracking-normal text-[var(--color-text-secondary)]">
+            Switching to {target}. The page will reload automatically once the daemon is back.
+          </p>
         </div>
       ) : (
         <div>
@@ -71,12 +70,16 @@ export function VersionSwitchOverlay() {
           </p>
           <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
             <button
+              aria-busy={diagnoseState === "spawning" || undefined}
+              aria-label={diagnoseState === "spawning" ? "Spawning diagnostic agent" : undefined}
               className="border border-[var(--color-border-default)] px-3 py-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={diagnoseState === "spawning" || diagnoseState === "spawned"}
               type="button"
               onClick={() => void handleDiagnose()}
             >
-              {DIAGNOSE_LABEL[diagnoseState]}
+              <BusyContent busy={diagnoseState === "spawning"}>
+                {DIAGNOSE_LABEL[diagnoseState]}
+              </BusyContent>
             </button>
             <button
               className="border border-[var(--color-border-default)] px-3 py-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"

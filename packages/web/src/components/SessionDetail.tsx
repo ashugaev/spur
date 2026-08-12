@@ -13,6 +13,8 @@ import {
 } from "react";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { BusyContent } from "@/components/BusyContent";
+import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -22,6 +24,7 @@ import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
@@ -33,7 +36,6 @@ import { ActivityDot } from "@/components/ActivityDot";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { Spinner } from "@/components/icons/Spinner";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
@@ -441,7 +443,7 @@ type ArtifactSwipeStart = {
 
 const COPY_TEXT_LABELS = {
   idle: "Copy",
-  copying: "Copying...",
+  copying: "Copy",
   copied: "Copied",
   error: "Copy failed",
 } as const;
@@ -620,7 +622,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -638,7 +647,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -654,7 +670,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -1042,18 +1065,18 @@ function ArtifactLightbox({
   if (!artifact || !artifactHref) return null;
 
   const html = isHtmlArtifact(artifact);
-  const previewStatusMessage =
+  const previewStatus =
     artifact.kind === "text" && !html
       ? textPreviewState === "loading"
-        ? "Loading preview"
+        ? "loading"
         : textPreviewState === "error"
-          ? "Preview unavailable"
+          ? "error"
           : null
       : artifact.kind === "image" || artifact.kind === "video" || html
         ? previewState !== "ready"
           ? previewState === "error"
-            ? "Preview unavailable"
-            : "Loading preview"
+            ? "error"
+            : "loading"
           : null
         : null;
 
@@ -1152,14 +1175,19 @@ function ArtifactLightbox({
           <div className="flex items-center gap-2">
             {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
               <button
-                aria-label={`Copy ${artifact.name}`}
+                aria-busy={copyState === "copying" || undefined}
+                aria-label={
+                  copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
+                }
                 className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 disabled={copyState === "copying"}
                 onClick={() => void handleCopyText()}
                 type="button"
               >
-                <CopyIcon />
-                {COPY_TEXT_LABELS[copyState]}
+                <BusyContent busy={copyState === "copying"}>
+                  <CopyIcon />
+                  {COPY_TEXT_LABELS[copyState]}
+                </BusyContent>
               </button>
             ) : null}
             {html ? (
@@ -1206,9 +1234,16 @@ function ArtifactLightbox({
             onPointerDown={handlePreviewPointerDown}
             onPointerUp={handlePreviewPointerUp}
           >
-            {previewStatusMessage ? (
+            {previewStatus ? (
               <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewStatusMessage}
+                {previewStatus === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
             {artifact.kind === "image" ? (
@@ -2518,7 +2553,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
-    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+    <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
       <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
@@ -2744,13 +2779,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canHandoff(session) ? (
               <button
+                aria-busy={busyAction === "handoff" || undefined}
+                aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openHandoffEditor}
                 title="Pass this task to another agent in the same workspace"
               >
-                {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+                <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
               </button>
             ) : null}
             {session.agent === "claude" &&
@@ -2770,33 +2807,39 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canPause(session) ? (
               <button
+                aria-busy={busyAction === "pause" || undefined}
+                aria-label={busyAction === "pause" ? "Pausing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("pause")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "pause" ? "Pausing..." : "Pause"}
+                <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
             {isRestorable(session) ? (
               <button
+                aria-busy={busyAction === "restore" || undefined}
+                aria-label={busyAction === "restore" ? "Restoring session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("restore")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "restore" ? "Restoring..." : "Restore"}
+                <BusyContent busy={busyAction === "restore"}>Restore</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (
               <button
+                aria-busy={busyAction === "reopen" || undefined}
+                aria-label={busyAction === "reopen" ? "Reopening session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("reopen")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
               >
-                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
+                <BusyContent busy={busyAction === "reopen"}>Reopen</BusyContent>
               </button>
             ) : null}
             {canRecover(session) ? (
@@ -2811,32 +2854,38 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canComplete(session) ? (
               <button
+                aria-busy={busyAction === "complete" || undefined}
+                aria-label={busyAction === "complete" ? "Completing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("complete")}
                 className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
               >
-                {busyAction === "complete" ? "Completing..." : "Complete"}
+                <BusyContent busy={busyAction === "complete"}>Complete</BusyContent>
               </button>
             ) : null}
             {!isTerminalSession(session) ? (
               <button
+                aria-busy={busyAction === "kill" || undefined}
+                aria-label={busyAction === "kill" ? "Killing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("kill", { force: true })}
                 className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
               >
-                {busyAction === "kill" ? "Killing..." : "Kill"}
+                <BusyContent busy={busyAction === "kill"}>Kill</BusyContent>
               </button>
             ) : null}
             {canRespawn(session) ? (
               <button
+                aria-busy={busyAction === "respawn" || undefined}
+                aria-label={busyAction === "respawn" ? "Respawning session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={openRespawnEditor}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
+                <BusyContent busy={busyAction === "respawn"}>Edit &amp; Respawn</BusyContent>
               </button>
             ) : null}
             <button
@@ -2958,6 +3007,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onSelect={setMessage}
                         />
                         <button
+                          aria-busy={busyAction === "send" || undefined}
+                          aria-label={busyAction === "send" ? "Queueing message" : undefined}
                           type="button"
                           disabled={
                             busyAction !== null || (!message.trim() && attachments.length === 0)
@@ -2965,12 +3016,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? (
-                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
-                          ) : null}
-                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
+                          <BusyContent busy={busyAction === "send"}>Queue</BusyContent>
                         </button>
                         <button
+                          aria-busy={busyAction === "send" || undefined}
+                          aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
                             busyAction !== null || (!message.trim() && attachments.length === 0)
@@ -2978,18 +3028,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? (
-                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
-                          ) : null}
-                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
-                          {busyAction !== "send" ? (
+                          <BusyContent busy={busyAction === "send"}>
+                            <span>Send now</span>
                             <span
                               aria-hidden="true"
                               className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                             >
                               {PRIMARY_SUBMIT_HINT}
                             </span>
-                          ) : null}
+                          </BusyContent>
                         </button>
                       </div>
                     </div>
@@ -3520,6 +3567,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       Cancel
                     </button>
                     <button
+                      aria-busy={isClearingConflictPort || undefined}
+                      aria-label={isClearingConflictPort ? "Clearing conflicting port" : undefined}
                       className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       disabled={busyAction !== null || conflictClearPort === null}
                       onClick={() => {
@@ -3533,7 +3582,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }}
                       type="button"
                     >
-                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                      <BusyContent busy={isClearingConflictPort}>Clear/Retry</BusyContent>
                     </button>
                   </div>
                 </div>
@@ -3645,20 +3694,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         Cancel
                       </button>
                       <button
+                        aria-busy={busyAction === "handoff" || undefined}
+                        aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                         className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         disabled={busyAction === "handoff"}
                         onClick={() => void handleHandoff()}
                         type="button"
                       >
-                        {busyAction === "handoff" ? "Handing off..." : "Handoff"}
-                        {busyAction !== "handoff" ? (
+                        <BusyContent busy={busyAction === "handoff"}>
+                          <span>Handoff</span>
                           <span
                             aria-hidden="true"
                             className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
                           >
                             {PRIMARY_SUBMIT_HINT}
                           </span>
-                        ) : null}
+                        </BusyContent>
                       </button>
                     </div>
                   </div>
@@ -3741,7 +3792,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               promptRef={respawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
-              submitBusyLabel="Respawning..."
+              submitBusyAriaLabel="Respawning session"
               submitDisabled={
                 busyAction === "respawn" ||
                 (!respawnPrompt.trim() &&
@@ -3790,7 +3841,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               promptRef={deskSpawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
-              submitBusyLabel="Spawning..."
+              submitBusyAriaLabel="Spawning desk agent"
               submitDisabled={deskSpawning}
               submitLabel="Spawn"
               submitting={deskSpawning}
@@ -3838,7 +3889,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-[var(--color-text-secondary)]">Loading...</p>
+        <CenteredLoader className="flex-1" label="Loading session" />
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
