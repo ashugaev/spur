@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14971,7 +14972,9 @@ describe("SessionService", () => {
     );
   });
 
-  it("keeps the pinned claude id via --session-id when native resume fails during send recovery", async () => {
+  it("mints a fresh claude session id when native resume fails during send recovery", async () => {
+    const FRESH_CLAUDE_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     buildAgentLaunchPlanMock.mockImplementation(
       (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
         agent,
@@ -15000,7 +15003,8 @@ describe("SessionService", () => {
     });
     tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
     // First recovery attempt (native --resume) reports the process exited, so
-    // the fallback fresh launch must reuse the pinned id, not drop it.
+    // the fallback fresh launch must mint a new id — the pinned id may already
+    // own a transcript, and claude refuses --session-id on it.
     isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -15015,15 +15019,15 @@ describe("SessionService", () => {
       expect.any(String),
       expect.anything(),
     );
-    // ...then the fresh relaunch reused the pinned id via --session-id.
+    // ...then the fresh relaunch minted a new id via --session-id, not the pinned one.
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
       "hello",
-      expect.objectContaining({ agentSessionId: PINNED_CLAUDE_SESSION_ID }),
+      expect.objectContaining({ agentSessionId: FRESH_CLAUDE_SESSION_ID }),
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+        launchCommand: `claude --session-id ${FRESH_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
       }),
     );
     expect(
@@ -15031,11 +15035,66 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "session.recover.resume_failed",
       ),
     ).toBe(true);
-    // The pinned id is preserved on the persisted record.
+    // The fresh id, not the pinned one, is persisted on the recovered record.
     const recoverWrite = writeSessionMock.mock.calls.find(
       ([, session]) => session.status === "running",
     );
-    expect(recoverWrite?.[1].agentSessionId).toBe(PINNED_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).toBe(FRESH_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).not.toBe(PINNED_CLAUDE_SESSION_ID);
+  });
+
+  it("drops the cached claude jsonl reader when fallback recovery mints a fresh id", async () => {
+    const FRESH_CLAUDE_SESSION_ID = "22222222-2222-4222-8222-222222222222";
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
+    buildAgentLaunchPlanMock.mockImplementation(
+      (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
+        agent,
+        launchCommand: options?.agentSessionId
+          ? `claude --session-id ${options.agentSessionId} --dangerously-skip-permissions`
+          : "claude --dangerously-skip-permissions",
+        initialMessage,
+        readyMarkers: ["Claude Code", "❯"],
+      }),
+    );
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    // First recovery attempt (native --resume) reports the process exited, so
+    // the fallback fresh launch mints a new id.
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = service as unknown as { claudeJsonlReaders: Map<string, unknown> };
+    // Seed a reader cached under the pinned id's now-dead transcript, as if a
+    // prior classify tick had already read it while the session was alive.
+    internals.claudeJsonlReaders.set("api-1", {
+      filePath: "/tmp/spur-worktrees/api/api-1/.claude/stale-pinned-transcript.jsonl",
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    await service.send("api-1", { message: "resume work" });
+
+    // The stale reader must not survive the id change: readClaudeJsonlState's
+    // fallback lookup (claude-jsonl-state.ts) would otherwise resolve the
+    // cached reader's filePath instead of re-deriving it from the fresh id.
+    expect(internals.claudeJsonlReaders.has("api-1")).toBe(false);
   });
 
   it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {
