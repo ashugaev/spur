@@ -24287,7 +24287,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("returns null when preflight returns empty output", async () => {
+    it("returns null when preflight finds no project branch requirements", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
         projects: {
@@ -24299,7 +24299,7 @@ describe("SessionService", () => {
           },
         },
       });
-      runSpawnPreflightMock.mockResolvedValue({});
+      runSpawnPreflightMock.mockResolvedValue({ noProjectBranchRequirements: true });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -24519,7 +24519,7 @@ describe("SessionService", () => {
       });
     });
 
-    it("falls back to a fresh session branch when respawn preflight returns empty output", async () => {
+    it("falls back to a fresh session branch when respawn preflight finds no project branch requirements", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -24548,7 +24548,7 @@ describe("SessionService", () => {
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:05:00.000Z",
       });
-      runSpawnPreflightMock.mockResolvedValue({});
+      runSpawnPreflightMock.mockResolvedValue({ noProjectBranchRequirements: true });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
