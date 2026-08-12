@@ -223,7 +223,7 @@ jsonl_append() {
   fi
   payload='{"noProjectBranchRequirements":true}'
   if [[ -n "$branch_hint" ]]; then
-    payload="{\"branch\":\"$branch_hint\"}"
+    payload='{"branch":"'"$branch_hint"'"}'
   fi
   if [[ -n "$output_file" ]]; then
     printf '%s\n' "$payload" > "$output_file"
