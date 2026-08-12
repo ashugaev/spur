@@ -11224,7 +11224,7 @@ export class SessionService {
 
       if (session.slots?.tags?.length) {
         const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+        const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
         if (carryTags.length > 0) {
           try {
             spawned = await this.updateSlots(spawned.id, {
