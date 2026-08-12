@@ -9219,8 +9219,7 @@ export class SessionService {
     );
     const genericUnlinks = normalized.unlinkLabels;
     const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true &&
-      (current.manualTitleOverride === true || Boolean(current.slots?.title?.trim()));
+      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
     const hasGenericChanges =
       (normalized.title !== undefined && !conditionalTitleBlocked) ||
       normalized.clearTitle ||

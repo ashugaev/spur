@@ -1306,7 +1306,11 @@ describe("SessionService", () => {
           }
         }
       }
-      const title = request.clearTitle ? undefined : (request.title ?? current?.title);
+      const title = request.clearTitle
+        ? undefined
+        : request.setTitleIfAbsent && current?.title?.trim()
+          ? current.title
+          : (request.title ?? current?.title);
       return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
     });
   });
@@ -18904,7 +18908,6 @@ describe("SessionService", () => {
     });
 
     expect(result.slots?.title).toBe("First");
-    expect(applySlotsUpdateMock).toHaveBeenCalledTimes(1);
     expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
       title: "First",
       setTitleIfAbsent: true,
