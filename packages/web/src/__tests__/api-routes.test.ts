@@ -514,7 +514,10 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "spur-shepherd" }));
+    mockedSpurRequestJson.mockResolvedValue({
+      disposition: "reused",
+      session: sessionFixture({ project: "spur-shepherd" }),
+    });
 
     const response = await diagnoseUpdate(
       new NextRequest("http://localhost:3000/api/diagnose-update", {
@@ -535,6 +538,22 @@ describe("Spur web API routes", () => {
     expect(body.agent).toBeUndefined();
     expect(body.prompt).toContain("1.5.0");
     expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
+    expect(body.reportDisposition).toBe(true);
+  });
+
+  it("POST /api/diagnose-update rejects an invalid daemon success body", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ id: "legacy-session-shape" });
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toContain("invalid diagnostic-session response");
   });
 
   it("POST /api/diagnose-update preserves daemon error status", async () => {

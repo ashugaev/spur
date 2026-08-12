@@ -15,6 +15,7 @@ import { readResponsePayload } from "@/lib/json-payload";
 // seconds; npm install can take tens of seconds on a cold cache.
 export const SWITCH_POLL_INTERVAL_MS = 3_000;
 export const SWITCH_POLL_ATTEMPTS = 30;
+const SWITCH_TARGET_STORAGE_KEY = "spur.version-switch.target";
 
 export interface RuntimeInfoResponse {
   version: string;
@@ -67,17 +68,24 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
 
   const startSwitch = useCallback((version: string) => {
     reloadedRef.current = false;
+    window.localStorage.setItem(SWITCH_TARGET_STORAGE_KEY, version);
     setState({ phase: "switching", target: version });
   }, []);
 
   const dismiss = useCallback(() => {
+    window.localStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
     setState(IDLE_STATE);
+  }, []);
+
+  useEffect(() => {
+    const target = window.localStorage.getItem(SWITCH_TARGET_STORAGE_KEY)?.trim();
+    if (target) setState({ phase: "switching", target });
   }, []);
 
   // Confirm the switch by polling the daemon until it reports the target
   // version. Fetch errors are expected while the daemon restarts.
   useEffect(() => {
-    if (state.phase !== "switching") return;
+    if (state.phase !== "switching" && state.phase !== "failed") return;
     const target = state.target;
     let attempts = 0;
     let cancelled = false;
@@ -95,6 +103,7 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
               // (which renders nothing) exposed with an interactive,
               // stale-state dashboard underneath.
               setState({ phase: "done", target });
+              window.localStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
               if (!reloadedRef.current) {
                 reloadedRef.current = true;
                 window.location.reload();
@@ -105,7 +114,7 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
         } catch {
           // daemon restarting; keep polling
         }
-        if (!cancelled && attempts >= SWITCH_POLL_ATTEMPTS) {
+        if (!cancelled && state.phase === "switching" && attempts >= SWITCH_POLL_ATTEMPTS) {
           setState({ phase: "failed", target });
         }
       })();

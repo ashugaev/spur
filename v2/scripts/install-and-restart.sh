@@ -19,6 +19,7 @@
 # Env overrides:
 #   NPM, SYSTEMCTL — substitute commands (used by tests)
 #   SPUR_INSTALL_LOG_DIR — override the log directory
+#   SPUR_INSTALL_LOCK_FILE — override the cross-process update lock (used by tests)
 
 set -u
 
@@ -28,6 +29,14 @@ VERSION="${1:-}"
 LOG_DIR="${SPUR_INSTALL_LOG_DIR:-$HOME/.spur/logs}"
 mkdir -p "$LOG_DIR"
 exec >>"$LOG_DIR/install-and-restart.log" 2>&1
+
+LOCK_FILE="${SPUR_INSTALL_LOCK_FILE:-$HOME/.spur/install-and-restart.lock}"
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+if ! flock 9; then
+  echo "$(date -u +%FT%TZ) install-and-restart lock failed: $LOCK_FILE"
+  exit 1
+fi
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "$(date -u +%FT%TZ) install-and-restart invalid version: $VERSION"
@@ -63,8 +72,28 @@ if [ -n "$INSTALL_PREFIX" ]; then
   npm_install_args+=(--prefix "$INSTALL_PREFIX")
 fi
 npm_install_args+=("$PACKAGE@$VERSION")
-"$NPM" "${npm_install_args[@]}"
-install_rc=$?
+install_output="$(mktemp "$LOG_DIR/install-output.XXXXXX")"
+"$NPM" "${npm_install_args[@]}" 2>&1 | tee "$install_output"
+install_rc=${PIPESTATUS[0]}
+if [ "$install_rc" -ne 0 ] && grep -q 'ENOTEMPTY' "$install_output" && [ -n "$INSTALL_PREFIX" ]; then
+  scope_dir="$INSTALL_PREFIX/lib/node_modules/@shugaev"
+  removed_stale=0
+  for candidate in "$scope_dir"/.spur-*; do
+    [ -d "$candidate" ] || continue
+    case "$candidate" in
+      "$scope_dir"/.spur-*)
+        rm -rf -- "$candidate"
+        removed_stale=1
+        ;;
+    esac
+  done
+  if [ "$removed_stale" -eq 1 ]; then
+    echo "$(date -u +%FT%TZ) install-and-restart removed stale npm rename directories; retrying once"
+    "$NPM" "${npm_install_args[@]}" 2>&1 | tee "$install_output"
+    install_rc=${PIPESTATUS[0]}
+  fi
+fi
+rm -f "$install_output"
 if [ "$install_rc" -ne 0 ]; then
   echo "$(date -u +%FT%TZ) install-and-restart npm install failed rc=$install_rc"
   exit "$install_rc"

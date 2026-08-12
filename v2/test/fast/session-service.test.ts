@@ -26363,6 +26363,28 @@ describe("SessionService", () => {
       });
     }
 
+    it("spawnShepherd reports reuse when requested and sends the prompt to the live session", async () => {
+      const sessions = createSessionStore();
+      seedRunningShepherdSession(sessions);
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.spawnShepherd({
+        prompt: "Diagnose update",
+        reportDisposition: true,
+      });
+
+      expect(result.disposition).toBe("reused");
+      expect(result.session.id).toBe("shp-1");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Diagnose update"),
+        { agent: "claude", interrupt: false },
+      );
+      service.dispose();
+    });
+
     async function expectScheduleWakeValidationError(
       request: ScheduleSessionWakeRequest,
       errorMessage: string,

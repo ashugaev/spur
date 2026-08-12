@@ -84,6 +84,8 @@ spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message..
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
+`POST /shepherd/spawn` reuses the newest running or spawning Shepherd. Pass `reportDisposition: true` to receive `{ disposition: "spawned" | "reused", session }`; omit it for the legacy session-only response.
+
 `wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying.
 
 ## list

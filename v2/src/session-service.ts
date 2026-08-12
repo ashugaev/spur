@@ -8382,7 +8382,21 @@ export class SessionService {
     return placeholder;
   }
 
-  async spawnShepherd(request: { prompt?: string } = {}): Promise<SessionView> {
+  async spawnShepherd(request?: {
+    prompt?: string;
+    reportDisposition?: false;
+  }): Promise<SessionView>;
+  async spawnShepherd(request: {
+    prompt?: string;
+    reportDisposition: true;
+  }): Promise<{ disposition: "spawned" | "reused"; session: SessionView }>;
+  async spawnShepherd(request: {
+    prompt?: string;
+    reportDisposition?: boolean;
+  }): Promise<SessionView | { disposition: "spawned" | "reused"; session: SessionView }>;
+  async spawnShepherd(
+    request: { prompt?: string; reportDisposition?: boolean } = {},
+  ): Promise<SessionView | { disposition: "spawned" | "reused"; session: SessionView }> {
     const prompt = request.prompt?.trim() ?? "";
     const reusable = listSessions(this.config.dataDir)
       .filter(
@@ -8392,17 +8406,21 @@ export class SessionService {
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {
+      let session: SessionView;
       if (prompt && reusable.status !== "spawning") {
-        return this.send(reusable.id, { message: prompt });
+        session = await this.send(reusable.id, { message: prompt });
+      } else {
+        session = await this.enrich(reusable);
       }
-      return this.enrich(reusable);
+      return request.reportDisposition ? { disposition: "reused", session } : session;
     }
-    return this.spawnInBackground({
+    const session = await this.spawnInBackground({
       project: SHEPHERD_PROJECT_ID,
       prompt,
       agent: "claude",
       overrides: { worktree: false },
     });
+    return request.reportDisposition ? { disposition: "spawned", session } : session;
   }
 
   async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {

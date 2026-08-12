@@ -1220,8 +1220,18 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/shepherd/spawn") {
-        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnShepherd(body));
+        const body = await readJsonBody<{ prompt?: unknown; reportDisposition?: unknown }>(
+          request,
+          15_000_000,
+        );
+        sendJson(
+          response,
+          201,
+          await service.spawnShepherd({
+            ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
+            ...(body.reportDisposition === true ? { reportDisposition: true } : {}),
+          }),
+        );
         return;
       }
 

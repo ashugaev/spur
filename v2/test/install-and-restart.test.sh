@@ -12,9 +12,10 @@ LOG_DIR="$(mktemp -d)"
 trap 'rm -rf "$LOG_DIR"' EXIT
 
 LOG_FILE="$LOG_DIR/install-and-restart.log"
+LOCK_FILE="$LOG_DIR/install-and-restart.lock"
 
 run_helper() {
-  SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL=echo bash "$HELPER" "$@"
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo bash "$HELPER" "$@"
 }
 
 # Case 1: valid version writes the expected install and restart lines.
@@ -65,7 +66,7 @@ fi
 
 # Case 3: missing systemctl falls back to manual-restart hint.
 rm -f "$LOG_FILE"
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL=/nonexistent/spur-test-systemctl \
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=/nonexistent/spur-test-systemctl \
   bash "$HELPER" 1.2.3
 if ! grep -q "systemctl not available, manual restart required" "$LOG_FILE"; then
   echo "FAIL: log missing manual-restart hint" >&2
@@ -76,7 +77,7 @@ fi
 # Case 4: multi-word SYSTEMCTL override (the real default is "systemctl --user")
 # splits into command + args.
 rm -f "$LOG_FILE"
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL="echo --user" bash "$HELPER" 1.2.3
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL="echo --user" bash "$HELPER" 1.2.3
 if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
   echo "FAIL: log missing multi-word systemctl argv" >&2
   cat "$LOG_FILE" >&2
@@ -86,7 +87,7 @@ fi
 # Case 5: a failing restart propagates its exit code instead of masking it.
 rm -f "$LOG_FILE"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL=false bash "$HELPER" 1.2.3
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=false bash "$HELPER" 1.2.3
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
@@ -107,7 +108,7 @@ chmod +x "$STUB_BIN_DIR/spur"
 
 rm -f "$LOG_FILE"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo PATH="$STUB_BIN_DIR:$PATH" \
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo PATH="$STUB_BIN_DIR:$PATH" \
   env -u SYSTEMCTL bash "$HELPER" 1.2.3
 rc=$?
 set -e
@@ -130,7 +131,7 @@ fi
 # Case 7: a non-default SYSTEMCTL override is an escape hatch that wins even
 # when a spur binary is resolvable — bare restart, not reinit.
 rm -f "$LOG_FILE"
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo PATH="$STUB_BIN_DIR:$PATH" SYSTEMCTL=echo \
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo PATH="$STUB_BIN_DIR:$PATH" SYSTEMCTL=echo \
   bash "$HELPER" 1.2.3
 if ! grep -q "restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
   echo "FAIL: log missing systemctl restart argv for the SYSTEMCTL escape hatch" >&2
@@ -160,7 +161,7 @@ chmod +x "$PREFIX_DIR/bin/spur"
 
 rm -f "$LOG_FILE"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo \
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 rc=$?
 set -e
@@ -184,5 +185,51 @@ if ! grep -q "spur reinit rc=0" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+
+# Case 9: npm ENOTEMPTY removes only scoped stale rename directories and retries once.
+NPM_STUB="$PREFIX_DIR/npm-stub"
+NPM_COUNT="$PREFIX_DIR/npm-count"
+STALE_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/.spur-stale"
+KEEP_DIR="$PREFIX_DIR/lib/node_modules/@shugaev/not-spur-stale"
+mkdir -p "$STALE_DIR" "$KEEP_DIR"
+cat >"$NPM_STUB" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$NPM_COUNT" ] || count="$(cat "$NPM_COUNT")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$NPM_COUNT"
+if [ "$count" -eq 1 ]; then
+  echo "npm ERR! code ENOTEMPTY"
+  exit 217
+fi
+echo "installed"
+EOF
+chmod +x "$NPM_STUB"
+rm -f "$LOG_FILE"
+NPM_COUNT="$NPM_COUNT" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  NPM="$NPM_STUB" SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
+[ ! -d "$STALE_DIR" ] || fail "stale npm rename directory was not removed"
+[ -d "$KEEP_DIR" ] || fail "cleanup removed a non-matching directory"
+[ "$(cat "$NPM_COUNT")" -eq 2 ] || fail "npm install was not retried exactly once"
+
+# Case 10: concurrent helpers serialize the npm install section.
+LOCK_NPM_STUB="$PREFIX_DIR/lock-npm-stub"
+LOCK_TRACE="$PREFIX_DIR/lock-trace"
+cat >"$LOCK_NPM_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo start >>"$LOCK_TRACE"
+sleep 0.2
+echo end >>"$LOCK_TRACE"
+EOF
+chmod +x "$LOCK_NPM_STUB"
+rm -f "$LOCK_TRACE"
+LOCK_TRACE="$LOCK_TRACE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  NPM="$LOCK_NPM_STUB" SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3 &
+first_pid=$!
+LOCK_TRACE="$LOCK_TRACE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  NPM="$LOCK_NPM_STUB" SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.4 &
+second_pid=$!
+wait "$first_pid" "$second_pid"
+[ "$(tr '\n' ' ' <"$LOCK_TRACE")" = "start end start end " ] || fail "concurrent installs overlapped"
 
 echo "install-and-restart.test.sh: OK"

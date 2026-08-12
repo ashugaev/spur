@@ -34,6 +34,7 @@ function mockRuntimeInfoFetch(getVersion: () => string) {
 describe("VersionSwitchProvider", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -126,6 +127,36 @@ describe("VersionSwitchProvider", () => {
     expect(result.current.phase).toBe("failed");
     expect(result.current.target).toBe("1.5.0");
     expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
+  it("keeps polling after the timeout and clears a late false failure", async () => {
+    let liveVersion = "1.4.2";
+    mockRuntimeInfoFetch(() => liveVersion);
+    const { result } = renderProvider();
+
+    vi.useFakeTimers();
+    act(() => result.current.startSwitch("1.5.0"));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000 * 30 + 100));
+    expect(result.current.phase).toBe("failed");
+
+    liveVersion = "1.5.0";
+    await act(async () => vi.advanceTimersByTimeAsync(3_100));
+
+    expect(result.current.phase).toBe("done");
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem("spur.version-switch.target")).toBeNull();
+  });
+
+  it("resumes confirmation after reload from the persisted target", async () => {
+    window.localStorage.setItem("spur.version-switch.target", "1.5.0");
+    mockRuntimeInfoFetch(() => "1.5.0");
+    vi.useFakeTimers();
+
+    const { result } = renderProvider();
+    await act(async () => vi.advanceTimersByTimeAsync(3_100));
+
+    expect(result.current.phase).toBe("done");
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
   });
 
   it("dismiss() resets failed -> idle", async () => {
