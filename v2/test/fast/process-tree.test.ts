@@ -71,7 +71,6 @@ describe("collectDescendants", () => {
     const processes = [proc(10, 11), proc(11, 10)];
     expect(collectDescendants(10, processes)).toEqual([10, 11]);
   });
-
 });
 
 describe("listProcesses", () => {

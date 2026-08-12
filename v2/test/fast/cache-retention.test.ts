@@ -213,19 +213,33 @@ describe("verdictFor", () => {
   });
 
   it("AC2/AC4: generic and tmp-entry names are class-never-pruned regardless of age", () => {
-    for (const [rootId, path, entryClass] of [
-      ...["yarn", "whisper.cpp", "pip", "go-build", "uv"].map((name) => [
-        "xdg-cache",
-        `/home/user/.cache/${name}`,
-        { kind: "generic", name },
-      ]),
-      ...["systemd-private-abc", "tmux-1000", ".X11-unix", "snap-private-tmp", "spur.yaml", "spur-worktree", "some-scratch-dir", "long-lived-socket"].map((name) => [
-        "tmp",
-        `/tmp/${name}`,
-        { kind: "tmp-entry", name },
-      ]),
-    ] as [string, string, CacheEntryClass][]) {
-      const entry = makeEntry({ path, rootId: rootId as "xdg-cache" | "tmp", entryClass, ageDays: 9999 });
+    const fixtures: Array<{
+      rootId: "xdg-cache" | "tmp";
+      path: string;
+      entryClass: CacheEntryClass;
+    }> = [
+      ...["yarn", "whisper.cpp", "pip", "go-build", "uv"].map((name) => ({
+        rootId: "xdg-cache" as const,
+        path: `/home/user/.cache/${name}`,
+        entryClass: { kind: "generic" as const, name },
+      })),
+      ...[
+        "systemd-private-abc",
+        "tmux-1000",
+        ".X11-unix",
+        "snap-private-tmp",
+        "spur.yaml",
+        "spur-worktree",
+        "some-scratch-dir",
+        "long-lived-socket",
+      ].map((name) => ({
+        rootId: "tmp" as const,
+        path: `/tmp/${name}`,
+        entryClass: { kind: "tmp-entry" as const, name },
+      })),
+    ];
+    for (const { rootId, path, entryClass } of fixtures) {
+      const entry = makeEntry({ path, rootId, entryClass, ageDays: 9999 });
       expect(verdictFor(entry, makeOwnership(), makeLiveness(), MY_UID)).toEqual({
         kind: "protected",
         reason: { kind: "class-never-pruned" },
