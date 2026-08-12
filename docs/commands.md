@@ -178,7 +178,7 @@ Delivery goes through the normal send path: a `stopped`/`paused` subscriber gets
 
 For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` over direct `pnpm dev` / `next dev`. It starts a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against it, publishing a `sidecar-ui` link. `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs. New isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks.
 
-`autoStart` applies only when the main session spawns. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
+`autoStart` applies when the main session spawns, restores, or recovers a dead agent — a session whose pane comes back gets its `autoStart` sidecars back too. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
 

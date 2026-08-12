@@ -1234,7 +1234,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -10071,7 +10071,11 @@ export class SessionService {
       this.restoreWarmupUntil.delete(session.id);
     }
     writeSession(this.config.dataDir, recovered);
-    await this.refreshDashboardCacheEntry(recovered);
+    // After the running record is on disk: a project sidecar can take tens of
+    // seconds to come up, and the reaper's running|spawning filter must cover
+    // that whole window without relying on the warmup cleared just above.
+    const withSidecars = await this.startAutoStartSidecars(recovered, project);
+    await this.refreshDashboardCacheEntry(withSidecars);
     this.logEvent("session.recover.completed", {
       level: "info",
       sessionId: session.id,
@@ -10079,11 +10083,11 @@ export class SessionService {
       message: `Recovered ${session.id}`,
       details: {
         agent: session.agent,
-        agentSessionId: recovered.agentSessionId ?? null,
+        agentSessionId: withSidecars.agentSessionId ?? null,
         tmuxSession: session.tmuxSession,
       },
     });
-    return recovered;
+    return withSidecars;
   }
 
   // Kills the live tmux pane and relaunches the agent in place, preserving its
@@ -10615,11 +10619,18 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
-    await this.refreshDashboardCacheEntry(persistedRestored);
+    // Started only after the running record is persisted: a project sidecar
+    // can take tens of seconds, and a crash inside that window must not leave
+    // a stopped record behind a live agent pane.
+    const restoredWithSidecars = await this.startAutoStartSidecars(
+      persistedRestored,
+      this.getProject(current.project),
+    );
+    await this.refreshDashboardCacheEntry(restoredWithSidecars);
     requestGitHubMergeConflictRestoreReplays(
       this.config,
-      persistedRestored.project,
-      persistedRestored.id,
+      restoredWithSidecars.project,
+      restoredWithSidecars.id,
     );
     this.logEvent("session.restore.completed", {
       level: "info",
@@ -10628,15 +10639,15 @@ export class SessionService {
       message: `Restored ${sessionId}`,
       details: {
         agent: current.agent,
-        agentSessionId: persistedRestored.agentSessionId ?? null,
+        agentSessionId: restoredWithSidecars.agentSessionId ?? null,
       },
     });
     this.stateCache.delete(sessionId);
     this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
-    if (this.shouldRunDelivery(persistedRestored)) {
-      this.scheduleDeliveryRunner(persistedRestored.id);
+    if (this.shouldRunDelivery(restoredWithSidecars)) {
+      this.scheduleDeliveryRunner(restoredWithSidecars.id);
     }
-    return this.enrich(persistedRestored);
+    return this.enrich(restoredWithSidecars);
   }
 
   // Brings a `completed` session back to life on the same id: rebuild the
