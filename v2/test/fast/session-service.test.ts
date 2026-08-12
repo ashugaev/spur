@@ -566,6 +566,7 @@ vi.mock("../../src/session-slots.js", () => ({
     (request: {
       title?: string;
       clearTitle?: boolean;
+      setTitleIfAbsent?: boolean;
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
       tags?: string[];
@@ -573,6 +574,7 @@ vi.mock("../../src/session-slots.js", () => ({
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
+      ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
       tags: request.tags ?? [],
@@ -1304,7 +1306,11 @@ describe("SessionService", () => {
           }
         }
       }
-      const title = request.clearTitle ? undefined : (request.title ?? current?.title);
+      const title = request.clearTitle
+        ? undefined
+        : request.setTitleIfAbsent && current?.title?.trim()
+          ? current.title
+          : (request.title ?? current?.title);
       return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
     });
   });
@@ -5766,6 +5772,19 @@ describe("SessionService", () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(runningSession({ status: "completed" }));
       expect(request.claudeAccountId).toBeUndefined();
+    });
+
+    it("starts a new workspace without carrying title state", async () => {
+      const { resolveRespawnRequest } = await loadSessionServiceModule();
+      const request = resolveRespawnRequest(
+        runningSession({
+          status: "completed",
+          slots: { title: "Old title", links: [] },
+        }),
+      );
+
+      expect(request).not.toHaveProperty("reuseWorkspaceSessionId");
+      expect(request).not.toHaveProperty("slots");
     });
   });
 
@@ -18952,6 +18971,117 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("allows one conditional title, then ignores later conditional titles", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { title: "First", setTitleIfAbsent: true });
+    const result = await service.updateSlots("api-1", {
+      title: "Second",
+      setTitleIfAbsent: true,
+    });
+
+    expect(result.slots?.title).toBe("First");
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+      title: "First",
+      setTitleIfAbsent: true,
+    });
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBeUndefined();
+    service.dispose();
+  });
+
+  it("keeps manual title authority while applying non-title conditional changes", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { title: "Manual" });
+    const linked = await service.updateSlots("api-1", {
+      title: "Agent retry",
+      setTitleIfAbsent: true,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+    await service.updateSlots("api-1", { clearTitle: true });
+    const cleared = await service.updateSlots("api-1", {
+      title: "Agent after clear",
+      setTitleIfAbsent: true,
+    });
+
+    expect(linked.slots?.title).toBe("Manual");
+    expect(linked.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+    ]);
+    expect(cleared.slots?.title).toBeUndefined();
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    service.dispose();
+  });
+
+  it("preserves the manual title override through unrelated workspace writes", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { clearTitle: true });
+    await service.updateSlots("api-1", {
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    service.dispose();
+  });
+
   it("updates slots without changing the session timestamp", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -24496,7 +24626,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("carries title and config-known tags to the spawned session", async () => {
+    it("keeps the shared title and tags without replaying the title as a manual edit", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -24524,6 +24654,7 @@ describe("SessionService", () => {
       reserveNextSessionIdMock.mockResolvedValue("api-2");
 
       const { SessionService } = await loadSessionServiceModule();
+      const { readWorkspaceState } = await loadWorkspaceStoreModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       applySlotsUpdateMock.mockImplementation((current, request) => {
         const links = [...(current?.links ?? [])];
@@ -24536,6 +24667,7 @@ describe("SessionService", () => {
         };
       });
 
+      await service.updateSlots("api-1", { title: "Handoff task" });
       const result = await service.handoff("api-1", { agent: "cursor" });
 
       // api-2 is a desk sibling of api-1 (reused workspace => deskId ===
@@ -24548,6 +24680,7 @@ describe("SessionService", () => {
         title: "Handoff task",
         tags: ["feature"],
       });
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
       expect(result.id).toBe("api-2");
     });
 

@@ -262,6 +262,7 @@ import {
 } from "./session-gc.js";
 import {
   deleteWorkspaceState,
+  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -7670,7 +7671,14 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    writeWorkspaceState(this.config.dataDir, workspaceId, state);
+    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
+    const nextState: WorkspaceState = {
+      ...state,
+      ...(state.manualTitleOverride || stored?.manualTitleOverride
+        ? { manualTitleOverride: true }
+        : {}),
+    };
+    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -7680,13 +7688,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (state.slots) {
-      mirrored.slots = state.slots;
+    if (nextState.slots) {
+      mirrored.slots = nextState.slots;
     } else {
       delete mirrored.slots;
     }
-    if (state.pr) {
-      mirrored.pr = state.pr;
+    if (nextState.pr) {
+      mirrored.pr = nextState.pr;
     } else {
       delete mirrored.pr;
     }
@@ -9210,8 +9218,10 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
+    const conditionalTitleBlocked =
+      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
     const hasGenericChanges =
-      normalized.title !== undefined ||
+      (normalized.title !== undefined && !conditionalTitleBlocked) ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
@@ -9219,7 +9229,12 @@ export class SessionService {
       normalized.untags.length > 0;
     const slots = hasGenericChanges
       ? applySlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+          ...(normalized.title !== undefined && !conditionalTitleBlocked
+            ? {
+                title: normalized.title,
+                ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
+              }
+            : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
@@ -9231,6 +9246,11 @@ export class SessionService {
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
+      ...(current.manualTitleOverride ||
+      normalized.clearTitle ||
+      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
+        ? { manualTitleOverride: true }
+        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
@@ -11213,14 +11233,13 @@ export class SessionService {
         });
       }
 
-      if (session.slots?.title || session.slots?.tags?.length) {
+      if (session.slots?.tags?.length) {
         const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
-        if (session.slots.title || carryTags.length > 0) {
+        const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
+        if (carryTags.length > 0) {
           try {
             spawned = await this.updateSlots(spawned.id, {
-              ...(session.slots.title ? { title: session.slots.title } : {}),
-              ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+              tags: carryTags,
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

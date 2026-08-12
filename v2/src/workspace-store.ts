@@ -15,6 +15,7 @@ import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from 
 export interface WorkspaceState {
   slots?: SessionSlots;
   pr?: SessionPrBinding;
+  manualTitleOverride?: true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,9 +68,11 @@ function readWorkspaceStateFile(path: string): WorkspaceState | null {
   if (!isRecord(parsed)) return null;
   const slots = parseSlots(parsed["slots"]);
   const pr = parsePrBinding(parsed["pr"]);
+  const manualTitleOverride = parsed["manualTitleOverride"] === true;
   return {
     ...(slots ? { slots } : {}),
     ...(pr ? { pr } : {}),
+    ...(manualTitleOverride ? { manualTitleOverride: true } : {}),
   };
 }
 
@@ -93,6 +96,7 @@ export function writeWorkspaceState(
   const payload: WorkspaceState = {
     ...(state.slots ? { slots: state.slots } : {}),
     ...(state.pr ? { pr: state.pr } : {}),
+    ...(state.manualTitleOverride ? { manualTitleOverride: true } : {}),
   };
   writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
   renameSync(tmpPath, path);
