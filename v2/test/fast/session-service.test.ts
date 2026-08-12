@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14952,7 +14953,9 @@ describe("SessionService", () => {
     );
   });
 
-  it("keeps the pinned claude id via --session-id when native resume fails during send recovery", async () => {
+  it("mints a fresh claude session id when native resume fails during send recovery", async () => {
+    const FRESH_CLAUDE_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     buildAgentLaunchPlanMock.mockImplementation(
       (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
         agent,
@@ -14981,7 +14984,9 @@ describe("SessionService", () => {
     });
     tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
     // First recovery attempt (native --resume) reports the process exited, so
-    // the fallback fresh launch must reuse the pinned id, not drop it.
+    // the fallback fresh launch must mint a new id — claude refuses
+    // --session-id on an id whose transcript already exists, which the
+    // pinned id's does (that's why --resume was attempted in the first place).
     isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -14996,15 +15001,16 @@ describe("SessionService", () => {
       expect.any(String),
       expect.anything(),
     );
-    // ...then the fresh relaunch reused the pinned id via --session-id.
+    // ...then the fresh relaunch minted a new id via --session-id, not the pinned one.
+    expect(FRESH_CLAUDE_SESSION_ID).not.toBe(PINNED_CLAUDE_SESSION_ID);
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
       "hello",
-      expect.objectContaining({ agentSessionId: PINNED_CLAUDE_SESSION_ID }),
+      expect.objectContaining({ agentSessionId: FRESH_CLAUDE_SESSION_ID }),
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+        launchCommand: `claude --session-id ${FRESH_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
       }),
     );
     expect(
@@ -15012,11 +15018,12 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "session.recover.resume_failed",
       ),
     ).toBe(true);
-    // The pinned id is preserved on the persisted record.
+    // The fresh id, not the pinned one, is persisted on the recovered record.
     const recoverWrite = writeSessionMock.mock.calls.find(
       ([, session]) => session.status === "running",
     );
-    expect(recoverWrite?.[1].agentSessionId).toBe(PINNED_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).toBe(FRESH_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).not.toBe(PINNED_CLAUDE_SESSION_ID);
   });
 
   it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {

@@ -10219,17 +10219,20 @@ export class SessionService {
         },
       });
       await killTmuxSession(session.tmuxSession);
-      // Reuse the pinned claude id on the fresh relaunch so the session stays
-      // bound to its native id; legacy (unpinned) sessions relaunch without one.
-      const freshPlan = pinnedClaudeId
+      // Mint a fresh claude id for the fallback launch (fresh per attempt so a
+      // retry never reuses a possibly-existing transcript id) — the pinned id's
+      // transcript already exists (that's why --resume was attempted), so
+      // --session-id on it would always be rejected by claude.
+      const freshClaudeId = pinnedClaudeId ? randomUUID() : undefined;
+      const freshPlan = freshClaudeId
         ? buildAgentLaunchPlan(session.agent, session.prompt, {
             ...planOptions,
             ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-            agentSessionId: pinnedClaudeId,
+            agentSessionId: freshClaudeId,
           })
         : baseLaunchPlan;
       const freshLaunchCommand = freshPlan.launchCommand;
-      recoveredAgentSessionId = pinnedClaudeId;
+      recoveredAgentSessionId = freshClaudeId;
       persistedLaunchCommand = freshLaunchCommand;
       await createTmuxSession({
         sessionName: session.tmuxSession,
