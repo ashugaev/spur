@@ -26338,10 +26338,14 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       reserveNextSessionIdMock.mockResolvedValue("shp-2");
 
-      const view = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+      const result = await service.spawnShepherd({
+        prompt: "Restart Shepherd",
+        reportDisposition: true,
+      });
 
-      expect(view.id).toBe("shp-2");
-      expect(view.status).toBe("spawning");
+      expect(result.disposition).toBe("spawned");
+      expect(result.session.id).toBe("shp-2");
+      expect(result.session.status).toBe("spawning");
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
