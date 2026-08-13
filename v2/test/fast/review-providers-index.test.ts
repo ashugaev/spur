@@ -88,6 +88,36 @@ describe("orderedReviewProviderIds", () => {
     ]);
   });
 
+  it("fails open to default ordering for an scp-like remote with an extra path segment", async () => {
+    // parseRepoSlugFromRemoteUrl rejects a 3-segment scp-like path (org/team/repo),
+    // so the all-github unanimity gate cannot fire even though the URL is a
+    // github.com remote; the origin-substring fallback still recognizes "github".
+    readRemoteUrlsMock.mockResolvedValue(new Map([["origin", "git@github.com:org/team/repo.git"]]));
+
+    await expect(orderedReviewProviderIds("/wt", { sources: {} })).resolves.toEqual([
+      "github",
+      "gitlab",
+    ]);
+  });
+
+  it("fails open to the gitlab-first fallback when a bare local path remote sits beside a github remote", async () => {
+    // parseRepoSlugFromRemoteUrl returns null for a bare local path, so the
+    // all-github unanimity gate cannot fire even though another remote is a
+    // valid github.com remote; the origin-substring fallback then decides
+    // ordering off the local path, which does not mention "github".
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([
+        ["upstream", "git@github.com:org/repo.git"],
+        ["origin", "/srv/repos/spur"],
+      ]),
+    );
+
+    await expect(orderedReviewProviderIds("/wt", { sources: {} })).resolves.toEqual([
+      "gitlab",
+      "github",
+    ]);
+  });
+
   it("defaults to github then gitlab when no remote is available", async () => {
     readRemoteUrlsMock.mockResolvedValue(new Map());
 
