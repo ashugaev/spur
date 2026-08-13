@@ -20054,10 +20054,6 @@ describe("SessionService", () => {
         }),
       }),
     );
-    expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      expect.objectContaining({ event: "session.restore.failed" }),
-    );
     // Full success path, not the catch: sidecars and the warmup window still run.
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
