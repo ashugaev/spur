@@ -778,6 +778,15 @@ export class SubmitAckTimeoutError extends Error {
   }
 }
 
+// A submit-ack timeout with the agent process still alive means the pane
+// write itself landed — only the acknowledgment scan timed out. Delivery
+// callers treat this as delivered rather than failed; a dead process means
+// the write is genuinely unconfirmed and the message must be retried. One
+// definition, shared by the drain and by flush.
+function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
+  return error instanceof SubmitAckTimeoutError && error.processAlive;
+}
+
 const RESTORE_PROMPT_PREFIX =
   'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:';
 const PLAN_MODE_PROMPT_SUFFIX =
@@ -1310,6 +1319,18 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
+}
+
+// Removes only the first occurrence of `value`, never all of them: `send`'s
+// duplicate-ignore guard keeps exact message text unique within one queue,
+// so "first occurrence" is the sound content-keyed equivalent of removing by
+// index without a persisted id.
+function removeFirstOccurrence(list: string[], value: string): string[] {
+  const index = list.indexOf(value);
+  if (index === -1) {
+    return list;
+  }
+  return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
 // Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
@@ -8645,13 +8666,22 @@ export class SessionService {
       });
       activeRecord = readySession;
     } else {
+      // Re-read immediately before the append: `readySession` above can be
+      // stale by the time this write lands (ensureSessionReadyForSend may
+      // have waited on a busy agent), and a blind append over that stale
+      // queue would erase a concurrent drain's commit or a concurrent
+      // send's append. Only the queue field is taken from the fresh read;
+      // every other field still comes from `readySession`.
+      const latestQueued = queuedMessages(
+        readSession(this.config.dataDir, sessionId) ?? readySession,
+      );
       activeRecord = withQueuedMessages(
         {
           ...readySession,
           status: "running",
           updatedAt: nowIso(),
         },
-        [...queued, finalMessage],
+        [...latestQueued, finalMessage],
         readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
       );
       writeSession(this.config.dataDir, activeRecord);
@@ -8709,10 +8739,46 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
+  // Single commit path for `deliverPrepared`'s success and recovered-ack-
+  // timeout branches only. `deliverQueuedMessage` keeps its own two-write
+  // commit (see the comment there) and must never be folded into this.
+  // The queue field is taken from a read AFTER the pane write, never from
+  // `readySession` (taken before it): that read can be arbitrarily stale by
+  // the time the send resolves, and blind-writing it would erase a
+  // concurrent append or resurrect an already-drained message.
+  private async commitDeliveredSend(
+    sessionId: string,
+    readySession: SessionRecord,
+  ): Promise<SessionRecord> {
+    this.stateCache.delete(sessionId);
+    const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
+    const updated = withQueuedMessages(
+      {
+        ...readySession,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      queuedMessages(latest),
+      latest.queuedMessages?.awaitingPrompt ?? false,
+    );
+    const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+    writeSession(this.config.dataDir, persisted);
+    return persisted;
+  }
+
   private async deliverPrepared(
     sessionId: string,
     message: string,
-    options: { interrupt?: boolean; entryPoint: "send" | "deliver"; hasAttachments?: boolean },
+    options: {
+      interrupt?: boolean;
+      entryPoint: "send" | "deliver" | "flush";
+      hasAttachments?: boolean;
+      // Flush's ack-timeout policy: a submit ack timeout with the process
+      // still alive means the pane write landed, so the delivery is treated
+      // as recovered instead of failed. Absent (deliver(), queue:false
+      // send) keeps today's throw-and-log-failed semantics unchanged.
+      recoverOnLiveAckTimeout?: boolean;
+    },
   ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
@@ -8740,26 +8806,44 @@ export class SessionService {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
-      await this.sendAgentMessage(readySession, message, { interrupt });
-      this.stateCache.delete(sessionId);
-      const updated: SessionRecord = {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      };
-      const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
-      writeSession(this.config.dataDir, persisted);
-      this.logEvent("session.message.sent", {
-        level: "info",
-        sessionId,
-        projectId: initialSession.project,
-        message: `Delivered message to ${sessionId}`,
-        details: {
-          interrupt,
-          messageLength: message.length,
-          agentSessionId: persisted.agentSessionId ?? null,
-        },
-      });
+      let recovered: SubmitAckTimeoutError | null = null;
+      try {
+        await this.sendAgentMessage(readySession, message, { interrupt });
+      } catch (error) {
+        if (options.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+          throw error;
+        }
+        recovered = error;
+      }
+      const persisted = await this.commitDeliveredSend(sessionId, readySession);
+      if (recovered) {
+        this.logEvent("session.message.delivery_recovered", {
+          level: "warn",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
+          details: {
+            agent: recovered.agent,
+            lastScannedFile: recovered.lastScannedFile,
+            elapsedMs: recovered.elapsedMs,
+            processAlive: recovered.processAlive,
+            messageLength: message.length,
+            entryPoint: options.entryPoint,
+          },
+        });
+      } else {
+        this.logEvent("session.message.sent", {
+          level: "info",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Delivered message to ${sessionId}`,
+          details: {
+            interrupt,
+            messageLength: message.length,
+            agentSessionId: persisted.agentSessionId ?? null,
+          },
+        });
+      }
       return await this.enrich(persisted);
     } catch (error) {
       if (error instanceof SessionRateLimitedError) {
@@ -11325,25 +11409,61 @@ export class SessionService {
       return false;
     }
 
-    await this.deliverQueuedMessage(latest, nextMessage, queuedMessages(latest).slice(1));
+    try {
+      await this.deliverQueuedMessage(latest, nextMessage);
+    } catch (error) {
+      // A queued-message delivery failure must never reach runDeliveryLoop's
+      // outer catch: that would call markPipelineErrored, which early-returns
+      // for a queued-message-only session and leaves no trace, and it would
+      // end the loop with no re-arm (no timer, no sweep exists). The message
+      // stays queued; the loop's own sleep-and-continue retries it.
+      const failure = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.message.delivery_failed", {
+        level: "error",
+        sessionId,
+        projectId: latest.project,
+        message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
+        details: {
+          messageLength: nextMessage.length,
+        },
+      });
+    }
     return true;
   }
 
   private async deliverQueuedMessage(
     session: SessionRecord,
     message: string,
-    remainingMessages: string[],
   ): Promise<SessionRecord> {
-    await this.sendAgentMessage(session, message, { interrupt: false });
+    let recovered: SubmitAckTimeoutError | null = null;
+    try {
+      await this.sendAgentMessage(session, message, { interrupt: false });
+    } catch (error) {
+      // A live process past a submit-ack timeout means the pane write
+      // landed; treat it as delivered rather than rethrow into the caller's
+      // failure branch (isRecoveredSubmitAckTimeout, module scope, shared
+      // with flush).
+      if (!isRecoveredSubmitAckTimeout(error)) {
+        throw error;
+      }
+      recovered = error;
+    }
     const sessionId = session.id;
     this.stateCache.delete(sessionId);
+    // Re-read and subtract the first occurrence of the delivered text,
+    // rather than trusting a pre-computed remaining-messages slice taken
+    // before the send: that slice can be stale by the time the send
+    // resolves (a concurrent `send` append, or a concurrent flush), and a
+    // blind write over it would erase the concurrent write.
+    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    const remaining = removeFirstOccurrence(queuedMessages(latest), message);
     const updated = withQueuedMessages(
       {
-        ...session,
+        ...latest,
         status: "running",
         updatedAt: nowIso(),
       },
-      remainingMessages,
+      remaining,
       true,
     );
     // Persist the drain before the discovery wait below: captureAgentSessionId
@@ -11354,6 +11474,22 @@ export class SessionService {
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
+    if (recovered) {
+      this.logEvent("session.message.delivery_recovered", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Recovered a delivered queued message to ${sessionId} after a submit ack timeout`,
+        details: {
+          agent: recovered.agent,
+          lastScannedFile: recovered.lastScannedFile,
+          elapsedMs: recovered.elapsedMs,
+          processAlive: recovered.processAlive,
+          messageLength: message.length,
+        },
+      });
+      return persisted;
+    }
     this.logEvent("session.message.sent", {
       level: "info",
       sessionId,

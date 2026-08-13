@@ -972,6 +972,8 @@ type SessionServiceInternals = {
   claudeCompactingOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
   paneWriteLocks: Map<string, Promise<void>>;
+  deliveryRuns: Map<string, Promise<void>>;
+  tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -5248,6 +5250,218 @@ describe("SessionService", () => {
     } finally {
       service.dispose();
     }
+  });
+
+  it("recovers a queued-message drain when the submit ack times out with a live process, and drains the next message after it (AC1)", async () => {
+    mockClaudeJsonlState("waiting");
+    // Direct calls to tryDeliverQueuedMessage below, not the timer-driven
+    // runDeliveryLoop: createDisposedSessionService's constructor sees no
+    // sessions yet (seeded after), so resumeSessionDelivery never arms a
+    // background loop that would race these calls.
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first queued", "second queued"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first queued", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_recovered",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "claude",
+          processAlive: true,
+        }),
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.sent", sessionId: "api-1" }),
+    );
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second queued"]);
+
+    const deliveredSecond = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    expect(deliveredSecond).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second queued", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+  });
+
+  it("retains a queued message and logs delivery_failed when the submit ack times out with a dead process, then retries on the next poll (AC2)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first queued"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    // Alive for ensureSessionReadyForSend's readiness check and
+    // classifySessionRecord's runtime snapshot (the drain picked up a live,
+    // waiting session), dead only by the time writeAgentMessage's
+    // post-resend check runs: the process died during the ack window, not
+    // before the drain even started.
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_failed",
+        level: "error",
+        sessionId: "api-1",
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.sent", sessionId: "api-1" }),
+    );
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+
+    // The retained message stays eligible for another attempt: runDeliveryLoop's
+    // queued branch sleeps and continues regardless of tryDeliverQueuedMessage's
+    // return value (11618-11624), so nothing here ends the loop or drops the
+    // message. Once the transient failure clears (process reachable again by
+    // the next poll), the retry succeeds and delivers the same message.
+    isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+    const deliveredAgain = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    expect(deliveredAgain).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not lose a send landing mid-drain: both messages survive and deliver in order (AC3)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        // Already true, as it would be while a real drain is in flight: a
+        // real runDeliveryLoop only reaches tryDeliverQueuedMessage once
+        // awaitingPrompt is false, and deliverQueuedMessage always sets it
+        // true again once the head is picked up. This is what keeps send()'s
+        // OWN inline delivery attempt (8709) from also racing this same
+        // head — it stands down whenever awaitingPrompt is already true.
+        messages: ["first"],
+        awaitingPrompt: true,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+    // Parked in the send for "first"; nothing committed to disk yet.
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+    await service.send("api-1", { message: "second" });
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first", "second"]);
+
+    releaseAck();
+    expect(await drain).toBe(true);
+
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual(["second"]);
+    const order = sendMessageToTmuxMock.mock.calls
+      .filter(([id]) => id === "api-1")
+      .map(([, message]) => message);
+    expect(order).toEqual(["first"]);
+
+    const drainSecond = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    expect(drainSecond).toBe(true);
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    const finalOrder = sendMessageToTmuxMock.mock.calls
+      .filter(([id]) => id === "api-1")
+      .map(([, message]) => message);
+    expect(finalOrder).toEqual(["first", "second"]);
   });
 
   it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
@@ -11094,7 +11308,7 @@ describe("SessionService", () => {
     dispatchSpy.mockRestore();
   });
 
-  it("logs state subscription delivery failures without claiming the transition", async () => {
+  it("claims a state subscription transition once send() queues it, even while the underlying pane write keeps failing", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ id: "api-1" }));
     sessions.set(
@@ -11105,7 +11319,7 @@ describe("SessionService", () => {
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
       }),
     );
-    sendMessageToTmuxMock.mockRejectedValueOnce(new Error("tmux down"));
+    sendMessageToTmuxMock.mockRejectedValue(new Error("tmux down"));
     const service = await createDisposedSessionService();
     service.subscribeToSessionStates("api-2", {
       targetSessionId: "api-1",
@@ -11126,18 +11340,29 @@ describe("SessionService", () => {
     await service.get("api-1");
     await service.get("api-1");
 
+    // A queued-message delivery failure never propagates out of send() (A1),
+    // so dispatchStateSubscriptions's `await this.send(...)` resolves
+    // normally and claims the transition immediately, even though the
+    // underlying pane write keeps failing and retrying in the background
+    // (session.message.delivery_failed) — this mirrors an ordinary queued
+    // send: appending to the queue is what "delivered" means to the caller,
+    // not the eventual pane write's own outcome.
     await vi.waitFor(() => {
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({
-          event: "session.subscription.delivery_failed",
+          event: "session.message.delivery_failed",
           sessionId: "api-2",
         }),
       );
     });
+    expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredTransitionId).toBeDefined();
+    expect(sessions.get("api-2")?.queuedMessages?.messages).toHaveLength(1);
     expect(
-      sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredTransitionId,
-    ).toBeUndefined();
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.subscription.delivery_failed",
+      ).length,
+    ).toBe(0);
   });
 
   it("logs terminal state transitions without recreating debug artifacts", async () => {
@@ -26511,7 +26736,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("consumes a one-shot wake and keeps the message queued when delivery fails", async () => {
+    it("consumes a one-shot wake, queues the message on delivery failure, and the queue drain retries it (AC1/AC2 loop-retry invariant)", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
         id: "shp-1",
@@ -26536,18 +26761,39 @@ describe("SessionService", () => {
         delayMs: 5_000,
         message: "Retry wake",
       });
+      // The wake fires, its send fails, and the message is queued — the
+      // queue drain loop (now armed since the session has a queued message)
+      // retries within this same window rather than dying silently (the
+      // pre-fix behavior: session-service.ts's runDeliveryLoop queued-message
+      // try/catch used to let this failure end the loop with no re-arm). The
+      // rejectOnce above is exhausted, so the retry's pane write succeeds and
+      // drains the queue.
       await vi.advanceTimersByTimeAsync(5_000);
 
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(2, "shp-1", "Retry wake", {
+        interrupt: false,
+        agent: "claude",
+      });
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
-      expect(sessions.get("shp-1")?.queuedMessages?.messages).toContain("Retry wake");
-
-      await advanceSeconds(5);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.queuedMessages?.messages ?? []).not.toContain("Retry wake");
+      // A queued-message delivery failure never propagates out of send() (A1):
+      // the wake's own send() call now resolves normally even though its
+      // inline delivery attempt failed, so processScheduledWakes logs
+      // wake.sent, not wake.failed. The failed attempt is diagnosed by the
+      // new delivery_failed event instead.
       expect(
         logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.failed")
           .length,
+      ).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.sent")
+          .length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.delivery_failed",
+        ).length,
       ).toBe(1);
       service.dispose();
     });
@@ -26621,21 +26867,32 @@ describe("SessionService", () => {
         },
       });
       mockClaudeJsonlState("waiting");
-      sendMessageToTmuxMock.mockRejectedValue(new Error("session busy"));
+      // A single failure, not persistent: this test's remaining concern is
+      // the INTERVAL wake's own nextDueAt bookkeeping (no perpetual refire of
+      // THAT mechanism). The queued-message retry this failure now arms
+      // (session-service.ts's runDeliveryLoop) is exercised on its own
+      // dedicated ack-timeout tests; here it just needs to not resurrect a
+      // storm — a single rejectOnce keeps that retry's own outcome
+      // deterministic (it succeeds) instead of chasing an open-ended
+      // persistent-failure retry count.
+      sendMessageToTmuxMock.mockRejectedValueOnce(new Error("session busy"));
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      // now = 10:05:01 on the first tick; the due wake fires and its send throws.
+      // now = 10:05:01 on the first tick; the due wake fires and its send
+      // throws, queuing "Check Quality CI". The queue drain's own retry
+      // (rejectOnce now exhausted) delivers it within this same window.
       await advanceSeconds(1);
 
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       // Failed send must still advance nextDueAt past `now` so the `<= now` guard
       // no longer matches — otherwise it would re-fire every tick forever.
       expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+      expect(sessions.get("shp-1")?.queuedMessages?.messages ?? []).toEqual([]);
 
-      // Ticks before the new due time must NOT re-fire.
+      // Ticks before the new due time must NOT re-fire the interval wake.
       await advanceSeconds(3);
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
 
       service.dispose();
     });
@@ -26888,20 +27145,39 @@ describe("SessionService", () => {
         stopCondition: "Daily check done",
         message: "Retry daily wake",
       });
+      // The daily wake fires, its send fails, and the message is queued —
+      // the queue drain loop (now armed) retries within this same window
+      // rather than leaving the message stuck (see the one-shot wake test
+      // above for the same invariant): the rejectOnce is exhausted, so this
+      // retry succeeds.
       await vi.advanceTimersByTimeAsync(60_000);
 
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
-      expect(sessions.get("shp-1")?.queuedMessages?.messages.join("\n")).toContain(
-        "Retry daily wake",
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(
+        2,
+        "shp-1",
+        expect.stringContaining("Retry daily wake"),
+        { interrupt: false, agent: "claude" },
       );
-
-      await advanceSeconds(5);
-
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
+      expect(sessions.get("shp-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      // A queued-message delivery failure never propagates out of send() (A1):
+      // the wake's own send() call resolves normally even though its inline
+      // delivery attempt failed, so processScheduledDailyWakes logs
+      // daily_sent, not daily_failed. The failed attempt is diagnosed by the
+      // new delivery_failed event instead.
       expect(
         logSpurEventMock.mock.calls.filter(
           ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.daily_sent")
+          .length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.delivery_failed",
         ).length,
       ).toBe(1);
       service.dispose();
