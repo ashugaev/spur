@@ -3815,6 +3815,17 @@ describe("SessionService", () => {
       nextStepIndex: 1,
       awaitingStepIndex: 0,
     });
+    // Step 1 rides the launch message, so the spawn is the only place that can
+    // report it; the delivery loop starts at step 2 and keeps its numbering.
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.pipeline.step_sent",
+        sessionId: "api-1",
+        message: "Sent pipeline step 1/2 to api-1",
+        details: { stepIndex: 1, totalSteps: 2 },
+      }),
+    );
   });
 
   it("uses project default spawn steps when the request does not provide them", async () => {
@@ -3908,6 +3919,10 @@ describe("SessionService", () => {
       "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
     );
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.pipeline.step_sent" }),
+    );
   });
 
   it("disables project default spawn steps in plan mode", async () => {

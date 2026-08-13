@@ -173,6 +173,8 @@ When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an 
 
 With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message — unless a mode resolved (see Modes below), in which case the mode instruction becomes the session's initial message on its own.
 
+Each step delivery logs `session.pipeline.step_sent` with 1-based `details.stepIndex` and `details.totalSteps`. Step 1 rides the launch message, so its event is logged by the spawn, next to `session.spawn.initial_prompt_sent`; steps 2..N are logged by the delivery loop.
+
 ## Desk groups
 
 ```yaml

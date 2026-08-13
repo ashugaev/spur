@@ -7291,9 +7291,11 @@ export class SessionService {
         message: `Agent prompt is ready for ${sessionId}`,
       });
 
+      let initialPromptSent = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
         await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
+        initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7304,6 +7306,7 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
+        initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7313,6 +7316,20 @@ export class SessionService {
             deliveryMode: "launch_command",
             imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
+          },
+        });
+      }
+      if (pipeline && initialPromptSent) {
+        // Step 1 rides the launch message, so the delivery loop starts at step 2
+        // and never emits for it. Emit here so every step has a step_sent event.
+        this.logEvent("session.pipeline.step_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent pipeline step 1/${pipeline.steps.length} to ${sessionId}`,
+          details: {
+            stepIndex: 1,
+            totalSteps: pipeline.steps.length,
           },
         });
       }
@@ -8282,6 +8299,20 @@ export class SessionService {
             deliveryMode: "launch_command",
             imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
+          },
+        });
+      }
+      if (pipeline && initialPromptSent) {
+        // Step 1 rides the launch message, so the delivery loop starts at step 2
+        // and never emits for it. Emit here so every step has a step_sent event.
+        this.logEvent("session.pipeline.step_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent pipeline step 1/${pipeline.steps.length} to ${sessionId}`,
+          details: {
+            stepIndex: 1,
+            totalSteps: pipeline.steps.length,
           },
         });
       }
