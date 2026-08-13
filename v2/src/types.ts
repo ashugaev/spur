@@ -736,6 +736,19 @@ export interface SessionQueuedMessagesState {
   awaitingPrompt: boolean;
 }
 
+// View-only shape: `messages` carries only real queued entries (the ones a
+// remove/flush control can act on), `pipelineMessages` carries derived future
+// pipeline step text separately and is omitted when empty. Kept distinct
+// from SessionQueuedMessagesState (the persisted record shape, whitelisted
+// to exactly two fields by metadata.ts's normalizeQueuedMessagesState) so a
+// pipeline-derived string can never be mistaken for a real queued message at
+// the type level.
+export interface SessionQueuedMessagesView {
+  messages: string[];
+  awaitingPrompt: boolean;
+  pipelineMessages?: string[];
+}
+
 export interface SessionScheduledWakeState {
   dueAt: string;
   message: string;
@@ -910,7 +923,7 @@ export interface SessionSidecarView {
   ageWarn?: boolean;
 }
 
-export interface SessionView extends SessionRecord {
+export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -924,6 +937,7 @@ export interface SessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  queuedMessages?: SessionQueuedMessagesView;
 }
 
 export interface DashboardSessionView extends SessionRecord {

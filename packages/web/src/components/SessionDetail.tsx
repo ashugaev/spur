@@ -36,7 +36,11 @@ import { ActivityDot } from "@/components/ActivityDot";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
+import { IconActionButton } from "@/components/IconActionButton";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { SendIcon } from "@/components/icons/SendIcon";
+import { Spinner } from "@/components/icons/Spinner";
+import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
@@ -1934,6 +1938,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  // Content-keyed, same as the daemon: the row's exact message text travels
+  // in the body, not an index — the server has no index to resolve.
+  const handleQueueAction = async (action: "remove" | "flush", message: string, index: number) => {
+    setBusyAction(`queue:${action}:${index}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/queue/${action}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message }),
+        },
+      );
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
+      }
+      await loadSession();
+    } catch (queueError) {
+      showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleOpenPrAction = async (prAction: OpenPrAction) => {
     if (!openPrAction) return;
     const body = {
@@ -2912,7 +2941,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
-              session.queuedMessages.awaitingPrompt ? (
+              session.queuedMessages.awaitingPrompt ||
+              (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Queued messages
@@ -2920,27 +2950,86 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </h2>
                   {session.queuedMessages.messages.length > 0 ? (
                     <ol aria-label="Queued messages list" className="space-y-2">
-                      {session.queuedMessages.messages.map((queuedMessage, index) => (
-                        <li
-                          key={`${session.id}:queued:${index}:${queuedMessage}`}
-                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
-                        >
-                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                            #{index + 1}
-                          </div>
-                          <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                      {session.queuedMessages.messages.map((queuedMessage, index) => {
+                        const removeBusy = busyAction === `queue:remove:${index}`;
+                        const flushBusy = busyAction === `queue:flush:${index}`;
+                        return (
+                          <li
+                            key={`${session.id}:queued:${index}:${queuedMessage}`}
+                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
                           >
-                            {queuedMessage}
-                          </div>
-                        </li>
-                      ))}
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                                #{index + 1}
+                              </div>
+                              <div className="flex shrink-0 gap-1.5">
+                                <IconActionButton
+                                  label={`Send queued message #${index + 1} now`}
+                                  busyLabel={`Sending queued message #${index + 1}…`}
+                                  busy={flushBusy}
+                                  disabled={busyAction !== null}
+                                  onClick={() =>
+                                    void handleQueueAction("flush", queuedMessage, index)
+                                  }
+                                >
+                                  {flushBusy ? (
+                                    <Spinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <SendIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                                  )}
+                                </IconActionButton>
+                                <IconActionButton
+                                  label={`Remove queued message #${index + 1}`}
+                                  busyLabel={`Removing queued message #${index + 1}…`}
+                                  busy={removeBusy}
+                                  disabled={busyAction !== null}
+                                  onClick={() =>
+                                    void handleQueueAction("remove", queuedMessage, index)
+                                  }
+                                >
+                                  {removeBusy ? (
+                                    <Spinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <TrashIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                                  )}
+                                </IconActionButton>
+                              </div>
+                            </div>
+                            <div
+                              className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                            >
+                              {queuedMessage}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
                     <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt — queued messages will send automatically.
                     </p>
+                  ) : null}
+                  {(session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
+                    <div className="mt-2">
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Auto steps
+                      </div>
+                      <ol aria-label="Auto pipeline steps list" className="mt-1 space-y-2">
+                        {session.queuedMessages.pipelineMessages?.map((stepMessage, index) => (
+                          <li
+                            key={`${session.id}:pipeline-queued:${index}:${stepMessage}`}
+                            className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 py-2"
+                          >
+                            <div
+                              className={`${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-tertiary)]`}
+                            >
+                              {stepMessage}
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
                   ) : null}
                 </section>
               ) : null}

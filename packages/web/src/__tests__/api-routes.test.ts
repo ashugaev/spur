@@ -74,6 +74,8 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remove/route";
+import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
 import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
 import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
@@ -646,6 +648,90 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/send",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  // ── POST /api/sessions/:id/queue/remove, .../queue/flush ────────────────
+
+  it("POST /api/sessions/:id/queue/remove rejects an empty message", async () => {
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/queue/flush rejects a missing message", async () => {
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("queue/remove forwards a 404 (not queued) body and status verbatim", async () => {
+    const notFound = { error: "Message not found in queue for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(notFound), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual(notFound);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/remove",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+    );
+  });
+
+  it("queue/flush forwards a 409 (delivery in flight) body and status verbatim", async () => {
+    const conflict = { error: "Delivery already in flight for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/flush",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
     );
   });
 
