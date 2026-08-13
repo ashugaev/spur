@@ -24,9 +24,7 @@ interface MockBuffer {
   baseY: number;
   rows: Array<MockBufferRow | undefined>;
   length: number;
-  getLine: (index: number) =>
-    | { isWrapped: boolean; translateToString: () => string }
-    | undefined;
+  getLine: (index: number) => { isWrapped: boolean; translateToString: () => string } | undefined;
 }
 
 function createBuffer(
