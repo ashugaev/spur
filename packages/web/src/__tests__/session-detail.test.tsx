@@ -2538,6 +2538,64 @@ describe("SessionDetail queue controls", () => {
     expect(await screen.findByText("Delivery already in flight for api-a1")).toBeInTheDocument();
     expect(screen.getByText("second follow-up")).toBeInTheDocument();
   });
+
+  it("announces the busy state on a per-row control via aria-busy and a swapped aria-label, for a screen reader, not only the visible spinner", async () => {
+    let resolveFlush: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              queuedMessages: { messages: ["first follow-up"], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveFlush = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    const flushButton = screen.getByLabelText("Send queued message #1 now");
+    const removeButton = screen.getByLabelText("Remove queued message #1");
+    expect(flushButton).not.toHaveAttribute("aria-busy");
+    expect(removeButton).not.toHaveAttribute("aria-busy");
+
+    fireEvent.click(flushButton);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Sending queued message #1…")).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+    });
+    // The remove button on the SAME row stays idle — only the control the
+    // user actually triggered announces busy.
+    expect(screen.getByLabelText("Remove queued message #1")).not.toHaveAttribute("aria-busy");
+
+    resolveFlush!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute(
+        "aria-busy",
+      );
+    });
+    fetchMock.mockRestore();
+  });
 });
 
 describe("SessionDetail logs", () => {

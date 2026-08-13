@@ -2965,6 +2965,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               <div className="flex shrink-0 gap-1.5">
                                 <IconActionButton
                                   label={`Send queued message #${index + 1} now`}
+                                  busyLabel={`Sending queued message #${index + 1}…`}
+                                  busy={flushBusy}
                                   disabled={busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
@@ -2978,6 +2980,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 </IconActionButton>
                                 <IconActionButton
                                   label={`Remove queued message #${index + 1}`}
+                                  busyLabel={`Removing queued message #${index + 1}…`}
+                                  busy={removeBusy}
                                   disabled={busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("remove", queuedMessage, index)

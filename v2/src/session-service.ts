@@ -2133,6 +2133,14 @@ export class SessionService {
   // does not bound (classifySessionRecord/ensureSessionReadyForSend can run
   // for a while before the pane lock is ever taken).
   private readonly queueDeliveryInFlight = new Set<string>();
+  // Log-once-per-transition for a queued-message delivery attempt that
+  // fails before or during the pane write: keyed by session id, value is
+  // the last logged failure message. A permanently broken session (missing
+  // workspace, dead relaunch) polls every PIPELINE_POLL_INTERVAL_MS and
+  // would otherwise flood session.message.delivery_failed once per second
+  // forever; only a CHANGE in the failure (a new problem, or a fresh
+  // failure after a successful delivery cleared the entry) logs again.
+  private readonly queuedMessageDeliveryLastFailure = new Map<string, string>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
@@ -4177,6 +4185,11 @@ export class SessionService {
     for (const sessionId of this.claudeRotationEpisode.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeRotationEpisode.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.queuedMessageDeliveryLastFailure.delete(sessionId);
       }
     }
   }
@@ -8668,33 +8681,35 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const queued = queuedMessages(readySession);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
+    // Single fresh read, taken once immediately before both the dedupe check
+    // and the append below, and used for both: `readySession` above can be
+    // stale by the time this runs (ensureSessionReadyForSend may have waited
+    // on a busy agent), and checking the dedupe against a stale queue while
+    // appending onto a fresher one lets two concurrent sends of the same
+    // text both pass the dedupe check and both append, leaving a duplicate
+    // entry that breaks unit 2's content key (exact text unique per queue).
+    // Only the queue field is taken from the fresh read; every other field
+    // still comes from `readySession`.
+    const latestQueued = queuedMessages(
+      readSession(this.config.dataDir, sessionId) ?? readySession,
+    );
     let activeRecord: SessionRecord;
-    if (queued.includes(finalMessage)) {
+    if (latestQueued.includes(finalMessage)) {
       this.logEvent("session.message.duplicate_ignored", {
         level: "info",
         sessionId,
         projectId: readySession.project,
         message: `Ignored duplicate queued message for ${sessionId}`,
         details: {
-          queuedCount: queued.length,
+          queuedCount: latestQueued.length,
           messageLength: finalMessage.length,
         },
       });
       activeRecord = readySession;
     } else {
-      // Re-read immediately before the append: `readySession` above can be
-      // stale by the time this write lands (ensureSessionReadyForSend may
-      // have waited on a busy agent), and a blind append over that stale
-      // queue would erase a concurrent drain's commit or a concurrent
-      // send's append. Only the queue field is taken from the fresh read;
-      // every other field still comes from `readySession`.
-      const latestQueued = queuedMessages(
-        readSession(this.config.dataDir, sessionId) ?? readySession,
-      );
       activeRecord = withQueuedMessages(
         {
           ...readySession,
@@ -11482,56 +11497,75 @@ export class SessionService {
         return false;
       }
 
-      const readySession = await this.ensureSessionReadyForSend(session);
-      const classified = await this.classifySessionRecord(readySession);
-      // A live claude server-error wedge behaves like "waiting" for delivery
-      // purposes: typing the queued message is exactly what un-wedges Claude
-      // (the same mechanism as the reactivation nudge in processScheduledWakes),
-      // so an ordinary queued send must not sit for up to 30 minutes waiting
-      // for that nudge to fire on its own.
-      if (classified.state !== "waiting" && !classified.serverError) {
-        return false;
-      }
-      // Gate on the agent's own structured artifact, not raw tmux activity. Raw
-      // tmux activity is the session-wide max across every window, so a user's
-      // split running a dev server would stall delivery indefinitely, and merely
-      // attaching the web terminal (which makes the TUI repaint) would delay it
-      // by another full window. The agent's transcript is inherently scoped to
-      // the agent and is untouched by both.
-      if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
-        return false;
-      }
-
-      const latest = readSession(this.config.dataDir, sessionId);
-      if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
-        return false;
-      }
-
-      const nextMessage = queuedMessages(latest)[0];
-      if (!nextMessage) {
-        return false;
-      }
-
+      let nextMessage: string | undefined;
       try {
+        const readySession = await this.ensureSessionReadyForSend(session);
+        const classified = await this.classifySessionRecord(readySession);
+        // A live claude server-error wedge behaves like "waiting" for delivery
+        // purposes: typing the queued message is exactly what un-wedges Claude
+        // (the same mechanism as the reactivation nudge in processScheduledWakes),
+        // so an ordinary queued send must not sit for up to 30 minutes waiting
+        // for that nudge to fire on its own.
+        if (classified.state !== "waiting" && !classified.serverError) {
+          return false;
+        }
+        // Gate on the agent's own structured artifact, not raw tmux activity. Raw
+        // tmux activity is the session-wide max across every window, so a user's
+        // split running a dev server would stall delivery indefinitely, and merely
+        // attaching the web terminal (which makes the TUI repaint) would delay it
+        // by another full window. The agent's transcript is inherently scoped to
+        // the agent and is untouched by both.
+        if (
+          !isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())
+        ) {
+          return false;
+        }
+
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
+          return false;
+        }
+
+        nextMessage = queuedMessages(latest)[0];
+        if (!nextMessage) {
+          return false;
+        }
+
         await this.deliverQueuedMessage(latest, nextMessage);
+        // A delivery that actually landed clears any dedup so a LATER
+        // failure (a new problem, not a repeat) logs fresh.
+        this.queuedMessageDeliveryLastFailure.delete(sessionId);
+        return true;
       } catch (error) {
-        // A queued-message delivery failure must never reach runDeliveryLoop's
-        // outer catch: that would call markPipelineErrored, which early-returns
-        // for a queued-message-only session and leaves no trace, and it would
-        // end the loop with no re-arm (no timer, no sweep exists). The message
-        // stays queued; the loop's own sleep-and-continue retries it.
+        // Wraps the whole attempt, not just the pane write: ensureSessionReadyForSend
+        // throws on real live conditions (missing workspace, killed/completed,
+        // a failed relaunch), and that throw must never reach runDeliveryLoop's
+        // outer catch either — it calls markPipelineErrored, which early-returns
+        // for a queued-message-only session and leaves no trace, ending the loop
+        // with no re-arm (defect C1's wedge, unqualified: ANY failure in this
+        // attempt, not only the send itself). The message stays queued; the
+        // loop's own sleep-and-continue retries it on the next poll.
         const failure = error instanceof Error ? error.message : String(error);
-        this.logEvent("session.message.delivery_failed", {
-          level: "error",
-          sessionId,
-          projectId: latest.project,
-          message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
-          details: {
-            messageLength: nextMessage.length,
-          },
-        });
+        // Log-once-per-transition: a permanently broken session (e.g. a
+        // wiped worktree) would otherwise log an error every
+        // PIPELINE_POLL_INTERVAL_MS (1s) forever. Only the first occurrence
+        // of a given failure message logs; a change (new problem, or
+        // recovery then a fresh failure) logs again.
+        const lastFailure = this.queuedMessageDeliveryLastFailure.get(sessionId);
+        if (lastFailure !== failure) {
+          this.queuedMessageDeliveryLastFailure.set(sessionId, failure);
+          this.logEvent("session.message.delivery_failed", {
+            level: "error",
+            sessionId,
+            projectId: session.project,
+            message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
+            details: {
+              ...(nextMessage !== undefined ? { messageLength: nextMessage.length } : {}),
+            },
+          });
+        }
+        return true;
       }
-      return true;
     } finally {
       this.queueDeliveryInFlight.delete(sessionId);
     }

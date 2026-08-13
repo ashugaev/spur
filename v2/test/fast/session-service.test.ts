@@ -5392,6 +5392,76 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
   });
 
+  it("survives a pre-delivery throw from ensureSessionReadyForSend (missing workspace): queue retained, one delivery_failed logged, no exception escapes (BLOCKING 2)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first queued"],
+        awaitingPrompt: false,
+      },
+    });
+    // Runtime gone (pane dead) so ensureSessionReadyForSend skips the live
+    // early-return and falls into recovery, and the workspace is missing so
+    // it throws BEFORE any pane write is attempted — the exact failure mode
+    // named in the review (missing workspace, :10228 in the reviewer's
+    // reading; killed/completed and a failed relaunch throw the same way).
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    // Before the fix, this throw escaped tryDeliverQueuedMessage entirely
+    // (only the pane write itself was wrapped) and would have reached
+    // runDeliveryLoop's outer catch -> markPipelineErrored -> silent
+    // early-return -> the loop dies with no re-arm and no event. Asserting
+    // this call resolves (never rejects) is what pins that it no longer
+    // escapes.
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_failed",
+        level: "error",
+        sessionId: "api-1",
+        message: expect.stringContaining("workspace is missing"),
+      }),
+    );
+    const failedLogCallsAfterFirst = logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "session.message.delivery_failed",
+    ).length;
+    expect(failedLogCallsAfterFirst).toBe(1);
+
+    // Log-once-per-transition (this task's chosen mitigation for the flood a
+    // permanently broken session would otherwise produce every
+    // PIPELINE_POLL_INTERVAL_MS): an IDENTICAL failure on the very next poll
+    // does not log again, but the call still resolves normally — the loop
+    // keeps retrying, it just stops re-announcing the same problem.
+    const deliveredAgain = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    expect(deliveredAgain).toBe(true);
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.message.delivery_failed",
+      ).length,
+    ).toBe(1);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+  });
+
   it("does not lose a send landing mid-drain: both messages survive and deliver in order (AC3)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
@@ -5463,6 +5533,77 @@ describe("SessionService", () => {
       .filter(([id]) => id === "api-1")
       .map(([, message]) => message);
     expect(finalOrder).toEqual(["first", "second"]);
+  });
+
+  it("a send() parked inside ensureSessionReadyForSend does not resurrect a message the drain committed while it waited (A4 send-append)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        // Already true, as it would be while a real drain is in flight (same
+        // reasoning as AC3): this isolates the append's own fresh-read
+        // behavior from send()'s OWN inline delivery attempt at 8748, which
+        // would otherwise immediately re-deliver the drain's remaining head
+        // the moment send() sees awaitingPrompt !== true, confounding this
+        // test with a second, unrelated delivery.
+        messages: ["a", "b"],
+        awaitingPrompt: true,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    // send()'s own ensureSessionReadyForSend is the FIRST call to
+    // tmuxSessionExists (its synchronous prelude runs before this test code
+    // resumes); park exactly that one call. The drain's own
+    // ensureSessionReadyForSend/classifySessionRecord calls come later and
+    // resolve immediately, so the drain can run to completion first.
+    let tmuxCall = 0;
+    let releaseFirstTmuxCheck: () => void = () => {};
+    const firstTmuxGate = new Promise<void>((resolve) => {
+      releaseFirstTmuxCheck = resolve;
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => {
+      tmuxCall += 1;
+      if (tmuxCall === 1) {
+        await firstTmuxGate;
+      }
+      return true;
+    });
+
+    const sendPromise = service.send("api-1", { message: "c" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    expect(delivered).toBe(true);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b"]);
+
+    releaseFirstTmuxCheck();
+    await sendPromise;
+
+    // "a" must stay delivered (not resurrected) and "c" must land on top of
+    // the drain's post-commit queue, not on the stale pre-drain snapshot
+    // send() read before it parked.
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b", "c"]);
+    const order = sendMessageToTmuxMock.mock.calls
+      .filter(([id]) => id === "api-1")
+      .map(([, message]) => message);
+    expect(order).toEqual(["a"]);
   });
 
   it("removes a message landing mid-drain, and the drain's commit never resurrects it (AC4)", async () => {
