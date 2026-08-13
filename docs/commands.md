@@ -101,12 +101,14 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
 
 ```bash
-spur queue <sessionId> list
-spur queue <sessionId> remove <index>
-spur queue <sessionId> flush <index>
+spur queue <sessionId> list [--json]
+spur queue <sessionId> remove <index> [--json]
+spur queue <sessionId> flush <index> [--json]
 ```
 
-Manages one session's message queue. `list` prints the queue as a 1-based numbered list of real queued messages; a pipeline's own future steps print separately, unnumbered, and are never a valid `remove`/`flush` target. `remove`/`flush` take that 1-based index, resolve it to exact message text via a fresh read taken immediately before acting (the daemon is content-keyed, not index-based, so an index is never sent over the wire), and echo the resolved text — the queue can change between an earlier `list` and this call, so what actually moved may differ from what an index printed a moment ago. `remove` drops the message without sending it. `flush` sends it immediately, ahead of the rest of the queue; it returns 409 while a pane write for this session is already in flight (the queue drain, or another flush) rather than blocking the command for the length of an ack window.
+One session's message queue. `list` numbers real queued messages from `1`; a pipeline's own future steps print separately, unnumbered, and are never a `remove`/`flush` target. `remove`/`flush` take that number, resolve it to exact message text through a fresh read taken immediately before acting, and echo the resolved text. The queue moves on its own, so a number from an older `list` either fails as not queued or acts on whatever now sits at that position. `remove` drops the message unsent. `flush` sends it immediately, ahead of the rest of the queue, which stays queued; it fails `409` while a pane write for that session is already in flight (the queue drain, or another flush) instead of holding the command for an ack window.
+
+Both act through `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush`, body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire; `404` when that text is not queued. The web session view drives the same two routes from per-row send-now and delete icons; auto steps get no controls.
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
 
