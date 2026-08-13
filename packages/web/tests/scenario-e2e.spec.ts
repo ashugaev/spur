@@ -296,9 +296,7 @@ async function expectTerminalLinksWithinViewport(
     throw new Error("Terminal links layout bounds unavailable");
   }
   expect(triggerBox.x).toBeGreaterThanOrEqual(controlsBox.x);
-  expect(triggerBox.x + triggerBox.width).toBeLessThanOrEqual(
-    controlsBox.x + controlsBox.width,
-  );
+  expect(triggerBox.x + triggerBox.width).toBeLessThanOrEqual(controlsBox.x + controlsBox.width);
   expect(panelBox.x).toBeGreaterThanOrEqual(0);
   expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width);
   expect(panelBox.y).toBeGreaterThanOrEqual(0);
@@ -800,7 +798,10 @@ test.describe("scenario migration E2E: terminal links", () => {
     await expect(page.getByRole("menu", { name: "Terminal links" })).toHaveCount(0);
     await expect
       .poll(async () =>
-        newest.locator("span").nth(1).evaluate((element) => element.scrollWidth > element.clientWidth),
+        newest
+          .locator("span")
+          .nth(1)
+          .evaluate((element) => element.scrollWidth > element.clientWidth),
       )
       .toBe(true);
     await expectTerminalLinksWithinViewport(page, terminal, trigger, panel);

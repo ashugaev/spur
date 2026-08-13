@@ -83,9 +83,7 @@ function trimTerminalUrlCandidate(candidate: string): string {
   return trimmed;
 }
 
-export function extractTerminalLinks(
-  rows: Array<TerminalBufferRow | undefined>,
-): TerminalLink[] {
+export function extractTerminalLinks(rows: Array<TerminalBufferRow | undefined>): TerminalLink[] {
   const occurrences: TerminalLink[] = [];
 
   for (const line of groupTerminalRows(rows)) {
