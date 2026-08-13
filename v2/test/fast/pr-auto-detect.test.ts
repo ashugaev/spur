@@ -539,18 +539,7 @@ describe("PR auto-detect", () => {
     if (!baseProject) {
       throw new Error("Missing api project fixture");
     }
-    return {
-      path: baseProject.path,
-      defaultBranch: baseProject.defaultBranch,
-      sessionPrefix: baseProject.sessionPrefix,
-      worktree: baseProject.worktree,
-      restoreAfterReboot: baseProject.restoreAfterReboot,
-      symlinks: baseProject.symlinks,
-      sidecars: baseProject.sidecars,
-      backlog: baseProject.backlog,
-      triggers: baseProject.triggers,
-      sources,
-    };
+    return { ...baseProject, sources };
   }
 
   it("does not call glab when every remote is github.com and no PR exists", async () => {
@@ -627,9 +616,6 @@ describe("PR auto-detect", () => {
         },
       ]),
     );
-    applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
-    } satisfies SessionSlots);
     vi.mocked(buildMergedConfig).mockReturnValue({
       config: {
         ...baseConfig(),
