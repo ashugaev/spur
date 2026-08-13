@@ -274,6 +274,7 @@ export interface SpurSessionView {
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
@@ -479,6 +480,7 @@ export interface DashboardSession {
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
@@ -527,7 +529,13 @@ export function toDashboardSession(
     };
   });
   const tags = session.slots?.tags ?? [];
-  const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
+  const queuedMessages = {
+    messages: session.queuedMessages?.messages ?? [],
+    awaitingPrompt: session.queuedMessages?.awaitingPrompt ?? false,
+    ...(session.queuedMessages?.pipelineMessages !== undefined
+      ? { pipelineMessages: session.queuedMessages.pipelineMessages }
+      : {}),
+  };
   return {
     id: session.id,
     projectId: session.project,

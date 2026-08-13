@@ -3358,7 +3358,9 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     });
 
     await page.goto("/");
-    await expect(page.getByText("Loading...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("status", { name: "Loading dashboard" })).not.toBeVisible({
+      timeout: 10_000,
+    });
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
 
     // Delay any subsequent /api/sessions call so that, if the dashboard were to
@@ -3374,7 +3376,184 @@ test.describe("D7d: Sessions list cache on revisit", () => {
 
     await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
-    await expect(page.getByText("Loading...")).toHaveCount(0);
+    await expect(page.getByRole("status", { name: "Loading dashboard" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
+  });
+});
+
+test.describe("D8: Loading feedback", () => {
+  test("maps dashboard and model waits to animated loaders", async ({ page }, testInfo) => {
+    let releaseSessions: (() => void) | undefined;
+    const sessionsReady = new Promise<void>((resolve) => {
+      releaseSessions = resolve;
+    });
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
+      await sessionsReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sessions: [],
+          projects: [{ id: "my-project", name: "my-project", configured: true }],
+          backlog: [],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    const dashboardLoader = page.getByRole("status", { name: "Loading dashboard" });
+    await expect(dashboardLoader).toBeVisible();
+    await expect(dashboardLoader.locator(".loader-centered-mark > span").first()).toHaveCSS(
+      "animation-name",
+      "loader-centered-pulse",
+    );
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const center = await page.evaluate(() => {
+        const mark = document.querySelector(".loader-centered-mark")?.getBoundingClientRect();
+        const header = document.querySelector("body > div header")?.getBoundingClientRect();
+        const footer = document.querySelector("body footer")?.getBoundingClientRect();
+        if (!mark || !header || !footer) return null;
+        return {
+          actualX: mark.left + mark.width / 2,
+          actualY: mark.top + mark.height / 2,
+          expectedX: window.innerWidth / 2,
+          expectedY: (header.bottom + footer.top) / 2,
+        };
+      });
+      expect(center).not.toBeNull();
+      expect(Math.abs((center?.actualX ?? 0) - (center?.expectedX ?? 0))).toBeLessThanOrEqual(1);
+      expect(Math.abs((center?.actualY ?? 0) - (center?.expectedY ?? 0))).toBeLessThanOrEqual(8);
+    }
+    const dashboardLoaderBox = await dashboardLoader.locator(".loader-centered-mark").boundingBox();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(dashboardLoader.locator(".loader-centered-mark > span").first()).toHaveCSS(
+      "animation-name",
+      "none",
+    );
+    expect(await dashboardLoader.locator(".loader-centered-mark").boundingBox()).toEqual(
+      dashboardLoaderBox,
+    );
+    await page.screenshot({ path: testInfo.outputPath("dashboard-loading.png") });
+
+    releaseSessions?.();
+    await expect(dashboardLoader).toHaveCount(0);
+
+    let releaseModels: (() => void) | undefined;
+    const modelsReady = new Promise<void>((resolve) => {
+      releaseModels = resolve;
+    });
+    await page.route("**/api/models?agent=claude", async (route) => {
+      await modelsReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ models: [] }),
+      });
+    });
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("button", { name: "Spawn model" }).click();
+    await expect(page.getByRole("status", { name: "Loading models" })).toHaveClass(
+      /loader-skeleton/,
+    );
+    const modelSkeleton = page.getByRole("status", { name: "Loading models" });
+    const modelSkeletonBox = await modelSkeleton.boundingBox();
+    await expect(modelSkeleton).toHaveCSS("animation-name", "none");
+    await expect(modelSkeleton).toHaveCSS("background-image", "none");
+    expect(await modelSkeleton.boundingBox()).toEqual(modelSkeletonBox);
+    releaseModels?.();
+  });
+
+  test("stops button and panel loader motion when reduced motion is requested", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("**/api/runtime/info", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ version: "1.4.0" }),
+      });
+    });
+    await page.route("**/api/runtime/versions", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current: "1.4.0",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-08-11T00:00:00.000Z" },
+            { tag: "1.4.0", publishedAt: "2026-08-01T00:00:00.000Z" },
+          ],
+        }),
+      });
+    });
+    let releaseSwitch: (() => void) | undefined;
+    const switchReady = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+    await page.route("**/api/runtime/versions/switch", async (route) => {
+      await switchReady;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ accepted: true, version: "1.5.0" }),
+      });
+    });
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /Show Spur version information/ })).toContainText(
+      "1.4.0",
+    );
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+    await page.getByRole("button", { name: "Switch Spur to 1.5.0" }).click();
+    const dialog = page.getByRole("dialog", { name: "Switch Spur version" });
+    await dialog.getByRole("button", { name: "Switch", exact: true }).click();
+    const switchingButton = dialog.getByRole("button", { name: "Switching version" });
+    await expect(switchingButton.locator(".voice-spinner")).toHaveCSS("animation-name", "none");
+
+    releaseSwitch?.();
+    const loadingBar = page.getByRole("status", { name: "Updating Spur" });
+    await expect(loadingBar).toBeVisible();
+    const loadingBarBox = await loadingBar.boundingBox();
+    await expect(loadingBar.locator(".loader-bar-segment")).toHaveCSS("animation-name", "none");
+    expect(await loadingBar.boundingBox()).toEqual(loadingBarBox);
+  });
+
+  test("keeps the desktop spawn button width while busy", async ({ page }, testInfo) => {
+    await openSpawnModal(page);
+    await page.route("**/api/preflight", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/loader-width" }),
+      });
+    });
+    let releaseSpawn: (() => void) | undefined;
+    const spawnReady = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    await page.route("**/api/spawn", async (route) => {
+      await spawnReady;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "loader-width" })),
+      });
+    });
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const idleButton = page.getByRole("button", { name: /^spawn$/i });
+    const idleBox = await idleButton.boundingBox();
+    await idleButton.click();
+    const busyButton = page.getByRole("button", { name: "Spawning session" });
+    await expect(busyButton).toHaveAttribute("aria-busy", "true");
+    const busyBox = await busyButton.boundingBox();
+    expect(idleBox?.width).toBe(busyBox?.width);
+    await page.screenshot({ path: testInfo.outputPath("spawn-busy-desktop.png") });
+    releaseSpawn?.();
   });
 });

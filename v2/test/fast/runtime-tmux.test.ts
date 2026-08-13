@@ -1,6 +1,7 @@
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
 
 type ExecFileAsync = (
   file: string,
@@ -489,6 +490,35 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
+  it("skips the interrupt keystroke for cursor sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "cursor" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(false);
+    expect(sleepMock).not.toHaveBeenCalledWith(500);
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
+  it("keeps the interrupt keystroke for claude sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "claude" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
+    expect(sleepMock).toHaveBeenCalledWith(500);
+  });
+
   it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
     let captureCount = 0;
     execFileAsyncMock.mockImplementation(async (_file, args) => {
@@ -517,7 +547,54 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
-  it("waits past the previous 30-second cutoff for a slow agent prompt", async () => {
+  it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
+    const resumedPane = "some replayed history line\nanother replayed line\n→ Add a follow-up";
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        return { stdout: resumedPane, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      waitForTmuxReady("api-1", [CURSOR_RESUME_READY_MARKER], 5_000, { agent: "cursor" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws PromptReadyTimeoutError when the pane never reaches the prompt", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        now += 10_000;
+        return { stdout: "Starting...", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { waitForTmuxReady, PromptReadyTimeoutError } =
+        await import("../../src/runtime-tmux.js");
+
+      await expect(
+        waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" }),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof PromptReadyTimeoutError &&
+          err.message.startsWith(
+            `Timed out waiting for tmux session "api-1" to reach the agent prompt`,
+          ) &&
+          err.elapsedMs > 0
+        );
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("waits past the previous 30-second cutoff for a slow agent prompt by default", async () => {
     let now = 0;
     let captureCount = 0;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -536,7 +613,7 @@ describe("runtime-tmux", () => {
     try {
       const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
 
-      await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, { agent: "claude" });
+      await waitForTmuxReady("api-1", ["Claude Code", "❯"]);
 
       expect(captureCount).toBe(5);
       expect(sleepMock.mock.calls.slice(0, 4)).toEqual([[728], [1_228], [2_228], [2_228]]);

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FavoriteIcon } from "@/components/icons/FavoriteIcon";
+import { Skeleton } from "@/components/Skeleton";
 import { INPUT_CLASS } from "@/design/classes";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useFavorites } from "@/hooks/useFavorites";
@@ -141,8 +142,8 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
               <span className="font-bold">Default</span>
             </button>
             {loading ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
-                Loading…
+              <div className="px-2 py-2">
+                <Skeleton className="h-4 w-28" label="Loading models" />
               </div>
             ) : error ? (
               <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-error)]">
