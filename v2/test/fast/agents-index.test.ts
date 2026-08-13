@@ -60,6 +60,7 @@ vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
 }));
 
 import {
+  agentHasLaunchSubmitAck,
   agentSubmitAckPacing,
   buildAgentLaunchPlan,
   createAgentSubmitAckBinding,
@@ -334,11 +335,9 @@ describe("createAgentSubmitAckBinding", () => {
     const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
     const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
     await binding?.scan("hello");
-    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(
-      ctx.worktreePath,
-      "pinned-uuid",
-      {},
-    );
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid", {
+      freshLaunch: false,
+    });
     expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/file.jsonl", size: 42 },
       "hello",
@@ -409,6 +408,14 @@ describe("agentSubmitAckPacing", () => {
       windowMs: 5_000,
       maxResends: 2,
     });
+  });
+
+  it("reports launch-send pacing for claude only", () => {
+    // Callers scope launch-send handling by this flag, so it must track exactly
+    // the agents whose short window and Enter resends justify it.
+    expect(agentHasLaunchSubmitAck("claude")).toBe(true);
+    expect(agentHasLaunchSubmitAck("codex")).toBe(false);
+    expect(agentHasLaunchSubmitAck("cursor")).toBe(false);
   });
 
   it("keeps cursor and codex pacing on a launch send", () => {

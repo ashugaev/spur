@@ -343,7 +343,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
       const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
-        ...(ctx.freshLaunch === true ? { freshLaunch: true } : {}),
+        freshLaunch: ctx.freshLaunch === true,
       });
       if (!baseline) {
         return null;
@@ -596,6 +596,15 @@ export function agentSubmitAckPacing(
     return adapter.launchSubmitAck;
   }
   return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
+}
+
+/**
+ * Whether the agent has launch-send pacing of its own, meaning its short window
+ * plus Enter resends are the launch send's whole recovery. Callers use this to
+ * scope launch-send handling to those agents instead of an agent name.
+ */
+export function agentHasLaunchSubmitAck(agent: AgentName): boolean {
+  return agentAdapter(agent).launchSubmitAck !== undefined;
 }
 
 export async function createAgentSubmitAckBinding(

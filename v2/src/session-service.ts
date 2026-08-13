@@ -13,6 +13,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
+  agentHasLaunchSubmitAck,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
@@ -787,6 +788,14 @@ const RESTRICT_WRITES_PROMPT_SUFFIX =
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
+/**
+ * `submit_unconfirmed` marks the one send path that resolves without knowing the
+ * message reached the agent: a launch send whose ack window ran out while the
+ * pane process was still alive. Every other resolution is `submitted` — either
+ * the ack matched, or the agent has no ack to match, which is the same evidence
+ * the pipeline delivery loop acts on for steps 2..N.
+ */
+type AgentSendOutcome = "submitted" | "submit_unconfirmed";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
@@ -6788,6 +6797,25 @@ export class SessionService {
     return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
   }
 
+  /**
+   * Pipeline step 1 rides the launch message, so the delivery loop starts at
+   * step 2 and never reports it. Both spawn paths log it here instead, with the
+   * loop's own event shape, and only once submission is confirmed — the same bar
+   * steps 2..N clear.
+   */
+  private logFirstPipelineStepSent(sessionId: string, projectId: string, totalSteps: number): void {
+    this.logEvent("session.pipeline.step_sent", {
+      level: "info",
+      sessionId,
+      projectId,
+      message: `Sent pipeline step 1/${totalSteps} to ${sessionId}`,
+      details: {
+        stepIndex: 1,
+        totalSteps,
+      },
+    });
+  }
+
   private resolveSpawnTarget(
     request: SpawnSessionRequest,
     modeResolution: "strict" | "carried" = "strict",
@@ -7290,13 +7318,13 @@ export class SessionService {
         message: `Agent prompt is ready for ${sessionId}`,
       });
 
-      let initialPromptSent = false;
+      let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+        const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
-        initialPromptSent = true;
+        firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7307,7 +7335,7 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
-        initialPromptSent = true;
+        firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7320,19 +7348,8 @@ export class SessionService {
           },
         });
       }
-      if (pipeline && initialPromptSent) {
-        // Step 1 rides the launch message, so the delivery loop starts at step 2
-        // and never emits for it. Emit here so every step has a step_sent event.
-        this.logEvent("session.pipeline.step_sent", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Sent pipeline step 1/${pipeline.steps.length} to ${sessionId}`,
-          details: {
-            stepIndex: 1,
-            totalSteps: pipeline.steps.length,
-          },
-        });
+      if (pipeline && firstStepSubmitted) {
+        this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
 
       stage = "record.write";
@@ -8274,12 +8291,14 @@ export class SessionService {
         details: { attempt },
       });
 
+      let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+        const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
         initialPromptSent = true;
+        firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -8292,6 +8311,7 @@ export class SessionService {
         });
       } else if (promptDeliveredOnLaunch) {
         initialPromptSent = true;
+        firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -8305,19 +8325,8 @@ export class SessionService {
           },
         });
       }
-      if (pipeline && initialPromptSent) {
-        // Step 1 rides the launch message, so the delivery loop starts at step 2
-        // and never emits for it. Emit here so every step has a step_sent event.
-        this.logEvent("session.pipeline.step_sent", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Sent pipeline step 1/${pipeline.steps.length} to ${sessionId}`,
-          details: {
-            stepIndex: 1,
-            totalSteps: pipeline.steps.length,
-          },
-        });
+      if (pipeline && firstStepSubmitted) {
+        this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
@@ -9016,7 +9025,7 @@ export class SessionService {
     >,
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
-  ): Promise<void> {
+  ): Promise<AgentSendOutcome> {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
@@ -9029,7 +9038,7 @@ export class SessionService {
     >,
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
-  ): Promise<void> {
+  ): Promise<AgentSendOutcome> {
     const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
@@ -9039,7 +9048,7 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-          ...(freshLaunch ? { freshLaunch: true } : {}),
+          freshLaunch,
         })
       : null;
     const startedAt = Date.now();
@@ -9048,24 +9057,28 @@ export class SessionService {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
     if (!binding) {
-      return;
+      return "submitted";
     }
     const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
-      ...(freshLaunch ? { freshLaunch: true } : {}),
+      freshLaunch,
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
-        return;
+        return "submitted";
       }
       if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
+    // fresh:true — this value decides whether an unacked send throws, and the
+    // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
+    // agent that just died as alive.
     const processAlive = await isProcessRunningInTmux(
       session.tmuxSession,
       sessionProcessMatchers(session),
+      { fresh: true },
     );
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
@@ -9081,7 +9094,7 @@ export class SessionService {
           processAlive,
         },
       });
-      return;
+      return "submitted";
     }
     this.logEvent("session.submit.timeout", {
       level: "warn",
@@ -9096,13 +9109,15 @@ export class SessionService {
         processAlive,
       },
     });
-    if (freshLaunch && processAlive) {
-      // Throwing here would tear the session down: the foreground spawn kills
-      // the tmux session in its catch, and the background spawn retries from
-      // scratch. The Enter resends above are the whole recovery, and a live
-      // agent means the pane is healthy, so surface the event and let the
-      // spawn finish instead of destroying a session that may be working.
-      return;
+    if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
+      // Scoped to agents with launch-send pacing (claude): their short window
+      // plus Enter resends are the launch send's whole recovery, so throwing
+      // afterwards would only tear a healthy session down — the foreground
+      // spawn kills the pane in its catch and the background spawn retries from
+      // scratch. Agents without that pacing keep throwing, which is what drives
+      // their launch retry. The caller learns submission was never confirmed
+      // from the outcome below.
+      return "submit_unconfirmed";
     }
     throw new SubmitAckTimeoutError({
       sessionId: session.id,
@@ -10510,7 +10525,9 @@ export class SessionService {
       // Fresh-launch fallback fires when the transcript is gone: either no resume
       // id was discovered, or a pinned claude keeps its `--session-id` launch
       // because its transcript is missing (both skip the resume plan below).
-      if (!launchPlan && (!restoredAgentSessionId || pinnedClaudeId)) {
+      const freshLaunchFallback =
+        !launchPlan && (!restoredAgentSessionId || Boolean(pinnedClaudeId));
+      if (freshLaunchFallback) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
@@ -10608,7 +10625,12 @@ export class SessionService {
             agent: current.agent,
           });
         } else {
-          await this.sendAgentMessage(current, restoreInitialMessage);
+          // The fallback relaunched the agent instead of resuming it, so this is a
+          // launch send with no transcript behind it, same as a spawn's. A resume
+          // send keeps the mid-session pacing and its own timeout handling below.
+          await this.sendAgentMessage(current, restoreInitialMessage, {
+            freshLaunch: freshLaunchFallback,
+          });
         }
       }
     } catch (error) {
