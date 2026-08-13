@@ -715,18 +715,43 @@ test.describe("scenario migration E2E: terminal links", () => {
     );
     await expect(trigger).toHaveText("2");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    const idleTriggerStyle = await trigger.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        color: style.color,
+      };
+    });
     await captureTerminalLinksState(page, "idle");
 
     await trigger.hover();
+    await expect
+      .poll(async () => trigger.evaluate((element) => getComputedStyle(element).borderColor))
+      .not.toBe(idleTriggerStyle.borderColor);
     await captureTerminalLinksState(page, "hover");
     await trigger.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
     await expect(trigger).toBeFocused();
+    const focusedTriggerStyle = await trigger.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { borderColor: style.borderColor, color: style.color };
+    });
+    expect(focusedTriggerStyle.borderColor).not.toBe(idleTriggerStyle.borderColor);
+    expect(focusedTriggerStyle.color).not.toBe(idleTriggerStyle.color);
     await captureTerminalLinksState(page, "focus");
 
-    await trigger.click();
+    await page.keyboard.press("Enter");
     const panel = page.getByRole("region", { name: "Terminal links" });
     await expect(panel).toBeVisible();
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const openTriggerStyle = await trigger.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { backgroundColor: style.backgroundColor, borderColor: style.borderColor };
+    });
+    expect(openTriggerStyle.backgroundColor).not.toBe(idleTriggerStyle.backgroundColor);
+    expect(openTriggerStyle.borderColor).not.toBe(idleTriggerStyle.borderColor);
     await expect(panel.getByRole("link")).toHaveCount(2);
     await expect(panel.getByRole("link").nth(0)).toContainText("new.example");
     await expect(panel.getByRole("link").nth(0)).toContainText("https://new.example/a?q=1");
@@ -736,9 +761,20 @@ test.describe("scenario migration E2E: terminal links", () => {
     await expect(newest).toHaveAttribute("target", "_blank");
     await expect(newest).toHaveAttribute("rel", "noopener noreferrer");
     await expect(page.getByRole("menu", { name: "Terminal links" })).toHaveCount(0);
+    const idleLinkStyle = await newest.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { backgroundColor: style.backgroundColor, outlineStyle: style.outlineStyle };
+    });
+    await page.keyboard.press("Tab");
+    await expect(newest).toBeFocused();
+    const focusedLinkStyle = await newest.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { backgroundColor: style.backgroundColor, outlineStyle: style.outlineStyle };
+    });
+    expect(focusedLinkStyle.backgroundColor).not.toBe(idleLinkStyle.backgroundColor);
+    expect(focusedLinkStyle.outlineStyle).not.toBe(idleLinkStyle.outlineStyle);
     await captureTerminalLinksState(page, "desktop-open");
 
-    await newest.focus();
     await page.keyboard.press("Escape");
     await expect(panel).toHaveCount(0);
     await expect(trigger).toBeFocused();

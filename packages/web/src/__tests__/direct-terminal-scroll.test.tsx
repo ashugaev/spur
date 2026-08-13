@@ -452,22 +452,40 @@ describe("DirectTerminal scroll integration", () => {
     const result = await mountTerminal({ sessionId: "session-a" });
     fireEvent.click(await screen.findByRole("button", { name: "Open terminal links" }));
     const staleParsedCallback = parsedWriteCallback;
+    const staleResizeCallback = terminalResizeCallback;
+    const staleBufferCallback = bufferChangeCallback;
 
     normalBuffer.rows = [];
     const { DirectTerminal } = await import("@/components/DirectTerminal");
+    const { Terminal } = await import("xterm");
+    const terminalConstructor = vi.mocked(Terminal);
+    const constructionCount = terminalConstructor.mock.calls.length;
+    terminalConstructor.mockImplementationOnce(() => {
+      throw new Error("session B terminal setup failed");
+    });
     await act(async () => {
       result.rerender(<DirectTerminal sessionId="session-b" />);
     });
     expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
     expect(discoveryDisposables.parsed).toHaveBeenCalledTimes(1);
     expect(discoveryDisposables.resize).toHaveBeenCalledTimes(1);
     expect(discoveryDisposables.buffer).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(terminalConstructor).toHaveBeenCalledTimes(constructionCount + 1);
+    });
 
     normalBuffer.rows = [{ text: "https://session-a.example" }];
-    act(() => staleParsedCallback?.());
+    act(() => {
+      staleParsedCallback?.();
+      staleResizeCallback?.();
+      staleBufferCallback?.();
+    });
     expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
 
-    act(() => parsedWriteCallback?.());
+    await act(async () => {
+      result.rerender(<DirectTerminal sessionId="session-c" />);
+    });
     expect(await screen.findByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
   });
 
