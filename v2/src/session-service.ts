@@ -17,8 +17,7 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
-  agentSubmitAckMaxResends,
-  agentSubmitAckWindowMs,
+  agentSubmitAckPacing,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -7294,7 +7293,9 @@ export class SessionService {
       let initialPromptSent = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+          freshLaunch: true,
+        });
         initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -8275,7 +8276,9 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+          freshLaunch: true,
+        });
         initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -9012,7 +9015,7 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<void> {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
@@ -9025,8 +9028,9 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<void> {
+    const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
@@ -9035,6 +9039,7 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          ...(freshLaunch ? { freshLaunch: true } : {}),
         })
       : null;
     const startedAt = Date.now();
@@ -9045,8 +9050,9 @@ export class SessionService {
     if (!binding) {
       return;
     }
-    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
-    const maxResends = agentSubmitAckMaxResends(session.agent);
+    const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
+      ...(freshLaunch ? { freshLaunch: true } : {}),
+    });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
@@ -9086,9 +9092,18 @@ export class SessionService {
         lastScannedFile: lastResult.lastScannedFile,
         messageLength: message.length,
         elapsedMs,
+        ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
       },
     });
+    if (freshLaunch && processAlive) {
+      // Throwing here would tear the session down: the foreground spawn kills
+      // the tmux session in its catch, and the background spawn retries from
+      // scratch. The Enter resends above are the whole recovery, and a live
+      // agent means the pane is healthy, so surface the event and let the
+      // spawn finish instead of destroying a session that may be working.
+      return;
+    }
     throw new SubmitAckTimeoutError({
       sessionId: session.id,
       agent: session.agent,

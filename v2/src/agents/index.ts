@@ -82,17 +82,32 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
+// Launch-send pacing for claude. A claude TUI still rendering the pasted launch
+// message swallows the submit Enter, and nothing is submitted until another one
+// arrives, so the launch send scans in short windows instead of the mid-session
+// default. A healthy submit reaches the transcript within ~0.4s, so 5s is a
+// wide margin, and the resends land far before the next pipeline step could
+// overwrite the composer.
+const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
   codexSessionsDir: string;
   /** Pinned native session id, used to bind claude ack scanning by id. */
   agentSessionId?: string;
+  /** Send goes to an agent that just launched and has no transcript yet. */
+  freshLaunch?: boolean;
 }
 
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+}
+
+export interface SubmitAckPacing {
+  windowMs: number;
+  maxResends: number;
 }
 
 export interface SubmitAckBinding {
@@ -145,6 +160,8 @@ interface AgentAdapter {
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
+  /** Pacing for the launch send only, for an agent that needs its own. */
+  launchSubmitAck?: SubmitAckPacing;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
@@ -318,10 +335,16 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    launchSubmitAck: {
+      windowMs: CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS,
+      maxResends: CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
+        ...(ctx.freshLaunch === true ? { freshLaunch: true } : {}),
+      });
       if (!baseline) {
         return null;
       }
@@ -564,12 +587,15 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
 }
 
-export function agentSubmitAckWindowMs(agent: AgentName): number {
-  return agentAdapter(agent).submitAckWindowMs;
-}
-
-export function agentSubmitAckMaxResends(agent: AgentName): number {
-  return agentAdapter(agent).submitAckMaxResends;
+export function agentSubmitAckPacing(
+  agent: AgentName,
+  options?: { freshLaunch?: boolean },
+): SubmitAckPacing {
+  const adapter = agentAdapter(agent);
+  if (options?.freshLaunch === true && adapter.launchSubmitAck) {
+    return adapter.launchSubmitAck;
+  }
+  return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
 }
 
 export async function createAgentSubmitAckBinding(

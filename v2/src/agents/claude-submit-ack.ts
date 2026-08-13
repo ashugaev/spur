@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { findLatestSessionFile, sessionFileForId } from "./claude.js";
+import { findLatestSessionFile, sessionFileForId, sessionFilePathForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
 
 export interface ClaudeSubmitBaseline {
@@ -12,19 +12,28 @@ export interface ClaudeSubmitBaseline {
 export async function captureClaudeSubmitBaseline(
   worktreePath: string,
   agentSessionId?: string,
+  options?: { freshLaunch?: boolean },
 ): Promise<ClaudeSubmitBaseline | null> {
   const file = agentSessionId
     ? await sessionFileForId(worktreePath, agentSessionId)
     : await findLatestSessionFile(worktreePath);
-  if (!file) {
+  if (file) {
+    try {
+      const fileStat = await stat(file);
+      return { file, size: fileStat.size };
+    } catch {
+      return null;
+    }
+  }
+  if (!agentSessionId || options?.freshLaunch !== true) {
     return null;
   }
-  try {
-    const fileStat = await stat(file);
-    return { file, size: fileStat.size };
-  } catch {
-    return null;
-  }
+  // A freshly launched claude writes `<uuid>.jsonl` only when it persists the
+  // first submitted message, so the launch send has no transcript to baseline
+  // against — exactly when the ack matters. Bind to the path the pinned id will
+  // create; `scanClaudeJsonlForMessage` tolerates a file that is not there yet
+  // and re-resolves the id when this candidate never appears.
+  return { file: sessionFilePathForId(worktreePath, agentSessionId), size: 0 };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
