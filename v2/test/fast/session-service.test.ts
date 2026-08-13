@@ -41,6 +41,8 @@ import type {
   SessionView,
   StateSource,
 } from "../../src/types.js";
+// Type-only, so it never bypasses the mocked module registry below.
+import type { AgentSendOutcome } from "../../src/session-service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -966,7 +968,7 @@ type SessionServiceInternals = {
     },
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
-  ): Promise<void>;
+  ): Promise<AgentSendOutcome>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -981,6 +983,11 @@ type SessionServiceInternals = {
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
   return service as SessionServiceInternals;
 }
+
+// Typed, because vitest's `toBe` accepts any expected value: renaming an outcome
+// in the source has to fail this file's typecheck, not only its next run.
+const SUBMITTED: AgentSendOutcome = "submitted";
+const SUBMIT_UNCONFIRMED: AgentSendOutcome = "submit_unconfirmed";
 
 async function createDisposedSessionService() {
   const { SessionService } = await loadSessionServiceModule();
@@ -4680,7 +4687,7 @@ describe("SessionService", () => {
       ),
       // Cursor's live-process recovery counts as submitted, same as it does for
       // the pipeline delivery loop, which treats a non-throwing send as sent.
-    ).resolves.toBe("submitted");
+    ).resolves.toBe(SUBMITTED);
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
     expect(logSpurEventMock).toHaveBeenCalledWith(
@@ -4828,7 +4835,7 @@ describe("SessionService", () => {
       ),
       // Resolves, but reports the message as unconfirmed so the caller withholds
       // the step_sent event.
-    ).resolves.toBe("submit_unconfirmed");
+    ).resolves.toBe(SUBMIT_UNCONFIRMED);
 
     expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
       "claude",
@@ -5019,7 +5026,7 @@ describe("SessionService", () => {
 
       // A different pane is not blocked behind api-1's in-flight ack wait.
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-2", "second", { agent: "codex" });
-      await expect(secondSend).resolves.toBe("submitted");
+      await expect(secondSend).resolves.toBe(SUBMITTED);
 
       releaseFirstAck();
       await firstSend;

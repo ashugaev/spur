@@ -795,7 +795,7 @@ type BackgroundSpawnAttemptResult = "completed" | "retry";
  * the ack matched, or the agent has no ack to match, which is the same evidence
  * the pipeline delivery loop acts on for steps 2..N.
  */
-type AgentSendOutcome = "submitted" | "submit_unconfirmed";
+export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
