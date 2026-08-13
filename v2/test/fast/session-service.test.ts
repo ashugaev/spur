@@ -16624,7 +16624,7 @@ describe("SessionService", () => {
       },
     });
     runSpawnPreflightMock.mockRejectedValue(
-      new Error("Spawn preflight must return exactly one valid JSON result: prose"),
+      new Error("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose"),
     );
 
     const { SessionService } = await loadSessionServiceModule();
@@ -16664,7 +16664,7 @@ describe("SessionService", () => {
       },
     });
     runSpawnPreflightMock.mockRejectedValue(
-      new Error("Spawn preflight must return exactly one valid JSON result: prose"),
+      new Error("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose"),
     );
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
@@ -16836,7 +16836,7 @@ describe("SessionService", () => {
       },
     });
     runSpawnPreflightMock.mockRejectedValue(
-      new Error("Spawn preflight must return exactly one valid JSON result: prose"),
+      new Error("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose"),
     );
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
@@ -16873,7 +16873,7 @@ describe("SessionService", () => {
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
   });
 
-  it("fails after three invalid JSON preflight results", async () => {
+  it("fails after three malformed preflight results", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -16885,7 +16885,7 @@ describe("SessionService", () => {
         },
       },
     });
-    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned invalid JSON"));
+    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned malformed output"));
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -16960,7 +16960,7 @@ describe("SessionService", () => {
         },
       },
     });
-    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned invalid JSON"));
+    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned malformed output"));
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
     const { SessionService } = await loadSessionServiceModule();

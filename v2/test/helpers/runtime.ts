@@ -143,9 +143,9 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
     branch_hint="$retry_branch_hint"
   fi
   if [[ -n "$branch_hint" ]]; then
-    printf '{"branch":"%s"}\n' "$branch_hint"
+    printf '%s\n' "$branch_hint"
   else
-    printf '{"noProjectBranchRequirements":true}\n'
+    printf 'NO_PROJECT_RULES\n'
   fi
   exit 0
 fi
@@ -221,9 +221,9 @@ jsonl_append() {
   if printf '%s' "$preflight_input" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
     branch_hint="$retry_branch_hint"
   fi
-  payload='{"noProjectBranchRequirements":true}'
+  payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
-    payload='{"branch":"'"$branch_hint"'"}'
+    payload="$branch_hint"
   fi
   if [[ -n "$output_file" ]]; then
     printf '%s\n' "$payload" > "$output_file"
@@ -314,9 +314,9 @@ fi`
     branch_hint="$retry_branch_hint"
   fi
   if [[ -n "$branch_hint" ]]; then
-    printf '{"branch":"%s"}\n' "$branch_hint"
+    printf '%s\n' "$branch_hint"
   else
-    printf '{"noProjectBranchRequirements":true}\n'
+    printf 'NO_PROJECT_RULES\n'
   fi
   exit 0
 fi

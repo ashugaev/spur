@@ -69,7 +69,7 @@ spur spawn backend-api
 
 Agents launch with full access: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`.
 
-Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for exactly one JSON result before worktree creation: `{"branch":"<name>"}` or `{"noProjectBranchRequirements":true}`. Only the second result bypasses fallback `branchNaming` validation. Empty, malformed, failed, invalid, or checked-out results retry three times, then fail the spawn. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
+Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for exactly one line before worktree creation: a branch name or `NO_PROJECT_RULES`. Only the exact sentinel bypasses fallback `branchNaming` validation. Empty, malformed, failed, invalid, or checked-out results retry three times, then fail the spawn. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
 
 New worktree branches fetch `origin`, fast-forward the base branch when only behind, and branch from the freshest remote ref. Override the base per session with `--worktree <defaultBranch>`.
 

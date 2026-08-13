@@ -3,6 +3,7 @@ import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CodexModule from "../../src/agents/codex.js";
 import type * as ModelsModule from "../../src/agents/models.js";
+import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
 const { mockExecFileAsync, mockStdinEnd } = vi.hoisted(() => ({
@@ -119,7 +120,7 @@ describe("runSpawnPreflight", () => {
 
   it("runs claude in print mode and parses a branch suggestion", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":"feature/login-rate-limit"}\n',
+      stdout: "feature/login-rate-limit\n",
       stderr: "",
     });
 
@@ -159,7 +160,7 @@ describe("runSpawnPreflight", () => {
 
   it("passes retry feedback to the preflight prompt", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":"feature/login-rate-limit"}\n',
+      stdout: "feature/login-rate-limit\n",
       stderr: "",
     });
 
@@ -187,7 +188,7 @@ describe("runSpawnPreflight", () => {
         args: string[],
         _options?: { env?: Record<string, string | undefined> },
       ) => {
-        writeFileSync(getCodexOutputPath(args), '{"branch":"feature/runtime-preflight"}\n', "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );
@@ -240,7 +241,7 @@ describe("runSpawnPreflight", () => {
         args: string[],
         _options?: { env?: Record<string, string | undefined> },
       ) => {
-        writeFileSync(getCodexOutputPath(args), '{"branch":"feature/runtime-preflight"}\n', "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );
@@ -275,7 +276,7 @@ describe("runSpawnPreflight", () => {
         if (codexHome) {
           observedConfig = readFileSync(`${codexHome}/config.toml`, "utf8");
         }
-        writeFileSync(getCodexOutputPath(args), '{"branch":"feature/runtime-preflight"}\n', "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );
@@ -301,7 +302,7 @@ describe("runSpawnPreflight", () => {
         args: string[],
         _options?: { env?: Record<string, string | undefined> },
       ) => {
-        writeFileSync(getCodexOutputPath(args), '{"branch":"feature/runtime-preflight"}\n', "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );
@@ -339,7 +340,7 @@ describe("runSpawnPreflight", () => {
 
   it("runs cursor in print mode with trust and workspace flags", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":"feature/cursor-preflight"}\n',
+      stdout: "feature/cursor-preflight\n",
       stderr: "",
     });
 
@@ -393,7 +394,7 @@ describe("runSpawnPreflight", () => {
     );
   });
 
-  it("rejects prose instead of a JSON result", async () => {
+  it("rejects prose instead of one branch line", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "branch one branch two\n",
       stderr: "",
@@ -408,7 +409,7 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
   it("rejects multi-line prose around a branch", async () => {
@@ -427,7 +428,7 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
   it("rejects prose after a branch", async () => {
@@ -445,10 +446,10 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
-  it("rejects legacy sentinel prose", async () => {
+  it("rejects sentinel wrapped in prose", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "The project has no branch-naming rules\nNO_PROJECT_RULES\n",
       stderr: "",
@@ -463,12 +464,12 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
   it("rejects a preflight branch that misses project branch naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":"bad-name"}\n',
+      stdout: "bad-name\n",
       stderr: "",
     });
 
@@ -489,7 +490,7 @@ describe("runSpawnPreflight", () => {
 
   it("rejects with PreflightBranchValidationError carrying the proposed branch", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":"bad-name"}\n',
+      stdout: "bad-name\n",
       stderr: "",
     });
 
@@ -524,7 +525,7 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
   it("rejects an empty codex output file", async () => {
@@ -542,12 +543,12 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix runtime regression from INT-42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
-  it("accepts explicit no-project-branch-requirements", async () => {
+  it("accepts the exact no-project-rules sentinel", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"noProjectBranchRequirements":true}\n',
+      stdout: `${PREFLIGHT_DEFER_SENTINEL}\n`,
       stderr: "",
     });
 
@@ -570,7 +571,7 @@ describe("runSpawnPreflight", () => {
     '{"branch":null}',
     '{"branch":""}',
     "[]",
-  ])("rejects an invalid strict result: %s", async (stdout) => {
+  ])("rejects a non-line result: %s", async (stdout) => {
     mockExecFileAsync.mockResolvedValueOnce({ stdout, stderr: "" });
 
     await expect(
@@ -582,7 +583,7 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one valid JSON result");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES");
   });
 
   it("surfaces cursor exit code and stderr on a non-zero exit", async () => {

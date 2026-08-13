@@ -2032,7 +2032,7 @@ async function runSpawnPreflightForSpawn(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
-      feedback = `${message}.${ruleHint} Return a corrected JSON result.`;
+      feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
       continue;
     }
 
@@ -2043,7 +2043,7 @@ async function runSpawnPreflightForSpawn(args: {
     const branch = preflight.branch;
     if (!branch) {
       lastError = new Error("Spawn preflight returned no branch result");
-      feedback = `${lastError.message}.${ruleHint} Return a corrected JSON result.`;
+      feedback = `${lastError.message}.${ruleHint} Return a corrected preflight result.`;
       continue;
     }
     const branchConflictPath = await findWorktreePathForBranch(args.project.path, branch);
