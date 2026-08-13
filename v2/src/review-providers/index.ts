@@ -1,11 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { parseRepoSlugFromRemoteUrl } from "../pr-lookup.js";
 import type { ProjectConfig, ReviewProviderId } from "../types.js";
+import { readRemoteUrls } from "../workspace.js";
 import { githubReviewProvider } from "./github.js";
 import { gitlabReviewProvider } from "./gitlab.js";
 import type { ReviewProvider } from "./types.js";
-
-const execFileAsync = promisify(execFile);
 
 const REVIEW_PROVIDERS = {
   github: githubReviewProvider,
@@ -31,25 +29,22 @@ function providerIdsFromProject(project?: Pick<ProjectConfig, "sources">): Revie
   return [...ids];
 }
 
-async function readOriginRemoteUrl(worktreePath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
-      cwd: worktreePath,
-      timeout: 10_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const value = stdout.trim();
-    return value.length > 0 ? value : null;
-  } catch {
-    return null;
+function inferProviderFromRemotes(remotes: Map<string, string>): ReviewProviderId[] {
+  const urls = [...remotes.values()];
+  // Every remote is github.com: glab exits non-zero on such a repo ("none of
+  // the git remotes ... point to a known GitLab host"), so no non-GitHub
+  // provider can answer.
+  if (
+    urls.length > 0 &&
+    urls.every((url) => parseRepoSlugFromRemoteUrl(url)?.host === "github.com")
+  ) {
+    return ["github"];
   }
-}
-
-function inferProviderFromRemote(remoteUrl: string | null): ReviewProviderId[] {
-  if (!remoteUrl) {
+  const origin = remotes.get("origin");
+  if (!origin) {
     return ["github", "gitlab"];
   }
-  return /\bgithub\b/i.test(remoteUrl) ? ["github", "gitlab"] : ["gitlab", "github"];
+  return /\bgithub\b/i.test(origin) ? ["github", "gitlab"] : ["gitlab", "github"];
 }
 
 export async function orderedReviewProviderIds(
@@ -60,5 +55,5 @@ export async function orderedReviewProviderIds(
   if (configured.length > 0) {
     return configured;
   }
-  return inferProviderFromRemote(await readOriginRemoteUrl(worktreePath));
+  return inferProviderFromRemotes(await readRemoteUrls(worktreePath));
 }

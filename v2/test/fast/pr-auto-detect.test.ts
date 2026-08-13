@@ -534,6 +534,119 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
+  function apiProjectWithSources(sources: ProjectConfig["sources"]): ProjectConfig {
+    const baseProject = baseConfig().projects.api;
+    if (!baseProject) {
+      throw new Error("Missing api project fixture");
+    }
+    return {
+      path: baseProject.path,
+      defaultBranch: baseProject.defaultBranch,
+      sessionPrefix: baseProject.sessionPrefix,
+      worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
+      symlinks: baseProject.symlinks,
+      sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
+      triggers: baseProject.triggers,
+      sources,
+    };
+  }
+
+  it("does not call glab when every remote is github.com and no PR exists", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql({});
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ event: "session.pr_auto_detect.failed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not call glab when every remote is github.com and the gh lookup errors", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockRejectedValue(new Error("gh: server error"));
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
+  it("still gives glab its turn when a gitlab remote sits beside a github upstream", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([
+        ["upstream", "git@github.com:acme/api.git"],
+        ["origin", "git@gitlab.com:acme/api.git"],
+      ]),
+    );
+    mockGraphql({});
+    glabMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          iid: 42,
+          title: "Support GitLab provider",
+          web_url: "https://gitlab.com/org/repo/-/merge_requests/42",
+        },
+      ]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    } satisfies SessionSlots);
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).toHaveBeenCalled();
+
+    service.dispose();
+  });
+
   it("prefers the live worktree branch for initial PR discovery", async () => {
     const session = makeSession({ branch: "stale-session-branch" });
     listSessionsMock.mockReturnValue([session]);
