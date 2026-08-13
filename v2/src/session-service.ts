@@ -11443,7 +11443,10 @@ export class SessionService {
           continue;
         }
 
-        if (session.pipeline?.awaitingStepIndex !== undefined) {
+        if (
+          session.pipeline?.status === "running" &&
+          session.pipeline.awaitingStepIndex !== undefined
+        ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
             return;
@@ -11731,11 +11734,12 @@ export class SessionService {
       return;
     }
 
+    const { awaitingStepIndex: _awaitingStepIndex, ...pipelineBase } = session.pipeline;
     writeSession(this.config.dataDir, {
       ...session,
       updatedAt: nowIso(),
       pipeline: {
-        ...session.pipeline,
+        ...pipelineBase,
         status: "errored",
         error: message,
       },
