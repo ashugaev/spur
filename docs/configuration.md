@@ -252,8 +252,8 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.
-- `projects.<id>.preflight`: optional object; enables strict JSON branch preflight before worktree creation. The agent returns `{"branch":"<name>"}` or `{"noProjectBranchRequirements":true}` only.
-- `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in JSON branch-or-no-rules prompt.
+- `projects.<id>.preflight`: optional object; enables strict branch preflight before worktree creation. The agent returns one branch name or `NO_PROJECT_RULES` only.
+- `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in branch-or-no-rules prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
