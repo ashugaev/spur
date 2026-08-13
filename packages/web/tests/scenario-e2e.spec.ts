@@ -730,6 +730,10 @@ test.describe("scenario migration E2E: terminal links", () => {
       .poll(async () => trigger.evaluate((element) => getComputedStyle(element).borderColor))
       .not.toBe(idleTriggerStyle.borderColor);
     await captureTerminalLinksState(page, "hover");
+    await page.mouse.move(0, 0);
+    await expect
+      .poll(async () => trigger.evaluate((element) => getComputedStyle(element).borderColor))
+      .toBe(idleTriggerStyle.borderColor);
     await trigger.focus();
     await page.keyboard.press("Tab");
     await page.keyboard.press("Shift+Tab");
