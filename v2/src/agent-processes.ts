@@ -14,8 +14,11 @@ import {
   collectDescendants,
   listProcesses,
   readProcessEnvValue,
+  readProcessIdentity,
   signalPid,
+  snapshotProcesses,
   snapshotProcessLiveness,
+  type ProcessIdentityReader,
   type ProcessSnapshotEntry,
 } from "./process-tree.js";
 import type { AgentName } from "./types.js";
@@ -23,17 +26,33 @@ import type { AgentName } from "./types.js";
 // registry's shared check shape.
 import type { HostInstallCheck } from "./host-install.js";
 
-// pid only: every consumer of a capture/scan result (terminateAgentProcesses,
-// killAgentPaneAndConfirmExit's logging, assertNoForeignAgentForSession) acts
-// on the pid alone. rss/age/args belong to the doctor-facing
-// UnownedAgentProcess below, which is built straight from ProcessSnapshotEntry
-// via toFinding, not from this type.
+// pid plus an identity token, because P1's escalation signals these pids up
+// to three grace windows (~6s) after capturing them, and the pane is killed
+// before the first signal — so a captured pid can be recycled inside that
+// window. `identity` is the /proc starttime, which changes when the number is
+// reused; null means this platform cannot verify identity (no procfs), which
+// callers must read as "cannot tell", never as "not my process".
+//
+// rss/age/args belong to the doctor-facing UnownedAgentProcess below, which is
+// built straight from ProcessSnapshotEntry via toFinding, not from this type.
 export interface AgentProcessRef {
   pid: number;
+  identity: string | null;
 }
 
-function toRef(proc: ProcessSnapshotEntry): AgentProcessRef {
-  return { pid: proc.pid };
+// A captured pid is still OUR process when it is alive AND its identity token
+// is unchanged. A changed token means the number was recycled: do not signal
+// it, and do not count it as a survivor — it is a different process, so
+// neither action would be about our agent. A null token (no procfs) degrades
+// to the liveness answer alone.
+async function isStillSameProcess(
+  ref: AgentProcessRef,
+  readIdentity: ProcessIdentityReader,
+): Promise<boolean> {
+  if (ref.identity === null) {
+    return true;
+  }
+  return (await readIdentity(ref.pid)) === ref.identity;
 }
 
 // Same word-boundary matching isProcessRunningInTmux (runtime-tmux.ts) uses,
@@ -97,49 +116,86 @@ function collapseToShallowest(
 // snapshot could not be taken) must never read as "everyone died this
 // round": every pid is kept as still alive so the poll keeps going instead
 // of falsely declaring a survivor gone.
-async function filterAlivePids(pids: readonly number[]): Promise<number[]> {
+async function filterAliveRefs(
+  refs: readonly AgentProcessRef[],
+  readIdentity: ProcessIdentityReader,
+): Promise<AgentProcessRef[]> {
   const snapshot = await snapshotProcessLiveness();
-  if (snapshot.status === "unavailable") {
-    return [...pids];
+  const alive =
+    snapshot.status === "unavailable"
+      ? [...refs]
+      : refs.filter((ref) => snapshot.alivePids.has(ref.pid));
+  const kept: AgentProcessRef[] = [];
+  for (const ref of alive) {
+    if (await isStillSameProcess(ref, readIdentity)) {
+      kept.push(ref);
+    }
   }
-  return pids.filter((pid) => snapshot.alivePids.has(pid));
+  return kept;
 }
 
-async function pollUntilDead(pids: number[], graceMs: number, pollMs: number): Promise<number[]> {
+async function pollUntilDead(
+  refs: readonly AgentProcessRef[],
+  graceMs: number,
+  pollMs: number,
+  readIdentity: ProcessIdentityReader,
+): Promise<AgentProcessRef[]> {
   const deadline = Date.now() + graceMs;
-  let alive = await filterAlivePids(pids);
+  let alive = await filterAliveRefs(refs, readIdentity);
   while (alive.length > 0 && Date.now() < deadline) {
     await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-    alive = await filterAlivePids(alive);
+    alive = await filterAliveRefs(alive, readIdentity);
   }
   return alive;
 }
 
+export type PaneAgentCapture =
+  | { status: "ok"; processes: AgentProcessRef[] }
+  | { status: "unavailable" };
+
+const CAPTURE_RETRY_DELAY_MS = 100;
+
 // P1, pane-rooted and exact: descendants of `panePid` whose args match this
 // session's own agent matchers. `panePid: null` (pane already gone, or the
-// caller never resolved one) reads as "nothing to capture" — never throws.
+// caller never resolved one) reads as an empty capture — never throws.
+//
+// "unavailable" when the process table could not be read. That must NOT
+// collapse into an empty capture: an empty capture makes
+// terminateAgentProcesses report "clear", which would let a
+// failOnSurvivors:true caller relaunch over a possibly-live agent — the exact
+// duplicate this module exists to prevent. Same fail-safe policy as
+// snapshotProcessLiveness. One retry first, since a `ps` failure here is
+// usually transient fork pressure.
 export async function capturePaneAgentProcesses(input: {
   panePid: number | null;
   processMatchers: readonly string[];
-}): Promise<AgentProcessRef[]> {
+}): Promise<PaneAgentCapture> {
   if (input.panePid === null) {
-    return [];
+    return { status: "ok", processes: [] };
   }
   const matchers = compileMatchers(input.processMatchers);
   if (matchers.length === 0) {
-    return [];
+    return { status: "ok", processes: [] };
   }
-  const processes = await listProcesses();
+  let snapshot = await snapshotProcesses();
+  if (snapshot.status === "unavailable") {
+    await sleep(CAPTURE_RETRY_DELAY_MS);
+    snapshot = await snapshotProcesses();
+  }
+  if (snapshot.status === "unavailable") {
+    return { status: "unavailable" };
+  }
+  const processes = snapshot.processes;
   const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
   const orderedPids = collectDescendants(input.panePid, processes);
   const refs: AgentProcessRef[] = [];
   for (const pid of orderedPids) {
     const proc = byPid.get(pid);
     if (proc && matchers.some((matcher) => matcher.test(proc.args))) {
-      refs.push(toRef(proc));
+      refs.push({ pid: proc.pid, identity: await readProcessIdentity(proc.pid) });
     }
   }
-  return refs;
+  return { status: "ok", processes: refs };
 }
 
 export type AgentTerminationOutcome = { status: "clear" } | { status: "survivors"; pids: number[] };
@@ -150,44 +206,48 @@ const POLL_MS = 100;
 // Poll -> SIGHUP -> poll -> SIGTERM -> poll -> SIGKILL -> poll. `processes`
 // is expected root-first (capturePaneAgentProcesses' order); signalling
 // walks it leaves-first so a parent is never signalled before its children.
-// Portable: signals and a `ps`-based liveness probe only, no /proc.
+// Portable: signals, a `ps`-based liveness probe, and an identity re-check
+// that no-ops where /proc is absent.
+//
+// Every round re-verifies identity before signalling, so a pid recycled after
+// the pane was killed is dropped rather than signalled or counted as a
+// survivor (see isStillSameProcess).
 export async function terminateAgentProcesses(
   processes: readonly AgentProcessRef[],
-  options?: { hupGraceMs?: number; termGraceMs?: number; killGraceMs?: number },
+  options?: {
+    hupGraceMs?: number;
+    termGraceMs?: number;
+    killGraceMs?: number;
+    readIdentity?: ProcessIdentityReader;
+  },
 ): Promise<AgentTerminationOutcome> {
   const hupGraceMs = options?.hupGraceMs ?? DEFAULT_GRACE_MS;
   const termGraceMs = options?.termGraceMs ?? DEFAULT_GRACE_MS;
   const killGraceMs = options?.killGraceMs ?? DEFAULT_GRACE_MS;
+  const readIdentity = options?.readIdentity ?? readProcessIdentity;
 
-  let survivors = await filterAlivePids([...processes].reverse().map((proc) => proc.pid));
+  let survivors = await filterAliveRefs([...processes].reverse(), readIdentity);
   if (survivors.length === 0) {
     return { status: "clear" };
   }
 
-  for (const pid of survivors) signalPid(pid, "SIGHUP");
-  survivors = await pollUntilDead(survivors, hupGraceMs, POLL_MS);
-  if (survivors.length === 0) {
-    return { status: "clear" };
+  for (const signal of ["SIGHUP", "SIGTERM", "SIGKILL"] as const) {
+    const graceMs =
+      signal === "SIGHUP" ? hupGraceMs : signal === "SIGTERM" ? termGraceMs : killGraceMs;
+    for (const ref of survivors) signalPid(ref.pid, signal);
+    survivors = await pollUntilDead(survivors, graceMs, POLL_MS, readIdentity);
+    if (survivors.length === 0) {
+      return { status: "clear" };
+    }
   }
 
-  for (const pid of survivors) signalPid(pid, "SIGTERM");
-  survivors = await pollUntilDead(survivors, termGraceMs, POLL_MS);
-  if (survivors.length === 0) {
-    return { status: "clear" };
-  }
-
-  for (const pid of survivors) signalPid(pid, "SIGKILL");
-  survivors = await pollUntilDead(survivors, killGraceMs, POLL_MS);
-  if (survivors.length === 0) {
-    return { status: "clear" };
-  }
-
-  return { status: "survivors", pids: survivors };
+  return { status: "survivors", pids: survivors.map((ref) => ref.pid) };
 }
 
-export type SessionAgentScan =
-  | { status: "unavailable" }
-  | { status: "ok"; processes: AgentProcessRef[] };
+// pids only: this scan is a launch-guard verdict, never a signalling target,
+// so it needs no identity token (contrast AgentProcessRef, whose pids get
+// signalled after a delay).
+export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; pids: number[] };
 
 // P2, env-rooted and heuristic launch guard: processes carrying
 // SPUR_SESSION === sessionId that are not this pane's own children
@@ -204,7 +264,7 @@ export async function findForeignAgentProcessesForSession(input: {
   }
   const matchers = compileMatchers(input.processMatchers);
   if (matchers.length === 0) {
-    return { status: "ok", processes: [] };
+    return { status: "ok", pids: [] };
   }
   const processes = await listProcesses();
   const excluded = new Set(
@@ -222,16 +282,13 @@ export async function findForeignAgentProcessesForSession(input: {
     }
   }
 
-  const byPid = new Map(sameSession.map((proc) => [proc.pid, proc]));
-  const roots = collapseToShallowest(
-    sameSession.map((proc) => proc.pid),
-    processes,
-  );
-  const refs = roots
-    .map((pid) => byPid.get(pid))
-    .filter((proc): proc is ProcessSnapshotEntry => proc !== undefined)
-    .map(toRef);
-  return { status: "ok", processes: refs };
+  return {
+    status: "ok",
+    pids: collapseToShallowest(
+      sameSession.map((proc) => proc.pid),
+      processes,
+    ),
+  };
 }
 
 export type UnownedAgentReason = "duplicate_for_session" | "terminal_record" | "unknown_session";

@@ -9,6 +9,7 @@ import {
   killProcessTree,
   listProcesses,
   parseElapsedSeconds,
+  snapshotProcesses,
   snapshotProcessLiveness,
   type ProcessSnapshotEntry,
   type PpidReader,
@@ -189,6 +190,34 @@ describe("snapshotProcessLiveness", () => {
       vi.doUnmock("node:child_process");
       vi.resetModules();
     }
+  });
+});
+
+describe("snapshotProcessLiveness bounds", () => {
+  it("bounds the liveness ps the same way as enumeration, and a timeout degrades to unavailable", async () => {
+    // This runs inside every poll round on pause/complete/kill/restore/
+    // relaunch/switchAuth — all daemon request paths — so an unbounded ps
+    // would hang the request instead of degrading.
+    const snapshot = await snapshotProcessLiveness(async (file, args, options) => {
+      expect(file).toBe("ps");
+      expect(args).toEqual(["-eo", "pid=,stat="]);
+      expect(options).toMatchObject({ encoding: "utf8", timeout: 2_000 });
+      expect(options.maxBuffer).toBeGreaterThan(0);
+      throw new Error("ps timed out");
+    });
+
+    expect(snapshot).toEqual({ status: "unavailable" });
+  });
+});
+
+describe("snapshotProcesses", () => {
+  it("reports unavailable on exec failure while listProcesses degrades to an empty fleet", async () => {
+    const failing = async () => {
+      throw new Error("ps timed out");
+    };
+
+    expect(await snapshotProcesses(failing)).toEqual({ status: "unavailable" });
+    expect(await listProcesses(failing)).toEqual([]);
   });
 });
 

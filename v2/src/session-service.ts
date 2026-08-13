@@ -9095,17 +9095,55 @@ export class SessionService {
   // apart). Capturing the pane's own process tree BEFORE the kill, then
   // polling those exact pids after it, is the only way to know the kill
   // actually landed.
+  // "absent" is the only answer that makes a null pane pid trustworthy: it
+  // means there is genuinely no pane, so nothing was missed. "exists" and
+  // "unreadable" both mean a null pane pid tells us nothing. Never throws —
+  // both callers run on teardown paths where a probe failure must not replace
+  // the error that actually matters (a spawn failure, for one).
+  private async probePaneState(tmuxSession: string): Promise<"exists" | "absent" | "unreadable"> {
+    try {
+      return (await tmuxSessionExists(tmuxSession)) ? "exists" : "absent";
+    } catch {
+      return "unreadable";
+    }
+  }
+
   private async killAgentPaneAndConfirmExit(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
     const panePid = await getTmuxPanePid(session.tmuxSession);
-    const processes = await capturePaneAgentProcesses({
+    if (panePid === null && (await this.probePaneState(session.tmuxSession)) !== "absent") {
+      // The pane is there (or tmux could not say), so P1 has nothing to
+      // verify against. Record it: the alternative is a silent pass that
+      // reads exactly like a clean teardown.
+      this.logEvent("session.agent_process.pane_pid_unreadable", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
+      });
+    }
+    const capture = await capturePaneAgentProcesses({
       panePid,
       processMatchers: sessionProcessMatchers(session),
     });
+    if (capture.status === "unavailable") {
+      // The process table could not be read, so "no survivors" would be a
+      // guess. Refusing a relaunch is recoverable; launching a duplicate is
+      // not. A teardown that is not about to relaunch still proceeds.
+      this.logEvent("session.agent_process.capture_unavailable", {
+        level: options.failOnSurvivors ? "error" : "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: could not read the process table before killing the agent pane`,
+      });
+      if (options.failOnSurvivors) {
+        throw new Error(
+          `Session ${session.id}: could not read the process table to confirm the prior agent process exited; refusing to launch a replacement`,
+        );
+      }
+    }
     await killTmuxSession(session.tmuxSession);
-    const outcome = await terminateAgentProcesses(processes);
+    const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
     if (outcome.status === "clear") {
       return;
     }
@@ -9129,11 +9167,25 @@ export class SessionService {
   // "no findings" both proceed. `force` bypasses this guard only; it never
   // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
-    session: Pick<SessionRecord, "id" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
     panePid: number | null,
     force: boolean,
   ): Promise<void> {
     if (force) {
+      return;
+    }
+    // A null pane pid means either "this session has no pane" (nothing to
+    // exclude, so the scan is sound) or "tmux was unreadable" (the exclusion
+    // set would be empty and the session's OWN live agent would read as
+    // foreign). Only the first is safe to scan on; the second joins the
+    // "unavailable" branch, because this guard must never block on a scan it
+    // could not perform.
+    if (panePid === null && (await this.probePaneState(session.tmuxSession)) !== "absent") {
+      this.logEvent("session.agent_process.scan_skipped", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; skipping the foreign-agent scan`,
+      });
       return;
     }
     const scan = await findForeignAgentProcessesForSession({
@@ -9144,17 +9196,17 @@ export class SessionService {
     if (scan.status !== "ok") {
       return;
     }
-    const [firstForeign] = scan.processes;
-    if (!firstForeign) {
+    const [firstForeign] = scan.pids;
+    if (firstForeign === undefined) {
       return;
     }
     this.logEvent("session.agent_process.foreign", {
       level: "warn",
       sessionId: session.id,
       message: `Session ${session.id} already has a live agent process outside its pane`,
-      details: { pids: scan.processes.map((proc) => proc.pid) },
+      details: { pids: scan.pids },
     });
-    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign.pid));
+    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
   private async applyManualStatus(

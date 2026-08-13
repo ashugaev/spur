@@ -127,14 +127,25 @@ const runProcessList: ProcessListRunner = async (file, args, options) => {
   return { stdout };
 };
 
+export type ProcessListResult =
+  | { status: "ok"; processes: ProcessSnapshotEntry[] }
+  | { status: "unavailable" };
+
 // One `ps -eo pid=,ppid=,rss=,etime=,args=` fork (execFile, no shell), bounded
 // by a timeout and a max buffer so a wedged or oversized `ps` cannot hang or
-// OOM this process. Malformed rows are skipped. Never throws — a failed `ps`
-// (including a timeout) reads as "no processes", the same degrade-quietly
-// contract as the rest of this module.
-export async function listProcesses(
+// OOM this process. Malformed rows are skipped.
+//
+// Returns "unavailable" on ANY exec failure (spawn error, EAGAIN/EMFILE under
+// fork pressure, timeout) so a caller that must not guess can tell "ps could
+// not run" from "ps ran and found nothing". `-eo` with no `-p` filter has no
+// "no such pid" failure mode of its own to confuse with a real exec failure.
+// A caller deciding whether a captured agent is still alive MUST refuse on
+// "unavailable" rather than read it as "found nobody, so everyone is dead" —
+// see snapshotProcessLiveness below for the same policy stated for the poll
+// loop, and capturePaneAgentProcesses for the pre-kill capture.
+export async function snapshotProcesses(
   run: ProcessListRunner = runProcessList,
-): Promise<ProcessSnapshotEntry[]> {
+): Promise<ProcessListResult> {
   let stdout: string;
   try {
     ({ stdout } = await run("ps", ["-eo", "pid=,ppid=,rss=,etime=,args="], {
@@ -143,8 +154,22 @@ export async function listProcesses(
       maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
     }));
   } catch {
-    return [];
+    return { status: "unavailable" };
   }
+  return { status: "ok", processes: parseProcessRows(stdout) };
+}
+
+// Degrade-quietly wrapper for callers that legitimately treat a failed `ps` as
+// an empty fleet (leak sweeps, tree kills — they act only on what they can
+// see). A caller that must distinguish failure uses snapshotProcesses.
+export async function listProcesses(
+  run: ProcessListRunner = runProcessList,
+): Promise<ProcessSnapshotEntry[]> {
+  const result = await snapshotProcesses(run);
+  return result.status === "ok" ? result.processes : [];
+}
+
+function parseProcessRows(stdout: string): ProcessSnapshotEntry[] {
   const processes: ProcessSnapshotEntry[] = [];
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -225,10 +250,20 @@ export type ProcessLivenessSnapshot =
 // reaps it) but answers a signal-0 probe, which is why this reads `ps`'s
 // state column instead of using kill(pid, 0): a captured agent left
 // unreaped would otherwise report "alive" forever.
-export async function snapshotProcessLiveness(): Promise<ProcessLivenessSnapshot> {
+// Bounded by the same timeout and max buffer as snapshotProcesses: this runs
+// inside every poll round on pause/complete/kill/restore/relaunch/switchAuth,
+// all of them daemon request paths, so a wedged `ps` must degrade to
+// "unavailable" on the timeout instead of hanging the request forever.
+export async function snapshotProcessLiveness(
+  run: ProcessListRunner = runProcessList,
+): Promise<ProcessLivenessSnapshot> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("ps", ["-eo", "pid=,stat="]));
+    ({ stdout } = await run("ps", ["-eo", "pid=,stat="], {
+      encoding: "utf8",
+      timeout: PROCESS_LIST_TIMEOUT_MS,
+      maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
+    }));
   } catch {
     return { status: "unavailable" };
   }
@@ -316,7 +351,12 @@ export type ProcessSignaler = (pid: number, signal: NodeJS.Signals) => void;
 // reuse the pid itself, so comparing it before/after a grace sleep is how
 // killProcessTree tells "this pid is still MY target" from "this pid now
 // belongs to something else that grabbed the number after SIGTERM landed".
-async function readProcessIdentity(pid: number): Promise<string | null> {
+//
+// Exported for the same reason in agent-processes.ts's P1 escalation, which
+// signals captured pids up to three grace windows after capturing them.
+// Linux-only (/proc): returns null off Linux, which callers must read as
+// "identity unverifiable here", never as "not my process".
+export async function readProcessIdentity(pid: number): Promise<string | null> {
   try {
     const content = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = content.lastIndexOf(")");

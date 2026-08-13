@@ -1384,6 +1384,12 @@ async function runInteractiveSessionList(
   };
 
   const restoreSelectedSession = async (): Promise<void> => {
+    // Disarm the other verbs' confirmations up front, including on the early
+    // returns below: pressing r must never leave a kill or respawn armed for
+    // a later single keypress. Restore's own pending survives — that is the
+    // latch forceRestore reads.
+    pendingKillConfirmationSessionId = null;
+    pendingRespawnConfirmationSessionId = null;
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     if (!isRestorableSession(session)) {

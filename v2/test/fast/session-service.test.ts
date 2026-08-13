@@ -129,7 +129,12 @@ const readCgroupMemorySnapshotMock = vi.fn();
 const isSystemdOomdPresentMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
-const capturePaneAgentProcessesMock = vi.fn(() => Promise.resolve<AgentProcessRef[]>([]));
+const capturePaneAgentProcessesMock = vi.fn(() =>
+  Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
+    status: "ok",
+    processes: [],
+  }),
+);
 const terminateAgentProcessesMock = vi.fn(() =>
   Promise.resolve<AgentTerminationOutcome>({ status: "clear" }),
 );
@@ -1175,7 +1180,7 @@ describe("SessionService", () => {
     isSystemdOomdPresentMock.mockReset().mockReturnValue(false);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
-    capturePaneAgentProcessesMock.mockReset().mockResolvedValue([]);
+    capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
     terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
     findForeignAgentProcessesForSessionMock
       .mockReset()
@@ -26307,8 +26312,8 @@ describe("SessionService", () => {
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       getTmuxPanePidMock.mockResolvedValue(4242);
-      const capturedRefs = [{ pid: 4242 }];
-      capturePaneAgentProcessesMock.mockResolvedValue(capturedRefs);
+      const capturedRefs = [{ pid: 4242, identity: "starttime-4242" }];
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: capturedRefs });
 
       const service = await createDisposedSessionService();
 
@@ -26336,6 +26341,35 @@ describe("SessionService", () => {
 
       await expect(service.restore("api-1")).rejects.toThrow(/555/);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses to launch a replacement when the process table could not be read before the kill", async () => {
+      // An unreadable process table means "no survivors" would be a guess.
+      // Guessing wrong here is the duplicate this guard exists to prevent,
+      // so restore must refuse and must not kill the pane either.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "unavailable" });
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/could not read the process table/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("still tears down on an unreadable process table when no relaunch follows — kill()", async () => {
+      // The mirror of the case above: a teardown heading to a terminal
+      // status must not become an unkillable session just because the
+      // process table was momentarily unreadable.
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "unavailable" });
+
+      const service = await createDisposedSessionService();
+
+      await service.kill("api-1", {});
+      expect(killTmuxSessionMock).toHaveBeenCalled();
     });
 
     it("refuses to launch a replacement when the prior agent survives SIGKILL — relaunch via send recovery", async () => {
@@ -26371,9 +26405,14 @@ describe("SessionService", () => {
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
+      // A readable pane pid is what makes the scan trustworthy: with a null
+      // pane pid on an existing tmux session the guard deliberately skips,
+      // because the exclusion set would be empty and the session's own agent
+      // would read as foreign.
+      getTmuxPanePidMock.mockResolvedValue(4242);
       findForeignAgentProcessesForSessionMock.mockResolvedValue({
         status: "ok",
-        processes: [{ pid: 777 }],
+        pids: [777],
       });
 
       const service = await createDisposedSessionService();
@@ -26385,6 +26424,28 @@ describe("SessionService", () => {
 
       expect(restored.status).toBe("running");
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the foreign-agent scan when the pane pid is unreadable, rather than calling the session's own agent foreign", async () => {
+      // getTmuxPanePid returns null both for "no pane" and for "tmux could
+      // not be read". On the second, P2's exclusion set would be empty, so
+      // the session's OWN live pane agent would be reported foreign and the
+      // relaunch would throw — and relaunchSessionInPlace hard-codes
+      // force=false, so send/switchAuth would wedge with no override.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      getTmuxPanePidMock.mockResolvedValue(null);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [777] });
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("api-1");
+
+      expect(restored.status).toBe("running");
+      expect(findForeignAgentProcessesForSessionMock).not.toHaveBeenCalled();
     });
 
     it("does not block restore() when the foreign-agent scan is 'unavailable'", async () => {

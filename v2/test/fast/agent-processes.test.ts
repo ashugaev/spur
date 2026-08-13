@@ -20,16 +20,30 @@ let forceAllAlive = false;
 // Simulates snapshotProcessLiveness's own fail-safe contract: "unavailable"
 // must never read as "found nobody, so treat every pid as dead".
 let snapshotUnavailable = false;
+// Simulates snapshotProcesses failing (a wedged or unforkable `ps`) for the
+// pre-kill capture, which must refuse rather than report an empty capture.
+let processSnapshotUnavailable = false;
+// pid -> /proc starttime token. A pid absent here reads as null identity
+// ("this platform cannot verify"), which is the macOS/no-procfs degrade path.
+let identities = new Map<number, string>();
 
-const listProcessesMock = vi.fn(async () =>
-  fakeTable.map(({ pid, ppid, rssKb, elapsedSeconds, args }) => ({
+function toEntries(): processTreeModule.ProcessSnapshotEntry[] {
+  return fakeTable.map(({ pid, ppid, rssKb, elapsedSeconds, args }) => ({
     pid,
     ppid,
     rssKb,
     elapsedSeconds,
     args,
-  })),
+  }));
+}
+
+const listProcessesMock = vi.fn(async () => toEntries());
+const snapshotProcessesMock = vi.fn(async () =>
+  processSnapshotUnavailable
+    ? ({ status: "unavailable" } as const)
+    : ({ status: "ok", processes: toEntries() } as const),
 );
+const readProcessIdentityMock = vi.fn(async (pid: number) => identities.get(pid) ?? null);
 const readProcessEnvValueMock = vi.fn(async (pid: number, key: string) => {
   if (!envReadable) return { status: "unreadable" as const };
   const proc = fakeTable.find((entry) => entry.pid === pid);
@@ -55,7 +69,9 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => {
   return {
     ...actual,
     listProcesses: listProcessesMock,
+    snapshotProcesses: snapshotProcessesMock,
     readProcessEnvValue: readProcessEnvValueMock,
+    readProcessIdentity: readProcessIdentityMock,
     canReadProcessEnv: canReadProcessEnvMock,
     snapshotProcessLiveness: snapshotProcessLivenessMock,
     signalPid: signalPidMock,
@@ -107,7 +123,11 @@ beforeEach(() => {
   deadPids = new Set();
   forceAllAlive = false;
   snapshotUnavailable = false;
+  processSnapshotUnavailable = false;
+  identities = new Map();
   listProcessesMock.mockClear();
+  snapshotProcessesMock.mockClear();
+  readProcessIdentityMock.mockClear();
   readProcessEnvValueMock.mockClear();
   canReadProcessEnvMock.mockClear();
   snapshotProcessLivenessMock.mockClear();
@@ -120,10 +140,49 @@ afterEach(() => {
 });
 
 describe("capturePaneAgentProcesses", () => {
-  it("returns [] when panePid is null", async () => {
+  it("returns an empty capture when panePid is null", async () => {
     expect(await capturePaneAgentProcesses({ panePid: null, processMatchers: ["claude"] })).toEqual(
-      [],
+      {
+        status: "ok",
+        processes: [],
+      },
     );
+  });
+
+  it("reports unavailable when the process table cannot be read, never an empty capture", async () => {
+    // An empty capture would make terminateAgentProcesses report "clear",
+    // letting a failOnSurvivors:true caller relaunch over a possibly-live
+    // agent — the duplicate this module exists to prevent. The capture must
+    // stay distinguishable from "the pane had no agent processes".
+    processSnapshotUnavailable = true;
+    expect(await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] })).toEqual({
+      status: "unavailable",
+    });
+  });
+
+  it("retries once before giving up on an unavailable process table", async () => {
+    processSnapshotUnavailable = true;
+    snapshotProcessesMock.mockImplementationOnce(async () => {
+      processSnapshotUnavailable = false;
+      return { status: "unavailable" } as const;
+    });
+    fakeTable = [
+      { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
+    ];
+    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
+    expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: null }] });
+  });
+
+  it("records each captured pid's identity so a recycled pid can be told apart later", async () => {
+    identities = new Map([[2, "starttime-2"]]);
+    fakeTable = [
+      { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
+    ];
+    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: "starttime-2" }] });
   });
 
   it("captures only pane descendants whose args match", async () => {
@@ -138,20 +197,22 @@ describe("capturePaneAgentProcesses", () => {
       },
       { pid: 3, ppid: 0, rssKb: 300, elapsedSeconds: 1, args: "/usr/bin/claude --other" },
     ];
-    const refs = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
-    expect(refs.map((ref) => ref.pid)).toEqual([2]);
+    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    expect(capture.status).toBe("ok");
+    if (capture.status !== "ok") throw new Error("unreachable");
+    expect(capture.processes.map((ref) => ref.pid)).toEqual([2]);
   });
 });
 
 describe("terminateAgentProcesses", () => {
   it("returns clear when nothing is alive", async () => {
     deadPids.add(5);
-    const outcome = await terminateAgentProcesses([{ pid: 5 }]);
+    const outcome = await terminateAgentProcesses([{ pid: 5, identity: null }]);
     expect(outcome).toEqual({ status: "clear" });
   });
 
   it("stops escalating as soon as SIGHUP clears the pid", async () => {
-    const outcome = await terminateAgentProcesses([{ pid: 7 }], {
+    const outcome = await terminateAgentProcesses([{ pid: 7, identity: null }], {
       hupGraceMs: 5,
       termGraceMs: 5,
       killGraceMs: 5,
@@ -163,7 +224,7 @@ describe("terminateAgentProcesses", () => {
 
   it("reports survivors when the pid never dies", async () => {
     forceAllAlive = true;
-    const outcome = await terminateAgentProcesses([{ pid: 9 }], {
+    const outcome = await terminateAgentProcesses([{ pid: 9, identity: null }], {
       hupGraceMs: 5,
       termGraceMs: 5,
       killGraceMs: 5,
@@ -180,12 +241,52 @@ describe("terminateAgentProcesses", () => {
     // a clean "clear" and a failOnSurvivors:true caller would launch a real
     // duplicate over it — exactly the bug this whole guard exists to close.
     snapshotUnavailable = true;
-    const outcome = await terminateAgentProcesses([{ pid: 99 }], {
+    const outcome = await terminateAgentProcesses([{ pid: 99, identity: null }], {
       hupGraceMs: 5,
       termGraceMs: 5,
       killGraceMs: 5,
     });
     expect(outcome).toEqual({ status: "survivors", pids: [99] });
+  });
+
+  it("never signals a pid whose identity changed after capture, and never counts it a survivor", async () => {
+    // The pane is killed before escalation starts, so a captured pid can be
+    // recycled inside the ~6s signal window. Signalling it would hit an
+    // unrelated process; counting it a survivor would block the relaunch
+    // forever on a process that is not ours.
+    forceAllAlive = true;
+    identities = new Map([[11, "recycled"]]);
+    const outcome = await terminateAgentProcesses([{ pid: 11, identity: "original" }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
+    expect(outcome).toEqual({ status: "clear" });
+    expect(signalPidMock).not.toHaveBeenCalled();
+  });
+
+  it("still signals a pid whose identity is unchanged", async () => {
+    forceAllAlive = true;
+    identities = new Map([[12, "same"]]);
+    const outcome = await terminateAgentProcesses([{ pid: 12, identity: "same" }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
+    expect(outcome).toEqual({ status: "survivors", pids: [12] });
+    expect(signalPidMock).toHaveBeenCalledWith(12, "SIGKILL");
+  });
+
+  it("treats a null captured identity as unverifiable and keeps escalating — the no-procfs degrade path", async () => {
+    forceAllAlive = true;
+    identities = new Map();
+    const outcome = await terminateAgentProcesses([{ pid: 13, identity: null }], {
+      hupGraceMs: 5,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    });
+    expect(outcome).toEqual({ status: "survivors", pids: [13] });
+    expect(signalPidMock).toHaveBeenCalledWith(13, "SIGKILL");
   });
 });
 
@@ -224,10 +325,7 @@ describe("findForeignAgentProcessesForSession", () => {
       processMatchers: ["claude"],
       excludePanePid: 1,
     });
-    expect(scan).toEqual({
-      status: "ok",
-      processes: [{ pid: 2 }],
-    });
+    expect(scan).toEqual({ status: "ok", pids: [2] });
   });
 
   it("resolves a ppid cycle between two candidates to exactly one survivor, never zero", async () => {
@@ -261,7 +359,7 @@ describe("findForeignAgentProcessesForSession", () => {
     });
     expect(scan.status).toBe("ok");
     if (scan.status !== "ok") throw new Error("unreachable");
-    expect(scan.processes).toHaveLength(1);
+    expect(scan.pids).toHaveLength(1);
   });
 });
 
