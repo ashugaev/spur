@@ -32,6 +32,12 @@ import { useToasts } from "@/hooks/useToasts";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { useTheme } from "@/lib/theme-context";
 import type { SpurSessionState } from "@/lib/types";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
+import {
+  areTerminalLinksEqual,
+  extractTerminalLinks,
+  type TerminalLink,
+} from "@/lib/terminal-links";
 
 interface DirectTerminalProps {
   sessionId: string;
@@ -160,6 +166,24 @@ function FourDirectionArrowIcon() {
   );
 }
 
+function ChainLinkIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3 w-3"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  );
+}
+
 function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
@@ -222,11 +246,19 @@ export function DirectTerminal({
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [arrowsOpen, setArrowsOpen] = useState(false);
+  const [terminalLinks, setTerminalLinks] = useState<TerminalLink[]>([]);
+  const terminalLinksRef = useRef<TerminalLink[]>([]);
+  const [terminalLinksOpen, setTerminalLinksOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
   const { toasts, showErrorToast, dismissToast } = useToasts();
   const sessionApiId = apiSessionId ?? sessionId;
+  const terminalLinksMenu = useAnchoredMenu({
+    open: terminalLinksOpen,
+    onClose: () => setTerminalLinksOpen(false),
+    contentDeps: [terminalLinks],
+  });
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -523,6 +555,10 @@ export function DirectTerminal({
   }, [arrowsOpen, hotkeysOpen]);
 
   useEffect(() => {
+    terminalLinksRef.current = [];
+    setTerminalLinks([]);
+    setTerminalLinksOpen(false);
+
     if (!terminalRef.current) return;
 
     let mounted = true;
@@ -530,6 +566,9 @@ export function DirectTerminal({
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
     let binaryDisposable: { dispose(): void } | null = null;
+    let parsedWriteDisposable: { dispose(): void } | null = null;
+    let terminalResizeDisposable: { dispose(): void } | null = null;
+    let bufferChangeDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
     let touchCleanup: (() => void) | null = null;
     let reconnectTimer: number | null = null;
@@ -582,6 +621,34 @@ export function DirectTerminal({
         terminal.open(terminalRef.current);
         terminal.focus();
         fit.fit();
+
+        const scanTerminalLinks = () => {
+          if (!mounted || !terminal) return;
+          const activeBuffer = terminal.buffer.active;
+          const startIndex = Math.max(0, activeBuffer.length - 100);
+          const rows = [];
+          for (let index = startIndex; index < activeBuffer.length; index += 1) {
+            const line = activeBuffer.getLine(index);
+            rows.push(
+              line
+                ? {
+                    text: line.translateToString(false, 0, terminal.cols),
+                    isWrapped: line.isWrapped,
+                  }
+                : undefined,
+            );
+          }
+          const nextLinks = extractTerminalLinks(rows);
+          if (areTerminalLinksEqual(terminalLinksRef.current, nextLinks)) return;
+          terminalLinksRef.current = nextLinks;
+          setTerminalLinks(nextLinks);
+          if (nextLinks.length === 0) setTerminalLinksOpen(false);
+        };
+
+        scanTerminalLinks();
+        parsedWriteDisposable = terminal.onWriteParsed(scanTerminalLinks);
+        terminalResizeDisposable = terminal.onResize(scanTerminalLinks);
+        bufferChangeDisposable = terminal.buffer.onBufferChange(scanTerminalLinks);
 
         // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
         // using native drag semantics, so finger movement matches terminal content movement.
@@ -760,6 +827,7 @@ export function DirectTerminal({
         };
       })
       .catch(() => {
+        if (!mounted) return;
         setStatus("error");
         setError("Failed to load terminal");
       });
@@ -781,6 +849,9 @@ export function DirectTerminal({
       touchCleanup?.();
       inputDisposable?.dispose();
       binaryDisposable?.dispose();
+      parsedWriteDisposable?.dispose();
+      terminalResizeDisposable?.dispose();
+      bufferChangeDisposable?.dispose();
       websocketRef.current?.close();
       websocketRef.current = null;
       terminal?.dispose();
@@ -940,6 +1011,69 @@ export function DirectTerminal({
           >
             Enter
           </button>
+          {terminalLinks.length > 0 ? (
+            <div className="shrink-0" ref={terminalLinksMenu.containerRef}>
+              <button
+                aria-controls="terminal-links-panel"
+                aria-expanded={terminalLinksOpen}
+                aria-label="Open terminal links"
+                className={cn(
+                  terminalControlButtonClass,
+                  "gap-1 px-2 text-[10px] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-accent)] focus-visible:outline-none",
+                  terminalLinksOpen &&
+                    "border-[var(--color-accent)] bg-[var(--color-hover-overlay)] text-[var(--color-accent)]",
+                )}
+                onClick={() => setTerminalLinksOpen((current) => !current)}
+                ref={terminalLinksMenu.buttonRef}
+                type="button"
+              >
+                <ChainLinkIcon />
+                <span>{terminalLinks.length}</span>
+              </button>
+              {terminalLinksOpen ? (
+                <div
+                  aria-label="Terminal links"
+                  className="fixed z-30 max-h-[min(24rem,calc(100vh-1rem))] w-96 max-w-[calc(100vw-1rem)] overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  id="terminal-links-panel"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setTerminalLinksOpen(false);
+                    terminalLinksMenu.buttonRef.current?.focus();
+                  }}
+                  ref={terminalLinksMenu.menuRef}
+                  role="region"
+                  style={terminalLinksMenu.menuStyle}
+                >
+                  <ul>
+                    {terminalLinks.map((link) => (
+                      <li
+                        className="border-b border-[var(--color-border-subtle)] last:border-b-0"
+                        key={link.url}
+                      >
+                        <a
+                          className="block min-w-0 px-2 py-2 transition hover:bg-[var(--color-hover-overlay)] focus-visible:bg-[var(--color-hover-overlay)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]"
+                          href={link.url}
+                          onClick={() => setTerminalLinksOpen(false)}
+                          rel="noopener noreferrer"
+                          target="_blank"
+                          title={link.url}
+                        >
+                          <span className="block truncate font-bold text-[var(--color-text-primary)]">
+                            {link.hostname}
+                          </span>
+                          <span className="block truncate font-mono text-[10px] text-[var(--color-text-secondary)]">
+                            {link.url}
+                          </span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="relative ml-auto" ref={arrowMenuRef}>
             <button
               aria-expanded={arrowsOpen}
