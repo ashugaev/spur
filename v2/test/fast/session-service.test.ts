@@ -5613,6 +5613,61 @@ describe("SessionService", () => {
     expect(order).toEqual(["a"]);
   });
 
+  it("arms the delivery runner after flushing a stopped session, so an earlier queued message drains too (PR #708 comment 1)", async () => {
+    mockClaudeJsonlState("waiting");
+    mockExitedThenRestoredProcess();
+    mockTimerPromisesSleepWithFakeTimers();
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first", "second"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+
+    // flushQueuedMessage("second") relaunches the stopped session (dead
+    // pane, live workspace — mockExitedThenRestoredProcess) to running and
+    // delivers only "second". None of the loop's own arming sites (send,
+    // spawn, restore, applyConfig/resumeSessionDelivery) run on this path,
+    // so without scheduleDeliveryRunner after the flush's persistence write,
+    // "first" would sit stuck until an unrelated send/restore happened to
+    // arm it.
+    const flushed = await service.flushQueuedMessage("api-1", "second");
+
+    expect(flushed.status).toBe("running");
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
+    expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
+
+    // The armed loop picks up the earlier message on its own, with no
+    // second explicit call.
+    await advanceSeconds(2);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+  });
+
   it("removes a message landing mid-drain, and the drain's commit never resurrects it (AC4)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
@@ -5660,6 +5715,62 @@ describe("SessionService", () => {
     expect(await drain).toBe(true);
 
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+  });
+
+  it("returns 409 removing the head while the drain is parked on its ack, since the pane write may have already landed (PR #708 comment 2)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first", "second"],
+        awaitingPrompt: true,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+    // "first" (the head) is already typed into the pane; the drain is only
+    // waiting on its ack. Removing it now would report success even though
+    // the text was already sent.
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
+      interrupt: false,
+      agent: "claude",
+    });
+
+    await expect(service.removeQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
+    // The queue is untouched by the rejected call.
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first", "second"]);
+
+    releaseAck();
+    expect(await drain).toBe(true);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second"]);
   });
 
   it("flushes a non-head entry, delivering and removing only it and leaving the remaining order unchanged (AC5)", async () => {

@@ -8811,6 +8811,22 @@ export class SessionService {
 
   async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    // A drain (or a flush) already in flight for this session may have
+    // already typed the CURRENT head into the pane and be parked waiting on
+    // its ack — removing that exact text now would report "removed unsent"
+    // even though the pane write already landed (the same pane-write-
+    // precedes-ack-wait asymmetry the original bug was). Gate ONLY head
+    // removal: deliverQueuedMessage always targets index 0, so a non-head
+    // message can never be mid-delivery, and rejecting a safe, unrelated
+    // removal with a 409 would force the caller to wait out a live
+    // delivery's full ack window (up to ~900s) for no reason.
+    const isHead = queuedMessages(session)[0] === message;
+    if (
+      isHead &&
+      (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId))
+    ) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
     const updated = this.writeQueueWithout(session, message);
     this.logEvent("session.message.queue_removed", {
       level: "info",
@@ -8850,7 +8866,18 @@ export class SessionService {
       });
       // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
-      return await this.enrich(this.writeQueueWithout(latest, message));
+      const persisted = this.writeQueueWithout(latest, message);
+      // deliverPrepared's own ensureSessionReadyForSend can relaunch a
+      // stopped session (dead pane, live workspace) to running — none of
+      // send/spawn/restore/applyConfig's arming sites run on that path, so
+      // any OTHER queued message left after this flush would sit stuck
+      // until an unrelated send/restore happened to arm the loop. Arm here,
+      // after the persistence write above, same as send()'s own call.
+      // A no-op when nothing is left to deliver (shouldRunDelivery), and
+      // never a second runDeliveryLoop when one is already armed
+      // (deliveryRuns.has, checked inside ensureDeliveryRunner).
+      this.scheduleDeliveryRunner(sessionId);
+      return await this.enrich(persisted);
     } finally {
       this.queueDeliveryInFlight.delete(sessionId);
     }

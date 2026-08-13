@@ -1236,7 +1236,14 @@ export async function startServer(
       const queueOpMatch = path.match(/^\/sessions\/([^/]+)\/queue\/(remove|flush)$/);
       if (method === "POST" && queueOpMatch?.[1]) {
         const body = await readJsonBody<{ message?: unknown }>(request);
-        if (typeof body.message !== "string" || !body.message.trim()) {
+        // Forward the same trimmed value validation checks: a queued message
+        // is always trimmed at enqueue (send()'s prepareSendMessage and the
+        // web proxy's send route both trim before it ever reaches the
+        // queue), so an untrimmed value here can never match a real entry —
+        // validating trimmed but looking up raw would 404 a caller who
+        // padded the text, for no reason.
+        const message = typeof body.message === "string" ? body.message.trim() : "";
+        if (!message) {
           sendError(response, 400, "message must be a non-empty string");
           return;
         }
@@ -1245,8 +1252,8 @@ export async function startServer(
           response,
           200,
           queueOpMatch[2] === "remove"
-            ? await service.removeQueuedMessage(queueSessionId, body.message)
-            : await service.flushQueuedMessage(queueSessionId, body.message),
+            ? await service.removeQueuedMessage(queueSessionId, message)
+            : await service.flushQueuedMessage(queueSessionId, message),
         );
         return;
       }
