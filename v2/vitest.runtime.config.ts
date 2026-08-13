@@ -8,5 +8,6 @@ export default defineConfig({
     hookTimeout: 60_000,
     fileParallelism: false,
     pool: "forks",
+    setupFiles: ["./test/setup/temp-dirs.ts"],
   },
 });

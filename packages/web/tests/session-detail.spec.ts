@@ -290,6 +290,56 @@ async function dispatchPointerPinch(
 
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
+  test("maps the session boot wait to a centered loader", async ({ page }, testInfo) => {
+    const session = makeWorkingSession({ id: "detail-loading-bar" });
+    let releaseSession: (() => void) | undefined;
+    const sessionReady = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}`, async (route) => {
+      await sessionReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    const loader = page.getByRole("status", { name: "Loading session" });
+    await expect(loader).toBeVisible();
+    await expect(loader.locator(".loader-centered-mark > span").first()).toHaveCSS(
+      "animation-name",
+      "loader-centered-pulse",
+    );
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const center = await page.evaluate(() => {
+        const mark = document.querySelector(".loader-centered-mark")?.getBoundingClientRect();
+        const back = document.querySelector("main > a")?.getBoundingClientRect();
+        const main = document.querySelector("main");
+        if (!mark || !back || !main) return null;
+        const paddingBottom = Number.parseFloat(getComputedStyle(main).paddingBottom);
+        return {
+          actualX: mark.left + mark.width / 2,
+          actualY: mark.top + mark.height / 2,
+          expectedX: window.innerWidth / 2,
+          expectedY: (back.bottom + window.innerHeight - paddingBottom) / 2,
+        };
+      });
+      expect(center).not.toBeNull();
+      expect(Math.abs((center?.actualX ?? 0) - (center?.expectedX ?? 0))).toBeLessThanOrEqual(1);
+      expect(Math.abs((center?.actualY ?? 0) - (center?.expectedY ?? 0))).toBeLessThanOrEqual(1);
+    }
+    await page.screenshot({ path: testInfo.outputPath("session-loading.png") });
+    releaseSession?.();
+    await expect(loader).toHaveCount(0);
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+  });
+
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
     await page.route("**/api/sessions/detail-missing", (route) => {
       void route.fulfill({
@@ -302,7 +352,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(page.getByText("Loading...")).toHaveCount(0);
+    await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
   });
 
   test("back link visible", async ({ page }) => {

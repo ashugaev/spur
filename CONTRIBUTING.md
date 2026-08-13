@@ -32,6 +32,10 @@ When agent launch or prompt delivery changes:
 pnpm --dir v2 test:smoke
 ```
 
+Tests allocate temp dirs under `TMPDIR` only, never under `~/.spur`. If an
+older revision left fixture dirs behind, list/remove them with
+`bash scripts/clean-test-temp-dirs.sh` (dry-run by default, `--delete` to remove).
+
 ## Repo Rules
 
 - `v2/` is the source of truth for runtime behavior.

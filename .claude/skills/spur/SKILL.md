@@ -17,6 +17,7 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
   Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH`: holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+  Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS
 
@@ -25,7 +26,10 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
+  Sidecar reap: `sidecarGc` (on by default) kills an idle or unowned non-MCP project sidecar, workspace-wide; an established connection on a reserved port vetoes every reap rule. Rule order `docs/configuration.md#sidecar-reaping`; implementation `v2/src/sidecars/policy.ts`.
+  Sidecar port collision: a sidecar start refuses when this workspace's own recorded port reservation for this sidecar matches another live workspace's recorded reservation, and that port is actually free right now — an occupied colliding port self-heals via the normal free-port scan, and a shared declared range alone never refuses (each workspace draws a distinct free port from it). No reuse, no auto-reap; `clearPort` bypasses the check; scoped to the same project only. Contract `docs/configuration.md#sidecar-reaping`; implementation `v2/src/session-service.ts` `refuseOverlappingCrossWorkspaceSidecar`.
   `eventLog`/`userActionLog` size caps, archive retention, terminal-shard compaction, and the `data-dir-log-bytes` doctor warn: `docs/configuration.md#event-log-retention`. Instance config only.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
   Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, collapse canonical aliases, and protect the instance path. One canonical problem path emits one warning per daemon lifetime. A separate worktree-internal filter runs at boot and every connect/disconnect and keeps a path inside `worktreeDir` out of the merge and the next registry write; `connect`/`disconnect` reject a non-absolute path, and `connect` also rejects a worktree-internal one, both 400. `spur doctor` check `config-registry` (`warn`, no exit-code effect) flags dead, worktree-internal, and over-cap entries — see `docs/configuration.md#config-registry`. Boot also logs one read-only `daemon.registry.count` event with the read count and the worktree-internal drop count, no prune, no registry-file write.

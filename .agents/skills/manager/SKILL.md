@@ -11,6 +11,7 @@ Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the 
 
 MODE
 
+  - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
   - `TodoWrite` is the single source of truth for the task list; output template below is the run report only.
 

@@ -141,6 +141,7 @@ interface AgentAdapter {
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
+  sendsInterruptKey: boolean;
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
@@ -313,6 +314,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -367,6 +369,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -419,6 +422,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
+    sendsInterruptKey: false,
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
@@ -546,6 +550,10 @@ export function agentStateStrategy(agent: AgentName): AgentStateStrategy {
 
 export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
+}
+
+export function agentSendsInterruptKey(agent: AgentName): boolean {
+  return agentAdapter(agent).sendsInterruptKey;
 }
 
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {

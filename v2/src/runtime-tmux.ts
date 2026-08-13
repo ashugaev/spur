@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode } from "./agents/index.js";
+import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -257,7 +257,7 @@ const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
-const AGENT_READY_TIMEOUT_MS = 30_000;
+const AGENT_READY_TIMEOUT_MS = 120_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -752,7 +752,11 @@ export async function sendMessageToTmux(
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  if (options?.interrupt) {
+  const sendInterruptKey =
+    options?.interrupt === true &&
+    options.agent !== undefined &&
+    agentSendsInterruptKey(options.agent);
+  if (sendInterruptKey) {
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
@@ -810,6 +814,18 @@ function tmuxReadyPollJitterMs(sessionName: string): number {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   }
   return hash % AGENT_READY_POLL_JITTER_MAX_MS;
+}
+
+export class PromptReadyTimeoutError extends Error {
+  readonly elapsedMs: number;
+
+  constructor(args: { sessionName: string; elapsedMs: number; detail: string }) {
+    super(
+      `Timed out waiting for tmux session "${args.sessionName}" to reach the agent prompt${args.detail}`,
+    );
+    this.name = "PromptReadyTimeoutError";
+    this.elapsedMs = args.elapsedMs;
+  }
 }
 
 export async function waitForTmuxReady(
@@ -876,9 +892,7 @@ export async function waitForTmuxReady(
   const detail = lastCapture.trim()
     ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
     : "";
-  throw new Error(
-    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt${detail}`,
-  );
+  throw new PromptReadyTimeoutError({ sessionName, elapsedMs: Date.now() - startedAt, detail });
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {

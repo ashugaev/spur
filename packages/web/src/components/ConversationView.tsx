@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { Spinner } from "@/components/icons/Spinner";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 import type { ConversationMessage, TranscriptEntry } from "@/lib/types";
 
@@ -181,13 +182,17 @@ function QuestionEntryRow({
                 : "text-[var(--color-text-tertiary)]"
           }`}
         >
-          {isAnswered
-            ? `Answered: ${answerState.optionLabel}`
-            : isError
-              ? "Couldn't send — try again"
-              : isPending
-                ? "Answering…"
-                : "Click an option to answer"}
+          {isAnswered ? (
+            `Answered: ${answerState.optionLabel}`
+          ) : isError ? (
+            "Couldn't send — try again"
+          ) : isPending ? (
+            <span aria-label="Sending answer" className="inline-flex" role="status">
+              <Spinner className="h-3 w-3" strokeWidth={1.5} />
+            </span>
+          ) : (
+            "Click an option to answer"
+          )}
         </div>
       ) : (
         <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
