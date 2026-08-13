@@ -2590,9 +2590,7 @@ describe("SessionDetail queue controls", () => {
     resolveFlush!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute(
-        "aria-busy",
-      );
+      expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute("aria-busy");
     });
     fetchMock.mockRestore();
   });
