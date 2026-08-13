@@ -244,6 +244,10 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (wake?.[1]) return { action: "session.wake", sessionId: wake[1] };
     const send = path.match(/^\/sessions\/([^/]+)\/send$/);
     if (send?.[1]) return { action: "session.send", sessionId: send[1] };
+    const queueRemove = path.match(/^\/sessions\/([^/]+)\/queue\/remove$/);
+    if (queueRemove?.[1]) return { action: "session.queue_remove", sessionId: queueRemove[1] };
+    const queueFlush = path.match(/^\/sessions\/([^/]+)\/queue\/flush$/);
+    if (queueFlush?.[1]) return { action: "session.queue_flush", sessionId: queueFlush[1] };
     const sourceReply = path.match(/^\/sessions\/([^/]+)\/source-reply$/);
     if (sourceReply?.[1]) return { action: "session.source_reply", sessionId: sourceReply[1] };
     const pause = path.match(/^\/sessions\/([^/]+)\/pause$/);

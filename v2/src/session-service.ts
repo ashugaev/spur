@@ -389,6 +389,7 @@ import {
   type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesState,
+  type SessionQueuedMessagesView,
   type SessionState,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
@@ -753,6 +754,13 @@ export class SessionAdmissionDeniedError extends Error {
 }
 
 export class SessionNotReopenableError extends Error {
+  readonly statusCode = 409;
+}
+
+// Message-only, same shape as SessionRateLimitedError: a pane write is
+// already in flight (either the drain or another flush), so serializing
+// behind it could hang the HTTP request for a whole ack window.
+export class QueueDeliveryInFlightError extends Error {
   readonly statusCode = 409;
 }
 
@@ -1293,13 +1301,18 @@ function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipelin
     );
 }
 
-function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
-  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesView | undefined {
+  const messages = queuedMessages(session);
+  const pipelineMessages = queuedPipelineMessages(session);
   const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
-  if (messages.length === 0 && !awaitingPrompt) {
+  if (messages.length === 0 && pipelineMessages.length === 0 && !awaitingPrompt) {
     return undefined;
   }
-  return { messages, awaitingPrompt };
+  return {
+    messages,
+    awaitingPrompt,
+    ...(pipelineMessages.length > 0 ? { pipelineMessages } : {}),
+  };
 }
 
 function withQueuedMessages(
@@ -2113,6 +2126,14 @@ export class SessionService {
   // registry warnings to one per canonical path for this daemon process.
   private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
+  // Symmetric marker, checked and set synchronously (before any await) by
+  // every writer that drains or flushes the queue: tryDeliverQueuedMessage
+  // stands down (returns false) while a flush holds it, and flushQueuedMessage
+  // rejects 409 while the drain holds it. Neither writer can observe the
+  // other's pre-pane-lock setup window, which the paneWriteLocks probe alone
+  // does not bound (classifySessionRecord/ensureSessionReadyForSend can run
+  // for a while before the pane lock is ever taken).
+  private readonly queueDeliveryInFlight = new Set<string>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
@@ -8739,6 +8760,87 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
+  // Content-keyed: locates the exact string in the queue rather than an
+  // index, since no per-message id is persisted (send()'s duplicate-ignore
+  // guard already keeps exact message text unique within one queue).
+  // Rewritten through withQueuedMessages so the empty-queue delete and the
+  // awaitingPrompt default stay in the one place that owns them.
+  async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const messages = queuedMessages(session);
+    const index = messages.indexOf(message);
+    if (index === -1) {
+      throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+    }
+    const remaining = [...messages.slice(0, index), ...messages.slice(index + 1)];
+    const updated = withQueuedMessages(
+      { ...session, updatedAt: nowIso() },
+      remaining,
+      session.queuedMessages?.awaitingPrompt ?? false,
+    );
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.message.queue_removed", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Removed a queued message for ${sessionId}`,
+      details: {
+        queuedCount: remaining.length,
+        messageLength: message.length,
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  // Immediate delivery of an already-queued entry. Order: probe -> deliver
+  // -> re-read -> subtract. Never remove-then-deliver — a failed delivery
+  // would lose the message outright. Delivery reuses deliverPrepared (the
+  // existing immediate-send path, given recoverOnLiveAckTimeout so a live
+  // ack timeout returns success instead of a false session.message.failed),
+  // so there is exactly one immediate-delivery path, not a second one forked
+  // for flush.
+  async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (!queuedMessages(session).includes(message)) {
+      throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+    }
+    // Two synchronous guards, before any await. The pane-lock probe catches
+    // a drain already past its own queueDeliveryInFlight registration and
+    // into the pane write; the marker probe catches a drain (or another
+    // flush) still in its pre-pane-lock setup, which the pane-lock probe
+    // alone cannot see.
+    if (this.paneWriteLocks.has(session.tmuxSession)) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    if (this.queueDeliveryInFlight.has(sessionId)) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    this.queueDeliveryInFlight.add(sessionId);
+    try {
+      await this.deliverPrepared(sessionId, message, {
+        entryPoint: "flush",
+        recoverOnLiveAckTimeout: true,
+      });
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      const remaining = removeFirstOccurrence(queuedMessages(latest), message);
+      const updated = withQueuedMessages(
+        { ...latest, updatedAt: nowIso() },
+        remaining,
+        latest.queuedMessages?.awaitingPrompt ?? false,
+      );
+      writeSession(this.config.dataDir, updated);
+      return this.enrich(updated);
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
+    }
+  }
+
   // Single commit path for `deliverPrepared`'s success and recovered-ack-
   // timeout branches only. `deliverQueuedMessage` keeps its own two-write
   // commit (see the comment there) and must never be folded into this.
@@ -11374,61 +11476,73 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+    // Synchronous, before any await: a flush already registered for this
+    // session owns the next attempt. Stand down instead of queuing behind
+    // the pane lock — the loop's own sleep-and-continue retry covers it, and
+    // this is not an error path (G2).
+    if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
-
-    const readySession = await this.ensureSessionReadyForSend(session);
-    const classified = await this.classifySessionRecord(readySession);
-    // A live claude server-error wedge behaves like "waiting" for delivery
-    // purposes: typing the queued message is exactly what un-wedges Claude
-    // (the same mechanism as the reactivation nudge in processScheduledWakes),
-    // so an ordinary queued send must not sit for up to 30 minutes waiting
-    // for that nudge to fire on its own.
-    if (classified.state !== "waiting" && !classified.serverError) {
-      return false;
-    }
-    // Gate on the agent's own structured artifact, not raw tmux activity. Raw
-    // tmux activity is the session-wide max across every window, so a user's
-    // split running a dev server would stall delivery indefinitely, and merely
-    // attaching the web terminal (which makes the TUI repaint) would delay it
-    // by another full window. The agent's transcript is inherently scoped to
-    // the agent and is untouched by both.
-    if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
-      return false;
-    }
-
-    const latest = readSession(this.config.dataDir, sessionId);
-    if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
-      return false;
-    }
-
-    const nextMessage = queuedMessages(latest)[0];
-    if (!nextMessage) {
-      return false;
-    }
-
+    this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverQueuedMessage(latest, nextMessage);
-    } catch (error) {
-      // A queued-message delivery failure must never reach runDeliveryLoop's
-      // outer catch: that would call markPipelineErrored, which early-returns
-      // for a queued-message-only session and leaves no trace, and it would
-      // end the loop with no re-arm (no timer, no sweep exists). The message
-      // stays queued; the loop's own sleep-and-continue retries it.
-      const failure = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.message.delivery_failed", {
-        level: "error",
-        sessionId,
-        projectId: latest.project,
-        message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
-        details: {
-          messageLength: nextMessage.length,
-        },
-      });
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+        return false;
+      }
+
+      const readySession = await this.ensureSessionReadyForSend(session);
+      const classified = await this.classifySessionRecord(readySession);
+      // A live claude server-error wedge behaves like "waiting" for delivery
+      // purposes: typing the queued message is exactly what un-wedges Claude
+      // (the same mechanism as the reactivation nudge in processScheduledWakes),
+      // so an ordinary queued send must not sit for up to 30 minutes waiting
+      // for that nudge to fire on its own.
+      if (classified.state !== "waiting" && !classified.serverError) {
+        return false;
+      }
+      // Gate on the agent's own structured artifact, not raw tmux activity. Raw
+      // tmux activity is the session-wide max across every window, so a user's
+      // split running a dev server would stall delivery indefinitely, and merely
+      // attaching the web terminal (which makes the TUI repaint) would delay it
+      // by another full window. The agent's transcript is inherently scoped to
+      // the agent and is untouched by both.
+      if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
+        return false;
+      }
+
+      const latest = readSession(this.config.dataDir, sessionId);
+      if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
+        return false;
+      }
+
+      const nextMessage = queuedMessages(latest)[0];
+      if (!nextMessage) {
+        return false;
+      }
+
+      try {
+        await this.deliverQueuedMessage(latest, nextMessage);
+      } catch (error) {
+        // A queued-message delivery failure must never reach runDeliveryLoop's
+        // outer catch: that would call markPipelineErrored, which early-returns
+        // for a queued-message-only session and leaves no trace, and it would
+        // end the loop with no re-arm (no timer, no sweep exists). The message
+        // stays queued; the loop's own sleep-and-continue retries it.
+        const failure = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.message.delivery_failed", {
+          level: "error",
+          sessionId,
+          projectId: latest.project,
+          message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
+          details: {
+            messageLength: nextMessage.length,
+          },
+        });
+      }
+      return true;
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
     }
-    return true;
   }
 
   private async deliverQueuedMessage(

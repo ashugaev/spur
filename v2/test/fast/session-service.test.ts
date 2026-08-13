@@ -973,6 +973,7 @@ type SessionServiceInternals = {
   lastClassifiedLogStates: Map<string, SessionState>;
   paneWriteLocks: Map<string, Promise<void>>;
   deliveryRuns: Map<string, Promise<void>>;
+  queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
 };
 
@@ -5462,6 +5463,423 @@ describe("SessionService", () => {
       .filter(([id]) => id === "api-1")
       .map(([, message]) => message);
     expect(finalOrder).toEqual(["first", "second"]);
+  });
+
+  it("removes a message landing mid-drain, and the drain's commit never resurrects it (AC4)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first", "second"],
+        awaitingPrompt: true,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await service.removeQueuedMessage("api-1", "second");
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
+
+    releaseAck();
+    expect(await drain).toBe(true);
+
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+  });
+
+  it("flushes a non-head entry, delivering and removing only it and leaving the remaining order unchanged (AC5)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first", "second", "third"],
+        awaitingPrompt: false,
+      },
+    });
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+
+    await service.flushQueuedMessage("api-1", "second");
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first", "third"]);
+  });
+
+  it("rejects remove/flush of a pipeline-derived string with 404 and leaves the pipeline untouched (AC6)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "Ship the feature",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      pipeline: {
+        steps: ["research", "implement", "test"],
+        nextStepIndex: 1,
+        awaitingStepIndex: 0,
+        status: "running",
+      },
+    });
+    const pipelineText = formatPipelineStepMessage("Ship the feature", "implement", 1, 3);
+    const pipelineBefore = sessions.get("api-1")?.pipeline;
+
+    await expect(service.removeQueuedMessage("api-1", pipelineText)).rejects.toThrow(
+      "Message not found in queue for api-1",
+    );
+    await expect(service.flushQueuedMessage("api-1", pipelineText)).rejects.toThrow(
+      "Message not found in queue for api-1",
+    );
+    expect(sessions.get("api-1")?.pipeline).toEqual(pipelineBefore);
+  });
+
+  it("returns 409 while the drain is parked before its pane write, and starts no second delivery (AC7a)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    tmuxSessionExistsMock.mockImplementation(() => gate.then(() => true));
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+    await expect(service.flushQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+    releaseGate();
+    expect(await drain).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 409 while the drain holds the pane lock mid-send (AC7b)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(1);
+
+    await expect(service.flushQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+    releaseAck();
+    expect(await drain).toBe(true);
+  });
+
+  it("sequenced flush after the drain releases: neither resurrects a drained message nor erases the flush (AC11a)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["a", "b", "c"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+    releaseAck();
+    expect(await drain).toBe(true);
+    // Drain's own finally has cleared queueDeliveryInFlight and its pane
+    // lock by the time the awaited promise above settles.
+    expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+    expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b", "c"]);
+
+    await service.flushQueuedMessage("api-1", "b");
+
+    const order = sendMessageToTmuxMock.mock.calls
+      .filter(([id]) => id === "api-1")
+      .map(([, message]) => message);
+    expect(order).toEqual(["a", "b"]);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["c"]);
+  });
+
+  it("a concurrent send during the flush's own send window is preserved, and only the flushed entry is removed (AC11b)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["a", "b", "c"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const flush = service.flushQueuedMessage("api-1", "b");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await service.send("api-1", { message: "d" });
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "b", "c", "d"]);
+
+    releaseAck();
+    await flush;
+
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "c", "d"]);
+  });
+
+  it("a deliver() landing while a drain is mid-send does not resurrect the drained head (AC12)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["a"],
+        awaitingPrompt: true,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    let releaseAck: () => void = () => {};
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(async () => {
+      await ackGate;
+      return { found: true, lastScannedFile: null };
+    });
+
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const deliverPromise = service.deliver("api-1", "urgent");
+    await vi.advanceTimersByTimeAsync(0);
+
+    releaseAck();
+    expect(await drain).toBe(true);
+    await deliverPromise;
+
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+  });
+
+  it("a recovered flush emits exactly delivery_recovered, removes the flushed entry, and resolves to a SessionView (AC13)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first"],
+        awaitingPrompt: false,
+      },
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    const view = await service.flushQueuedMessage("api-1", "first");
+
+    expect(view.id).toBe("api-1");
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.message.delivery_recovered",
+      ).length,
+    ).toBe(1);
+    expect(
+      logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.message.sent")
+        .length,
+    ).toBe(0);
+    expect(
+      logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.message.failed")
+        .length,
+    ).toBe(0);
   });
 
   it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
@@ -12364,7 +12782,7 @@ describe("SessionService", () => {
     expect(listedWithCompleted[2]?.state).toBe("stopped");
   });
 
-  it("includes queued manual messages before future pipeline steps in session views", async () => {
+  it("splits queued manual messages from future pipeline steps in session views (G4 view split)", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -12397,12 +12815,12 @@ describe("SessionService", () => {
     const [listed] = await service.list();
 
     expect(listed?.queuedMessages).toEqual({
-      messages: [
-        "Manual queued follow-up",
+      messages: ["Manual queued follow-up"],
+      awaitingPrompt: true,
+      pipelineMessages: [
         formatPipelineStepMessage("Ship the feature", "implement", 1, 3),
         formatPipelineStepMessage("Ship the feature", "test", 2, 3),
       ],
-      awaitingPrompt: true,
     });
   });
 

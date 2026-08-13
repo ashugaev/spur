@@ -37,6 +37,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
@@ -1232,6 +1233,36 @@ export async function startServer(
         return;
       }
 
+      const queueRemoveSessionId = path.match(/^\/sessions\/([^/]+)\/queue\/remove$/)?.[1];
+      if (method === "POST" && queueRemoveSessionId) {
+        const body = await readJsonBody<{ message?: unknown }>(request);
+        if (typeof body.message !== "string" || !body.message.trim()) {
+          sendError(response, 400, "message must be a non-empty string");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.removeQueuedMessage(queueRemoveSessionId, body.message),
+        );
+        return;
+      }
+
+      const queueFlushSessionId = path.match(/^\/sessions\/([^/]+)\/queue\/flush$/)?.[1];
+      if (method === "POST" && queueFlushSessionId) {
+        const body = await readJsonBody<{ message?: unknown }>(request);
+        if (typeof body.message !== "string" || !body.message.trim()) {
+          sendError(response, 400, "message must be a non-empty string");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.flushQueuedMessage(queueFlushSessionId, body.message),
+        );
+        return;
+      }
+
       const answerSessionId = path.match(/^\/sessions\/([^/]+)\/answer$/)?.[1];
       if (method === "POST" && answerSessionId) {
         const body = await readJsonBody<{ optionIndex?: unknown }>(request);
@@ -1455,7 +1486,8 @@ export async function startServer(
         error instanceof InvalidJsonBodyError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
-        error instanceof SessionNotReopenableError
+        error instanceof SessionNotReopenableError ||
+        error instanceof QueueDeliveryInFlightError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
