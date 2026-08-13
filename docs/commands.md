@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -99,6 +99,14 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
+
+```bash
+spur queue <sessionId> list
+spur queue <sessionId> remove <index>
+spur queue <sessionId> flush <index>
+```
+
+Manages one session's message queue. `list` prints the queue as a 1-based numbered list of real queued messages; a pipeline's own future steps print separately, unnumbered, and are never a valid `remove`/`flush` target. `remove`/`flush` take that 1-based index, resolve it to exact message text via a fresh read taken immediately before acting (the daemon is content-keyed, not index-based, so an index is never sent over the wire), and echo the resolved text — the queue can change between an earlier `list` and this call, so what actually moved may differ from what an index printed a moment ago. `remove` drops the message without sending it. `flush` sends it immediately, ahead of the rest of the queue; it returns 409 while a pane write for this session is already in flight (the queue drain, or another flush) rather than blocking the command for the length of an ack window.
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
 

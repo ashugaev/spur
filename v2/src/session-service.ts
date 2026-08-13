@@ -388,7 +388,6 @@ import {
   type SessionRecord,
   type SessionSlots,
   type SessionStatus,
-  type SessionQueuedMessagesState,
   type SessionQueuedMessagesView,
   type SessionState,
   type SessionStateSubscription,
@@ -8835,7 +8834,7 @@ export class SessionService {
         latest.queuedMessages?.awaitingPrompt ?? false,
       );
       writeSession(this.config.dataDir, updated);
-      return this.enrich(updated);
+      return await this.enrich(updated);
     } finally {
       this.queueDeliveryInFlight.delete(sessionId);
     }

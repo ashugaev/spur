@@ -2455,6 +2455,91 @@ describe("SessionDetail voice input", () => {
   });
 });
 
+describe("SessionDetail queue controls", () => {
+  it("removes and flushes real queued rows only, leaves auto-step rows uncontrolled, and surfaces a 409 toast", async () => {
+    let queuedMessages: {
+      messages: string[];
+      awaitingPrompt: boolean;
+      pipelineMessages: string[];
+    } = {
+      messages: ["first follow-up", "second follow-up"],
+      awaitingPrompt: false,
+      pipelineMessages: ["Ship the feature — step 2/3: implement"],
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ queuedMessages })), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/remove" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        if (body.message === "second follow-up") {
+          return new Response(JSON.stringify({ error: "Delivery already in flight for api-a1" }), {
+            status: 409,
+          });
+        }
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+    expect(screen.getByText("Ship the feature — step 2/3: implement")).toBeInTheDocument();
+
+    // Both controls render only on the two real queued rows, never on the
+    // auto (pipeline-derived) row.
+    expect(screen.getAllByLabelText(/^Remove queued message #\d+$/)).toHaveLength(2);
+    expect(screen.getAllByLabelText(/^Send queued message #\d+ now$/)).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "first follow-up" }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("first follow-up")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+
+    // Flushing the remaining row hits a 409 (delivery already in flight):
+    // the row stays and the daemon's message surfaces as an error toast.
+    fireEvent.click(screen.getByLabelText("Send queued message #1 now"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "second follow-up" }),
+      });
+    });
+    expect(await screen.findByText("Delivery already in flight for api-a1")).toBeInTheDocument();
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+  });
+});
+
 describe("SessionDetail logs", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
