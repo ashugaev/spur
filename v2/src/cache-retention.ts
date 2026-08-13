@@ -77,7 +77,6 @@ export interface CacheEntry {
   rootId: CacheRootId;
   entryClass: CacheEntryClass;
   sizeKb: number;
-  newestChangeMs: number;
   ageDays: number;
 }
 
@@ -700,14 +699,12 @@ async function measureRoot(
     // simply unmeasured, not a reason to report it at size 0 or to drop the
     // whole root (see partialDuStdout above).
     if (sizeKb === undefined) continue;
-    const newestChangeMs = Math.max(fact.mtimeMs, fact.ctimeMs);
     const ageDays = ageDaysFor(fact.mtimeMs, fact.ctimeMs, nowMs);
     entries.push({
       path: item.path,
       rootId: root.id,
       entryClass: item.entryClass,
       sizeKb,
-      newestChangeMs,
       ageDays,
     });
     totalKb += sizeKb;

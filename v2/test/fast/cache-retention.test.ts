@@ -46,7 +46,6 @@ function makeEntry(overrides: Partial<CacheEntry> & { entryClass: CacheEntryClas
     path: "/home/user/.npm/_cacache",
     rootId: "npm-cacache",
     sizeKb: 100,
-    newestChangeMs: Date.now(),
     ageDays: 0,
     ...overrides,
   };
@@ -150,12 +149,10 @@ describe("ageDaysFor", () => {
 
 describe("verdictFor", () => {
   it("protects vendor-cache at 6 days and marks it prunable at the 7-day floor", () => {
-    const now = Date.now();
     const liveness = makeLiveness();
     const at6 = makeEntry({
       entryClass: { kind: "vendor-cache" },
       ageDays: GLOBAL_MIN_AGE_DAYS - 1,
-      newestChangeMs: now - (GLOBAL_MIN_AGE_DAYS - 1) * DAY_MS,
     });
     expect(verdictFor(at6, makeOwnership(), liveness, MY_UID)).toEqual({
       kind: "protected",
@@ -168,7 +165,6 @@ describe("verdictFor", () => {
     const at7 = makeEntry({
       entryClass: { kind: "vendor-cache" },
       ageDays: GLOBAL_MIN_AGE_DAYS,
-      newestChangeMs: now - GLOBAL_MIN_AGE_DAYS * DAY_MS,
     });
     expect(verdictFor(at7, makeOwnership(), liveness, MY_UID)).toEqual({ kind: "prunable" });
   });
@@ -558,7 +554,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
               rootId: "npm-cacache",
               entryClass: { kind: "vendor-cache" },
               sizeKb: 10,
-              newestChangeMs: Date.now() - 61 * DAY_MS,
               ageDays: 61,
             },
             verdict: { kind: "prunable" },
@@ -597,7 +592,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
           rootId: "npm-cacache" as const,
           entryClass: { kind: "vendor-cache" as const },
           sizeKb: 10,
-          newestChangeMs: old.getTime(),
           ageDays: 60,
         },
         verdict: { kind: "prunable" as const },
@@ -608,7 +602,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
           rootId: "npm-npx" as const,
           entryClass: { kind: "npx-package" as const, hash: "escape-link" },
           sizeKb: 10,
-          newestChangeMs: old.getTime(),
           ageDays: 60,
         },
         verdict: { kind: "prunable" as const },
@@ -619,7 +612,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
           rootId: "npm-npx" as const,
           entryClass: { kind: "npx-package" as const, hash: "outside" },
           sizeKb: 10,
-          newestChangeMs: old.getTime(),
           ageDays: 60,
         },
         verdict: { kind: "prunable" as const },
@@ -677,7 +669,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
               rootId: "npm-cacache" as const,
               entryClass: { kind: "vendor-cache" as const },
               sizeKb: 10,
-              newestChangeMs: Date.now() - 61 * DAY_MS,
               ageDays: 61,
             },
             verdict: { kind: "prunable" as const },
@@ -688,7 +679,6 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
               rootId: "npm-cacache" as const,
               entryClass: { kind: "vendor-cache" as const },
               sizeKb: 10,
-              newestChangeMs: Date.now() - 61 * DAY_MS,
               ageDays: 61,
             },
             verdict: { kind: "prunable" as const },

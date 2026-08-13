@@ -1462,7 +1462,6 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
             rootId: "npm-npx",
             entryClass: { kind: "npx-package", hash: "small" },
             sizeKb: 1_000_000,
-            newestChangeMs: 0,
             ageDays: 40,
           },
           verdict: { kind: "prunable" },
@@ -1473,7 +1472,6 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
             rootId: "npm-cacache",
             entryClass: { kind: "vendor-cache" },
             sizeKb: 20_000_000,
-            newestChangeMs: 0,
             ageDays: 40,
           },
           verdict: { kind: "prunable" },
@@ -1489,7 +1487,6 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
               dirName: "chromium-1208",
             },
             sizeKb: 5_000_000,
-            newestChangeMs: 0,
             ageDays: 400,
           },
           verdict: {
