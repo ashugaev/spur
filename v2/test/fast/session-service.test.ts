@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -566,6 +567,7 @@ vi.mock("../../src/session-slots.js", () => ({
     (request: {
       title?: string;
       clearTitle?: boolean;
+      setTitleIfAbsent?: boolean;
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
       tags?: string[];
@@ -573,6 +575,7 @@ vi.mock("../../src/session-slots.js", () => ({
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
+      ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
       tags: request.tags ?? [],
@@ -1307,7 +1310,11 @@ describe("SessionService", () => {
           }
         }
       }
-      const title = request.clearTitle ? undefined : (request.title ?? current?.title);
+      const title = request.clearTitle
+        ? undefined
+        : request.setTitleIfAbsent && current?.title?.trim()
+          ? current.title
+          : (request.title ?? current?.title);
       return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
     });
   });
@@ -6539,6 +6546,19 @@ describe("SessionService", () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(runningSession({ status: "completed" }));
       expect(request.claudeAccountId).toBeUndefined();
+    });
+
+    it("starts a new workspace without carrying title state", async () => {
+      const { resolveRespawnRequest } = await loadSessionServiceModule();
+      const request = resolveRespawnRequest(
+        runningSession({
+          status: "completed",
+          slots: { title: "Old title", links: [] },
+        }),
+      );
+
+      expect(request).not.toHaveProperty("reuseWorkspaceSessionId");
+      expect(request).not.toHaveProperty("slots");
     });
   });
 
@@ -15736,7 +15756,9 @@ describe("SessionService", () => {
     );
   });
 
-  it("keeps the pinned claude id via --session-id when native resume fails during send recovery", async () => {
+  it("mints a fresh claude session id when native resume fails during send recovery", async () => {
+    const FRESH_CLAUDE_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     buildAgentLaunchPlanMock.mockImplementation(
       (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
         agent,
@@ -15765,7 +15787,8 @@ describe("SessionService", () => {
     });
     tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
     // First recovery attempt (native --resume) reports the process exited, so
-    // the fallback fresh launch must reuse the pinned id, not drop it.
+    // the fallback fresh launch must mint a new id — the pinned id may already
+    // own a transcript, and claude refuses --session-id on it.
     isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -15780,15 +15803,15 @@ describe("SessionService", () => {
       expect.any(String),
       expect.anything(),
     );
-    // ...then the fresh relaunch reused the pinned id via --session-id.
+    // ...then the fresh relaunch minted a new id via --session-id, not the pinned one.
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
       "hello",
-      expect.objectContaining({ agentSessionId: PINNED_CLAUDE_SESSION_ID }),
+      expect.objectContaining({ agentSessionId: FRESH_CLAUDE_SESSION_ID }),
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+        launchCommand: `claude --session-id ${FRESH_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
       }),
     );
     expect(
@@ -15796,11 +15819,66 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "session.recover.resume_failed",
       ),
     ).toBe(true);
-    // The pinned id is preserved on the persisted record.
+    // The fresh id, not the pinned one, is persisted on the recovered record.
     const recoverWrite = writeSessionMock.mock.calls.find(
       ([, session]) => session.status === "running",
     );
-    expect(recoverWrite?.[1].agentSessionId).toBe(PINNED_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).toBe(FRESH_CLAUDE_SESSION_ID);
+    expect(recoverWrite?.[1].agentSessionId).not.toBe(PINNED_CLAUDE_SESSION_ID);
+  });
+
+  it("drops the cached claude jsonl reader when fallback recovery mints a fresh id", async () => {
+    const FRESH_CLAUDE_SESSION_ID = "22222222-2222-4222-8222-222222222222";
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
+    buildAgentLaunchPlanMock.mockImplementation(
+      (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
+        agent,
+        launchCommand: options?.agentSessionId
+          ? `claude --session-id ${options.agentSessionId} --dangerously-skip-permissions`
+          : "claude --dangerously-skip-permissions",
+        initialMessage,
+        readyMarkers: ["Claude Code", "❯"],
+      }),
+    );
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    // First recovery attempt (native --resume) reports the process exited, so
+    // the fallback fresh launch mints a new id.
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = service as unknown as { claudeJsonlReaders: Map<string, unknown> };
+    // Seed a reader cached under the pinned id's now-dead transcript, as if a
+    // prior classify tick had already read it while the session was alive.
+    internals.claudeJsonlReaders.set("api-1", {
+      filePath: "/tmp/spur-worktrees/api/api-1/.claude/stale-pinned-transcript.jsonl",
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    await service.send("api-1", { message: "resume work" });
+
+    // The stale reader must not survive the id change: readClaudeJsonlState's
+    // fallback lookup (claude-jsonl-state.ts) would otherwise resolve the
+    // cached reader's filePath instead of re-deriving it from the fresh id.
+    expect(internals.claudeJsonlReaders.has("api-1")).toBe(false);
   });
 
   it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {
@@ -19733,6 +19811,117 @@ describe("SessionService", () => {
     // Its workspace id is its own id, so it gets its own workspace file once
     // it has slots.
     expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Solo title");
+    service.dispose();
+  });
+
+  it("allows one conditional title, then ignores later conditional titles", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { title: "First", setTitleIfAbsent: true });
+    const result = await service.updateSlots("api-1", {
+      title: "Second",
+      setTitleIfAbsent: true,
+    });
+
+    expect(result.slots?.title).toBe("First");
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+      title: "First",
+      setTitleIfAbsent: true,
+    });
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBeUndefined();
+    service.dispose();
+  });
+
+  it("keeps manual title authority while applying non-title conditional changes", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { title: "Manual" });
+    const linked = await service.updateSlots("api-1", {
+      title: "Agent retry",
+      setTitleIfAbsent: true,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+    await service.updateSlots("api-1", { clearTitle: true });
+    const cleared = await service.updateSlots("api-1", {
+      title: "Agent after clear",
+      setTitleIfAbsent: true,
+    });
+
+    expect(linked.slots?.title).toBe("Manual");
+    expect(linked.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+    ]);
+    expect(cleared.slots?.title).toBeUndefined();
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    service.dispose();
+  });
+
+  it("preserves the manual title override through unrelated workspace writes", async () => {
+    const store = createSessionStore();
+    store.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", { clearTitle: true });
+    await service.updateSlots("api-1", {
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
     service.dispose();
   });
 
@@ -25280,7 +25469,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("carries title and config-known tags to the spawned session", async () => {
+    it("keeps the shared title and tags without replaying the title as a manual edit", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -25308,6 +25497,7 @@ describe("SessionService", () => {
       reserveNextSessionIdMock.mockResolvedValue("api-2");
 
       const { SessionService } = await loadSessionServiceModule();
+      const { readWorkspaceState } = await loadWorkspaceStoreModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       applySlotsUpdateMock.mockImplementation((current, request) => {
         const links = [...(current?.links ?? [])];
@@ -25320,6 +25510,7 @@ describe("SessionService", () => {
         };
       });
 
+      await service.updateSlots("api-1", { title: "Handoff task" });
       const result = await service.handoff("api-1", { agent: "cursor" });
 
       // api-2 is a desk sibling of api-1 (reused workspace => deskId ===
@@ -25332,6 +25523,7 @@ describe("SessionService", () => {
         title: "Handoff task",
         tags: ["feature"],
       });
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
       expect(result.id).toBe("api-2");
     });
 

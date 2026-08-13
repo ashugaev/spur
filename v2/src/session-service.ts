@@ -262,6 +262,7 @@ import {
 } from "./session-gc.js";
 import {
   deleteWorkspaceState,
+  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -7724,7 +7725,14 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    writeWorkspaceState(this.config.dataDir, workspaceId, state);
+    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
+    const nextState: WorkspaceState = {
+      ...state,
+      ...(state.manualTitleOverride || stored?.manualTitleOverride
+        ? { manualTitleOverride: true }
+        : {}),
+    };
+    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -7734,13 +7742,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (state.slots) {
-      mirrored.slots = state.slots;
+    if (nextState.slots) {
+      mirrored.slots = nextState.slots;
     } else {
       delete mirrored.slots;
     }
-    if (state.pr) {
-      mirrored.pr = state.pr;
+    if (nextState.pr) {
+      mirrored.pr = nextState.pr;
     } else {
       delete mirrored.pr;
     }
@@ -9403,8 +9411,10 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
+    const conditionalTitleBlocked =
+      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
     const hasGenericChanges =
-      normalized.title !== undefined ||
+      (normalized.title !== undefined && !conditionalTitleBlocked) ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
@@ -9412,7 +9422,12 @@ export class SessionService {
       normalized.untags.length > 0;
     const slots = hasGenericChanges
       ? applySlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+          ...(normalized.title !== undefined && !conditionalTitleBlocked
+            ? {
+                title: normalized.title,
+                ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
+              }
+            : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
@@ -9424,6 +9439,11 @@ export class SessionService {
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
+      ...(current.manualTitleOverride ||
+      normalized.clearTitle ||
+      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
+        ? { manualTitleOverride: true }
+        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
@@ -10328,12 +10348,10 @@ export class SessionService {
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
-    // A pinned claude keeps its native id on a fresh relaunch via --session-id so
-    // later state reads stay bound to the same transcript instead of a new one.
-    const pinnedClaudeId =
-      session.agent === "claude" && sessionWithAgentId.agentSessionId
-        ? sessionWithAgentId.agentSessionId
-        : undefined;
+    // A pinned claude resumes via --session-id on the native-resume attempt below;
+    // only the fresh-launch fallback (on resume failure) mints a new id, since
+    // claude rejects --session-id on a transcript that may already exist.
+    const isPinnedClaude = session.agent === "claude" && Boolean(sessionWithAgentId.agentSessionId);
     let persistedLaunchCommand = baseLaunchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
@@ -10412,17 +10430,19 @@ export class SessionService {
         },
       });
       await killTmuxSession(session.tmuxSession);
-      // Reuse the pinned claude id on the fresh relaunch so the session stays
-      // bound to its native id; legacy (unpinned) sessions relaunch without one.
-      const freshPlan = pinnedClaudeId
+      // Mint a fresh claude id for the fallback launch (fresh per attempt so a
+      // retry never reuses a possibly-existing transcript id) — the pinned id
+      // may already own a transcript, and claude rejects --session-id on it.
+      const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
+      const freshPlan = freshClaudeId
         ? buildAgentLaunchPlan(session.agent, session.prompt, {
             ...planOptions,
             ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-            agentSessionId: pinnedClaudeId,
+            agentSessionId: freshClaudeId,
           })
         : baseLaunchPlan;
       const freshLaunchCommand = freshPlan.launchCommand;
-      recoveredAgentSessionId = pinnedClaudeId;
+      recoveredAgentSessionId = freshClaudeId;
       persistedLaunchCommand = freshLaunchCommand;
       await createTmuxSession({
         sessionName: session.tmuxSession,
@@ -10450,6 +10470,12 @@ export class SessionService {
     }
 
     this.stateCache.delete(session.id);
+    if (recoveredAgentSessionId !== sessionWithAgentId.agentSessionId) {
+      // The fallback minted a fresh claude id: any cached jsonl reader still
+      // points at the dead transcript and would otherwise win over the new
+      // id in readClaudeJsonlState's fallback lookup.
+      this.claudeJsonlReaders.delete(session.id);
+    }
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     return this.applyReservedSidecars(
       {
@@ -11406,14 +11432,13 @@ export class SessionService {
         });
       }
 
-      if (session.slots?.title || session.slots?.tags?.length) {
+      if (session.slots?.tags?.length) {
         const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-        const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
-        if (session.slots.title || carryTags.length > 0) {
+        const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
+        if (carryTags.length > 0) {
           try {
             spawned = await this.updateSlots(spawned.id, {
-              ...(session.slots.title ? { title: session.slots.title } : {}),
-              ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+              tags: carryTags,
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

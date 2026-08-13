@@ -134,9 +134,11 @@ Register or unregister a project config with the running instance. `[path]` reso
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session:
 
 ```bash
-spur-slots --title "Fix flaky auth test"
+spur-slots --title-if-absent "Fix flaky auth test"
 spur-slots --link pr=https://github.com/org/repo/pull/45 --link tracker=https://tracker.example.com/TASK-123
 ```
+
+`--title-if-absent` initializes the workspace title once. Later conditional writes do nothing. `--title` and `--clear-title` remain unrestricted manual controls; either blocks future conditional title writes in that workspace. Other flags combined with a blocked conditional title still apply.
 
 ## service
 
