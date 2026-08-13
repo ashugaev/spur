@@ -10628,9 +10628,27 @@ export class SessionService {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
           // send keeps the mid-session pacing and its own timeout handling below.
-          await this.sendAgentMessage(current, restoreInitialMessage, {
+          const restoreSendOutcome = await this.sendAgentMessage(current, restoreInitialMessage, {
             freshLaunch: freshLaunchFallback,
           });
+          if (restoreSendOutcome === "submit_unconfirmed") {
+            // Same degraded state the catch below reports for a resume send that
+            // timed out on a live pane: the agent is up, its prompt is not
+            // confirmed. `processAlive` is true by the outcome's contract, and the
+            // send already spent its Enter resends, so restore continues and the
+            // reason names what is unproven.
+            this.logEvent("session.restore.recovered", {
+              level: "warn",
+              sessionId,
+              projectId: current.project,
+              message: `Restored ${sessionId} with an unconfirmed restore prompt`,
+              details: {
+                reason: "submit_unconfirmed",
+                agent: current.agent,
+                processAlive: true,
+              },
+            });
+          }
         }
       }
     } catch (error) {
