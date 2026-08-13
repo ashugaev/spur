@@ -1233,32 +1233,20 @@ export async function startServer(
         return;
       }
 
-      const queueRemoveSessionId = path.match(/^\/sessions\/([^/]+)\/queue\/remove$/)?.[1];
-      if (method === "POST" && queueRemoveSessionId) {
+      const queueOpMatch = path.match(/^\/sessions\/([^/]+)\/queue\/(remove|flush)$/);
+      if (method === "POST" && queueOpMatch?.[1]) {
         const body = await readJsonBody<{ message?: unknown }>(request);
         if (typeof body.message !== "string" || !body.message.trim()) {
           sendError(response, 400, "message must be a non-empty string");
           return;
         }
+        const queueSessionId = queueOpMatch[1];
         sendJson(
           response,
           200,
-          await service.removeQueuedMessage(queueRemoveSessionId, body.message),
-        );
-        return;
-      }
-
-      const queueFlushSessionId = path.match(/^\/sessions\/([^/]+)\/queue\/flush$/)?.[1];
-      if (method === "POST" && queueFlushSessionId) {
-        const body = await readJsonBody<{ message?: unknown }>(request);
-        if (typeof body.message !== "string" || !body.message.trim()) {
-          sendError(response, 400, "message must be a non-empty string");
-          return;
-        }
-        sendJson(
-          response,
-          200,
-          await service.flushQueuedMessage(queueFlushSessionId, body.message),
+          queueOpMatch[2] === "remove"
+            ? await service.removeQueuedMessage(queueSessionId, body.message)
+            : await service.flushQueuedMessage(queueSessionId, body.message),
         );
         return;
       }

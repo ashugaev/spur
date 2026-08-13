@@ -8759,35 +8759,43 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
-  // Content-keyed: locates the exact string in the queue rather than an
-  // index, since no per-message id is persisted (send()'s duplicate-ignore
-  // guard already keeps exact message text unique within one queue).
-  // Rewritten through withQueuedMessages so the empty-queue delete and the
-  // awaitingPrompt default stay in the one place that owns them.
-  async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+  // Content-keyed: both queue ops locate the exact string in the queue rather
+  // than an index, since no per-message id is persisted (send()'s
+  // duplicate-ignore guard already keeps exact message text unique within one
+  // queue).
+  private readSessionWithQueuedMessage(sessionId: string, message: string): SessionRecord {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
-    const messages = queuedMessages(session);
-    const index = messages.indexOf(message);
-    if (index === -1) {
+    if (!queuedMessages(session).includes(message)) {
       throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
     }
-    const remaining = [...messages.slice(0, index), ...messages.slice(index + 1)];
+    return session;
+  }
+
+  // Rewritten through withQueuedMessages so the empty-queue delete and the
+  // awaitingPrompt default stay in the one place that owns them.
+  private writeQueueWithout(session: SessionRecord, message: string): SessionRecord {
     const updated = withQueuedMessages(
       { ...session, updatedAt: nowIso() },
-      remaining,
+      removeFirstOccurrence(queuedMessages(session), message),
       session.queuedMessages?.awaitingPrompt ?? false,
     );
     writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
+    const updated = this.writeQueueWithout(session, message);
     this.logEvent("session.message.queue_removed", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Removed a queued message for ${sessionId}`,
       details: {
-        queuedCount: remaining.length,
+        queuedCount: queuedMessages(updated).length,
         messageLength: message.length,
       },
     });
@@ -8802,22 +8810,13 @@ export class SessionService {
   // so there is exactly one immediate-delivery path, not a second one forked
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
-    if (!queuedMessages(session).includes(message)) {
-      throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
-    }
-    // Two synchronous guards, before any await. The pane-lock probe catches
-    // a drain already past its own queueDeliveryInFlight registration and
-    // into the pane write; the marker probe catches a drain (or another
-    // flush) still in its pre-pane-lock setup, which the pane-lock probe
-    // alone cannot see.
-    if (this.paneWriteLocks.has(session.tmuxSession)) {
-      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
-    }
-    if (this.queueDeliveryInFlight.has(sessionId)) {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
+    // Both probes are synchronous, before any await. The pane-lock probe
+    // catches a drain already past its own queueDeliveryInFlight registration
+    // and into the pane write; the marker probe catches a drain (or another
+    // flush) still in its pre-pane-lock setup, which the pane-lock probe alone
+    // cannot see.
+    if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
     }
     this.queueDeliveryInFlight.add(sessionId);
@@ -8826,15 +8825,9 @@ export class SessionService {
         entryPoint: "flush",
         recoverOnLiveAckTimeout: true,
       });
+      // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
-      const remaining = removeFirstOccurrence(queuedMessages(latest), message);
-      const updated = withQueuedMessages(
-        { ...latest, updatedAt: nowIso() },
-        remaining,
-        latest.queuedMessages?.awaitingPrompt ?? false,
-      );
-      writeSession(this.config.dataDir, updated);
-      return await this.enrich(updated);
+      return await this.enrich(this.writeQueueWithout(latest, message));
     } finally {
       this.queueDeliveryInFlight.delete(sessionId);
     }

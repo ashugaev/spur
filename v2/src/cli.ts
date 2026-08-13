@@ -333,14 +333,11 @@ function resolveQueuedMessageByIndex(
   index: number,
 ): string {
   const messages = session.queuedMessages?.messages ?? [];
-  if (!Number.isInteger(index) || index < 1 || index > messages.length) {
+  const message = index >= 1 ? messages[index - 1] : undefined;
+  if (message === undefined) {
     throw new Error(
       `Index ${index} is out of range: ${sessionId} has ${messages.length} queued message(s)`,
     );
-  }
-  const message = messages[index - 1];
-  if (message === undefined) {
-    throw new Error(`Index ${index} is out of range for ${sessionId}`);
   }
   return message;
 }
