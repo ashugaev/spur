@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -84,7 +84,7 @@ spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message..
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` and the message retries through the queue drain (below) like any other queued message.
 
 ## list
 
@@ -99,6 +99,18 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
+
+```bash
+spur queue <sessionId> list [--json]
+spur queue <sessionId> remove <index> [--json]
+spur queue <sessionId> flush <index> [--json]
+```
+
+One session's message queue. `list` numbers real queued messages from `1`; a pipeline's own future steps print separately, unnumbered, and are never a `remove`/`flush` target. `remove`/`flush` take that number, resolve it to exact message text through a fresh read taken immediately before acting, and echo the resolved text. The queue moves on its own, so a number from an older `list` either fails as not queued or acts on whatever now sits at that position. `remove` drops the message unsent. `flush` sends it immediately, ahead of the rest of the queue, which stays queued; it fails `409` while a pane write for that session is already in flight (the queue drain, or another flush) instead of holding the command for an ack window. `remove` fails the same `409` only when the targeted message is currently the queue's head and a delivery is in flight for it — the pane write may have already landed, so reporting a plain removal would be a lie; removing any other position is never in flight (only the head is ever mid-delivery) and always succeeds.
+
+Both act through `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush`, body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire, matched against the trimmed value on both sides since a queued message is always trimmed at enqueue; `404` when that text is not queued. The web session view drives the same two routes from per-row send-now and delete icons; auto steps get no controls.
+
+Queued-message delivery events: `session.message.sent` (delivered), `session.message.delivery_recovered` (the agent's submit acknowledgment timed out but the process was still alive, so the pane write is treated as delivered), `session.message.delivery_failed` (retained, retried on the next poll), `session.message.queue_removed` (a `remove` call). A landed delivery logs exactly one of `sent` / `delivery_recovered` / `delivery_failed`; a `delivery_failed` whose message is unchanged from the last logged failure on that session is suppressed (zero events) rather than repeated once per poll, so a permanently broken session doesn't flood the log.
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
 
@@ -172,7 +184,7 @@ One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing t
 
 `--state` is repeatable. Valid states: `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, `killed`. Delivery fires once per matching transition, immediately after the target session's state settles — not on every poll. If the target is already in a watched state when the subscription arms, nothing fires until the next transition into that state. `--message` sets custom text appended after a blank line to the default `Session <targetSessionId> changed state: <from> -> <to> at <iso> (source: <src>).` line.
 
-Delivery goes through the normal send path: a `stopped`/`paused` subscriber gets resumed (native conversation resume, then fresh launch fallback) to receive it. There is no retry — dispatch fires once per transition; a failed delivery logs `session.subscription.delivery_failed` and is dropped. Only a later transition fires again.
+Delivery goes through the normal queued `send` path: a `stopped`/`paused` subscriber gets resumed (native conversation resume, then fresh launch fallback) to receive it. There is no retry of the dispatch itself — it fires once per transition. The transition is claimed as soon as `send` queues the message, not once it is actually delivered: a synchronous `send` failure (subscriber gone, not running) logs `session.subscription.delivery_failed` and leaves the transition unclaimed so a later matching transition can retry it; a pane-write failure after the message is queued does not — the transition stays claimed and the message itself retries through the message-queue events above.
 
 `spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one subscription at spawn time — same target/state/message rules above. The CLI checks the target session exists before spawning and fails with a clear error if it doesn't. Direct API/MCP callers that skip this check get the daemon's own non-fatal behavior instead: an invalid spawn-time target doesn't fail the spawn — Spur logs `session.subscription.spawn_failed` and the new session comes up with no subscription armed.
 
