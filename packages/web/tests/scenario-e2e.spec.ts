@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "playwright/test";
+import { join } from "node:path";
 import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
 
 type WorkingSession = ReturnType<typeof makeWorkingSession>;
@@ -216,6 +217,10 @@ async function mockTerminal(page: Page) {
     const state = {
       sockets: [] as MockWebSocket[],
       sent: [] as SentInput[],
+      emitOutput(data: string) {
+        const socket = this.sockets.at(-1);
+        socket?.onmessage?.(new MessageEvent("message", { data }));
+      },
     };
 
     Object.defineProperty(window, "__scenarioTerminalState", {
@@ -261,6 +266,20 @@ async function terminalSentData(page: Page): Promise<string[]> {
         .filter((entry): entry is string => typeof entry === "string") ?? []
     );
   });
+}
+
+async function emitTerminalOutput(page: Page, data: string) {
+  await page.evaluate((output) => {
+    const windowWithState = window as unknown as {
+      __scenarioTerminalState?: { emitOutput: (value: string) => void };
+    };
+    windowWithState.__scenarioTerminalState?.emitOutput(output);
+  }, data);
+}
+
+async function captureTerminalLinksState(page: Page, name: string) {
+  const outputDir = process.env.SPUR_SESSION_ARTIFACTS_DIR ?? test.info().outputDir;
+  await page.screenshot({ path: join(outputDir, `terminal-links-${name}.png`) });
 }
 
 test.describe("scenario migration E2E: spawn voice", () => {
@@ -676,5 +695,93 @@ test.describe("scenario migration E2E: terminal voice", () => {
 
     await expect(textbox).toHaveValue("Existing draft Appended terminal voice");
     await expect(modal.getByRole("img", { name: "terminal-image.png" })).toBeVisible();
+  });
+});
+
+test.describe("scenario migration E2E: terminal links", () => {
+  test("discovers recent links and keeps the disclosure accessible at desktop and mobile", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "scenario-terminal-links", project: "my-project" });
+    const terminal = await openTerminal(page, session);
+    const trigger = terminal.getByRole("button", { name: "Open terminal links" });
+
+    await expect(trigger).toHaveCount(0);
+    await captureTerminalLinksState(page, "empty");
+
+    await emitTerminalOutput(
+      page,
+      "First https://old.example/path\r\nLatest https://new.example/a?q=1",
+    );
+    await expect(trigger).toHaveText("2");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await captureTerminalLinksState(page, "idle");
+
+    await trigger.hover();
+    await captureTerminalLinksState(page, "hover");
+    await trigger.focus();
+    await expect(trigger).toBeFocused();
+    await captureTerminalLinksState(page, "focus");
+
+    await trigger.click();
+    const panel = page.getByRole("region", { name: "Terminal links" });
+    await expect(panel).toBeVisible();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(panel.getByRole("link")).toHaveCount(2);
+    await expect(panel.getByRole("link").nth(0)).toContainText("new.example");
+    await expect(panel.getByRole("link").nth(0)).toContainText("https://new.example/a?q=1");
+    await expect(panel.getByRole("link").nth(1)).toContainText("old.example");
+    const newest = panel.getByRole("link").nth(0);
+    await expect(newest).toHaveAttribute("href", "https://new.example/a?q=1");
+    await expect(newest).toHaveAttribute("target", "_blank");
+    await expect(newest).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(page.getByRole("menu", { name: "Terminal links" })).toHaveCount(0);
+    await captureTerminalLinksState(page, "desktop-open");
+
+    await newest.focus();
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await terminal.getByTestId("direct-terminal-header").click();
+    await expect(panel).toHaveCount(0);
+
+    await trigger.click();
+    const popupPromise = page.waitForEvent("popup");
+    await panel.getByRole("link").nth(0).click();
+    const popup = await popupPromise;
+    await expect(panel).toHaveCount(0);
+    expect(await popup.evaluate(() => window.opener)).toBeNull();
+    await popup.close();
+
+    await page.setViewportSize({ width: 320, height: 844 });
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    const viewport = page.viewportSize();
+    const controlsBox = await terminal.getByTestId("direct-terminal-controls").boundingBox();
+    const triggerBox = await trigger.boundingBox();
+    const panelBox = await panel.boundingBox();
+    expect(viewport).not.toBeNull();
+    expect(controlsBox).not.toBeNull();
+    expect(triggerBox).not.toBeNull();
+    expect(panelBox).not.toBeNull();
+    if (!viewport || !controlsBox || !triggerBox || !panelBox) {
+      throw new Error("Terminal links layout bounds unavailable");
+    }
+    expect(triggerBox.x).toBeGreaterThanOrEqual(controlsBox.x);
+    expect(triggerBox.x + triggerBox.width).toBeLessThanOrEqual(
+      controlsBox.x + controlsBox.width,
+    );
+    expect(panelBox.x).toBeGreaterThanOrEqual(0);
+    expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width);
+    expect(panelBox.y).toBeGreaterThanOrEqual(0);
+    expect(panelBox.y + panelBox.height).toBeLessThanOrEqual(viewport.height);
+    await captureTerminalLinksState(page, "mobile-open");
   });
 });
