@@ -63,17 +63,23 @@ if [ -n "$STATUS_FILE" ]; then
     fi
     sleep 0.01
   done
-  write_terminal_status() {
-    status_rc=$?
-    status_phase="failed"
-    [ "$status_rc" -eq 0 ] && status_phase="succeeded"
-    status_tmp="$STATUS_FILE.tmp.$$"
-    printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s}\n' \
-      "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" >"$status_tmp"
-    mv -f "$status_tmp" "$STATUS_FILE"
-  }
-  trap write_terminal_status EXIT
 fi
+
+# One EXIT trap for the whole run: the temp validator copy staged before the
+# install and, when the daemon asked for it, the terminal deploy status.
+_VALIDATOR_TMP=""
+on_exit() {
+  status_rc=$?
+  [ -z "$_VALIDATOR_TMP" ] || rm -rf "$_VALIDATOR_TMP"
+  [ -n "$STATUS_FILE" ] || return
+  status_phase="failed"
+  [ "$status_rc" -eq 0 ] && status_phase="succeeded"
+  status_tmp="$STATUS_FILE.tmp.$$"
+  printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s}\n' \
+    "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" >"$status_tmp"
+  mv -f "$status_tmp" "$STATUS_FILE"
+}
+trap on_exit EXIT
 
 # Derive the npm prefix from where this script (shipped inside the package at
 # <prefix>/lib/node_modules/@shugaev/spur/scripts/) already lives, so the install
@@ -104,6 +110,21 @@ if [ -n "$INSTALL_PREFIX" ]; then
   npm_install_args+=(--prefix "$INSTALL_PREFIX")
 fi
 npm_install_args+=("$PACKAGE@$VERSION")
+
+PREVIOUS_VERSION=""
+if [ -n "$INSTALL_PREFIX" ]; then
+  _prev_pkg="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/package.json"
+  PREVIOUS_VERSION="$(node -e 'try{console.log(require(process.argv[1]).version)}catch(_){}' "$_prev_pkg" 2>/dev/null || true)"
+  _prev_validator="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/scripts/verify-package-files.sh"
+  _prev_list="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/required-package-files.txt"
+  if [ -f "$_prev_validator" ] && [ -f "$_prev_list" ]; then
+    _VALIDATOR_TMP="$(mktemp -d)"
+    mkdir -p "$_VALIDATOR_TMP/scripts"
+    cp "$_prev_validator" "$_VALIDATOR_TMP/scripts/"
+    cp "$_prev_list" "$_VALIDATOR_TMP/"
+  fi
+fi
+
 install_output="$(mktemp "$LOG_DIR/install-output.XXXXXX")"
 "$NPM" "${npm_install_args[@]}" 2>&1 | tee "$install_output"
 install_rc=${PIPESTATUS[0]}
@@ -125,6 +146,20 @@ rm -f "$install_output"
 if [ "$install_rc" -ne 0 ]; then
   echo "$(date -u +%FT%TZ) install-and-restart npm install failed rc=$install_rc"
   exit "$install_rc"
+fi
+
+if [ -n "$INSTALL_PREFIX" ] && [ -n "$_VALIDATOR_TMP" ]; then
+  PKG_ROOT="$INSTALL_PREFIX/lib/node_modules/$PACKAGE"
+  if ! bash "$_VALIDATOR_TMP/scripts/verify-package-files.sh" "$PKG_ROOT"; then
+    echo "$(date -u +%FT%TZ) install-and-restart package validation failed"
+    if [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
+      "$NPM" "${_rollback_args[@]}"
+      _rollback_rc=$?
+      echo "$(date -u +%FT%TZ) install-and-restart rollback install rc=$_rollback_rc"
+    fi
+    exit 1
+  fi
 fi
 
 # node-pty ships a prebuilt linux binary inside the published tarball's
@@ -150,6 +185,15 @@ if { [ -z "$SYSTEMCTL_RAW" ] || [ "$SYSTEMCTL_RAW" = "systemctl --user" ]; } && 
   "$spur_bin" reinit
   reinit_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$reinit_rc"
+  if [ "$reinit_rc" -ne 0 ] && [ -n "$INSTALL_PREFIX" ] && [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
+    "$NPM" "${_rollback_args[@]}"
+    _rollback_rc=$?
+    echo "$(date -u +%FT%TZ) install-and-restart rollback install rc=$_rollback_rc"
+    "$spur_bin" reinit
+    _rollback_reinit_rc=$?
+    echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$_rollback_reinit_rc"
+  fi
   exit "$reinit_rc"
 fi
 

@@ -46,6 +46,8 @@ Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-refe
 
 Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
+The `agent-process-ownership` check reports live agent processes their session record does not own. Ownership keys on the `SPUR_SESSION` id each process carries, never on cwd — the worktree in a finding is evidence, not the key. Reasons: `duplicate_for_session` (live record, more than one process), `terminal_record` (record `completed` or `killed`), `unknown_session` (no record). Each finding prints pid, agent, session id, reason, rss, age, worktree. Severity `warn`, so findings never flip the exit code. Linux only (reads `/proc/<pid>/environ`); elsewhere the check reports `cannot determine agent process ownership on this platform` at `info`. Skipped when `~/.spur/config.yaml` is absent or unparsable.
+
 ## spawn
 
 ```bash
@@ -71,7 +73,7 @@ spur spawn backend-api
 
 Agents launch with full access: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`.
 
-Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for one branch name (or `NO_PROJECT_RULES` / empty to defer to default naming) before worktree creation. An invalid or already-checked-out suggestion is fed back for retry, up to three attempts. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
+Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for exactly one line before worktree creation: a branch name or `NO_PROJECT_RULES`. Only the exact sentinel bypasses fallback `branchNaming` validation. Empty, malformed, failed, invalid, or checked-out results retry three times, then fail the spawn. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
 
 New worktree branches fetch `origin`, fast-forward the base branch when only behind, and branch from the freshest remote ref. Override the base per session with `--worktree <defaultBranch>`.
 
@@ -99,6 +101,8 @@ Hides `completed` and `killed` by default. Derives live `state` and `lastActivit
 A session with one or more sidecars whose age is resolvable shows a compact `sidecar <name> <age>` fact, naming only the oldest sidecar (`+N more` when others are running); a `!` suffix marks one already past `sidecarGc.maxAgeWarnMinutes` ([Sidecar reaping](configuration.md#sidecar-reaping)). A session with no sidecars, or none with a resolvable age, renders unchanged.
 
 `pause` keeps the worktree. `complete` and `kill` both tear down the pane and remove an owned worktree; `kill` additionally requires `--force` on a dirty or unpushed worktree. Shared-workspace sessions keep the project path on `kill`. `restore` needs status `running`, `stopped`, or `paused` with state `stopped`/`error` — or status `errored` with state `error` — plus an existing workspace (shepherd excepted, see above), so `killed` and `completed` sessions are never restorable.
+
+`restore` and `reopen` refuse to launch over a live agent process still carrying that session id: a foreign process outside the pane, or the pane's own process surviving the SIGHUP, SIGTERM, SIGKILL escalation (2s grace per signal). They also refuse when the process table could not be read at all, since "no survivors" would then be a guess; a teardown with no relaunch behind it (`pause`, `complete`, `kill`) proceeds instead of refusing. A first `r` surfaces the refusal; a second `r` on the same session retries with force, which bypasses the foreign-process refusal only — a SIGKILL survivor and an unreadable process table refuse either way. `spur reopen <sessionId> --force` is the CLI equivalent. The foreign-process scan reads `/proc/<pid>/environ`, so off Linux it is skipped, not failed, and it is also skipped when the pane's own pid is unreadable, because the scan cannot then tell the session's own agent from a foreign one.
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 

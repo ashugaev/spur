@@ -37,8 +37,17 @@ const mockTerminal = {
   dispose: vi.fn(),
   onData: vi.fn(() => ({ dispose: vi.fn() })),
   onBinary: vi.fn(() => ({ dispose: vi.fn() })),
+  onWriteParsed: vi.fn(() => ({ dispose: vi.fn() })),
+  onResize: vi.fn(() => ({ dispose: vi.fn() })),
   cols: 80,
   rows: 24,
+  buffer: {
+    active: {
+      length: 0,
+      getLine: vi.fn(() => undefined),
+    },
+    onBufferChange: vi.fn(() => ({ dispose: vi.fn() })),
+  },
   parser: {
     registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
     registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),

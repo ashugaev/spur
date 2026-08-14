@@ -66,6 +66,7 @@ import {
   type PreflightRequest,
   type HandoffSessionRequest,
   type RespawnSessionRequest,
+  type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
@@ -300,6 +301,13 @@ export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
     request.skipPrCheck = true;
   }
   return request;
+}
+
+export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  return raw["force"] === true ? { force: true } : {};
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -1403,13 +1411,15 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        sendJson(response, 200, await service.restore(restoreSessionId));
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.restore(restoreSessionId, body));
         return;
       }
 
       const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
       if (method === "POST" && reopenSessionId) {
-        sendJson(response, 200, await service.reopen(reopenSessionId));
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
 

@@ -77,9 +77,7 @@ if [[ "$npm_prefix" != "$HOME/.local" ]]; then
   die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local --location=global --globalconfig \"\$HOME/.spur/npmrc\" && chmod 600 \"\$HOME/.spur/npmrc\""
 fi
 
-for f in deploy/spur-daemon.npm.service deploy/spur-web.npm.service dist/cli.js web/dist-server/web-server.js; do
-  [[ -f "$PKG_ROOT/$f" ]] || die "package file missing: $PKG_ROOT/$f (reinstall @shugaev/spur)"
-done
+bash "$PKG_ROOT/scripts/verify-package-files.sh" "$PKG_ROOT" || die "package validation failed (reinstall @shugaev/spur)"
 
 if ! systemctl --user status >/dev/null 2>&1; then
   die "user systemd is unavailable (systemctl --user status failed)"

@@ -28,6 +28,7 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Spawn preflight returns one strict line. Only explicit no-project-rules sentinel bypasses fallback `branchNaming`; malformed or failed results exhaust preflight retries then fail spawn. Contract: `docs/commands.md`.
   Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
   Sidecar reap: `sidecarGc` (on by default) kills an idle or unowned non-MCP project sidecar, workspace-wide; an established connection on a reserved port vetoes every reap rule. Rule order `docs/configuration.md#sidecar-reaping`; implementation `v2/src/sidecars/policy.ts`.
@@ -46,6 +47,7 @@ SAFETY
   Never run `spur gc --execute` against a data dir you do not own. It removes worktrees and archives records. Point `--config` at a temp data dir for development; a bare `spur gc` is a dry run and the only safe form elsewhere.
   The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on); `--expose-web` binds `0.0.0.0` and is public. Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user — treat each source (Telegram, GitHub comments, Jira) as untrusted input.
   For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.
+  `restore`/`reopen` refuse to relaunch over a live agent process still carrying that session id (a foreign process, the pane's own process surviving the kill escalation, or an unreadable process table, where "no survivors" would be a guess) so a session never ends up with two live agent processes. `--force` (CLI) or a second `r` on the same selection in `spur list` bypasses only the foreign-process refusal, never a confirmed survivor or an unreadable table. A teardown with no relaunch behind it proceeds rather than refusing, so a wedged process can never make a session unkillable. `spur doctor`'s `agent-process-ownership` check reports unowned agent processes at `warn`; detail in `docs/commands.md`.
 
 IN THIS REPO
 

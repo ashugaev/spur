@@ -1,0 +1,4 @@
+deploy/spur-daemon.npm.service
+deploy/spur-web.npm.service
+dist/cli.js
+web/dist-server/web-server.js
