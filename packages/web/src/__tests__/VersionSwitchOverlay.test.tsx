@@ -88,7 +88,11 @@ describe("VersionSwitchOverlay", () => {
       await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
     });
 
-    expect(screen.getByTestId("version-switch-overlay")).toBeInTheDocument();
+    const overlay = screen.getByTestId("version-switch-overlay");
+    expect(overlay).toBeInTheDocument();
+    expect(overlay).toHaveTextContent(
+      /Switch to 1\.5\.0 not confirmed — check ~\/\.spur\/logs\/install-and-restart\.log\./,
+    );
     const dismissButton = screen.getByRole("button", { name: "Dismiss" });
     expect(screen.getByRole("button", { name: "Reload now" })).toBeInTheDocument();
 
