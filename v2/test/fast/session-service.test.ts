@@ -30510,7 +30510,11 @@ describe("SessionService", () => {
     describe("shouldParkForStale predicate", () => {
       it("is disabled at staleAfterMs <= 0 regardless of idle time", async () => {
         const { shouldParkForStale } = await loadSessionServiceModule();
-        const view = { status: "running", state: "waiting", lastActivityAt: "2020-01-01T00:00:00.000Z" } as const;
+        const view = {
+          status: "running",
+          state: "waiting",
+          lastActivityAt: "2020-01-01T00:00:00.000Z",
+        } as const;
         expect(shouldParkForStale(view, 0, Date.now())).toBe(false);
         expect(shouldParkForStale(view, -1, Date.now())).toBe(false);
       });
@@ -30883,6 +30887,77 @@ describe("SessionService", () => {
           .map(([, entry]) => entry)
           .filter((entry) => entry.event === "session.stale.park_aborted");
         expect(abortedEvents.length).toBeGreaterThanOrEqual(1);
+        service.dispose();
+      });
+
+      it("delivers a message queued during the teardown window instead of stranding it (FIX D)", async () => {
+        // Same abandon path as the test above (a message queues onto disk
+        // while the pane is being killed), but this pins the OUTCOME rather
+        // than just the abandon: left alone, status stays "running" with a
+        // confirmed-dead pane and nothing guaranteed to run before the next
+        // reconcileUnexpectedStop tick marks it stopped/errored — a plain
+        // stopped/errored record is never re-armed (finishStaleWake only
+        // fires for stopReason === "stale_timeout"), so the queued message
+        // would be stranded on disk forever. The abandon branch must kick
+        // the delivery runner itself so it — not reconcile — wins the race.
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        let relaunched = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+            const current = sessions.get("api-1");
+            if (current) {
+              sessions.set("api-1", {
+                ...current,
+                queuedMessages: { messages: ["queued during teardown"], awaitingPrompt: false },
+              });
+            }
+          }
+        });
+        // Both the tmux session and its agent process go down together on
+        // kill, and both come back once the recovery path relaunches — tied
+        // to the same state instead of call-count "once" mocks, since the
+        // sweep classifies this session (and re-classifies it post-relaunch)
+        // an indeterminate number of times before and after the park.
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched || !agentPaneKilled);
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched || !agentPaneKilled);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        const abortedEvents = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.stale.park_aborted");
+        expect(abortedEvents.length).toBeGreaterThanOrEqual(1);
+
+        // Drain the delivery runner kicked off from the abandon branch: it
+        // relaunches the dead pane (createTmuxSession), then flushes the
+        // queued message once the recovered session classifies as waiting.
+        await vi.advanceTimersByTimeAsync(10_000);
+        for (let i = 0; i < 100; i += 1) {
+          await Promise.resolve();
+        }
+
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "queued during teardown",
+          expect.objectContaining({ interrupt: false }),
+        );
+        const persisted = sessions.get("api-1");
+        expect(persisted?.status).toBe("running");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted?.queuedMessages?.messages ?? []).toEqual([]);
         service.dispose();
       });
 

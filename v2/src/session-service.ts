@@ -1406,8 +1406,7 @@ export function isRestorableSession(
     ((session.status === "running" && session.state === "stopped") ||
       (session.status === "stopped" &&
         (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
-      (session.status === "paused" &&
-        (session.state === "stopped" || session.state === "error")) ||
+      (session.status === "paused" && (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
@@ -4112,6 +4111,22 @@ export class SessionService {
     const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
     if (!cleaned || cleaned.status !== "running" || deliveryPending) {
       abandonPark();
+      // deliveryPending means a message queued in mid-teardown, on a pane we
+      // just confirmed dead above — the record is left status:"running" with
+      // no live process. Left alone, that's a coin flip against the next
+      // reconcileUnexpectedStop tick: if reconcile wins it writes
+      // stopped/errored, shouldRunDelivery goes false, and the message is
+      // stranded for good — finishStaleWake only re-arms delivery for
+      // stopReason==="stale_timeout", never a plain stopped/errored record.
+      // Kick the delivery runner now, synchronously, so it (not reconcile)
+      // is the one racing for this session: ensureDeliveryRunner is a no-op
+      // if a loop is already running (deliveryRuns dedupe), and the loop's
+      // own tryDeliverQueuedMessage claims queueDeliveryInFlight before its
+      // first await, so this can never start a second concurrent recovery
+      // attempt against the same pane.
+      if (cleaned && cleaned.status === "running" && deliveryPending) {
+        this.scheduleDeliveryRunner(cleaned.id);
+      }
       return;
     }
     if (await isProcessRunningInTmux(cleaned.tmuxSession, sessionProcessMatchers(cleaned))) {

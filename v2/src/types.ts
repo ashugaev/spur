@@ -27,9 +27,7 @@ export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
 
-export function isStaleParked(
-  session: Pick<SessionRecord, "status" | "stopReason">,
-): boolean {
+export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReason">): boolean {
   return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 

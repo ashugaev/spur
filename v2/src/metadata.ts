@@ -717,9 +717,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
-    ...(normalizedSession.staleSidecars
-      ? { staleSidecars: normalizedSession.staleSidecars }
-      : {}),
+    ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
       : {}),

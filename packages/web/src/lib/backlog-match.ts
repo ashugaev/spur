@@ -5,11 +5,6 @@ import type { AvailableBacklogItem, DashboardSession } from "@/lib/types";
 // here too. "state" is the only field this predicate's callers pass through
 // consistently; stopReason isn't always available on the trimmed session
 // shape callers hand in, and "stale" already encodes exactly this case.
-// "stale" (a parked idle session, session-service.ts parkStaleSession) still
-// owns its work item — any event wakes it silently — so it counts as active
-// here too. "state" is the only field this predicate's callers pass through
-// consistently; stopReason isn't always available on the trimmed session
-// shape callers hand in, and "stale" already encodes exactly this case.
 const ACTIVE_STATES = new Set(["working", "waiting", "needs_input", "rate_limited", "stale"]);
 
 function escapeRegExp(value: string): string {

@@ -18,13 +18,7 @@ const inactiveConfig: ActivityConfig = {
   text: "var(--color-text-secondary)",
 };
 
-// Exported for tests only: it's the source of truth this component renders
-// from, and a render-only assertion can't distinguish a real per-activity
-// entry from the fallback below — "stale"/"stopped"/"killed" all reuse
-// inactiveConfig's colors, and the fallback's label falls back to the raw
-// activity string, so a deleted entry renders pixel-identical to the entry
-// it should have used.
-export const activityConfig: Record<string, ActivityConfig> = {
+const activityConfig: Record<string, ActivityConfig> = {
   working: {
     label: "working",
     dot: "var(--color-status-working)",
@@ -46,7 +40,6 @@ export const activityConfig: Record<string, ActivityConfig> = {
     text: "var(--color-status-attention)",
   },
   error: errorConfig,
-  stale: { ...inactiveConfig, label: "stale" },
   stopped: { ...inactiveConfig, label: "stopped" },
   killed: { ...inactiveConfig, label: "killed" },
 };

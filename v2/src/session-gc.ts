@@ -12,7 +12,13 @@ import {
   removeWorktree,
   resolveRepoPathFromWorktree,
 } from "./workspace.js";
-import { isStaleParked, type AppConfig, type ProjectConfig, type SessionGcStatus, type SessionRecord } from "./types.js";
+import {
+  isStaleParked,
+  type AppConfig,
+  type ProjectConfig,
+  type SessionGcStatus,
+  type SessionRecord,
+} from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
