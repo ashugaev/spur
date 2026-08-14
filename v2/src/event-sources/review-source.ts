@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import {
   deleteReviewSourceSnapshot,
@@ -13,10 +12,14 @@ import {
   type ReviewSignal,
   type ReviewSnapshot,
   type ReviewSourceConfig,
-  isStaleParked,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
-import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
+import {
+  isEligibleForSourcePoll,
+  type SourceHandle,
+  type SourceModule,
+  type SourceStartDeps,
+} from "./types.js";
 
 function emitSignalsByKind(
   providerId: ReviewProviderId,
@@ -62,12 +65,8 @@ export function createReviewSourceModule(
         if (stopped || deps.signal.aborted || polling) return;
         polling = true;
         try {
-          const sessions = listSessions(deps.dataDir).filter(
-            (session) =>
-              session.project === deps.projectId &&
-              (session.status === "running" || isStaleParked(session)) &&
-              Boolean(session.worktreePath) &&
-              existsSync(session.worktreePath),
+          const sessions = listSessions(deps.dataDir).filter((session) =>
+            isEligibleForSourcePoll(session, deps.projectId),
           );
           const currentSessionIds = new Set<string>();
 

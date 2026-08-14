@@ -873,7 +873,7 @@ function statusFallbackState(
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
   if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
-  if (status === "stopped" && session.stopReason === "stale_timeout") return "stale";
+  if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -4108,13 +4108,21 @@ export class SessionService {
     this.staleParkInFlight.set(latest.id, parkInFlight);
     try {
       const project = this.resolveProjectForSession(latest);
-      const staleSidecars: string[] = [];
-      for (const name of sessionSidecarNames(latest, project)) {
-        const ownerId = this.sidecarOwnerIdForName(latest, project, name);
-        if (await sidecarTmuxAlive(ownerId, name)) {
-          staleSidecars.push(name);
-        }
-      }
+      // Promise.all, matching the sidecar-liveness scan pattern elsewhere in
+      // this file (see the runningSidecarNames lookup): probing each pane's
+      // tmux liveness sequentially would serialize N round-trips before
+      // killAgentPaneAndConfirmExit even starts, stretching this sweep tick
+      // for every session queued behind it. Promise.all preserves the
+      // sidecarNames array order in its result regardless of resolution
+      // order, so staleSidecars stays deterministic.
+      const staleSidecars = (
+        await Promise.all(
+          sessionSidecarNames(latest, project).map(async (name) => {
+            const ownerId = this.sidecarOwnerIdForName(latest, project, name);
+            return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
+          }),
+        )
+      ).filter((name): name is string => name !== null);
       await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
       // A throw here must never abort the park: the agent pane is already
       // dead (confirmed above), so leaving status "running" on disk would
@@ -6740,6 +6748,11 @@ export class SessionService {
     record: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
+    // Raw stopReason check, not isStaleParked: both callers pass a record
+    // already flipped to status:"running" by the relaunch/restore that
+    // preceded this call, so isStaleParked (which requires
+    // status==="stopped") would always return false here and silently
+    // disable the sidecar replay.
     if (record.stopReason !== "stale_timeout") {
       return record;
     }
@@ -11068,6 +11081,13 @@ export class SessionService {
           message,
         }),
       );
+      // Raw stopReason checks, not isStaleParked: current.status here can
+      // already be "running" (isRestorableSession's running+state:"stopped"
+      // dead-pane case) with a residual stopReason left over from a prior
+      // park that nothing has cleared yet. isStaleParked requires
+      // status==="stopped" and would wrongly stop suppressing the restore
+      // prompt for that case. This also gates on manual_pause alongside
+      // stale_timeout, which isStaleParked does not cover.
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
@@ -13306,7 +13326,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
-      session.stopReason === "stale_timeout" ||
+      isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
@@ -13323,7 +13343,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
-      latest.stopReason === "stale_timeout" ||
+      isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {
       return latest;
