@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { BusyContent } from "@/components/BusyContent";
 import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
@@ -254,9 +255,21 @@ export function VoiceControls({
 }
 
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
-  if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
-  if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
-  if (voice.recording) return <>Recording... {VOICE_TOGGLE_HINT} to stop</>;
+  if (voice.voiceBusy === "starting") {
+    return (
+      <span aria-label="Starting microphone" role="status">
+        <Spinner className="h-3 w-3" strokeWidth={1.5} />
+      </span>
+    );
+  }
+  if (voice.voiceBusy === "transcribing") {
+    return (
+      <span aria-label="Transcribing audio" role="status">
+        <Spinner className="h-3 w-3" strokeWidth={1.5} />
+      </span>
+    );
+  }
+  if (voice.recording) return <>Recording — {VOICE_TOGGLE_HINT} to stop</>;
   return null;
 }
 
@@ -289,6 +302,7 @@ export function VoiceConfirmModal({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hasAttachments = attachments.length > 0;
   const dismiss = () => {
+    if (voice.voiceBusy === "sending") return;
     onDismiss?.();
     voice.dismissModal();
   };
@@ -334,6 +348,7 @@ export function VoiceConfirmModal({
         }
         if (isPrimarySubmitHotkey(event)) {
           event.preventDefault();
+          if (voice.voiceBusy || voice.recording) return;
           confirmDraft();
         }
       }}
@@ -346,7 +361,8 @@ export function VoiceConfirmModal({
           </span>
           <button
             aria-label="Close voice draft"
-            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
+            disabled={voice.voiceBusy === "sending"}
             onClick={dismiss}
             title="Close voice draft"
             type="button"
@@ -355,9 +371,6 @@ export function VoiceConfirmModal({
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
-          <p className="text-[var(--color-text-secondary)]">
-            Review the draft before inserting it.
-          </p>
           <div className="relative">
             <textarea
               className={`min-h-40 w-full resize-y ${INPUT_CLASS} pb-14 ${
@@ -379,7 +392,7 @@ export function VoiceConfirmModal({
                 event.preventDefault();
                 onAddFiles(files);
               }}
-              placeholder={voicePlaceholder("Review the transcription before inserting...", voice)}
+              placeholder={voicePlaceholder("Edit transcription...", voice)}
               ref={textareaRef}
               value={voice.voiceDraft}
             />
@@ -420,7 +433,9 @@ export function VoiceConfirmModal({
               </div>
             </div>
           </div>
-          {(voice.recording || voice.voiceBusy) && (
+          {(voice.recording ||
+            voice.voiceBusy === "starting" ||
+            voice.voiceBusy === "transcribing") && (
             <p className="text-xs text-[var(--color-text-tertiary)]">
               <VoiceStatusHint voice={voice} />
             </p>
@@ -433,7 +448,8 @@ export function VoiceConfirmModal({
           <div className="flex items-center justify-end gap-2">
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              disabled={voice.voiceBusy === "sending"}
               onClick={dismiss}
               type="button"
             >
@@ -441,8 +457,9 @@ export function VoiceConfirmModal({
             </button>
             {onQueue ? (
               <button
-                aria-label="Add to queue"
-                className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                aria-busy={voice.voiceBusy === "sending" || undefined}
+                aria-label={voice.voiceBusy === "sending" ? "Queueing voice input" : "Add to queue"}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 disabled={
                   (!voice.voiceDraft.trim() && !hasAttachments) ||
                   voice.recording ||
@@ -451,10 +468,12 @@ export function VoiceConfirmModal({
                 onClick={queueDraft}
                 type="button"
               >
-                Queue
+                <BusyContent busy={voice.voiceBusy === "sending"}>Queue</BusyContent>
               </button>
             ) : null}
             <button
+              aria-busy={voice.voiceBusy === "sending" || undefined}
+              aria-label={voice.voiceBusy === "sending" ? "Inserting voice input" : undefined}
               className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
               disabled={
                 (!voice.voiceDraft.trim() && !hasAttachments) ||
@@ -464,13 +483,15 @@ export function VoiceConfirmModal({
               onClick={confirmDraft}
               type="button"
             >
-              <span>Insert</span>
-              <span
-                aria-hidden="true"
-                className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
-              >
-                {PRIMARY_SUBMIT_HINT}
-              </span>
+              <BusyContent busy={voice.voiceBusy === "sending"}>
+                <span>Insert</span>
+                <span
+                  aria-hidden="true"
+                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
+                >
+                  {PRIMARY_SUBMIT_HINT}
+                </span>
+              </BusyContent>
             </button>
           </div>
         </div>

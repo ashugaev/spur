@@ -40,8 +40,8 @@ describe("resolveSpawnModel", () => {
   it("does not bleed one agent's default model onto another agent", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
-      resolvedAgent: "claude",
-      project: project({ defaultModels: { codex: "gpt-5.5" } }),
+      resolvedAgent: "codex",
+      project: project({ defaultModels: { cursor: "composer-2.5" } }),
     });
     expect(result).toBeUndefined();
   });
@@ -53,6 +53,24 @@ describe("resolveSpawnModel", () => {
       project: project({ defaultModels: {} }),
     });
     expect(result).toBeUndefined();
+  });
+
+  it("applies opus as the Claude default when none is configured", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "claude",
+      project: project({ defaultModels: {} }),
+    });
+    expect(result).toBe("opus");
+  });
+
+  it("lets an explicit Claude default model override Spur's opus default", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "claude",
+      project: project({ defaultModels: { claude: "sonnet" } }),
+    });
+    expect(result).toBe("sonnet");
   });
 
   it("applies auto as the Cursor default when no Cursor default is configured", () => {

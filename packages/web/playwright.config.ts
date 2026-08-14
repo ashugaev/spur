@@ -9,6 +9,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 1,
   workers: 1,
+  // Self-hosted CI runners are shared; a cold `next start` render can exceed the
+  // 30s default under load. 60s headroom keeps render-heavy specs from flaking.
+  timeout: 60_000,
   reporter: "line",
   use: {
     baseURL,

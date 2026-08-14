@@ -4,12 +4,12 @@ import { ModelSelect } from "@/components/ModelSelect.js";
 import type { AgentModel } from "@/lib/types.js";
 
 const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
+  { id: "opus", label: "Opus", isDefault: true },
+  { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
 ];
 
-const CODEX_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5" }];
+const CODEX_MODELS: AgentModel[] = [{ id: "codex-model-id", label: "Codex model" }];
 
 function mockModelsFetch(byAgent: Record<string, AgentModel[]>) {
   return vi.fn((input: RequestInfo | URL) => {

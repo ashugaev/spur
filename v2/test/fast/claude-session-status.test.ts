@@ -35,6 +35,16 @@ describe("classifyClaudeSessionStatus", () => {
     expect(classifyClaudeSessionStatus("waiting")).toBe("waiting");
   });
 
+  // Regression (status-verifier shp-a4bc, spur-6cdc): a session sitting idle
+  // at a live AskUserQuestion-style decision menu ("Enter to select ·
+  // ↑/↓ to navigate · Esc to cancel") reports `waitingFor: "input needed"`
+  // in its ~/.claude/sessions/<pid>.json status file even when the matching
+  // tool_use was never flushed to the JSONL transcript. This must classify
+  // as needs_input, same as a permission prompt.
+  it("maps a live decision-menu wait to needs_input", () => {
+    expect(classifyClaudeSessionStatus("waiting", "input needed")).toBe("needs_input");
+  });
+
   it("returns null for unknown status details so JSONL can classify", () => {
     expect(classifyClaudeSessionStatus("paused")).toBeNull();
     expect(classifyClaudeSessionStatus("waiting", "tool result")).toBeNull();
@@ -65,6 +75,36 @@ describe("readClaudeSessionStatus", () => {
       state: "working",
       status: "busy",
       filePath: join(sessionsDir, "new.json"),
+    });
+  });
+
+  // Regression (status-verifier shp-a4bc, spur-6cdc): reproduces the real
+  // session-status record captured from a genuinely idle session parked at
+  // a live decision menu, whose transcript JSONL had stopped 35h earlier
+  // with no pending tool_use recorded at all. The status file alone must be
+  // enough to classify needs_input, independent of the transcript.
+  it("classifies a live decision-menu wait as needs_input from the status file alone", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "1173289.json", {
+      pid: 1173289,
+      sessionId: "7927f8b7-0cdb-4127-91f1-e1e72e209262",
+      cwd: "/home/alek/.spur/worktrees/sp/spur-5ef1",
+      status: "waiting",
+      waitingFor: "input needed",
+      updatedAt: 1785173876965,
+      statusUpdatedAt: 1785173876965,
+    });
+
+    const result = await readClaudeSessionStatus(
+      "/home/alek/.spur/worktrees/sp/spur-5ef1",
+      "7927f8b7-0cdb-4127-91f1-e1e72e209262",
+      sessionsDir,
+    );
+
+    expect(result).toMatchObject({
+      state: "needs_input",
+      status: "waiting",
+      waitingFor: "input needed",
     });
   });
 

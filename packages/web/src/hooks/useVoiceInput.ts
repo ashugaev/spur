@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { startRealtimeTranscription, type RealtimeSession } from "@/lib/realtime-voice-client";
+import { readApiErrorMessage } from "@/lib/json-payload";
 
 interface RealtimeTokenResponse {
   value: string;
@@ -167,22 +168,6 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-async function readVoiceError(response: Response, fallback: string): Promise<string> {
-  const text = await response.text();
-  if (!text) return fallback;
-
-  try {
-    const payload = JSON.parse(text) as { error?: unknown };
-    if (typeof payload.error === "string" && payload.error.trim()) {
-      return payload.error;
-    }
-  } catch {
-    // Fall back to the raw response body when it is not JSON.
-  }
-
-  return text;
-}
-
 function isRetryableTranscriptionError(error: unknown): boolean {
   if (error instanceof RetryableTranscriptionError) return true;
   if (error instanceof DOMException && error.name === "AbortError") return true;
@@ -218,7 +203,7 @@ async function transcribeRecording(audio: Blob): Promise<string> {
       });
 
       if (!response.ok) {
-        const message = await readVoiceError(response, TRANSCRIBE_ERROR);
+        const message = await readApiErrorMessage(response, TRANSCRIBE_ERROR);
         if (!TRANSCRIBE_RETRYABLE_STATUS_CODES.has(response.status)) {
           throw new Error(message);
         }
@@ -302,7 +287,7 @@ export interface UseVoiceInput {
   recording: boolean;
   hasRetainedTake: boolean;
   retainedTakePlaying: boolean;
-  voiceBusy: "starting" | "transcribing" | null;
+  voiceBusy: "starting" | "transcribing" | "sending" | null;
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
@@ -334,7 +319,7 @@ export function useVoiceInput(options: {
   const [recording, setRecording] = useState(false);
   const [hasRetainedTake, setHasRetainedTake] = useState(false);
   const [retainedTakePlaying, setRetainedTakePlaying] = useState(false);
-  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
+  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | "sending" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
@@ -564,7 +549,7 @@ export function useVoiceInput(options: {
 
         const response = await fetch("/api/runtime/voice/realtime-token", { method: "POST" });
         if (!response.ok) {
-          throw new Error(await readVoiceError(response, TRANSCRIBE_ERROR));
+          throw new Error(await readApiErrorMessage(response, TRANSCRIBE_ERROR));
         }
         const token = (await response.json()) as RealtimeTokenResponse;
 
@@ -762,6 +747,7 @@ export function useVoiceInput(options: {
     async (onInsert: (text: string) => unknown, options?: { allowEmpty?: boolean }) => {
       const trimmed = voiceDraft.trim();
       if (!trimmed && !options?.allowEmpty) return;
+      setVoiceBusy("sending");
       try {
         const inserted = await onInsert(trimmed);
         if (inserted === false) {
@@ -772,6 +758,8 @@ export function useVoiceInput(options: {
         setVoiceDraft("");
       } catch (error) {
         setVoiceError(error instanceof Error ? error.message : INSERT_ERROR);
+      } finally {
+        setVoiceBusy(null);
       }
     },
     [voiceDraft],

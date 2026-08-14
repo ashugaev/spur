@@ -16,6 +16,7 @@ import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -414,6 +415,15 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexReasoningEffort(
+  command: string,
+  reasoningEffort: ProviderReasoningEffort | undefined,
+): string {
+  return reasoningEffort
+    ? `${command} -c ${shellEscape(`model_reasoning_effort="${reasoningEffort}"`)}`
+    : command;
+}
+
 function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
   if (!imagePaths || imagePaths.length === 0) {
     return command;
@@ -440,6 +450,7 @@ export function buildCodexPlan(
   options?: {
     codexHomePath?: string;
     codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
     startupImagePaths?: string[];
     restrictWrites?: boolean;
     model?: string;
@@ -448,9 +459,12 @@ export function buildCodexPlan(
   const command = withCodexHome(
     appendCodexImages(
       appendCodexModel(
-        appendCodexArgs(
-          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
-          options?.codexArgs,
+        appendCodexReasoningEffort(
+          appendCodexArgs(
+            `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+            options?.codexArgs,
+          ),
+          options?.reasoningEffort,
         ),
         options?.model,
       ),
@@ -475,13 +489,21 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      appendCodexArgs(
-        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
-        options?.codexArgs,
+      appendCodexReasoningEffort(
+        appendCodexArgs(
+          `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
+          options?.codexArgs,
+        ),
+        options?.reasoningEffort,
       ),
       options?.codexHomePath,
     ),
@@ -492,7 +514,12 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    reasoningEffort?: ProviderReasoningEffort;
+    restrictWrites?: boolean;
+  },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -536,19 +563,18 @@ export function appendCodexTrustedProjects(
   return result;
 }
 
-const CODEX_PLAYWRIGHT_TABLE = "[mcp_servers.playwright]";
-
-// Remove an inherited [mcp_servers.playwright] table (header through the line
+// Remove an inherited [mcp_servers.<server>] table (header through the line
 // before the next "[" table header or EOF). Parse-aware so adjacent tables stay
 // intact. Only strips this exact table, never partial matches like
-// [mcp_servers.playwright_x].
-function stripCodexPlaywrightTable(configText: string): string {
+// [mcp_servers.<server>_x].
+function stripCodexMcpTable(configText: string, server: string): string {
+  const header = `[mcp_servers.${server}]`;
   const lines = configText.split("\n");
   const result: string[] = [];
   let inTable = false;
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed === CODEX_PLAYWRIGHT_TABLE) {
+    if (trimmed === header) {
       inTable = true;
       continue;
     }
@@ -564,24 +590,22 @@ function stripCodexPlaywrightTable(configText: string): string {
   return result.join("\n");
 }
 
-function withCodexPlaywrightServer(configText: string, port: number): string {
-  const stripped = stripCodexPlaywrightTable(configText);
+function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): string {
+  const stripped = stripCodexMcpTable(configText, binding.server);
   const trimmed = stripped.trimEnd();
   const separator = trimmed ? "\n\n" : "";
-  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "http://127.0.0.1:${port}/mcp"\n`;
+  const table = `[mcp_servers.${binding.server}]\nurl = "${binding.url}"\n`;
   return `${trimmed}${separator}${table}`;
 }
 
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
-  playwrightPort?: number,
+  mcpBindings: readonly SidecarMcpBinding[] = [],
 ): Promise<string> {
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
-  return playwrightPort === undefined
-    ? stripCodexPlaywrightTable(withTrust)
-    : withCodexPlaywrightServer(withTrust, playwrightPort);
+  return mcpBindings.reduce((text, binding) => withCodexMcpServer(text, binding), withTrust);
 }
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
@@ -619,7 +643,11 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
-  options?: { restrictWrites?: boolean; playwrightPort?: number },
+  options?: {
+    restrictWrites?: boolean;
+    mcpBindings?: SidecarMcpBinding[];
+    modelsCacheHome?: string;
+  },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -630,10 +658,22 @@ export async function ensureCodexHooksConfig(
     next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
   }
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.playwrightPort);
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, options?.mcpBindings ?? []);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
+  if (options?.modelsCacheHome) {
+    await cp(
+      join(options.modelsCacheHome, "models_cache.json"),
+      join(codexDir, "models_cache.json"),
+      {
+        force: true,
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    });
+  }
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
@@ -715,6 +755,38 @@ function extractUserTextFromLine(line: string): string | null {
   return null;
 }
 
+function extractAssistantTextFromLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "response_item") {
+    const p = payload as unknown as RolloutResponseItemPayload;
+    if (p.type === "message" && p.role === "assistant" && Array.isArray(p.content)) {
+      const texts = p.content
+        .filter(
+          (c): c is { type: string; text: string } =>
+            c.type === "output_text" && typeof c.text === "string",
+        )
+        .map((c) => c.text);
+      return texts.length > 0 ? texts.join("") : null;
+    }
+  }
+
+  return null;
+}
+
 export async function scanCodexRolloutForMessage(
   sessionsDir: string,
   messageText: string,
@@ -774,6 +846,22 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  model?: string;
+}
+
+interface CodexRolloutCandidate {
+  result: CodexRolloutReadResult;
+  mtimeMs: number;
+}
+
+interface CodexRolloutFileFingerprint {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface CodexRolloutReaderState {
+  files: Map<string, CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }>;
 }
 
 function readRolloutString(value: unknown): string | undefined {
@@ -798,18 +886,20 @@ function codexRolloutStateRecord(
   };
 }
 
+function extractCodexTurnContextModel(parsed: Record<string, unknown>): string | undefined {
+  if (parsed["type"] !== "turn_context") {
+    return undefined;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  return readRolloutString(payload["model"]);
+}
+
 function extractCodexRolloutStateLine(
-  line: string,
+  parsed: Record<string, unknown>,
 ): Omit<CodexRolloutStateRecord, "filePath"> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
   const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
   if (!timestamp) {
     return null;
@@ -906,14 +996,8 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-function extractCodexRateLimitsLine(line: string): unknown {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
+  if (parsed["type"] !== "event_msg") {
     return null;
   }
   const payload = parsed["payload"];
@@ -927,35 +1011,47 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
+  let model: string | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
+    // Parse each changed rollout line once and share it across the extractors.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index] ?? "");
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
     if (rateLimit === null) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
       if (detection) {
         rateLimit = detection;
       }
     }
     if (rollout === null) {
-      const state = extractCodexRolloutStateLine(line);
-      if (!state) {
-        continue;
+      const state = extractCodexRolloutStateLine(parsed);
+      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+        rollout = {
+          ...state,
+          filePath,
+        };
       }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      rollout = {
-        ...state,
-        filePath,
-      };
     }
-    if (rateLimit) {
+    if (model === undefined) {
+      model = extractCodexTurnContextModel(parsed);
+    }
+    if (rollout && rateLimit && model !== undefined) {
       break;
     }
   }
-  return { rollout, rateLimit };
+  return { rollout, rateLimit, ...(model ? { model } : {}) };
 }
 
-export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
+export async function readCodexRolloutState(
+  sessionsDir: string,
+  reader?: CodexRolloutReaderState,
+): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
@@ -966,8 +1062,29 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
   // same instant, so filesystem mtime stops reflecting content recency. Rank by
   // the newest in-content state timestamp instead (heal preserves those), and
   // keep mtime only as a deterministic tie-breaker.
+  const nextFiles = new Map<
+    string,
+    CodexRolloutFileFingerprint & { candidate: CodexRolloutCandidate | null }
+  >();
   const candidates = await Promise.all(
     files.map(async (filePath) => {
+      let fingerprint: CodexRolloutFileFingerprint | null = null;
+      try {
+        const fileStat = await stat(filePath);
+        fingerprint = { ino: fileStat.ino, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+      } catch {
+        // Preserve the existing best-effort read below for a stat/read race.
+      }
+      const cached = reader?.files.get(filePath);
+      if (
+        fingerprint &&
+        cached?.ino === fingerprint.ino &&
+        cached.mtimeMs === fingerprint.mtimeMs &&
+        cached.size === fingerprint.size
+      ) {
+        nextFiles.set(filePath, cached);
+        return cached.candidate;
+      }
       let content: string;
       try {
         content = await readFile(filePath, "utf8");
@@ -976,26 +1093,39 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
-      if (!result.rollout && !result.rateLimit) {
+      if (!result.rollout && !result.rateLimit && !result.model) {
+        if (fingerprint) {
+          nextFiles.set(filePath, { ...fingerprint, candidate: null });
+        }
         return null;
       }
-      let mtimeMs: number;
-      try {
-        mtimeMs = (await stat(filePath)).mtimeMs;
-      } catch {
-        mtimeMs = 0;
+      const candidate = { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
+      if (fingerprint) {
+        nextFiles.set(filePath, { ...fingerprint, candidate });
       }
-      return { result, mtimeMs };
+      return candidate;
     }),
   );
+  if (reader) reader.files = nextFiles;
   const existing = candidates.filter(
-    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
-      candidate !== null,
+    (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
   if (existing.length === 0) {
     return { rollout: null, rateLimit: null };
   }
-  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  // A just-started rollout file can carry a `turn_context` model before it has
+  // any state or rate-limit line, so it loses both selections below. Rank the
+  // model on its own to keep the live model available from the first turn.
+  const model = existing
+    .filter((candidate) => candidate.result.model)
+    .reduce<CodexRolloutCandidate | null>(
+      (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+      null,
+    )?.result.model;
+  const stateful = existing.filter(
+    (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
+  );
+  const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
   if (withRollout.length > 0) {
     const best = withRollout.reduce((left, right) => {
       const leftTs = left.result.rollout?.timestampMs ?? 0;
@@ -1005,10 +1135,190 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
-    return best.result;
+    return { ...best.result, ...(model ? { model } : {}) };
   }
-  const newestByMtime = existing.reduce((left, right) =>
-    right.mtimeMs > left.mtimeMs ? right : left,
+  const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
+    (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+    null,
   );
-  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
+  return {
+    rollout: null,
+    rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(model ? { model } : {}),
+  };
+}
+
+// ── Transcript entries (unified message/tool/question timeline) ──────
+
+/** Maps call_id → output text from every function_call_output/custom_tool_call_output line. */
+function buildToolOutputMap(lines: string[]): Map<string, string> {
+  const outputs = new Map<string, string>();
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "response_item") {
+      continue;
+    }
+    const payload = parsed["payload"];
+    if (!isRecord(payload)) {
+      continue;
+    }
+    const payloadType = payload["type"];
+    if (payloadType !== "function_call_output" && payloadType !== "custom_tool_call_output") {
+      continue;
+    }
+    const callId = readRolloutString(payload["call_id"]);
+    const output = readRolloutString(payload["output"]);
+    if (callId && output) {
+      outputs.set(callId, output);
+    }
+  }
+  return outputs;
+}
+
+interface CodexReasoningSummaryItem {
+  type?: string;
+  text?: string;
+}
+
+function extractCodexReasoningText(summary: unknown): string {
+  if (!Array.isArray(summary)) {
+    return "";
+  }
+  return summary
+    .filter(
+      (item): item is CodexReasoningSummaryItem =>
+        isRecord(item) && typeof item["text"] === "string" && item["text"].trim() !== "",
+    )
+    .map((item) => (item.text as string).trim())
+    .join("\n");
+}
+
+/** input_required questions carry the same `{header, question}` shape AskUserQuestion does. */
+function extractCodexQuestionText(payload: Record<string, unknown>): {
+  header: string;
+  prompt: string;
+} {
+  const questionsValue = payload["questions"];
+  if (Array.isArray(questionsValue) && questionsValue.length > 0 && isRecord(questionsValue[0])) {
+    const first = questionsValue[0];
+    return {
+      header: typeof first["header"] === "string" ? first["header"] : "",
+      prompt: typeof first["question"] === "string" ? first["question"] : "",
+    };
+  }
+  return { header: "", prompt: "" };
+}
+
+/**
+ * Full transcript in file-line order: user/assistant messages, reasoning summaries,
+ * function_call tool invocations (paired with their output by call_id), and
+ * request_user_input/input_required prompts. Question option payload shape is
+ * unverified in production data, so options are always omitted here.
+ */
+export async function readCodexTranscriptEntries(
+  sessionsDir: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
+  if (!filePath) {
+    return null;
+  }
+
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const toolOutputs = buildToolOutputMap(lines);
+
+  const entries: TranscriptEntry[] = [];
+
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
+
+    const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : undefined;
+    const parsedTimestampMs = timestamp ? Date.parse(timestamp) : NaN;
+    const ts: { timestampMs: number } | Record<string, never> = Number.isFinite(parsedTimestampMs)
+      ? { timestampMs: parsedTimestampMs }
+      : {};
+
+    const type = parsed["type"];
+
+    if (type === "response_item") {
+      const userText = extractUserTextFromLine(line);
+      if (userText !== null && userText.trim()) {
+        entries.push({ kind: "message", role: "user", text: userText, ...ts });
+        continue;
+      }
+
+      const assistantText = extractAssistantTextFromLine(line);
+      if (assistantText !== null && assistantText.trim()) {
+        entries.push({ kind: "message", role: "assistant", text: assistantText, ...ts });
+        continue;
+      }
+
+      const payload = parsed["payload"];
+      if (!isRecord(payload)) {
+        continue;
+      }
+      const payloadType = payload["type"];
+
+      if (payloadType === "reasoning") {
+        const text = extractCodexReasoningText(payload["summary"]);
+        if (text) {
+          entries.push({ kind: "reasoning", text, ...ts });
+        }
+        continue;
+      }
+
+      if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+        const name = typeof payload["name"] === "string" ? payload["name"] : "";
+        const callId = readRolloutString(payload["call_id"]);
+        if (name === "request_user_input") {
+          entries.push({ kind: "question", header: "", prompt: "", ...ts });
+          continue;
+        }
+        const inputSummary = readRolloutString(payload["arguments"]);
+        const output = callId ? toolOutputs.get(callId) : undefined;
+        entries.push({
+          kind: "tool",
+          name,
+          ...(callId ? { callId } : {}),
+          ...(inputSummary ? { inputSummary } : {}),
+          ...(output ? { output } : {}),
+          ...ts,
+        });
+      }
+      continue;
+    }
+
+    if (type === "event_msg") {
+      const payload = parsed["payload"];
+      if (!isRecord(payload) || payload["type"] !== "input_required") {
+        continue;
+      }
+      const { header, prompt } = extractCodexQuestionText(payload);
+      entries.push({ kind: "question", header, prompt, ...ts });
+    }
+  }
+
+  return entries;
 }

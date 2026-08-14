@@ -52,6 +52,17 @@ echo -e "${BLUE}║  Spur - Onboarding Integration Test                   ║${N
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
 echo ""
 
+# On a correctly configured Spur host this script is a no-op from now on;
+# use scripts/test-deploy.sh for reviewer/test deploys.
+npm_prefix="$(npm config get prefix 2>/dev/null || true)"
+npm_prefix="${npm_prefix#"${npm_prefix%%[![:space:]]*}"}"
+npm_prefix="${npm_prefix%"${npm_prefix##*[![:space:]]}"}"
+if [[ -n "$npm_prefix" ]] && [[ "$(realpath -m "$npm_prefix")" = "$(realpath -m "$HOME/.local")" ]]; then
+  echo "onboarding-test: refusing production npm prefix"
+  echo "  use scripts/test-deploy.sh for reviewer/test deploys"
+  exit 1
+fi
+
 start_step "Step 1: Navigate to repository"
 cd "$REPO_ROOT" || fail_step "Repository not found"
 end_step "Step 1: Repository accessible"
@@ -102,7 +113,7 @@ end_step "Step 5: Fresh repo created"
 
 # Step 6: Run doctor in the fresh repo
 start_step "Step 6: Run spur doctor"
-DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json)" || fail_step "Step 6: spur doctor failed"
+DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json --scaffold)" || fail_step "Step 6: spur doctor failed"
 PROJECT_ID="$(printf '%s' "$DOCTOR_OUTPUT" | jq -r '.projectId')"
 if [ "$PROJECT_ID" != "test-project" ]; then
     printf '%s\n' "$DOCTOR_OUTPUT"

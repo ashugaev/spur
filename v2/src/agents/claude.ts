@@ -4,9 +4,31 @@ import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { AgentModel } from "./models.js";
+import type { ProviderReasoningEffort } from "../types.js";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
+}
+
+// Spur's default model for the Claude agent, applied when a spawn resolves to
+// claude without an explicit or configured model.
+export const DEFAULT_CLAUDE_MODEL = "opus";
+
+// Claude's selectable models. This catalog and its default live with the agent,
+// not in the generic models registry. listClaudeModels flags DEFAULT_CLAUDE_MODEL
+// at call time so the picker badge tracks the spawn default from one source.
+const CLAUDE_MODELS: AgentModel[] = [
+  { id: "opus", label: "Opus" },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "haiku", label: "Haiku" },
+  { id: "fable", label: "Fable" },
+];
+
+export function listClaudeModels(): AgentModel[] {
+  return CLAUDE_MODELS.map((model) =>
+    model.id === DEFAULT_CLAUDE_MODEL ? { ...model, isDefault: true } : model,
+  );
 }
 
 const RESTRICT_WRITES_DENY_COMMAND =
@@ -124,6 +146,7 @@ interface ClaudePlanOptions {
   model?: string;
   claudeConfigDir?: string;
   sessionId?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 }
 
 function withClaudeConfigDir(command: string, configDir?: string): string {
@@ -143,7 +166,9 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
 }
 
 function claudeMcpConfigArg(options?: ClaudePlanOptions): string {
-  return options?.mcpConfigPath ? ` --mcp-config ${shellEscape(options.mcpConfigPath)}` : "";
+  return options?.mcpConfigPath
+    ? ` --mcp-config ${shellEscape(options.mcpConfigPath)} --strict-mcp-config`
+    : "";
 }
 
 export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): AgentLaunchPlan {
@@ -155,9 +180,10 @@ export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): Ag
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
+  const reasoningEffortArg = options?.reasoningEffort ? ` --effort ${options.reasoningEffort}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}${reasoningEffortArg}`,
       options?.claudeConfigDir,
     ),
     initialMessage: prompt,
@@ -176,9 +202,10 @@ export function buildClaudeResumePlan(
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
+  const reasoningEffortArg = options?.reasoningEffort ? ` --effort ${options.reasoningEffort}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${reasoningEffortArg}`,
       options?.claudeConfigDir,
     ),
     readyMarkers: ["❯"],

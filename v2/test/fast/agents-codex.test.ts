@@ -142,6 +142,21 @@ describe("buildCodexPlan", () => {
     );
   });
 
+  it("sets configured reasoning effort", () => {
+    const plan = buildCodexPlan("prompt", { reasoningEffort: "medium" });
+    expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="medium"'`);
+  });
+
+  it("appends typed reasoning effort after legacy raw args", () => {
+    const plan = buildCodexPlan("prompt", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"'],
+      reasoningEffort: "medium",
+    });
+    expect(plan.launchCommand.indexOf(`'-c' 'model_reasoning_effort="high"'`)).toBeLessThan(
+      plan.launchCommand.indexOf(`-c 'model_reasoning_effort="medium"'`),
+    );
+  });
+
   it("passes startup images on the launch command and skips tmux prompt delivery", () => {
     const plan = buildCodexPlan("describe this", {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
@@ -153,8 +168,8 @@ describe("buildCodexPlan", () => {
   });
 
   it("appends --model when provided", () => {
-    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
-    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+    const plan = buildCodexPlan("prompt", { model: "codex-model-id" });
+    expect(plan.launchCommand).toContain("--model 'codex-model-id'");
   });
 
   it("omits --model when absent", () => {
@@ -214,6 +229,21 @@ describe("buildCodexResumePlan", () => {
       codexArgs: ["-c", 'service_tier="fast"', "--enable", "fast_mode"],
     });
     expect(plan.launchCommand).toContain(`'-c' 'service_tier="fast"' '--enable' 'fast_mode'`);
+  });
+
+  it("sets configured reasoning effort on resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", { reasoningEffort: "high" });
+    expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="high"'`);
+  });
+
+  it("appends typed reasoning effort after legacy raw args on resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", {
+      codexArgs: ["-c", 'model_reasoning_effort="low"'],
+      reasoningEffort: "high",
+    });
+    expect(plan.launchCommand.indexOf(`'-c' 'model_reasoning_effort="low"'`)).toBeLessThan(
+      plan.launchCommand.indexOf(`-c 'model_reasoning_effort="high"'`),
+    );
   });
 
   it("does not include initialMessage", () => {
@@ -468,7 +498,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   });
 
   it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
-    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
+    const config = '[tui.model_availability_nux]\n"codex-model-id" = 3\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
@@ -483,7 +513,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n',
     );
   });
 
@@ -509,6 +539,30 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+
+  it("copies the configured models cache into the isolated home", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" });
+    expect(mockCp).toHaveBeenCalledWith(
+      "/persistent/codex/models_cache.json",
+      "/session/tool/codex-home/models_cache.json",
+      { force: true },
+    );
+  });
+
+  it("ignores a missing configured models cache", async () => {
+    mockCp.mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ENOENT" }));
+    await expect(
+      ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" }),
+    ).resolves.toBe("/session/tool/codex-home");
+  });
+
+  it("propagates non-ENOENT models cache errors", async () => {
+    const error = Object.assign(new Error("denied"), { code: "EACCES" });
+    mockCp.mockRejectedValueOnce(error);
+    await expect(
+      ensureCodexHooksConfig("/session/tool", [], { modelsCacheHome: "/persistent/codex" }),
+    ).rejects.toBe(error);
   });
 
   it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
@@ -706,10 +760,12 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).not.toContain("[projects.");
   });
 
-  it("writes a single playwright http server table for the reserved port", async () => {
+  it("writes a single mcp server table per binding for the reserved port", async () => {
     setUserConfig('[model]\nname = "test"\n');
 
-    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], { playwrightPort: 8742 });
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+    });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
@@ -717,15 +773,38 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const content = writeCall?.[1] as string;
     const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
     expect(count).toBe(1);
-    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://127.0.0.1:8742/mcp"');
+    // Client-facing URL must use "localhost", not the bare IP: @playwright/mcp's
+    // DNS-rebinding protection rejects "127.0.0.1:<port>" with HTTP 403.
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).not.toContain('url = "http://127.0.0.1:8742/mcp"');
   });
 
-  it("strips a pre-existing inherited playwright table and preserves unrelated servers", async () => {
+  it("writes one table per binding for multiple mcp bindings", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [
+        { server: "playwright", url: "http://localhost:8742/mcp" },
+        { server: "widget", url: "http://localhost:9001/widget" },
+      ],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).toContain('[mcp_servers.widget]\nurl = "http://localhost:9001/widget"');
+  });
+
+  it("strips a pre-existing inherited table for the bound server and preserves unrelated servers", async () => {
     setUserConfig(
       '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
     );
 
-    await ensureCodexHooksConfig("/session/tool", [], { playwrightPort: 8742 });
+    await ensureCodexHooksConfig("/session/tool", [], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+    });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
@@ -734,11 +813,12 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
     expect(count).toBe(1);
     expect(content).not.toContain('args = ["@playwright/mcp"]');
-    expect(content).toContain('url = "http://127.0.0.1:8742/mcp"');
+    expect(content).toContain('url = "http://localhost:8742/mcp"');
+    // The unrelated server's URL is preserved verbatim (not rewritten).
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 
-  it("omits the playwright table when no port is provided", async () => {
+  it("omits any mcp server table when no bindings are provided", async () => {
     setUserConfig('[model]\nname = "test"\n');
 
     await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
@@ -750,7 +830,7 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).not.toContain("[mcp_servers.playwright]");
   });
 
-  it("strips a pre-existing inherited playwright table even when no port is provided (sidecar start failure)", async () => {
+  it("leaves an inherited table for an unbound server untouched when no bindings are provided", async () => {
     setUserConfig(
       '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
     );
@@ -761,8 +841,7 @@ describe("ensureCodexHooksConfig trusted projects", () => {
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
     const content = writeCall?.[1] as string;
-    expect(content).not.toContain("[mcp_servers.playwright]");
-    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.playwright]\ncommand = "npx"');
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 });

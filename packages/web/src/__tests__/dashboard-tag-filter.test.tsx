@@ -78,6 +78,16 @@ function mockFetch() {
   });
 }
 
+// Tag chips in the Filters modal render as "{name}:{count}", so match on the
+// stable name prefix rather than an exact string.
+function tagChip(name: string) {
+  return screen.getByRole("button", { name: new RegExp(`^${name}:`) });
+}
+
+function openFilters() {
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+}
+
 describe("Dashboard tag filter", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -91,15 +101,15 @@ describe("Dashboard tag filter", () => {
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
     expect(screen.getByText("Plain session")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
-    fireEvent.click(screen.getByRole("button", { name: "bug" }));
+    openFilters();
+    fireEvent.click(tagChip("bug"));
 
     await waitFor(() => expect(screen.queryByText("Plain session")).not.toBeInTheDocument());
     expect(screen.getByText("Bug session")).toBeInTheDocument();
     expect(screen.queryByText("Docs session")).not.toBeInTheDocument();
 
     // Add a second tag: OR keeps sessions matching either tag.
-    fireEvent.click(screen.getByRole("button", { name: "docs" }));
+    fireEvent.click(tagChip("docs"));
     await waitFor(() => expect(screen.getByText("Docs session")).toBeInTheDocument());
     expect(screen.getByText("Bug session")).toBeInTheDocument();
     expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
@@ -107,7 +117,7 @@ describe("Dashboard tag filter", () => {
     expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug", "docs"]));
 
     // Deselect one tag narrows the list back down.
-    fireEvent.click(screen.getByRole("button", { name: "docs" }));
+    fireEvent.click(tagChip("docs"));
     await waitFor(() => expect(screen.queryByText("Docs session")).not.toBeInTheDocument());
     expect(screen.getByText("Bug session")).toBeInTheDocument();
     expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"]));
@@ -121,14 +131,14 @@ describe("Dashboard tag filter", () => {
     expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
   });
 
-  it("clears the selection via All tags and empties storage", async () => {
+  it("clears the selection by deselecting the chip and empties storage", async () => {
     window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug"]));
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
     expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
-    fireEvent.click(screen.getByRole("button", { name: "All tags" }));
+    openFilters();
+    fireEvent.click(tagChip("bug"));
     await waitFor(() => expect(screen.getByText("Plain session")).toBeInTheDocument());
     expect(window.localStorage.getItem("spur:tag-filters")).toBeNull();
   });
@@ -140,7 +150,7 @@ describe("Dashboard tag filter", () => {
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
 
     // Narrow search so no session matches, revealing the empty placeholder.
-    fireEvent.change(screen.getByPlaceholderText(/filter sessions/i), {
+    fireEvent.change(screen.getByPlaceholderText(/^Filter/i), {
       target: { value: "zzz-no-match" },
     });
     await waitFor(() =>
@@ -226,9 +236,9 @@ describe("Dashboard tag filter", () => {
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
-    expect(screen.getByRole("button", { name: "bug" })).toBeInTheDocument();
+    openFilters();
+    expect(tagChip("bug")).toBeInTheDocument();
     // "docs" is in the catalog but applied to no session, so it must not appear.
-    expect(screen.queryByRole("button", { name: "docs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^docs:/ })).not.toBeInTheDocument();
   });
 });

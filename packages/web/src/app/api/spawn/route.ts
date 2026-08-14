@@ -10,6 +10,7 @@ interface SpawnBody {
   agent?: AgentName;
   members?: Array<{ agent?: AgentName; name?: string }>;
   model?: string;
+  mode?: string;
   attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
@@ -18,6 +19,7 @@ interface SpawnBody {
   selfDestruct?: { enabled: boolean; conditions?: string };
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
+  slots?: { links?: Array<{ label: string; url: string }> };
 }
 
 class SpawnRequestError extends Error {}
@@ -89,6 +91,7 @@ export async function POST(request: NextRequest) {
       if (body.agent) payload.agent = body.agent;
       if (body.model?.trim()) payload.model = body.model.trim();
     }
+    if (body.mode?.trim()) payload.mode = body.mode.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;
@@ -97,6 +100,9 @@ export async function POST(request: NextRequest) {
     const reuseId = body.reuseWorkspaceSessionId?.trim();
     if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
     if (body.bootstrap === true) payload.bootstrap = true;
+    if (Array.isArray(body.slots?.links) && body.slots.links.length > 0) {
+      payload.slots = { links: body.slots.links };
+    }
 
     const session = filteredMembers?.length
       ? await spurRequestJson<SpurSpawnResult>("/sessions", spurJsonInit("POST", payload))

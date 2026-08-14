@@ -26,6 +26,16 @@ export interface ReadClaudeSessionStatusOptions {
 
 type ClaudeSessionStatusCandidate = Omit<ClaudeSessionStatusRecord, "state">;
 
+// Claude's own `waitingFor` reasons that mean it is genuinely blocked on a
+// human decision (a permission dialog or an AskUserQuestion-style menu) as
+// opposed to merely idling on something else in flight (e.g. "tool result",
+// "network") that will resolve itself without a human. This is the same
+// signal a human sees as a live "Enter to select · ... " TUI menu — Claude
+// Code updates this file directly from its UI state, so it stays correct
+// even when the matching tool_use never makes it into the JSONL transcript
+// (a known gap for some menu types, e.g. self-scheduling wake-loop prompts).
+const NEEDS_INPUT_WAITING_REASONS = new Set(["permission prompt", "input needed"]);
+
 export function classifyClaudeSessionStatus(
   status: string,
   waitingFor?: string,
@@ -42,7 +52,7 @@ export function classifyClaudeSessionStatus(
   if (waitingFor === undefined) {
     return "waiting";
   }
-  return waitingFor === "permission prompt" ? "needs_input" : null;
+  return NEEDS_INPUT_WAITING_REASONS.has(waitingFor) ? "needs_input" : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

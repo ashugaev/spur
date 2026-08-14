@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { BusyContent } from "@/components/BusyContent";
 import type { SpurClaudeAccount } from "@/lib/types";
 
 interface SwitchAuthDialogProps {
@@ -98,8 +99,8 @@ export function SwitchAuthDialog({
           Switch Claude account
         </h2>
         <p className="mb-3 normal-case tracking-normal text-[var(--color-text-secondary)]">
-          Relaunch this Claude session under a different logged-in account. The session restarts and
-          resumes in the same worktree.
+          Session-home sessions swap credentials in place — no restart. Legacy sessions (not yet
+          launched against a session home) may relaunch once to migrate.
         </p>
         <label className="mb-3 block normal-case tracking-normal text-[var(--color-text-secondary)]">
           Account
@@ -146,12 +147,14 @@ export function SwitchAuthDialog({
             Cancel
           </button>
           <button
+            aria-busy={status === "pending" || undefined}
+            aria-label={status === "pending" ? "Switching account" : undefined}
             className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={status === "pending" || !selected}
             type="button"
             onClick={() => onConfirm(selected, force)}
           >
-            {status === "pending" ? "Switching…" : "Switch"}
+            <BusyContent busy={status === "pending"}>Switch</BusyContent>
           </button>
         </div>
       </div>

@@ -12,7 +12,7 @@ import {
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
-import { createTempDir } from "../helpers/common.js";
+import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const PARAM_EXPANSION_OPEN = "$" + "{";
@@ -289,10 +289,20 @@ exit 42
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
+    // A real "spur.yaml" is used, not the shared "/tmp/spur.yaml": the
+    // wrapper below execs the real CLI, and "/tmp/spur.yaml" is the default
+    // instance config that a live daemon on this host (dev box or self-hosted
+    // CI runner) may already be listening on at its default port 4310. Point
+    // at a fresh port nothing is bound to so this stays a fast, isolated test
+    // instead of round-tripping whatever daemon happens to own the shared path.
+    const configPath = join(dataDir, "spur.yaml");
+    const port = await findFreePort();
+    writeFileSync(configPath, `server:\n  host: 127.0.0.1\n  port: ${port}\n`, "utf8");
+
     const toolDir = ensureSessionSlotTool({
       dataDir,
       sessionId: "api-3",
-      configPath: "/tmp/spur.yaml",
+      configPath,
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
@@ -306,8 +316,12 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
     );
 
     expect(() =>
+      // SPUR_DISABLE_AUTOSTART=1 so the CLI throws immediately instead of
+      // auto-spawning a daemon on the free port above and waiting up to
+      // ~40s for it to come up, which would flake this test past the
+      // vitest timeout under load.
       execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
+        env: { ...process.env, SPUR_DISABLE_AUTOSTART: "1" },
       }),
     ).toThrow();
 

@@ -2,6 +2,8 @@
 
 import { type FocusEvent, useEffect, useRef, useState } from "react";
 
+const HOVER_OPEN_DELAY_MS = 100;
+
 export interface FooterPopover {
   containerRef: React.MutableRefObject<HTMLDivElement | null>;
   open: boolean;
@@ -17,7 +19,16 @@ export function useFooterPopover(): FooterPopover {
   const [pinned, setPinned] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const open = !dismissed && (hovered || pinned);
+
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current === null) return;
+    clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = null;
+  };
+
+  useEffect(() => clearHoverTimer, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -51,9 +62,14 @@ export function useFooterPopover(): FooterPopover {
     },
     onMouseEnter() {
       setDismissed(false);
-      setHovered(true);
+      clearHoverTimer();
+      hoverTimerRef.current = setTimeout(() => {
+        hoverTimerRef.current = null;
+        setHovered(true);
+      }, HOVER_OPEN_DELAY_MS);
     },
     onMouseLeave() {
+      clearHoverTimer();
       setDismissed(false);
       setHovered(false);
     },

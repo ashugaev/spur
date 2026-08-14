@@ -42,15 +42,48 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     server: { host: "127.0.0.1", port: 4310 },
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
+    projectsRoot: "/tmp/spur-data/projects",
     defaultAgent: "claude",
     tmux: { socketName: "spur-test" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
     rateLimitReactivation: { afterHours: 0 },
     authRotation: {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+    },
+    sessionGc: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxGroupsPerSweep: 20,
+      statuses: ["completed", "killed", "stopped"],
+    },
+    sidecarGc: {
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    },
+    admission: {
+      enabled: true,
+      maxLiveSessions: 1000,
+      maxLiveSessionsSource: "derived",
+      perSessionBytes: 1_610_612_736,
+      reserveFraction: 0.7,
+      memoryGuard: {
+        enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1_073_741_824,
+        minFreeSwapBytes: 0,
+        admissionFloorBytes: 8_000_000_000,
+        shedCriticalFloorBytes: 4_000_000_000,
+        restoreFloorBytes: 9_610_612_736,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
     },
     tags: [],
     projects: {
@@ -113,7 +146,36 @@ describe("backlog runner", () => {
         title: "Fix checkout",
         url: "https://jira.example.com/browse/WEB-17",
         fetchedAt: expect.any(String),
+        position: 0,
       },
+    ]);
+  });
+
+  it("stamps ascending position matching provider fetch order", async () => {
+    fetchJiraIssuesMock.mockResolvedValueOnce([
+      { id: "30003", key: "WEB-3", title: "Third", url: "https://jira.example.com/browse/WEB-3" },
+      { id: "10001", key: "WEB-1", title: "First", url: "https://jira.example.com/browse/WEB-1" },
+      { id: "20002", key: "WEB-2", title: "Second", url: "https://jira.example.com/browse/WEB-2" },
+    ]);
+
+    const controller = startConfiguredBacklogs({
+      config: appConfig({ features: binding({ runOnStart: true }) }),
+      logger: { warn: vi.fn() },
+    });
+
+    await vi.waitFor(() => expect(replaceAvailableBacklogItemsMock).toHaveBeenCalledTimes(1));
+    controller.stop();
+
+    const [, , , items] = replaceAvailableBacklogItemsMock.mock.calls[0] ?? [];
+    expect(
+      (items as { externalId: string; position: number }[]).map((item) => [
+        item.externalId,
+        item.position,
+      ]),
+    ).toEqual([
+      ["30003", 0],
+      ["10001", 1],
+      ["20002", 2],
     ]);
   });
 

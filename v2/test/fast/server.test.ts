@@ -1,17 +1,19 @@
 import * as fs from "node:fs";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { readEventLog } from "../../src/event-log.js";
+import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
-import { startServer } from "../../src/server.js";
+import { startServer, type StartedServer } from "../../src/server.js";
 import {
-  BacklogItemUnavailableError,
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
+  SessionResourceNotFoundError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -24,6 +26,20 @@ import {
 import { findFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const configPath = join(root, "does-not-exist", "spur.yaml");
+
+    await expect(
+      startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      }),
+    ).rejects.toThrow("does not exist");
+
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
   it("serves runtime info and stops cleanly in-process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -68,14 +84,336 @@ describe("startServer", () => {
       await server.stop();
     }
 
-    expect(readEventLog(dataDir).map((entry) => entry.event)).toEqual([
+    const events = readEventLog(dataDir).filter(
+      (entry) => entry.event !== "daemon.memory.unbounded",
+    );
+    expect(events[0]).toMatchObject({
+      event: "daemon.registry.count",
+      details: { read: 1, worktreeInternalDropped: 0 },
+    });
+    expect(events[1]).toMatchObject({
+      event: "gh.poll_cycle",
+      details: { cycle: "attention", calls: 0 },
+    });
+    expect(events.map((entry) => entry.event)).toEqual([
+      "daemon.registry.count",
+      "gh.poll_cycle",
       "daemon.startup.reconciled",
+      "daemon.admission.startup",
       "daemon.started",
       "http.route.not_found",
       "daemon.stopping",
       "daemon.stopped",
     ]);
+    expect(events.find((entry) => entry.event === "daemon.admission.startup")).toMatchObject({
+      details: { cap: 100, capSource: "default", live: 0 },
+    });
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const defaultResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(defaultResponse.status).toBe(200);
+      const defaultResult = (await defaultResponse.json()) as {
+        supported: boolean;
+        leaked: unknown[];
+        reaped: unknown[];
+      };
+      expect(defaultResult.reaped).toEqual([]);
+
+      const reapResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reap: true }),
+      });
+      expect(reapResponse.status).toBe(200);
+      const reapResult = (await reapResponse.json()) as {
+        supported: boolean;
+        leaked: unknown[];
+        reaped: unknown[];
+      };
+      // Nothing leaked in this empty sandbox, so both calls report the same
+      // shape either way — the important assertion is the default omits any
+      // reaping regardless of what `leaked` ends up containing.
+      expect(reapResult.leaked).toEqual(defaultResult.leaked);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("reports an unbounded fleet cgroup once during startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-memory-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+    vi.spyOn(SessionService.prototype, "getMemoryCeilingWarning").mockReturnValue({
+      cgroupPath: "/system.slice/spur-daemon.service",
+      memoryMaxUnlimited: true,
+      memoryHighUnlimited: true,
+      oomdPresent: false,
+    });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const events = readEventLog(dataDir).filter(
+        (entry) => entry.event === "daemon.memory.unbounded",
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        level: "warn",
+        details: {
+          cgroupPath: "/system.slice/spur-daemon.service",
+          memoryMaxUnlimited: true,
+          oomdPresent: false,
+        },
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        "Spur fleet cgroup /system.slice/spur-daemon.service has unlimited memory.max and systemd-oomd is absent\n",
+      );
+    } finally {
+      await server.stop();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("GET /headroom returns cap, projectCaps, live, projectedRoom, per-session rss, memory, and guard", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const response = await fetch(`http://127.0.0.1:${port}/headroom`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        cap: { global: number; source: string; perSessionBytes: number; reserveFraction: number };
+        projectCaps: Record<string, number>;
+        live: { count: number; byProject: Record<string, number> };
+        projectedRoom: number;
+        sessions: Array<{ id: string; project: string; status: string; rssBytes: number }>;
+        memory: unknown;
+        guard: {
+          enforce: boolean;
+          minAvailableBytes: number;
+          minFreeSwapBytes: number;
+          crossed: boolean;
+        };
+      };
+      expect(body.cap).toMatchObject({ global: 100, source: "default" });
+      expect(body.live).toEqual({ count: 1, byProject: { demo: 1 } });
+      expect(body.projectedRoom).toBe(body.cap.global - 1);
+      expect(body.sessions).toEqual([
+        { id: "demo-1", project: "demo", status: "running", rssBytes: expect.any(Number) },
+      ]);
+      expect(typeof body.guard.enforce).toBe("boolean");
+      expect(typeof body.guard.crossed).toBe("boolean");
+      expect(body.memory === null || typeof body.memory === "object").toBe(true);
+      expect(body.projectCaps).toEqual({});
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+    const originalSpawn = SessionService.prototype.spawn;
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      SessionService.prototype.spawn = async function mockSpawn() {
+        throw new SessionAdmissionDeniedError(
+          'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
+        );
+      };
+
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      const response = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "hello" }),
+      });
+      expect(response.status).toBe(429);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("2");
+      expect(body.error).toContain("cap");
+    } finally {
+      SessionService.prototype.spawn = originalSpawn;
+      await server?.stop();
+    }
+  });
+
+  it("flushes a pending collapsed warn before the final daemon.stopped log", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      // All three fall inside the default 60s collapse window: the first
+      // writes immediately, the next two are suppressed (suppressedCount 2).
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "first",
+      });
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "second",
+      });
+      logSpurEvent(dataDir, {
+        event: "session.wake.interval_failed",
+        level: "warn",
+        message: "third",
+      });
+    } finally {
+      await server.stop();
+    }
+
+    const events = readEventLog(dataDir);
+    const summaryIndex = events.findIndex((entry) => entry.details?.["suppressedCount"] === 2);
+    const stoppedIndex = events.findIndex((entry) => entry.event === "daemon.stopped");
+    expect(summaryIndex).toBeGreaterThanOrEqual(0);
+    expect(stoppedIndex).toBeGreaterThan(summaryIndex);
   });
 
   it("force closes active requests during stop", async () => {
@@ -449,7 +787,7 @@ describe("startServer", () => {
         lastActivityAt: "2026-04-15T00:00:00.000Z",
         artifacts: [],
         services: [],
-        sidecars: [{ name: "dev", alive: true, ports: [] }],
+        sidecars: [{ name: "dev", alive: true, ports: [], tmuxSession: "demo-1--dev" }],
       } satisfies SessionView;
     };
 
@@ -657,6 +995,67 @@ describe("startServer", () => {
     }
   });
 
+  it("routes POST /sessions/:id/reopen and forwards a refusal as 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalReopen = SessionService.prototype.reopen;
+    const calls: string[] = [];
+    SessionService.prototype.reopen = async function mockReopen(sessionId) {
+      calls.push(sessionId);
+      if (sessionId === "demo-1") {
+        throw new SessionNotReopenableError(
+          "Session demo-1 is running, not completed — use restore or respawn",
+        );
+      }
+      return { id: sessionId, status: "running" } as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const refused = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/reopen`, {
+        method: "POST",
+      });
+      expect(refused.status).toBe(409);
+      await expect(refused.json()).resolves.toEqual({
+        error: "Session demo-1 is running, not completed — use restore or respawn",
+      });
+
+      const accepted = await fetch(`http://127.0.0.1:${port}/sessions/demo-2/reopen`, {
+        method: "POST",
+      });
+      expect(accepted.status).toBe(200);
+      await expect(accepted.json()).resolves.toEqual({ id: "demo-2", status: "running" });
+      expect(calls).toEqual(["demo-1", "demo-2"]);
+    } finally {
+      SessionService.prototype.reopen = originalReopen;
+      await server.stop();
+    }
+  });
+
   it("returns 409 when sending to a rate-limited session with queue: false", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -699,6 +1098,156 @@ describe("startServer", () => {
       expect(response.status).toBe(409);
     } finally {
       SessionService.prototype.send = originalSend;
+      await server.stop();
+    }
+  });
+
+  it("maps queue remove/flush 404 (not queued) and 409 (delivery in flight), and 400 on an empty message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(sessionId, message) {
+      if (message === "not queued") {
+        throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      if (message === "in flight") {
+        throw new QueueDeliveryInFlightError("Delivery already in flight for demo-1");
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const notFound = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "not queued" }),
+      });
+      expect(notFound.status).toBe(404);
+
+      const inFlight = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "in flight" }),
+      });
+      expect(inFlight.status).toBe(409);
+
+      const emptyMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "" }),
+      });
+      expect(emptyMessage.status).toBe(400);
+
+      const missingMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(missingMessage.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      await server.stop();
+    }
+  });
+
+  it("forwards a trimmed message to queue remove/flush, so validation and lookup agree on normalization (PR #708 comment 3)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const receivedRemove: string[] = [];
+    const receivedFlush: string[] = [];
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(_sessionId, message) {
+      receivedRemove.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      receivedFlush.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const remove = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "  padded text  " }),
+      });
+      expect(remove.status).toBe(200);
+      expect(receivedRemove).toEqual(["padded text"]);
+
+      const flush = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "\tanother\n" }),
+      });
+      expect(flush.status).toBe(200);
+      expect(receivedFlush).toEqual(["another"]);
+
+      // Whitespace-only still counts as empty after trimming.
+      const whitespaceOnly = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "   " }),
+      });
+      expect(whitespaceOnly.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
       await server.stop();
     }
   });
@@ -773,7 +1322,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes backlog list and take through the session service", async () => {
+  it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -797,7 +1346,6 @@ describe("startServer", () => {
     );
 
     const listAvailableBacklog = SessionService.prototype.listAvailableBacklog;
-    const takeAvailableBacklog = SessionService.prototype.takeAvailableBacklog;
     SessionService.prototype.listAvailableBacklog = function mockListAvailableBacklog() {
       return [
         {
@@ -809,11 +1357,9 @@ describe("startServer", () => {
           title: "Fix checkout",
           url: "https://jira.example.com/browse/WEB-17",
           fetchedAt: "2026-06-16T12:00:00.000Z",
+          position: 0,
         },
       ];
-    };
-    SessionService.prototype.takeAvailableBacklog = async function mockTakeAvailableBacklog() {
-      throw new BacklogItemUnavailableError("Backlog item is unavailable");
     };
 
     const server = await startServer(configPath, {
@@ -825,23 +1371,8 @@ describe("startServer", () => {
       const availableResponse = await fetch(`http://127.0.0.1:${port}/backlog/available`);
       expect(availableResponse.status).toBe(200);
       await expect(availableResponse.json()).resolves.toMatchObject([{ key: "WEB-17" }]);
-
-      const takeResponse = await fetch(`http://127.0.0.1:${port}/backlog/take`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: "demo",
-          backlogId: "features",
-          externalId: "10001",
-        }),
-      });
-      expect(takeResponse.status).toBe(409);
-      await expect(takeResponse.json()).resolves.toEqual({
-        error: "Backlog item is unavailable",
-      });
     } finally {
       SessionService.prototype.listAvailableBacklog = listAvailableBacklog;
-      SessionService.prototype.takeAvailableBacklog = takeAvailableBacklog;
       await server.stop();
     }
   });
@@ -1143,7 +1674,145 @@ describe("startServer", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("image/png");
       expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBeNull();
       await expect(response.text()).resolves.toBe("artifact-bytes");
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("keeps the html artifact sandbox identical to the web preview frames", async () => {
+    // The web package cannot import from v2, so the flag list exists twice. Drift
+    // between the CSP header and the iframe sandbox must fail here, not in a browser.
+    const flagPattern = /ARTIFACT_HTML_SANDBOX = "([^"]+)"/;
+    const daemonSource = await readFile(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const webSource = await readFile(
+      new URL("../../../packages/web/src/lib/artifact-html.ts", import.meta.url),
+      "utf8",
+    );
+
+    const daemonPolicy = daemonSource.match(flagPattern)?.[1];
+    const webFlags = webSource.match(flagPattern)?.[1];
+
+    expect(webFlags).toBeTruthy();
+    expect(daemonPolicy).toBe(`sandbox ${webFlags}`);
+    expect(daemonPolicy).not.toContain("allow-same-origin");
+  });
+
+  it("hands SVG artifacts over as downloads so they never render on Spur's origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "chart.svg");
+    await writeFile(artifactPath, "<svg xmlns='http://www.w3.org/2000/svg'/>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "chart.svg",
+        name: "chart.svg",
+        size: 38,
+        mimeType: "image/svg+xml",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/artifacts/chart.svg`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/svg+xml");
+      expect(response.headers.get("content-disposition")).toContain("attachment");
+      await response.text();
+    } finally {
+      SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("sandboxes HTML artifacts served through GET /sessions/:id/artifacts/:artifactId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    const artifactPath = join(root, "report.html");
+    await writeFile(artifactPath, "<h1>Report</h1>", "utf8");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getArtifact = SessionService.prototype.getArtifact;
+    SessionService.prototype.getArtifact = function mockGetArtifact() {
+      return {
+        id: "report.html",
+        name: "report.html",
+        size: 15,
+        mimeType: "text/html; charset=utf-8",
+        kind: "text",
+        origin: "intentional",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        path: artifactPath,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/artifacts/report.html`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(response.headers.get("content-disposition")).toContain("inline");
+      expect(response.headers.get("content-security-policy")).toBe(
+        "sandbox allow-scripts allow-forms allow-popups allow-modals",
+      );
+      await expect(response.text()).resolves.toBe("<h1>Report</h1>");
     } finally {
       SessionService.prototype.getArtifact = getArtifact;
       await server.stop();
@@ -1372,6 +2041,123 @@ describe("startServer", () => {
     }
   });
 
+  it("serves shared memory routes with validation and missing-key errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const setResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Use HTTP API" }),
+        },
+      );
+      expect(setResponse.status).toBe(200);
+      await expect(setResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const listResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project`,
+      );
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toEqual({
+        scope: "project",
+        keys: ["decision.api"],
+      });
+
+      const getResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.json()).resolves.toEqual({
+        scope: "project",
+        entry: { key: "decision.api", body: "Use HTTP API" },
+      });
+
+      const removeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(removeResponse.status).toBe(200);
+      await expect(removeResponse.json()).resolves.toEqual({
+        scope: "project",
+        key: "decision.api",
+      });
+
+      const missingKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+      );
+      expect(missingKeyResponse.status).toBe(404);
+
+      const missingKeyRemoveResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/decision.api`,
+        { method: "DELETE" },
+      );
+      expect(missingKeyRemoveResponse.status).toBe(404);
+
+      const missingSessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/missing/shared-memory/project`,
+      );
+      expect(missingSessionResponse.status).toBe(404);
+
+      const invalidScopeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/bogus`,
+      );
+      expect(invalidScopeResponse.status).toBe(400);
+
+      const invalidKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/shared-memory/project/Bad`,
+      );
+      expect(invalidKeyResponse.status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /claude-accounts/remove returns 409 when a running session is bound to the account", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1595,6 +2381,110 @@ describe("startServer", () => {
     }
   });
 
+  it("rejects an invalid spawn-time subscriptions payload without spawning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnSpy = vi.spyOn(SessionService.prototype, "spawn");
+    const spawnInBackgroundSpy = vi.spyOn(SessionService.prototype, "spawnInBackground");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const invalidStateResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: [{ targetSessionId: "demo-2", states: ["blocked"] }],
+        }),
+      });
+      expect(invalidStateResponse.status).toBe(400);
+
+      const invalidShapeResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "hi", subscriptions: {} }),
+      });
+      expect(invalidShapeResponse.status).toBe(400);
+
+      const backgroundInvalidResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/background`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: "demo",
+            prompt: "hi",
+            subscriptions: [{ targetSessionId: "demo-2", states: ["blocked"] }],
+          }),
+        },
+      );
+      expect(backgroundInvalidResponse.status).toBe(400);
+
+      const duplicateTargetResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: [
+            { targetSessionId: "demo-2", states: ["waiting"] },
+            { targetSessionId: "demo-2", states: ["stopped"] },
+          ],
+        }),
+      });
+      expect(duplicateTargetResponse.status).toBe(400);
+      const duplicateTargetBody = (await duplicateTargetResponse.json()) as { error?: string };
+      expect(duplicateTargetBody.error).toMatch(/must not repeat targetSessionId/);
+
+      const tooManyResponse = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          prompt: "hi",
+          subscriptions: Array.from({ length: 21 }, (_, i) => ({
+            targetSessionId: `demo-${i}`,
+            states: ["waiting"],
+          })),
+        }),
+      });
+      expect(tooManyResponse.status).toBe(400);
+      const tooManyBody = (await tooManyResponse.json()) as { error?: string };
+      expect(tooManyBody.error).toMatch(/must not exceed 20 entries/);
+
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(spawnInBackgroundSpy).not.toHaveBeenCalled();
+    } finally {
+      spawnSpy.mockRestore();
+      spawnInBackgroundSpy.mockRestore();
+      await server.stop();
+    }
+  });
+
   it("POST /projects creates an unconfigured project and returns 201 with derived id", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1674,6 +2564,57 @@ describe("startServer", () => {
       };
       expect(removed.removedKind).toBe("unconfigured");
       expect(removed.projects.find((p) => p.id === "demo-app")).toBeUndefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("GET /projects carries modes through the HTTP boundary and omits them for a modes-less project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const plainRepoDir = join(root, "plain-repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(plainRepoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    modes:",
+        "      manager:",
+        "        skill: manager",
+        "        default: true",
+        "  plain:",
+        `    path: ${plainRepoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await response.json()) as Array<{
+        id: string;
+        modes?: Record<string, { skill: string; default?: boolean }>;
+      }>;
+      expect(listed.find((p) => p.id === "demo")?.modes).toEqual({
+        manager: { skill: "manager", default: true },
+      });
+      expect(listed.find((p) => p.id === "plain")).not.toHaveProperty("modes");
     } finally {
       await server.stop();
     }
@@ -1822,6 +2763,145 @@ describe("startServer", () => {
       const payload = (await response.json()) as { error: string };
       expect(payload.error).toBe(`path is not a directory: ${filePath}`);
       expect(fs.statSync(filePath).isFile()).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects derives folder under dataDir/projects when path omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { path: string };
+      };
+      expect(payload.id).toBe("demo-app");
+      const expectedPath = join(dataDir, "projects", "demo-app");
+      expect(payload.entry.path).toBe(expectedPath);
+      expect(fs.existsSync(expectedPath)).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects derives folder under configured projectsRoot when path omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projectsRoot: ./custom-root",
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { path: string };
+      };
+      expect(payload.id).toBe("demo-app");
+      const expectedPath = join(root, "custom-root", "demo-app");
+      expect(payload.entry.path).toBe(expectedPath);
+      expect(fs.existsSync(expectedPath)).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects returns 400 when path is provided but blank", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub", path: "" }),
+      });
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as { error: string };
+      expect(payload.error).toBe("path must be a non-empty string when provided");
     } finally {
       await server.stop();
     }
@@ -2011,6 +3091,96 @@ describe("startServer", () => {
     }
   });
 
+  it("disconnects a symlink alias and reconnects its fresh retarget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const oldDir = join(root, "old");
+    const freshDir = join(root, "fresh");
+    const aliasDir = join(root, "alias");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(oldDir, { recursive: true });
+    await mkdir(freshDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const oldConfigPath = join(oldDir, "spur.yaml");
+    const freshConfigPath = join(freshDir, "spur.yaml");
+    await writeFile(
+      oldConfigPath,
+      ["projects:", "  old:", `    path: ${oldDir}`, "    sessionPrefix: old", ""].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      freshConfigPath,
+      ["projects:", "  fresh:", `    path: ${freshDir}`, "    sessionPrefix: fresh", ""].join("\n"),
+      "utf8",
+    );
+    fs.symlinkSync(oldDir, aliasDir, "dir");
+    const aliasConfigPath = join(aliasDir, "spur.yaml");
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const connectOld = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(connectOld.status).toBe(200);
+
+      const disconnect = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(disconnect.status).toBe(200);
+
+      await rm(aliasDir);
+      fs.symlinkSync(freshDir, aliasDir, "dir");
+
+      const reconnect = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: aliasConfigPath }),
+      });
+      expect(reconnect.status).toBe(200);
+      const payload = (await reconnect.json()) as { projects: Array<{ id: string }> };
+      expect(payload.projects.some((project) => project.id === "fresh")).toBe(true);
+      expect(payload.projects.some((project) => project.id === "old")).toBe(false);
+
+      expect(readConfigRegistryFile(dataDir).configPaths).toEqual([
+        fs.realpathSync(bootstrapConfigPath),
+        fs.realpathSync(aliasConfigPath),
+      ]);
+      expect(fs.realpathSync(aliasConfigPath)).toBe(fs.realpathSync(freshConfigPath));
+      expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(
+        fs.realpathSync(oldConfigPath),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("DELETE /projects/:id disconnects a configured project without touching its spur.yaml", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -2079,6 +3249,173 @@ describe("startServer", () => {
       const afterBytes = await readFile(projectConfigPath);
       expect(afterBytes.equals(originalBytes)).toBe(true);
       expect(fs.statSync(projectConfigPath).mtimeMs).toBe(originalMtimeMs);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("rejects POST /projects/connect for a config inside worktreeDir with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const worktreeConfigDir = join(worktreeDir, "proj", "sess");
+    await mkdir(worktreeConfigDir, { recursive: true });
+    const worktreeConfigPath = join(worktreeConfigDir, "spur.yaml");
+    await writeFile(
+      worktreeConfigPath,
+      ["projects:", "  sess:", `    path: ${worktreeConfigDir}`, ""].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: worktreeConfigPath }),
+      });
+      expect(response.status).toBe(400);
+      expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(worktreeConfigPath);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("drops a registered project directory at boot and rejects connecting one with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const extraProjectDir = join(root, "extra-project");
+    const extraConfigPath = join(extraProjectDir, "spur.yaml");
+    await mkdir(extraProjectDir, { recursive: true });
+    await writeFile(
+      extraConfigPath,
+      [
+        "projects:",
+        "  extra:",
+        `    path: ${extraProjectDir}`,
+        "    sessionPrefix: extra",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [extraProjectDir, extraConfigPath],
+      unconfiguredProjects: [],
+    });
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(bootRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraProjectDir }),
+      });
+      expect(response.status).toBe(400);
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("rejects POST /projects/disconnect for a relative configPath with 400 instead of resolving it against the daemon cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/disconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: "spur.yaml" }),
+      });
+      expect(response.status).toBe(400);
+
+      const projectsResponse = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await projectsResponse.json()) as Array<{ id: string }>;
+      expect(listed.find((entry) => entry.id === "base")).toBeDefined();
     } finally {
       await server.stop();
     }
@@ -2178,5 +3515,126 @@ describe("startServer", () => {
       dirWatcher.close();
       await server.stop();
     }
+  });
+
+  it("refuses to bind the production port from a non-default config path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-prod-slot-test-"));
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      ["server:", "  port: 4310", `dataDir: ${dataDir}`, `worktreeDir: ${worktreeDir}`].join("\n"),
+      "utf8",
+    );
+
+    let started: StartedServer | undefined;
+    try {
+      await expect(
+        startServer(configPath, {
+          info: () => undefined,
+          warn: () => undefined,
+        }).then((server) => {
+          started = server;
+          return server;
+        }),
+      ).rejects.toThrow(/4310/);
+    } finally {
+      await started?.stop();
+    }
+
+    expect(fs.existsSync(dataDir)).toBe(false);
+    expect(fs.existsSync(worktreeDir)).toBe(false);
+  });
+
+  it("prunes an orphan registry path at boot and logs a duplicate-project warning once across repeated connects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Orphan: file and parent directory are gone before daemon boot.
+    const orphanDir = join(root, "orphan-dir");
+    const orphanConfigPath = join(orphanDir, "spur.yaml");
+    await mkdir(orphanDir, { recursive: true });
+    await writeFile(orphanConfigPath, "projects:\n  ghost:\n    path: /tmp/ghost\n", "utf8");
+    await rm(orphanDir, { recursive: true, force: true });
+    const missingParentAlivePath = join(root, "temporarily-missing.yaml");
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [orphanConfigPath, missingParentAlivePath],
+      unconfiguredProjects: [],
+    });
+
+    // Duplicate: this config conflicts with the bootstrap "demo" project id.
+    const duplicateProjectDir = join(root, "dup-project");
+    const duplicateConfigPath = join(duplicateProjectDir, "spur.yaml");
+    await mkdir(duplicateProjectDir, { recursive: true });
+    await writeFile(
+      duplicateConfigPath,
+      [
+        "projects:",
+        "  demo:",
+        `    path: ${duplicateProjectDir}`,
+        "    sessionPrefix: demo-dup",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(orphanConfigPath);
+      expect(bootRegistry.configPaths).toContain(missingParentAlivePath);
+      expect(readEventLog(dataDir).some((entry) => entry.event.endsWith(".pruned"))).toBe(false);
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ configPath: duplicateConfigPath }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(orphanConfigPath);
+      expect(finalRegistry.configPaths).toContain(missingParentAlivePath);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(duplicateConfigPath));
+    } finally {
+      await server.stop();
+    }
+
+    // Both registry problems are distinct but share level+event+sessionId, so
+    // warn collapse holds the second until a flush. Shutdown flushes it, which
+    // is why this reads the log after stop() rather than inside the try.
+    const registryWarnings = readEventLog(dataDir).filter(
+      (entry) => entry.event === "daemon.registry.warning",
+    );
+    expect(registryWarnings).toHaveLength(2);
   });
 });

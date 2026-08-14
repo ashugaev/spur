@@ -1,3 +1,4 @@
+import { IconCloseButton } from "@/components/IconCloseButton";
 import type { GithubPrCheckUnavailablePayload } from "@/lib/types";
 
 interface GithubRateLimitDialogProps {
@@ -51,15 +52,11 @@ export function GithubRateLimitDialog({
               </p>
             )}
           </div>
-          <button
-            aria-label="Dismiss GitHub PR check dialog"
-            className="border border-[var(--color-border-default)] px-2 py-1 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-            disabled={busy}
+          <IconCloseButton
+            label="Dismiss GitHub PR check dialog"
             onClick={onCancel}
-            type="button"
-          >
-            x
-          </button>
+            disabled={busy}
+          />
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
           {payload.rateLimited ? (

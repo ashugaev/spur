@@ -2,6 +2,7 @@
 
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
+import { BusyContent } from "@/components/BusyContent";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
@@ -19,6 +20,7 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
@@ -61,8 +63,13 @@ export type SpawnModalMode =
       kind: "spawn";
       project: ProjectControl;
       model: FieldControl<string | null>;
+      sessionMode?: {
+        value: string;
+        onChange: (next: string) => void;
+        options: { value: string; label: string }[];
+      };
       branch: FieldControl<string>;
-      workspaceMode: FieldControl<"default" | "worktree" | "shared">;
+      workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
@@ -93,7 +100,7 @@ interface SpawnModalProps {
   onSubmit: () => void;
   submitting: boolean;
   submitLabel: string;
-  submitBusyLabel: string;
+  submitBusyAriaLabel: string;
   submitDisabled: boolean;
   showCancel: boolean;
   // Agent
@@ -165,7 +172,7 @@ function ModeFields({
   if (mode.kind === "spawn") {
     return (
       <>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <select
             aria-label="Spawn project"
             className={`flex-1 ${INPUT_CLASS}`}
@@ -188,6 +195,20 @@ function ModeFields({
               value={mode.model.value}
             />
           </div>
+          {mode.sessionMode ? (
+            <select
+              aria-label="Spawn session mode"
+              className={`min-w-24 flex-1 ${INPUT_CLASS}`}
+              onChange={(event) => mode.sessionMode?.onChange(event.target.value)}
+              value={mode.sessionMode.value}
+            >
+              {mode.sessionMode.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <button
             className="whitespace-nowrap border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
             onClick={mode.members.onAdd}
@@ -234,9 +255,7 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
             <option value="default">Default</option>
@@ -328,7 +347,7 @@ export function SpawnModal({
   onSubmit,
   submitting,
   submitLabel,
-  submitBusyLabel,
+  submitBusyAriaLabel,
   submitDisabled,
   showCancel,
   agent,
@@ -435,20 +454,22 @@ export function SpawnModal({
               </button>
             ) : null}
             <button
+              aria-busy={submitting || undefined}
+              aria-label={submitting ? submitBusyAriaLabel : undefined}
               className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
               disabled={submitDisabled}
               onClick={onSubmit}
               type="button"
             >
-              <span>{submitting ? submitBusyLabel : submitLabel}</span>
-              {!submitting ? (
+              <BusyContent busy={submitting}>
+                <span>{submitLabel}</span>
                 <span
                   aria-hidden="true"
                   className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
-              ) : null}
+              </BusyContent>
             </button>
           </div>
         </div>

@@ -41,6 +41,7 @@ async function loadClientModule() {
 
 describe("client.ensureServer", () => {
   beforeEach(() => {
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", undefined);
     spawnMock.mockReset().mockReturnValue({ unref: vi.fn() });
     sleepMock.mockClear();
     loadConfigMock.mockReset().mockReturnValue({

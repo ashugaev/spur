@@ -123,7 +123,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+function fakeAgentScript(
+  agentName: "claude" | "codex" | "cursor",
+  options?: { hupResistant?: boolean },
+): string {
+  // Opt-in only: real agents don't ignore SIGHUP, and the terminate-then-
+  // confirm guard's own default grace windows assume it lands. This exists
+  // solely so a runtime test can force the SIGKILL path deterministically.
+  const hupTrap = options?.hupResistant ? "\ntrap '' HUP" : "";
   const header =
     agentName === "claude"
       ? "Claude Code"
@@ -155,7 +162,7 @@ fi
 # the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
 # action kills the script, so the interrupt drops the process instead of
 # just clearing its input line, and the send never reaches the read loop.
-trap '' INT
+trap '' INT${hupTrap}
 mode="launch"
 resume_id=""
 pinned_session_id=""
@@ -446,7 +453,7 @@ $extra"
   esac
 done`
       : agentName === "codex"
-        ? `trap '' INT
+        ? `trap '' INT${hupTrap}
 codex_paste_start=$'\\e[200~'
 codex_paste_end=$'\\e[201~'
 codex_buffer=""
@@ -622,6 +629,68 @@ function argValue(args, prefix) {
   return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 }
 
+function connection(nodes) {
+  return { nodes, pageInfo: { hasPreviousPage: false, startCursor: null } };
+}
+
+function prFromNumber(state, prNumber) {
+  return (
+    state.prsByNumber?.[String(prNumber)] ||
+    Object.values(state.prsByBranch || {}).find(
+      (value) => String(value?.number || "") === String(prNumber),
+    )
+  );
+}
+
+function pullRequestNode(state, pr) {
+  if (!pr) return null;
+  const prNumber = String(pr.number || "");
+  const checks = (state.checksByPr?.[prNumber] || []).map((check) => ({
+    name: check.name,
+    conclusion: check.state,
+    status: check.state === "PENDING" ? "IN_PROGRESS" : "COMPLETED",
+  }));
+  const issueComments = (state.commentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    author: comment.user || null,
+  }));
+  const reviews = (state.reviewsByPr?.[prNumber] || []).map((review, index) => ({
+    databaseId: index + 1,
+    state: review.state || null,
+    body: "",
+    author: review.user || null,
+  }));
+  const reviewComments = (state.reviewCommentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    path: comment.path || null,
+    line: comment.line || null,
+    author: comment.user || null,
+  }));
+  const reviewThreads = state.reviewThreadsByPr?.[prNumber] ||
+    (reviewComments.length > 0
+      ? [{ id: "THREAD_" + prNumber, isResolved: false, comments: connection(reviewComments) }]
+      : []);
+  return {
+    id: "PR_" + prNumber,
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    reviewDecision: pr.reviewDecision || null,
+    mergeable: pr.mergeable || "MERGEABLE",
+    mergeStateStatus: pr.mergeStateStatus || "CLEAN",
+    isDraft: false,
+    state: pr.state || "OPEN",
+    commits: {
+      nodes: [{ commit: { statusCheckRollup: { contexts: connection(checks) } } }],
+    },
+    reviewThreads: connection(reviewThreads),
+    reviews: connection(reviews),
+    comments: connection(issueComments),
+  };
+}
+
 const state = readState();
 const args = process.argv.slice(2);
 
@@ -656,7 +725,37 @@ if (args[0] === "pr" && args[1] === "view") {
   process.exit(0);
 }
 
-if (args[0] === "api" && args[1] === "graphql") {
+if (args[0] === "api" && args.includes("graphql")) {
+  const query = argValue(args, "query=") || "";
+  const repository = {
+    nameWithOwner: (argValue(args, "owner=") || "acme") + "/" + (argValue(args, "name=") || "api"),
+    isFork: false,
+    parent: null,
+  };
+  for (const arg of args) {
+    const numberMatch = arg.match(/^n(\\d+)=(\\d+)$/);
+    if (numberMatch) {
+      repository["a" + numberMatch[1]] = pullRequestNode(
+        state,
+        prFromNumber(state, numberMatch[2]),
+      );
+      continue;
+    }
+    const branchMatch = arg.match(/^b(\\d+)=(.*)$/s);
+    if (branchMatch) {
+      const node = pullRequestNode(state, state.prsByBranch?.[branchMatch[2]]);
+      repository["a" + branchMatch[1]] = connection(node ? [node] : []);
+    }
+  }
+  if (/r\\s*:\\s*repository/.test(query)) {
+    print({
+      data: {
+        rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00.000Z" },
+        r: repository,
+      },
+    });
+    process.exit(0);
+  }
   const prNumber = argValue(args, "number=");
   print({
     data: {
@@ -776,9 +875,14 @@ export async function createTmuxSession(args: {
 
 export async function captureTmuxPane(sessionName: string, lines = 80): Promise<string> {
   try {
+    // `-J` joins soft-wrapped lines back into one logical line. Without it, a
+    // long prompt line that happens to wrap exactly mid-word (e.g. "This"
+    // splitting into "Thi\ns" at the pane's fixed column width) can break a
+    // plain `.includes()` match on assertion text that spans the wrap point —
+    // a false negative unrelated to whether the text is actually present.
     const { stdout } = await execFileAsync(
       "tmux",
-      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`]),
+      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-J", "-S", `-${lines}`]),
     );
     return stdout;
   } catch {
@@ -886,6 +990,9 @@ export async function createGitRepo(): Promise<{ repoDir: string; originDir: str
   await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
   await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: repoDir });
+  await execFileAsync("git", ["remote", "add", "upstream", "https://github.com/acme/api.git"], {
+    cwd: repoDir,
+  });
   await writeFile(join(repoDir, "README.md"), "# Spur Runtime Test\n", "utf8");
   await writeFile(join(repoDir, ".env"), "TEST_ENV=1\n", "utf8");
   await execFileAsync("git", ["add", "."], { cwd: repoDir });
@@ -901,7 +1008,7 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 
 export async function createRuntimeTestContext(
   port: number,
-  options?: { useFakeTools?: boolean },
+  options?: { useFakeTools?: boolean; hupResistantAgents?: boolean },
 ): Promise<RuntimeTestContext> {
   _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
@@ -912,14 +1019,22 @@ export async function createRuntimeTestContext(
   const agentLogDir = join(rootDir, "agent-logs");
   const ghStateFile = join(rootDir, "gh-state.json");
   const useFakeTools = options?.useFakeTools ?? true;
+  const hupResistant = options?.hupResistantAgents ?? false;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
   await writeFile(join(rootDir, ".zshrc"), "# Spur runtime test shell\n", "utf8");
   if (useFakeTools) {
-    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
-    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
-    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
-    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
+    const agentScriptOptions = { hupResistant };
+    await writeExecutable(
+      join(fakeBinDir, "claude"),
+      fakeAgentScript("claude", agentScriptOptions),
+    );
+    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex", agentScriptOptions));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor", agentScriptOptions));
+    await writeExecutable(
+      join(fakeBinDir, "cursor-agent"),
+      fakeAgentScript("cursor", agentScriptOptions),
+    );
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
@@ -951,7 +1066,15 @@ export async function createRuntimeTestContext(
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
-    await writeFile(configPath, content, "utf8");
+    await writeFile(
+      configPath,
+      `admission:
+  enabled: false
+  memoryGuard:
+    enforceFloors: false
+${content}`,
+      "utf8",
+    );
     return configPath;
   };
 

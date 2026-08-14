@@ -53,3 +53,17 @@ export function truncateMiddle(value: string, maxLength = 64): string {
   const keep = Math.max(8, Math.floor((maxLength - 1) / 2));
   return `${value.slice(0, keep)}…${value.slice(-keep)}`;
 }
+
+// Single largest unit, no rounding-up — matches the sidecar row's other
+// tokens (name, port) in being a terse glance value, not a precise duration.
+// Shared by SessionDetail's sidecar row and the dashboard's sidecar
+// indicator so both surfaces render the same value the same way.
+export function formatSidecarAge(ageSeconds: number): string {
+  if (ageSeconds < 60) return `${ageSeconds}s`;
+  const minutes = Math.floor(ageSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}

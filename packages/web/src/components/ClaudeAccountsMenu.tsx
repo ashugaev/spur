@@ -5,9 +5,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { TerminalModal } from "@/components/TerminalModal";
+import { AccountsIcon } from "@/components/icons/AccountsIcon";
+import { BusyContent } from "@/components/BusyContent";
+import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import type { ClaudeAccountSummary, DashboardSession } from "@/lib/types";
 
 const LOGIN_POLL_INTERVAL_MS = 3_000;
+
+interface AccountProvider {
+  agent: AgentName;
+}
+
+// Only claude has a working account surface today; codex/cursor would be
+// appended here once they gain an equivalent accounts API.
+const PROVIDERS: AccountProvider[] = [{ agent: "claude" }];
+const activeProvider = PROVIDERS[0];
 
 interface AccountsResponse {
   accounts: ClaudeAccountSummary[];
@@ -209,25 +221,28 @@ export function ClaudeAccountsMenu() {
         aria-label="Manage Claude accounts"
         className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         data-testid="claude-accounts-trigger"
+        title="Manage Claude accounts"
         type="button"
         onClick={popover.toggle}
       >
-        <span>Claude accounts</span>
-        <span className="font-bold text-[var(--color-text-primary)]">{authenticatedCount}</span>
+        <AccountsIcon className="h-4 w-4" />
       </button>
       {popover.open ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(22rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
-            <span className="text-[var(--color-text-secondary)]">Claude accounts</span>
+            <span className="text-[var(--color-text-secondary)]">
+              {getAgentDisplayName(activeProvider.agent)} accounts
+            </span>
             <span className="font-bold text-[var(--color-text-primary)]">
               {authenticatedCount} ready
             </span>
           </div>
+          {/* Additional providers (codex, cursor) append here once they gain an accounts API. */}
           {accounts.length === 0 ? (
             <div className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
               {accountsQuery.isError
                 ? (accountsQuery.error as Error).message
-                : "No accounts yet. Add one to log in."}
+                : "No accounts yet. Add extra accounts to rotate between them — manually, or automatically onto a fresh one when the current account runs out of quota."}
             </div>
           ) : (
             <ul className="mb-2 flex max-h-48 flex-col gap-1 overflow-y-auto">
@@ -250,16 +265,29 @@ export function ClaudeAccountsMenu() {
                       {account.authenticated ? "ready" : "not logged in"}
                     </span>
                   </span>
-                  <button
-                    aria-label={`Remove Claude account ${accountName(account)}`}
-                    className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
-                    data-testid={`remove-account-${account.id}`}
-                    disabled={removeMutation.isPending}
-                    type="button"
-                    onClick={() => removeMutation.mutate(account.id)}
-                  >
-                    Remove
-                  </button>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      aria-label={`Use Claude account ${accountName(account)}`}
+                      className="cursor-not-allowed border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] opacity-50 outline-none"
+                      data-testid={`use-account-${account.id}`}
+                      disabled
+                      tabIndex={-1}
+                      title="Switching accounts is per-session (pick this account when starting a session); no global switch is available yet."
+                      type="button"
+                    >
+                      Use
+                    </button>
+                    <button
+                      aria-label={`Remove Claude account ${accountName(account)}`}
+                      className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+                      data-testid={`remove-account-${account.id}`}
+                      disabled={removeMutation.isPending}
+                      type="button"
+                      onClick={() => removeMutation.mutate(account.id)}
+                    >
+                      Remove
+                    </button>
+                  </span>
                 </li>
               ))}
             </ul>
@@ -280,13 +308,15 @@ export function ClaudeAccountsMenu() {
               onChange={(event) => setLabel(event.target.value)}
             />
             <button
+              aria-busy={addMutation.isPending || undefined}
+              aria-label={addMutation.isPending ? "Adding account" : undefined}
               className="border border-[var(--color-border-default)] px-2 py-1 font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               data-testid="add-account"
               disabled={addMutation.isPending}
               type="button"
               onClick={() => addMutation.mutate(label.trim())}
             >
-              {addMutation.isPending ? "Adding…" : "Add account"}
+              <BusyContent busy={addMutation.isPending}>Add account</BusyContent>
             </button>
           </div>
           {addError ? (
