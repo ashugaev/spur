@@ -30461,8 +30461,12 @@ describe("SessionService", () => {
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
+      queueDeliveryInFlight: Set<string>;
+      staleParkInFlight: Map<string, Promise<void>>;
+      paneWriteLocks: Map<string, Promise<void>>;
       pollAttentionStates(baseline: boolean): Promise<void>;
       teardownSessionSidecars(session: SessionRecord): Promise<void>;
+      tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
     };
 
     function staleInternals(service: unknown): StaleModeInternals {
@@ -31065,6 +31069,479 @@ describe("SessionService", () => {
       });
     });
 
+    describe("GAP 1: park vs. delivery race", () => {
+      it("backs off (kills nothing) when a queued-message delivery is already in flight", async () => {
+        // A delivery already past its own queueDeliveryInFlight registration
+        // owns the pane right now — parking over it would destroy an
+        // in-flight turn that today's post-hoc abandon check (further down
+        // in parkStaleSession) is too late to undo.
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        internals.queueDeliveryInFlight.add("api-1");
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.status).toBe("running");
+        const skippedEvents = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.stale.park_skipped_delivery_in_flight");
+        expect(skippedEvents.length).toBeGreaterThanOrEqual(1);
+        service.dispose();
+      });
+
+      it("backs off (kills nothing) when a pane write is already landing", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        internals.paneWriteLocks.set("api-1", new Promise<void>(() => {}));
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+
+      // Shared fixture for the "waits, then sees post-park state" tests below:
+      // a running session parkStaleSession has just claimed, plus a project
+      // sidecar so finishStaleWake's replay (gated on stopReason ===
+      // "stale_timeout", which only the POST-park record carries) proves the
+      // caller used the fresh re-read rather than its pre-park snapshot.
+      function armParkableApiProject(): void {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: { proxy: { command: "pnpm proxy" } },
+            },
+          },
+        });
+      }
+
+      it("waits for a park in flight instead of relaunching over it, then recovers off the post-park record (send)", async () => {
+        // parkStaleSession claims staleParkInFlight before its destructive
+        // kill+teardown; send()'s own recovery step must see that claim and
+        // wait for it instead of relaunching the pane park is destroying —
+        // rejecting here would drop a scheduled/interval wake outright (its
+        // occurrence is already claimed with nothing left to re-arm it).
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        const pending = service.send("api-1", { message: "hi" });
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        // Still parked, not yet resolved: nothing has touched the pane.
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        // Simulate the park finishing: the record on disk moves to
+        // stopped/stale_timeout with a replay list, exactly like
+        // parkStaleSession's own final write.
+        const current = sessions.get("api-1");
+        if (current) {
+          sessions.set("api-1", {
+            ...current,
+            status: "stopped",
+            stopReason: "stale_timeout",
+            staleSidecars: ["proxy"],
+          });
+        }
+        releasePark();
+        const result = await pending;
+
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        // Only reachable off the post-park record: finishStaleWake's replay
+        // is gated on stopReason === "stale_timeout", which the pre-park
+        // snapshot (status "running", no stopReason) never carried.
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "hi",
+          expect.objectContaining({}),
+        );
+        expect(result.status).toBe("running");
+        const persisted = sessions.get("api-1");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted).not.toHaveProperty("staleSidecars");
+      });
+
+      it("waits for a park in flight instead of relaunching over it, then recovers off the post-park record (deliver)", async () => {
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        const pending = service.deliver("api-1", "urgent");
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        const current = sessions.get("api-1");
+        if (current) {
+          sessions.set("api-1", {
+            ...current,
+            status: "stopped",
+            stopReason: "stale_timeout",
+            staleSidecars: ["proxy"],
+          });
+        }
+        releasePark();
+        await pending;
+
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "urgent",
+          expect.objectContaining({}),
+        );
+        const persisted = sessions.get("api-1");
+        expect(persisted?.status).toBe("running");
+        expect(persisted).not.toHaveProperty("stopReason");
+      });
+
+      it("waits for a park in flight instead of relaunching over it, then re-reads its queued-message target (flushQueuedMessage)", async () => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        // Queue the message AFTER construction/dispose, not at seed time —
+        // seeding it before construction can race a boot-time delivery-loop
+        // arm that claims queueDeliveryInFlight before this test's own
+        // staleParkInFlight probe runs, which is not what this test targets.
+        const seeded = sessions.get("api-1");
+        if (seeded) {
+          sessions.set("api-1", {
+            ...seeded,
+            queuedMessages: { messages: ["flush me"], awaitingPrompt: false },
+          });
+        }
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+
+        const pending = service.flushQueuedMessage("api-1", "flush me");
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        releasePark();
+        await pending;
+
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "flush me",
+          expect.objectContaining({ interrupt: false }),
+        );
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+
+      it("waits for a park in flight instead of racing its kill, then relaunches off the post-park record (switchAuth)", async () => {
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        testAccounts = [
+          {
+            id: "backup",
+            configDir: "/abs/backup",
+            createdAt: "2026-03-18T09:00:00.000Z",
+            authenticated: true,
+          },
+        ];
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        // force: true skips the classifySessionState busy-check ahead of the
+        // credential-swap write — that check is exercised on its own by the
+        // "refuses to switch while working without force" test above; this
+        // test is only about the staleParkInFlight wait further down.
+        const pending = service.switchAuth("api-1", "backup", { reason: "manual", force: true });
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+
+        const current = sessions.get("api-1");
+        if (current) {
+          sessions.set("api-1", {
+            ...current,
+            status: "stopped",
+            stopReason: "stale_timeout",
+            staleSidecars: ["proxy"],
+          });
+        }
+        releasePark();
+        await pending;
+
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        // Only reachable off the post-park record: finishStaleWake's replay
+        // is gated on stopReason === "stale_timeout".
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        const persisted = sessions.get("api-1");
+        expect(persisted?.status).toBe("running");
+        expect(persisted).not.toHaveProperty("stopReason");
+      });
+
+      it("waits for a park in flight instead of standing down, then delivers off the re-read record (tryDeliverQueuedMessage)", async () => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        // Queue the message AFTER construction/dispose, not at seed time —
+        // seeding it before construction can race a boot-time delivery-loop
+        // arm that claims queueDeliveryInFlight before this test's own
+        // staleParkInFlight probe runs, same trap as flushQueuedMessage's
+        // sibling test above.
+        const seeded = sessions.get("api-1");
+        if (seeded) {
+          sessions.set("api-1", {
+            ...seeded,
+            queuedMessages: { messages: ["direct deliver"], awaitingPrompt: false },
+          });
+        }
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+
+        const pending = internals.tryDeliverQueuedMessage("api-1");
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        releasePark();
+        const delivered = await pending;
+
+        expect(delivered).toBe(true);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "direct deliver",
+          expect.objectContaining({ interrupt: false }),
+        );
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+
+      it("releases staleParkInFlight once the park finishes, letting the next send() through", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(internals.staleParkInFlight.has("api-1")).toBe(false);
+        service.dispose();
+      });
+    });
+
+    describe("GAP 1c: scheduled/interval wakes claimed while a park is mid-flight", () => {
+      it("a scheduled wake landing mid-park is delivered, not lost, off the post-park record", async () => {
+        // processScheduledWakes clears scheduledWake and persists that BEFORE
+        // calling send() — if send() rejected instead of waiting on the park,
+        // this claimed occurrence would be gone for good (session.wake.failed
+        // logs it and nothing re-arms it).
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "reminder" },
+          }),
+        );
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+
+        // The monitor's first poll tick claims the due occurrence and calls
+        // send(), which then blocks on the park in flight.
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        // Simulate the park finishing: the record on disk moves to
+        // stopped/stale_timeout, exactly like parkStaleSession's own final
+        // write — send()'s recovery step must see this, not the pre-park
+        // "running" snapshot it read before blocking (the agent pane itself
+        // stays alive throughout, per isProcessRunningInTmuxMock's default,
+        // so no relaunch is needed to prove delivery).
+        const current = sessions.get("api-1");
+        if (current) {
+          sessions.set("api-1", { ...current, status: "stopped", stopReason: "stale_timeout" });
+        }
+        releasePark();
+        await vi.advanceTimersByTimeAsync(0);
+        for (let i = 0; i < 20; i += 1) {
+          await Promise.resolve();
+        }
+
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "reminder",
+          expect.objectContaining({}),
+        );
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.sent")
+            .length,
+        ).toBe(1);
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.failed")
+            .length,
+        ).toBe(0);
+        service.dispose();
+      });
+
+      it("an interval wake landing mid-park is delivered, not lost, off the post-park record", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            intervalWake: {
+              nextDueAt: "2026-03-18T10:05:00.000Z",
+              intervalMs: 5_000,
+              message: "interval reminder",
+              stopCondition: "stop when done",
+            },
+          }),
+        );
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        let releasePark: () => void = () => {};
+        internals.staleParkInFlight.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releasePark = resolve;
+          }),
+        );
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        // Claimed (advanced past `now`) before the blocked send() resolves.
+        expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        const current = sessions.get("api-1");
+        if (current) {
+          sessions.set("api-1", { ...current, status: "stopped", stopReason: "stale_timeout" });
+        }
+        releasePark();
+        await vi.advanceTimersByTimeAsync(0);
+        for (let i = 0; i < 20; i += 1) {
+          await Promise.resolve();
+        }
+
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("interval reminder"),
+          expect.objectContaining({}),
+        );
+        service.dispose();
+      });
+    });
+
     describe("wake: send() to a parked (stale_timeout) session", () => {
       it("relaunches, replays every staleSidecars name, delivers the message, and clears stopReason/staleSidecars — pane write ordered after both the process check and the sidecar replay", async () => {
         loadConfigMock.mockReturnValue({
@@ -31096,12 +31573,19 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T09:00:00.000Z",
         });
         listSessionsMock.mockReturnValue([]);
-        // Pane is gone (parked): the first tmux-alive probe reads false, the
-        // pane created by the relaunch reads true from then on.
-        tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+        // Pane is gone (parked): tmux-alive reads false until the relaunch
+        // creates it. State-keyed rather than a call-count-ordered
+        // mockResolvedValueOnce — a background sweep (e.g. the orphaned-tmux
+        // reaper, which now also probes stale_timeout records) can consume an
+        // ordered once-value meant for this call (see the session-service
+        // test order flake note: ordered mockResolvedValueOnce breaks under
+        // load/extra background calls).
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
 
         const order: string[] = [];
         createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
           order.push("createTmuxSession");
         });
         isProcessRunningInTmuxMock.mockImplementation(async () => {
@@ -31172,7 +31656,13 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T09:00:00.000Z",
         });
         listSessionsMock.mockReturnValue([]);
-        tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+        // State-keyed, not an ordered mockResolvedValueOnce — see the sibling
+        // test above for why (session-service test order flake note).
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
         isProcessRunningInTmuxMock.mockResolvedValue(true);
         createTmuxSidecarSessionMock.mockRejectedValueOnce(new Error("sidecar boom"));
 
@@ -31307,15 +31797,49 @@ describe("SessionService", () => {
     });
 
     describe("reapOrphanedTmux", () => {
-      it("never reaps a stale_timeout record's orphaned tmux", async () => {
+      it("reaps a stale_timeout record's orphaned sidecar tmux left behind by a failed park teardown (GAP 2)", async () => {
+        // parkStaleSession's own teardownSessionSidecars is best-effort: a
+        // throw there leaves a live sidecar pane with no retry. This is the
+        // only unconditional safety net for it (reapDeadSessionSidecars'
+        // project-sidecar pass is config-gated on sidecarGc.enabled and
+        // idle-TTL, not an immediate guarantee).
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "stopped",
+            stopReason: "stale_timeout",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        // The agent pane itself is already gone (park confirmed that before
+        // writing the record) — only the sidecar pane leaked.
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1");
+        service.dispose();
+      });
+
+      it("still never kills a stale_timeout record's agent pane while its agent process is confirmed alive", async () => {
+        // A relaunch racing the park write can recreate the agent pane
+        // before this loop's own liveness re-check runs (see the send()-vs-
+        // park race tests above) — this loop's existing two-probe guard must
+        // protect that exactly as it does for every other terminal status.
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
           runningSession({ id: "api-1", status: "stopped", stopReason: "stale_timeout" }),
         );
         tmuxSessionExistsMock.mockResolvedValue(true);
-        isProcessRunningInTmuxMock.mockResolvedValue(false);
-        timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
 
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -31323,6 +31847,59 @@ describe("SessionService", () => {
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
         expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) =>
+              entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
+          ),
+        ).toBe(true);
+        service.dispose();
+      });
+
+      it("does not tear down a stale_timeout desk member's shared sidecar pane while a live sibling still uses it", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: {
+                daemon: {
+                  command: "pnpm daemon",
+                  autoStart: false,
+                  ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+                },
+              },
+            },
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "stopped",
+            stopReason: "stale_timeout",
+            sidecarNames: ["daemon"],
+            sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+          }),
+        );
+        sessions.set("api-2", {
+          ...(sessions.get("api-1") as SessionRecord),
+          id: "api-2",
+          tmuxSession: "api-2",
+          deskId: "api-1",
+          status: "running",
+        });
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-2");
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
         service.dispose();
       });
     });
