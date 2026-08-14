@@ -50,6 +50,10 @@ fi
 STATUS_FILE="${SPUR_INSTALL_STATUS_FILE:-}"
 STATUS_STARTED_AT="$(date -u +%FT%TZ)"
 if [ -n "$STATUS_FILE" ]; then
+  # Wait for the daemon's "running" record for this pid before arming the
+  # terminal-status trap: a fast failure could otherwise write its terminal
+  # record first and have the daemon's later "running" write bury it, leaving
+  # the status stuck in progress and 409-ing every future switch.
   for _ in $(seq 1 200); do
     if [ -f "$STATUS_FILE" ] && \
       grep -q '"phase":"running"' "$STATUS_FILE" && \

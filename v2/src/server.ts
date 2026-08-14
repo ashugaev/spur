@@ -743,26 +743,22 @@ export async function startServer(
           processStartTime,
           startedAt,
         });
-        child.once("error", () => {
+        // The helper writes its own terminal status, but only after it arms the
+        // trap: this covers a spawn error and the exits before that (bad
+        // version, lock timeout). Losing the race to the helper is harmless —
+        // both writes carry the same outcome.
+        const finishSwitch = (exitCode: number): void => {
           writeDeploySwitchState(switchStatePath, {
-            phase: "failed",
+            phase: exitCode === 0 ? "succeeded" : "failed",
             version: requestedVersion,
             pid: child.pid ?? process.pid,
             startedAt,
             finishedAt: new Date().toISOString(),
-            exitCode: -1,
+            exitCode,
           });
-        });
-        child.once("exit", (code) => {
-          writeDeploySwitchState(switchStatePath, {
-            phase: code === 0 ? "succeeded" : "failed",
-            version: requestedVersion,
-            pid: child.pid ?? process.pid,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            exitCode: code ?? -1,
-          });
-        });
+        };
+        child.once("error", () => finishSwitch(-1));
+        child.once("exit", (code) => finishSwitch(code ?? -1));
         child.unref();
         sendJson(response, 202, { accepted: true, version: requestedVersion });
         return;
