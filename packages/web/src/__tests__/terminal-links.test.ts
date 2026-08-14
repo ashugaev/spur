@@ -252,10 +252,11 @@ describe("extractTerminalLinks", () => {
   it("does not join a full-width URL row into an unrelated indented sentence", () => {
     const prefix = "● https://example.com/";
     const url = prefix.slice(2) + "a".repeat(COLS - prefix.length);
-    expect(prefix.length + "a".repeat(COLS - prefix.length).length).toBe(COLS);
+    const firstRowText = prefix + "a".repeat(COLS - prefix.length);
+    expect(firstRowText).toHaveLength(COLS);
 
     const links = extractTerminalLinks(
-      [padded(prefix + "a".repeat(COLS - prefix.length)), padded("  Next sentence, unrelated.")],
+      [padded(firstRowText), padded("  Next sentence, unrelated.")],
       COLS,
     );
 
