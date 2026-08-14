@@ -12,7 +12,7 @@ import {
   removeWorktree,
   resolveRepoPathFromWorktree,
 } from "./workspace.js";
-import type { AppConfig, ProjectConfig, SessionGcStatus, SessionRecord } from "./types.js";
+import { isStaleParked, type AppConfig, type ProjectConfig, type SessionGcStatus, type SessionRecord } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -628,8 +628,12 @@ async function measureWorktreeSize(worktreePath: string): Promise<number | null>
 
 export function createGcDeps(
   config: AppConfig,
+  // A stale-parked session (isStaleParked) is an in-progress task that fell
+  // idle, not an abandoned one — session-service.ts wakes it silently on any
+  // event. Counting it live here keeps its worktree out of GC candidacy;
+  // reclaiming it would surface as "workspace is missing" on that wake.
   isLiveSession: (session: SessionRecord) => boolean = (session) =>
-    session.status === "running" || session.status === "spawning",
+    session.status === "running" || session.status === "spawning" || isStaleParked(session),
 ): SessionGcExecutorDeps {
   // One `gh pr list` per repo per run, cached for the whole run. A PR opened
   // after a repo's first probe is invisible to later groups of that same run;

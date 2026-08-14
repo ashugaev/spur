@@ -331,6 +331,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isStaleParked,
   isTerminalSessionStatus,
   type AdmissionCapSource,
   type AgentName,
@@ -1398,10 +1399,15 @@ export function isRestorableSession(
   // error) — not that the session died, so it must not read as restorable.
   // Only "stopped" state (the pane/process actually went away) qualifies
   // while status is still "running".
+  // state "stale" only ever comes from statusFallbackState for
+  // status === "stopped" (stopReason "stale_timeout") — never for "paused" —
+  // so that combination is not a case to guard against here.
   return (
     ((session.status === "running" && session.state === "stopped") ||
-      ((session.status === "stopped" || session.status === "paused") &&
+      (session.status === "stopped" &&
         (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
+      (session.status === "paused" &&
+        (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
@@ -4065,11 +4071,55 @@ export class SessionService {
       }
     }
     await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
-    await this.teardownSessionSidecars(latest);
+    // A throw here must never abort the park: the agent pane is already
+    // dead (confirmed above), so leaving status "running" on disk would
+    // make reconcileUnexpectedStop mark it errored with error evidence on
+    // the next tick — an "error" derived state is a closed state, and
+    // triggers.ts's clearBatch drops the pending event that woke this sweep
+    // for a closed session. Finishing the park (best-effort teardown or
+    // not) keeps the derived state "stale", which stays open, so the event
+    // survives to be replayed on the next wake.
+    try {
+      await this.teardownSessionSidecars(latest);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.stale.teardown_failed", {
+        level: "error",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Sidecar teardown failed while parking ${latest.id}: ${message}`,
+      });
+    }
     const idleMs = Date.now() - Date.parse(view.lastActivityAt);
     const staleAfterMs = this.resolveStaleAfterMs(latest);
+    // killAgentPaneAndConfirmExit/teardownSessionSidecars each take
+    // multi-second REAP_CONFIRM_INTERVAL_MS/REAP_GRACE_MS waits and
+    // teardownSessionSidecars itself writes the record (slot unlink path).
+    // Anything a send/deliver/relaunch wrote to disk during that window
+    // would otherwise be silently clobbered by a park built from the
+    // pre-teardown `latest` snapshot — mirror the complete/pause re-read
+    // (see the `cleanedSession = readSession(...)` pattern above) and
+    // abandon the park rather than overwrite a record that moved.
+    const cleaned = readSession(this.config.dataDir, latest.id);
+    const abandonPark = (): void => {
+      this.logEvent("session.stale.park_aborted", {
+        level: "warn",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Abandoned parking ${latest.id}: record changed during teardown`,
+      });
+    };
+    const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
+    if (!cleaned || cleaned.status !== "running" || deliveryPending) {
+      abandonPark();
+      return;
+    }
+    if (await isProcessRunningInTmux(cleaned.tmuxSession, sessionProcessMatchers(cleaned))) {
+      abandonPark();
+      return;
+    }
     const parked: SessionRecord = {
-      ...this.sessionWithReleasedSidecarPorts(latest),
+      ...this.sessionWithReleasedSidecarPorts(cleaned),
       status: "stopped",
       stopReason: "stale_timeout",
       updatedAt: nowIso(),
@@ -4657,7 +4707,18 @@ export class SessionService {
       // by maxGroupsPerSweep, and only reclaim groups are measured.
       const report = await executeSessionGc(
         plan,
-        createGcDeps(this.config, (session) => this.isLiveSessionRecord(session)),
+        // A stale-parked session (isStaleParked) merely went idle — it is
+        // an in-progress task, not an abandoned one, and any incoming event
+        // wakes it silently (parkStaleSession/finishStaleWake). Reclaiming
+        // its worktree while parked would surface as "workspace is
+        // missing" on that wake, losing uncommitted work. isLiveSessionRecord
+        // itself stays narrow (running|spawning|restore-warmup) since it also
+        // drives admission control and headroom, where a parked session
+        // correctly does NOT hold a live slot.
+        createGcDeps(
+          this.config,
+          (session) => this.isLiveSessionRecord(session) || isStaleParked(session),
+        ),
         {
           dryRun: false,
           sizes: true,

@@ -11,6 +11,7 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
+  isStaleParked,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
   type SendTriggerConfig,
@@ -147,7 +148,15 @@ function isSessionNotFoundError(message: string): boolean {
   return message.startsWith("Session not found:");
 }
 
+// A stale-parked session (status "stopped", stopReason "stale_timeout") is
+// still the owner of its work item — it merely went idle and any incoming
+// event wakes it silently (session-service.ts parkStaleSession/finishStaleWake).
+// Treating it as replaceable here would spawn a second session for the same
+// work item on top of the one that is about to be woken.
 function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
+  if (isStaleParked(session)) {
+    return false;
+  }
   return (
     session.status === "stopped" ||
     session.status === "errored" ||

@@ -179,6 +179,25 @@ describe("session gc against a real git worktree", () => {
     expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
   });
 
+  it("blocks a stale-parked session's worktree — it is an idle in-progress task, not an abandoned one (FIX 5)", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      status: "stopped",
+      stopReason: "stale_timeout",
+    });
+
+    const report = await executeSessionGc(
+      planFor(fixture.config),
+      depsWithoutGh(fixture.config, NO_OPEN_PRS),
+      { dryRun: false, sizes: false },
+    );
+
+    expect(report.groups[0]?.blockReasons).toEqual(["live_session"]);
+    expect(existsSync(fixture.worktreePath)).toBe(true);
+    expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
+  });
+
   it("blocks a worktree holding unpushed commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.worktreePath, "feature.txt"), "local only\n", "utf8");
