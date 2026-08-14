@@ -337,6 +337,17 @@ describe("buildUserActionRecord decoder", () => {
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
   });
 
+  it("decodes queue remove/flush with sessionId, never falling through to unknown", () => {
+    expect(build({ path: "/sessions/demo-1/queue/remove" })).toMatchObject({
+      action: "session.queue_remove",
+      sessionId: "demo-1",
+    });
+    expect(build({ path: "/sessions/demo-1/queue/flush" })).toMatchObject({
+      action: "session.queue_flush",
+      sessionId: "demo-1",
+    });
+  });
+
   it("decodes shared-memory writes and removals with sessionId, not falling into session-memory", () => {
     const set = build({ path: "/sessions/demo-1/shared-memory/task/decision.api" });
     expect(set).toMatchObject({ action: "shared.memory_set", sessionId: "demo-1" });

@@ -308,6 +308,46 @@ function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
   return lines.join("\n");
 }
 
+// 1-based numbered queue: real entries only (the ones remove/flush can act
+// on); pipeline steps render separately, unnumbered, since they are not a
+// valid remove/flush target.
+function renderQueuedMessages(sessionId: string, session: SessionView): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const pipelineMessages = session.queuedMessages?.pipelineMessages ?? [];
+  if (messages.length === 0 && pipelineMessages.length === 0) {
+    return dimText(`No queued messages for ${sessionId}.`);
+  }
+  const lines: string[] = [];
+  messages.forEach((message, index) => {
+    lines.push(`${boldText(`#${index + 1}`)} ${message}`);
+  });
+  if (pipelineMessages.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push(dimText("Auto steps (not selectable):"));
+    for (const stepMessage of pipelineMessages) {
+      lines.push(dimText(`- ${stepMessage}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+function resolveQueuedMessageByIndex(
+  sessionId: string,
+  session: SessionView,
+  index: number,
+): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const message = index >= 1 ? messages[index - 1] : undefined;
+  if (message === undefined) {
+    throw new Error(
+      `Index ${index} is out of range: ${sessionId} has ${messages.length} queued message(s)`,
+    );
+  }
+  return message;
+}
+
 function renderSessionMemoryList(sessionId: string, response: SessionMemoryListResponse): string {
   if (response.records.length === 0) {
     return dimText(`No session memory for ${sessionId}.`);
@@ -1174,6 +1214,13 @@ function helpNotes(command: Command): string[] {
     return [
       "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
       "Session memory is daemon-managed and scoped to one existing session id.",
+    ];
+  }
+  if (command.name() === "queue") {
+    return [
+      "Exact forms: `spur queue <sessionId> list`, `remove <index>`, `flush <index>`.",
+      "`remove`/`flush` take a 1-based index from the most recent `list`; the CLI resolves it to exact text via a fresh read immediately before acting.",
+      "A pipeline-derived auto step is never a valid index — only real queued messages are numbered.",
     ];
   }
   return [];
@@ -2777,6 +2824,75 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("queue")
+    .description("Manage a session's message queue.")
+    .usage("<sessionId> <list|remove|flush> [index]")
+    .argument("<sessionId>", "Session id")
+    .argument("<action>", "list, remove, or flush")
+    .argument("[index]", "1-based queue index (remove/flush only)")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (sessionId: string, action: string, index: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        if (action === "list") {
+          if (index !== undefined) {
+            throw new Error("queue list does not accept an index");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading queue for ${sessionId}`,
+            action: () =>
+              getJson<SessionView>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}`,
+                configPath,
+              ),
+            render: (session) => renderQueuedMessages(sessionId, session),
+          });
+          return;
+        }
+
+        if (action !== "remove" && action !== "flush") {
+          throw new Error("queue action must be list, remove, or flush");
+        }
+
+        const parsedIndex = index === undefined ? NaN : Number(index);
+        if (!Number.isInteger(parsedIndex)) {
+          throw new Error(`queue ${action} requires a 1-based index`);
+        }
+
+        // Resolved text is captured here so the success line can echo what
+        // was acted on: the GET -> POST window is one round trip wide, so
+        // this may act on a slightly different queue than an earlier `list`
+        // printed, and the caller must see which text actually moved.
+        let resolvedMessage = "";
+        await outputResult({
+          json: Boolean(options.json),
+          label: `${action === "remove" ? "removing" : "flushing"} queued message #${parsedIndex}`,
+          action: async () => {
+            const session = await getJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}`,
+              configPath,
+            );
+            resolvedMessage = resolveQueuedMessageByIndex(sessionId, session, parsedIndex);
+            return postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/queue/${action}`,
+              { message: resolvedMessage },
+              configPath,
+            );
+          },
+          success: () =>
+            action === "remove"
+              ? `Removed queued message: ${resolvedMessage}`
+              : `Flushed queued message: ${resolvedMessage}`,
+          render: renderSessionCard,
+        });
+      },
+    );
 
   program
     .command("memory")

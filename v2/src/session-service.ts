@@ -397,7 +397,7 @@ import {
   type SessionRecord,
   type SessionSlots,
   type SessionStatus,
-  type SessionQueuedMessagesState,
+  type SessionQueuedMessagesView,
   type SessionState,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
@@ -768,6 +768,13 @@ export class SessionNotReopenableError extends Error {
   readonly statusCode = 409;
 }
 
+// Message-only, same shape as SessionRateLimitedError: a pane write is
+// already in flight (either the drain or another flush), so serializing
+// behind it could hang the HTTP request for a whole ack window.
+export class QueueDeliveryInFlightError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
@@ -788,6 +795,15 @@ export class SubmitAckTimeoutError extends Error {
     this.elapsedMs = args.elapsedMs;
     this.processAlive = args.processAlive;
   }
+}
+
+// A submit-ack timeout with the agent process still alive means the pane
+// write itself landed — only the acknowledgment scan timed out. Delivery
+// callers treat this as delivered rather than failed; a dead process means
+// the write is genuinely unconfirmed and the message must be retried. One
+// definition, shared by the drain and by flush.
+function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
+  return error instanceof SubmitAckTimeoutError && error.processAlive;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -1296,13 +1312,18 @@ function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipelin
     );
 }
 
-function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
-  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesView | undefined {
+  const messages = queuedMessages(session);
+  const pipelineMessages = queuedPipelineMessages(session);
   const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
-  if (messages.length === 0 && !awaitingPrompt) {
+  if (messages.length === 0 && pipelineMessages.length === 0 && !awaitingPrompt) {
     return undefined;
   }
-  return { messages, awaitingPrompt };
+  return {
+    messages,
+    awaitingPrompt,
+    ...(pipelineMessages.length > 0 ? { pipelineMessages } : {}),
+  };
 }
 
 function withQueuedMessages(
@@ -1322,6 +1343,18 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
+}
+
+// Removes only the first occurrence of `value`, never all of them: `send`'s
+// duplicate-ignore guard keeps exact message text unique within one queue,
+// so "first occurrence" is the sound content-keyed equivalent of removing by
+// index without a persisted id.
+function removeFirstOccurrence(list: string[], value: string): string[] {
+  const index = list.indexOf(value);
+  if (index === -1) {
+    return list;
+  }
+  return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
 // Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
@@ -2112,6 +2145,22 @@ export class SessionService {
   // registry warnings to one per canonical path for this daemon process.
   private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
+  // Symmetric marker, checked and set synchronously (before any await) by
+  // every writer that drains or flushes the queue: tryDeliverQueuedMessage
+  // stands down (returns false) while a flush holds it, and flushQueuedMessage
+  // rejects 409 while the drain holds it. Neither writer can observe the
+  // other's pre-pane-lock setup window, which the paneWriteLocks probe alone
+  // does not bound (classifySessionRecord/ensureSessionReadyForSend can run
+  // for a while before the pane lock is ever taken).
+  private readonly queueDeliveryInFlight = new Set<string>();
+  // Log-once-per-transition for a queued-message delivery attempt that
+  // fails before or during the pane write: keyed by session id, value is
+  // the last logged failure message. A permanently broken session (missing
+  // workspace, dead relaunch) polls every PIPELINE_POLL_INTERVAL_MS and
+  // would otherwise flood session.message.delivery_failed once per second
+  // forever; only a CHANGE in the failure (a new problem, or a fresh
+  // failure after a successful delivery cleared the entry) logs again.
+  private readonly queuedMessageDeliveryLastFailure = new Map<string, string>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
@@ -4156,6 +4205,11 @@ export class SessionService {
     for (const sessionId of this.claudeRotationEpisode.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeRotationEpisode.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.queuedMessageDeliveryLastFailure.delete(sessionId);
       }
     }
   }
@@ -8675,19 +8729,30 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const queued = queuedMessages(readySession);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
+    // Single fresh read, taken once immediately before both the dedupe check
+    // and the append below, and used for both: `readySession` above can be
+    // stale by the time this runs (ensureSessionReadyForSend may have waited
+    // on a busy agent), and checking the dedupe against a stale queue while
+    // appending onto a fresher one lets two concurrent sends of the same
+    // text both pass the dedupe check and both append, leaving a duplicate
+    // entry that breaks unit 2's content key (exact text unique per queue).
+    // Only the queue field is taken from the fresh read; every other field
+    // still comes from `readySession`.
+    const latestQueued = queuedMessages(
+      readSession(this.config.dataDir, sessionId) ?? readySession,
+    );
     let activeRecord: SessionRecord;
-    if (queued.includes(finalMessage)) {
+    if (latestQueued.includes(finalMessage)) {
       this.logEvent("session.message.duplicate_ignored", {
         level: "info",
         sessionId,
         projectId: readySession.project,
         message: `Ignored duplicate queued message for ${sessionId}`,
         details: {
-          queuedCount: queued.length,
+          queuedCount: latestQueued.length,
           messageLength: finalMessage.length,
         },
       });
@@ -8699,7 +8764,7 @@ export class SessionService {
           status: "running",
           updatedAt: nowIso(),
         },
-        [...queued, finalMessage],
+        [...latestQueued, finalMessage],
         readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
       );
       writeSession(this.config.dataDir, activeRecord);
@@ -8757,10 +8822,147 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
+  // Content-keyed: both queue ops locate the exact string in the queue rather
+  // than an index, since no per-message id is persisted (send()'s
+  // duplicate-ignore guard already keeps exact message text unique within one
+  // queue).
+  private readSessionWithQueuedMessage(sessionId: string, message: string): SessionRecord {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (!queuedMessages(session).includes(message)) {
+      throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+    }
+    return session;
+  }
+
+  // Rewritten through withQueuedMessages so the empty-queue delete and the
+  // awaitingPrompt default stay in the one place that owns them.
+  private writeQueueWithout(session: SessionRecord, message: string): SessionRecord {
+    const updated = withQueuedMessages(
+      { ...session, updatedAt: nowIso() },
+      removeFirstOccurrence(queuedMessages(session), message),
+      session.queuedMessages?.awaitingPrompt ?? false,
+    );
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
+    // A drain (or a flush) already in flight for this session may have
+    // already typed the CURRENT head into the pane and be parked waiting on
+    // its ack — removing that exact text now would report "removed unsent"
+    // even though the pane write already landed (the same pane-write-
+    // precedes-ack-wait asymmetry the original bug was). Gate ONLY head
+    // removal: deliverQueuedMessage always targets index 0, so a non-head
+    // message can never be mid-delivery, and rejecting a safe, unrelated
+    // removal with a 409 would force the caller to wait out a live
+    // delivery's full ack window (up to ~900s) for no reason.
+    const isHead = queuedMessages(session)[0] === message;
+    if (
+      isHead &&
+      (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId))
+    ) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    const updated = this.writeQueueWithout(session, message);
+    this.logEvent("session.message.queue_removed", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Removed a queued message for ${sessionId}`,
+      details: {
+        queuedCount: queuedMessages(updated).length,
+        messageLength: message.length,
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  // Immediate delivery of an already-queued entry. Order: probe -> deliver
+  // -> re-read -> subtract. Never remove-then-deliver — a failed delivery
+  // would lose the message outright. Delivery reuses deliverPrepared (the
+  // existing immediate-send path, given recoverOnLiveAckTimeout so a live
+  // ack timeout returns success instead of a false session.message.failed),
+  // so there is exactly one immediate-delivery path, not a second one forked
+  // for flush.
+  async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
+    // Both probes are synchronous, before any await. The pane-lock probe
+    // catches a drain already past its own queueDeliveryInFlight registration
+    // and into the pane write; the marker probe catches a drain (or another
+    // flush) still in its pre-pane-lock setup, which the pane-lock probe alone
+    // cannot see.
+    if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    this.queueDeliveryInFlight.add(sessionId);
+    try {
+      await this.deliverPrepared(sessionId, message, {
+        entryPoint: "flush",
+        recoverOnLiveAckTimeout: true,
+      });
+      // Re-read: the delivery just wrote the record, so `session` is stale.
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      const persisted = this.writeQueueWithout(latest, message);
+      // deliverPrepared's own ensureSessionReadyForSend can relaunch a
+      // stopped session (dead pane, live workspace) to running — none of
+      // send/spawn/restore/applyConfig's arming sites run on that path, so
+      // any OTHER queued message left after this flush would sit stuck
+      // until an unrelated send/restore happened to arm the loop. Arm here,
+      // after the persistence write above, same as send()'s own call.
+      // A no-op when nothing is left to deliver (shouldRunDelivery), and
+      // never a second runDeliveryLoop when one is already armed
+      // (deliveryRuns.has, checked inside ensureDeliveryRunner).
+      this.scheduleDeliveryRunner(sessionId);
+      return await this.enrich(persisted);
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
+    }
+  }
+
+  // Single commit path for `deliverPrepared`'s success and recovered-ack-
+  // timeout branches only. `deliverQueuedMessage` keeps its own two-write
+  // commit (see the comment there) and must never be folded into this.
+  // The queue field is taken from a read AFTER the pane write, never from
+  // `readySession` (taken before it): that read can be arbitrarily stale by
+  // the time the send resolves, and blind-writing it would erase a
+  // concurrent append or resurrect an already-drained message.
+  private async commitDeliveredSend(
+    sessionId: string,
+    readySession: SessionRecord,
+  ): Promise<SessionRecord> {
+    this.stateCache.delete(sessionId);
+    const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
+    const updated = withQueuedMessages(
+      {
+        ...readySession,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      queuedMessages(latest),
+      latest.queuedMessages?.awaitingPrompt ?? false,
+    );
+    const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+    writeSession(this.config.dataDir, persisted);
+    return persisted;
+  }
+
   private async deliverPrepared(
     sessionId: string,
     message: string,
-    options: { interrupt?: boolean; entryPoint: "send" | "deliver"; hasAttachments?: boolean },
+    options: {
+      interrupt?: boolean;
+      entryPoint: "send" | "deliver" | "flush";
+      hasAttachments?: boolean;
+      // Flush's ack-timeout policy: a submit ack timeout with the process
+      // still alive means the pane write landed, so the delivery is treated
+      // as recovered instead of failed. Absent (deliver(), queue:false
+      // send) keeps today's throw-and-log-failed semantics unchanged.
+      recoverOnLiveAckTimeout?: boolean;
+    },
   ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
@@ -8788,26 +8990,44 @@ export class SessionService {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
-      await this.sendAgentMessage(readySession, message, { interrupt });
-      this.stateCache.delete(sessionId);
-      const updated: SessionRecord = {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      };
-      const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
-      writeSession(this.config.dataDir, persisted);
-      this.logEvent("session.message.sent", {
-        level: "info",
-        sessionId,
-        projectId: initialSession.project,
-        message: `Delivered message to ${sessionId}`,
-        details: {
-          interrupt,
-          messageLength: message.length,
-          agentSessionId: persisted.agentSessionId ?? null,
-        },
-      });
+      let recovered: SubmitAckTimeoutError | null = null;
+      try {
+        await this.sendAgentMessage(readySession, message, { interrupt });
+      } catch (error) {
+        if (options.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+          throw error;
+        }
+        recovered = error;
+      }
+      const persisted = await this.commitDeliveredSend(sessionId, readySession);
+      if (recovered) {
+        this.logEvent("session.message.delivery_recovered", {
+          level: "warn",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
+          details: {
+            agent: recovered.agent,
+            lastScannedFile: recovered.lastScannedFile,
+            elapsedMs: recovered.elapsedMs,
+            processAlive: recovered.processAlive,
+            messageLength: message.length,
+            entryPoint: options.entryPoint,
+          },
+        });
+      } else {
+        this.logEvent("session.message.sent", {
+          level: "info",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Delivered message to ${sessionId}`,
+          details: {
+            interrupt,
+            messageLength: message.length,
+            agentSessionId: persisted.agentSessionId ?? null,
+          },
+        });
+      }
       return await this.enrich(persisted);
     } catch (error) {
       if (error instanceof SessionRateLimitedError) {
@@ -11500,60 +11720,127 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+    // Synchronous, before any await: a flush already registered for this
+    // session owns the next attempt. Stand down instead of queuing behind
+    // the pane lock — the loop's own sleep-and-continue retry covers it, and
+    // this is not an error path (G2).
+    if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
+    this.queueDeliveryInFlight.add(sessionId);
+    try {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+        return false;
+      }
 
-    const readySession = await this.ensureSessionReadyForSend(session);
-    const classified = await this.classifySessionRecord(readySession);
-    // A live claude server-error wedge behaves like "waiting" for delivery
-    // purposes: typing the queued message is exactly what un-wedges Claude
-    // (the same mechanism as the reactivation nudge in processScheduledWakes),
-    // so an ordinary queued send must not sit for up to 30 minutes waiting
-    // for that nudge to fire on its own.
-    if (classified.state !== "waiting" && !classified.serverError) {
-      return false;
-    }
-    // Gate on the agent's own structured artifact, not raw tmux activity. Raw
-    // tmux activity is the session-wide max across every window, so a user's
-    // split running a dev server would stall delivery indefinitely, and merely
-    // attaching the web terminal (which makes the TUI repaint) would delay it
-    // by another full window. The agent's transcript is inherently scoped to
-    // the agent and is untouched by both.
-    if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
-      return false;
-    }
+      let nextMessage: string | undefined;
+      try {
+        const readySession = await this.ensureSessionReadyForSend(session);
+        const classified = await this.classifySessionRecord(readySession);
+        // A live claude server-error wedge behaves like "waiting" for delivery
+        // purposes: typing the queued message is exactly what un-wedges Claude
+        // (the same mechanism as the reactivation nudge in processScheduledWakes),
+        // so an ordinary queued send must not sit for up to 30 minutes waiting
+        // for that nudge to fire on its own.
+        if (classified.state !== "waiting" && !classified.serverError) {
+          return false;
+        }
+        // Gate on the agent's own structured artifact, not raw tmux activity. Raw
+        // tmux activity is the session-wide max across every window, so a user's
+        // split running a dev server would stall delivery indefinitely, and merely
+        // attaching the web terminal (which makes the TUI repaint) would delay it
+        // by another full window. The agent's transcript is inherently scoped to
+        // the agent and is untouched by both.
+        if (
+          !isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())
+        ) {
+          return false;
+        }
 
-    const latest = readSession(this.config.dataDir, sessionId);
-    if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
-      return false;
-    }
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
+          return false;
+        }
 
-    const nextMessage = queuedMessages(latest)[0];
-    if (!nextMessage) {
-      return false;
-    }
+        nextMessage = queuedMessages(latest)[0];
+        if (!nextMessage) {
+          return false;
+        }
 
-    await this.deliverQueuedMessage(latest, nextMessage, queuedMessages(latest).slice(1));
-    return true;
+        await this.deliverQueuedMessage(latest, nextMessage);
+        // A delivery that actually landed clears any dedup so a LATER
+        // failure (a new problem, not a repeat) logs fresh.
+        this.queuedMessageDeliveryLastFailure.delete(sessionId);
+        return true;
+      } catch (error) {
+        // Wraps the whole attempt, not just the pane write: ensureSessionReadyForSend
+        // throws on real live conditions (missing workspace, killed/completed,
+        // a failed relaunch), and that throw must never reach runDeliveryLoop's
+        // outer catch either — it calls markPipelineErrored, which early-returns
+        // for a queued-message-only session and leaves no trace, ending the loop
+        // with no re-arm (defect C1's wedge, unqualified: ANY failure in this
+        // attempt, not only the send itself). The message stays queued; the
+        // loop's own sleep-and-continue retries it on the next poll.
+        const failure = error instanceof Error ? error.message : String(error);
+        // Log-once-per-transition: a permanently broken session (e.g. a
+        // wiped worktree) would otherwise log an error every
+        // PIPELINE_POLL_INTERVAL_MS (1s) forever. Only the first occurrence
+        // of a given failure message logs; a change (new problem, or
+        // recovery then a fresh failure) logs again.
+        const lastFailure = this.queuedMessageDeliveryLastFailure.get(sessionId);
+        if (lastFailure !== failure) {
+          this.queuedMessageDeliveryLastFailure.set(sessionId, failure);
+          this.logEvent("session.message.delivery_failed", {
+            level: "error",
+            sessionId,
+            projectId: session.project,
+            message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
+            details: {
+              ...(nextMessage !== undefined ? { messageLength: nextMessage.length } : {}),
+            },
+          });
+        }
+        return true;
+      }
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
+    }
   }
 
   private async deliverQueuedMessage(
     session: SessionRecord,
     message: string,
-    remainingMessages: string[],
   ): Promise<SessionRecord> {
-    await this.sendAgentMessage(session, message, { interrupt: false });
+    let recovered: SubmitAckTimeoutError | null = null;
+    try {
+      await this.sendAgentMessage(session, message, { interrupt: false });
+    } catch (error) {
+      // A live process past a submit-ack timeout means the pane write
+      // landed; treat it as delivered rather than rethrow into the caller's
+      // failure branch (isRecoveredSubmitAckTimeout, module scope, shared
+      // with flush).
+      if (!isRecoveredSubmitAckTimeout(error)) {
+        throw error;
+      }
+      recovered = error;
+    }
     const sessionId = session.id;
     this.stateCache.delete(sessionId);
+    // Re-read and subtract the first occurrence of the delivered text,
+    // rather than trusting a pre-computed remaining-messages slice taken
+    // before the send: that slice can be stale by the time the send
+    // resolves (a concurrent `send` append, or a concurrent flush), and a
+    // blind write over it would erase the concurrent write.
+    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    const remaining = removeFirstOccurrence(queuedMessages(latest), message);
     const updated = withQueuedMessages(
       {
-        ...session,
+        ...latest,
         status: "running",
         updatedAt: nowIso(),
       },
-      remainingMessages,
+      remaining,
       true,
     );
     // Persist the drain before the discovery wait below: captureAgentSessionId
@@ -11564,6 +11851,22 @@ export class SessionService {
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
+    if (recovered) {
+      this.logEvent("session.message.delivery_recovered", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Recovered a delivered queued message to ${sessionId} after a submit ack timeout`,
+        details: {
+          agent: recovered.agent,
+          lastScannedFile: recovered.lastScannedFile,
+          elapsedMs: recovered.elapsedMs,
+          processAlive: recovered.processAlive,
+          messageLength: message.length,
+        },
+      });
+      return persisted;
+    }
     this.logEvent("session.message.sent", {
       level: "info",
       sessionId,
@@ -11628,7 +11931,10 @@ export class SessionService {
           continue;
         }
 
-        if (session.pipeline?.awaitingStepIndex !== undefined) {
+        if (
+          session.pipeline?.status === "running" &&
+          session.pipeline.awaitingStepIndex !== undefined
+        ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
             return;
@@ -11916,11 +12222,12 @@ export class SessionService {
       return;
     }
 
+    const { awaitingStepIndex: _awaitingStepIndex, ...pipelineBase } = session.pipeline;
     writeSession(this.config.dataDir, {
       ...session,
       updatedAt: nowIso(),
       pipeline: {
-        ...session.pipeline,
+        ...pipelineBase,
         status: "errored",
         error: message,
       },

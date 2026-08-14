@@ -9,9 +9,11 @@ import { writeSession } from "../../src/metadata.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
+  SessionResourceNotFoundError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -1096,6 +1098,156 @@ describe("startServer", () => {
       expect(response.status).toBe(409);
     } finally {
       SessionService.prototype.send = originalSend;
+      await server.stop();
+    }
+  });
+
+  it("maps queue remove/flush 404 (not queued) and 409 (delivery in flight), and 400 on an empty message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(sessionId, message) {
+      if (message === "not queued") {
+        throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      if (message === "in flight") {
+        throw new QueueDeliveryInFlightError("Delivery already in flight for demo-1");
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const notFound = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "not queued" }),
+      });
+      expect(notFound.status).toBe(404);
+
+      const inFlight = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "in flight" }),
+      });
+      expect(inFlight.status).toBe(409);
+
+      const emptyMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "" }),
+      });
+      expect(emptyMessage.status).toBe(400);
+
+      const missingMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(missingMessage.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      await server.stop();
+    }
+  });
+
+  it("forwards a trimmed message to queue remove/flush, so validation and lookup agree on normalization (PR #708 comment 3)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const receivedRemove: string[] = [];
+    const receivedFlush: string[] = [];
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(_sessionId, message) {
+      receivedRemove.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      receivedFlush.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const remove = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "  padded text  " }),
+      });
+      expect(remove.status).toBe(200);
+      expect(receivedRemove).toEqual(["padded text"]);
+
+      const flush = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "\tanother\n" }),
+      });
+      expect(flush.status).toBe(200);
+      expect(receivedFlush).toEqual(["another"]);
+
+      // Whitespace-only still counts as empty after trimming.
+      const whitespaceOnly = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "   " }),
+      });
+      expect(whitespaceOnly.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
       await server.stop();
     }
   });
