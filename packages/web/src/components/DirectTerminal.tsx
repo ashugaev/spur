@@ -638,7 +638,7 @@ export function DirectTerminal({
                 : undefined,
             );
           }
-          const nextLinks = extractTerminalLinks(rows);
+          const nextLinks = extractTerminalLinks(rows, terminal.cols);
           if (areTerminalLinksEqual(terminalLinksRef.current, nextLinks)) return;
           terminalLinksRef.current = nextLinks;
           setTerminalLinks(nextLinks);
