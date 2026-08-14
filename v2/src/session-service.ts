@@ -865,11 +865,14 @@ function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean
   return typeof session.error === "string" && session.error.trim().length > 0;
 }
 
-function statusFallbackState(session: Pick<SessionRecord, "status" | "error">): SessionState {
+function statusFallbackState(
+  session: Pick<SessionRecord, "status" | "error" | "stopReason">,
+): SessionState {
   const status = session.status;
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
   if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
+  if (status === "stopped" && session.stopReason === "stale_timeout") return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -1398,10 +1401,27 @@ export function isRestorableSession(
   return (
     ((session.status === "running" && session.state === "stopped") ||
       ((session.status === "stopped" || session.status === "paused") &&
-        (session.state === "stopped" || session.state === "error")) ||
+        (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
+}
+
+// Pure park predicate, exported for direct unit coverage the same way
+// isIdleEnoughToReceive is. `staleAfterMs <= 0` means the feature is
+// disabled (instance/project resolution turns 0 into "never park").
+// `state === "waiting"` already implies a usable pane and a live agent
+// process (see classifySessionRecord/statusFallbackState), so working,
+// needs_input, rate_limited, and every terminal-ish state are excluded by
+// construction, not by an extra check here.
+export function shouldParkForStale(
+  view: Pick<SessionView, "status" | "state" | "lastActivityAt">,
+  staleAfterMs: number,
+  now: number = Date.now(),
+): boolean {
+  if (staleAfterMs <= 0) return false;
+  if (view.status !== "running" || view.state !== "waiting") return false;
+  return now - Date.parse(view.lastActivityAt) >= staleAfterMs;
 }
 
 export function buildRestorePrompt(
@@ -4011,6 +4031,63 @@ export class SessionService {
     }
   }
 
+  // Per-project override then the instance default, matching every other
+  // project-vs-instance resolution in this file (resolveProjectForSession is
+  // the single source for the project side). 0 (instance or project) means
+  // "never park" — shouldParkForStale treats <= 0 as disabled.
+  private resolveStaleAfterMs(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
+  ): number {
+    const project = this.resolveProjectForSession(session);
+    const minutes = project?.staleAfterMinutes ?? this.config.staleAfterMinutes;
+    return minutes * 60_000;
+  }
+
+  // Parks a running/waiting session that has been idle past staleAfterMinutes:
+  // kills the agent pane, tears down its sidecars (not cleanupSessionServices —
+  // service instances are out of scope here, matching reconcileUnexpectedStop),
+  // and writes status:"stopped"/stopReason:"stale_timeout" with the names of
+  // whatever sidecar was still tmux-alive at park time. Called only from the
+  // attention-monitor sweep, off a `view` that can be up to
+  // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
+  // re-asserted "running" before anything is torn down.
+  private async parkStaleSession(view: SessionView): Promise<void> {
+    const latest = readSession(this.config.dataDir, view.id);
+    if (!latest || latest.status !== "running") {
+      return;
+    }
+    const project = this.resolveProjectForSession(latest);
+    const staleSidecars: string[] = [];
+    for (const name of sessionSidecarNames(latest, project)) {
+      const ownerId = this.sidecarOwnerIdForName(latest, project, name);
+      if (await sidecarTmuxAlive(ownerId, name)) {
+        staleSidecars.push(name);
+      }
+    }
+    await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+    await this.teardownSessionSidecars(latest);
+    const idleMs = Date.now() - Date.parse(view.lastActivityAt);
+    const staleAfterMs = this.resolveStaleAfterMs(latest);
+    const parked: SessionRecord = {
+      ...this.sessionWithReleasedSidecarPorts(latest),
+      status: "stopped",
+      stopReason: "stale_timeout",
+      updatedAt: nowIso(),
+      ...(staleSidecars.length ? { staleSidecars } : {}),
+    };
+    delete parked.error;
+    writeSession(this.config.dataDir, parked);
+    this.stateCache.delete(latest.id);
+    await this.refreshDashboardCacheEntry(parked);
+    this.logEvent("session.stale.parked", {
+      level: "info",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message: `Parked ${latest.id} after ${Math.round(idleMs / 60_000)}m idle`,
+      details: { idleMs, staleAfterMs, staleSidecars },
+    });
+  }
+
   private async pollAttentionStates(baseline: boolean): Promise<void> {
     if (this.attentionMonitorRunning) {
       return;
@@ -4055,6 +4132,16 @@ export class SessionService {
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
+          }
+          if (
+            session.project !== SHEPHERD_PROJECT_ID &&
+            !this.spawnsInFlight.has(session.id) &&
+            !this.isInRestoreWarmup(session.id) &&
+            !this.shouldRunDelivery(session) &&
+            shouldParkForStale(view, this.resolveStaleAfterMs(session))
+          ) {
+            await this.parkStaleSession(view);
+            continue;
           }
           const attention: AttentionState | null =
             view.state === "needs_input"
@@ -4411,7 +4498,9 @@ export class SessionService {
     try {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) =>
-          REAPABLE_SESSION_STATUSES.has(session.status) && session.stopReason !== "manual_pause",
+          REAPABLE_SESSION_STATUSES.has(session.status) &&
+          session.stopReason !== "manual_pause" &&
+          session.stopReason !== "stale_timeout",
       );
       let reaped = 0;
       let liveUnderTerminal = 0;
@@ -6481,6 +6570,62 @@ export class SessionService {
       }
     }
     return updatedRecord;
+  }
+
+  // The single place both wake entry points (relaunchSessionInPlace, reached
+  // by send/deliver/tryDeliverQueuedMessage/switchAuth, and restore()) call
+  // to finish waking a stale-parked session: no-op for every non-parked
+  // record (stopReason !== "stale_timeout"), so it is safe to call
+  // unconditionally on every recovered/restored record. Must run only after
+  // the caller has confirmed the agent process is live in the new pane and
+  // before any message is sent — startSidecarInternal's own live-owner-pane
+  // short circuit means replaying a still-alive desk-shared sidecar here is
+  // always a no-op, never a double start. Sidecar failures are best-effort,
+  // same policy as startAutoStartSidecars: log and continue, never block or
+  // fail the wake.
+  private async finishStaleWake(
+    record: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<SessionRecord> {
+    if (record.stopReason !== "stale_timeout") {
+      return record;
+    }
+    let updated = record;
+    for (const name of record.staleSidecars ?? []) {
+      try {
+        updated = await this.startSidecarWithDependencies({
+          session: updated,
+          project,
+          sidecarName: name,
+          sidecarDepth: ROOT_SIDECAR_DEPTH,
+          onStarted: (startedName, startedSidecar) => {
+            this.logEvent("session.sidecar.started", {
+              level: "info",
+              sessionId: record.id,
+              projectId: record.project,
+              message: `Replayed stale-parked sidecar ${startedName} for ${record.id}`,
+              details: {
+                sidecarName: startedName,
+                command: startedSidecar.command,
+                sidecarDepth: ROOT_SIDECAR_DEPTH,
+              },
+            });
+          },
+        });
+      } catch (sidecarError) {
+        const sidecarMessage =
+          sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+        this.logEvent("session.sidecar.stale_wake.failed", {
+          level: "warn",
+          sessionId: record.id,
+          projectId: record.project,
+          message: `Failed to replay stale sidecar ${name} for ${record.id}: ${sidecarMessage}`,
+        });
+      }
+    }
+    delete updated.stopReason;
+    delete updated.staleSidecars;
+    return updated;
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
@@ -10594,17 +10739,24 @@ export class SessionService {
       this.claudeJsonlReaders.delete(session.id);
     }
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    return this.applyReservedSidecars(
-      {
-        ...recoveredBase,
-        planMode,
-        restrictWrites,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-        launchCommand: persistedLaunchCommand,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      mcpSidecarUpdate,
+    // finishStaleWake runs after the agent process check above confirmed the
+    // new pane is live, and before any caller (send/deliverPrepared/
+    // tryDeliverQueuedMessage/switchAuth, all downstream of
+    // ensureSessionReadyForSend) injects a message into it.
+    return this.finishStaleWake(
+      this.applyReservedSidecars(
+        {
+          ...recoveredBase,
+          planMode,
+          restrictWrites,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+          launchCommand: persistedLaunchCommand,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        mcpSidecarUpdate,
+      ),
+      project,
     );
   }
 
@@ -10714,7 +10866,9 @@ export class SessionService {
         }),
       );
       const shouldSendRestoreMessage =
-        current.status !== "paused" && current.stopReason !== "manual_pause";
+        current.status !== "paused" &&
+        current.stopReason !== "manual_pause" &&
+        current.stopReason !== "stale_timeout";
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
@@ -10889,6 +11043,9 @@ export class SessionService {
       this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
+        // No finishStaleWake here: this branch is only reachable through the
+        // submit-ack wait of restore()'s own message, which a stale-parked
+        // session never sends (shouldSendRestoreMessage is false for it).
         const recovered: SessionRecord = this.applyReservedSidecars(
           {
             ...recoveredBase,
@@ -10943,7 +11100,7 @@ export class SessionService {
     }
 
     const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = this.applyReservedSidecars(
+    let restored: SessionRecord = this.applyReservedSidecars(
       {
         ...restoredBase,
         planMode: resolvePlanMode(current),
@@ -10954,6 +11111,7 @@ export class SessionService {
       },
       mcpSidecarUpdate,
     );
+    restored = await this.finishStaleWake(restored, this.getProject(current.project));
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
@@ -12572,6 +12730,7 @@ export class SessionService {
       if (
         nextState !== "needs_input" &&
         nextState !== "rate_limited" &&
+        nextState !== "stale" &&
         nextState !== "stopped" &&
         nextState !== "killed" &&
         nextState !== "error"
@@ -12915,6 +13074,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      session.stopReason === "stale_timeout" ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
@@ -12931,6 +13091,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      latest.stopReason === "stale_timeout" ||
       hasSessionErrorEvidence(latest)
     ) {
       return latest;

@@ -1423,6 +1423,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const staleAfterMinutes = asNonNegativeNumber(
+    raw["staleAfterMinutes"],
+    `${label}.staleAfterMinutes`,
+  );
   const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
@@ -1520,6 +1524,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }
 

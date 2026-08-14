@@ -4181,6 +4181,49 @@ projects:
     expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
   });
+
+  it("parses projects.<id>.staleAfterMinutes as a per-project override", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 15
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(15);
+  });
+
+  it("lets a project's staleAfterMinutes of 0 disable parking while the instance stays enabled", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 0
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(0);
+  });
+
+  it("rejects a negative projects.<id>.staleAfterMinutes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: -1
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.staleAfterMinutes must be a non-negative number",
+    );
+  });
 });
 
 describe("deriveMaxLiveSessions", () => {

@@ -459,6 +459,33 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows restore for a stale-parked session", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          status: "stopped",
+          state: "stale",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
+  });
+
   it("hides restore when the workspace no longer exists", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -538,7 +565,7 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    for (const state of ["working", "waiting", "stopped", "error"] as const) {
+    for (const state of ["working", "waiting", "stale", "stopped", "error"] as const) {
       const { unmount } = render(
         <SessionRow
           session={makeSession({ state, hasUnseenAttention: false })}

@@ -427,6 +427,46 @@ describe("session workspaceId normalization", () => {
   });
 });
 
+describe("staleSidecars", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "stopped" as const,
+    stopReason: "stale_timeout" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("survives a write/read round-trip alongside stopReason: stale_timeout", async () => {
+    // Guards the whitelist trap: normalizeSessionRecord drops any optional
+    // field it does not explicitly list, silently, with no error — the same
+    // trap workspaceId and sidecarProcs above pin.
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      staleSidecars: ["proxy", "dev"],
+    });
+
+    const read = readSession(dataDir, "api-1");
+    expect(read?.stopReason).toBe("stale_timeout");
+    expect(read?.staleSidecars).toEqual(["proxy", "dev"]);
+  });
+
+  it("omits the field entirely for a record that never had it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
+
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("staleSidecars");
+  });
+});
+
 describe("sidecarProcs", () => {
   const base = {
     project: "api",

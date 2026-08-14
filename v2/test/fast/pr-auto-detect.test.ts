@@ -261,6 +261,7 @@ function baseConfig(): AppConfig {
         shedSwapUsedFraction: 0.9,
       },
     },
+    staleAfterMinutes: 60,
     projects: {
       api: {
         path: "/repo/api",

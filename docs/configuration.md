@@ -247,6 +247,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.worktree`: optional, default `true`. `false` runs in the project path instead of an owned worktree. Override per session with `--worktree`/`--shared` or `trigger.spawn.overrides.worktree`.
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.maxLiveSessions`: optional positive integer. Per-project cap on top of the global `admission.maxLiveSessions` cap — a spawn or restore that would put this project over its own cap is refused even while the host is under the global cap. Works in both instance and project config.
+- `projects.<id>.staleAfterMinutes`: optional non-negative number. Overrides the instance `staleAfterMinutes` for this project only. See [Stale mode](#stale-mode).
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
 - `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. See [Sidecar reaping](#sidecar-reaping).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
@@ -301,6 +302,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `authRotation.cooldownMinutes`: optional, default `60`.
 - `authRotation.maxRotationsPerEpisode`: optional, default `2`.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
+- `staleAfterMinutes`: optional non-negative number, default `60`. Instance config only. Minutes a `running` session may sit idle (state `waiting`) before the daemon parks it: pane killed, sidecars torn down, record written `status: "stopped"`, `stopReason: "stale_timeout"`, derived state `stale`. `0` disables parking entirely. Any system message (GitHub/review event, trigger send, scheduled/interval/daily wake) wakes a parked session silently — no restore prompt — and replays the sidecars that were tmux-alive at park time before delivering the message; manual Resume wakes it with no message at all. See [Stale mode](#stale-mode).
 - `sessionGc.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur gc`](commands.md#gc) policy on a timer; `spur gc` itself works regardless.
 - `sessionGc.olderThanDays`: optional, default `30`. Minimum age of a group's newest record. Also the `spur gc --older-than` default.
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
@@ -382,6 +384,14 @@ Each pass logs `session.sidecar.reaped` per kill with the matched rule and the f
 Every session view (daemon `GET /sessions`, `GET /sessions/<id>`, and the dashboard) carries each sidecar's `ageSeconds` (elapsed seconds since the recorded identity's process start, omitted when unresolvable) and `ageWarn` (true once `ageSeconds` reaches `maxAgeWarnMinutes` — the same threshold `session.sidecar.age_warning` fires at, so the UI and the event agree). The session detail page, the dashboard's running-sidecars row, and `spur list` ([list](commands.md#list)) all render the age and mark an over-threshold one so a stale sidecar is visible without a manual check.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's own recorded port reservation for this sidecar exactly matches another (live) workspace's recorded reservation for one of its non-MCP sidecars in the same project, AND that port is actually free right now. A declared `ports` range shared by several sidecars (by design — each workspace draws a distinct free port from it) never triggers this on its own, and neither does an occupied colliding port: the normal reservation reuse gate already declines to reuse an occupied port and falls through to the free-port scan, so the start self-heals onto a different port instead. The error names the holding workspace and its sidecar. Spur reuses no pane and reaps nothing across a workspace boundary — stop that sidecar or its owning session first. A same-workspace sidecar, a different project, a holder with no live pane, and an explicit `clearPort` on the start request all refuse nothing — `clearPort` is itself a user-driven override of a conflicting reservation.
+
+## Stale mode
+
+`staleAfterMinutes` (instance, default `60`) parks a `running` session that has sat idle in state `waiting` for that many minutes: its tmux pane is killed, its live sidecars are torn down, and the record is written `status: "stopped"`, `stopReason: "stale_timeout"`, `staleSidecars` (the sidecar names that were tmux-alive at park time), derived state `stale`. `0` (instance or `projects.<id>.staleAfterMinutes` override) disables parking for that scope. A session in `working`, `needs_input`, or `rate_limited`, one with queued or in-flight work, and Shepherd sessions are never parked.
+
+Any system message wakes a parked session automatically and silently: a GitHub/review event, a trigger send, a scheduled/interval/daily wake, or a manual send all relaunch the pane, replay `staleSidecars`, and deliver the message once the agent process is confirmed live — no restore prompt. Manual Resume (`spur restore`, the web Resume button) wakes it the same way but sends no message at all. After any wake the record carries neither `stopReason` nor `staleSidecars` — indistinguishable from a session that was never parked.
+
+`spur list` and the dashboard show a parked session as state `stale`; it stays in the same Stopped grouping as any other `stopped` session and keeps its Resume action.
 
 ## Events
 

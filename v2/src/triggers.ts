@@ -514,11 +514,14 @@ function isSendTrigger(
 
 function isDeliverableState(session: SessionView): boolean {
   return (
-    session.state === "waiting" &&
-    isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs())
+    session.state === "stale" ||
+    (session.state === "waiting" &&
+      isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs()))
   );
 }
 
+// "stale" is deliberately never closed: a parked session has no live agent to
+// interrupt, so it must stay deliverable rather than dropping the batch.
 function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }

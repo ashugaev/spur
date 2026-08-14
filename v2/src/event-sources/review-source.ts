@@ -13,6 +13,7 @@ import {
   type ReviewSignal,
   type ReviewSnapshot,
   type ReviewSourceConfig,
+  isStaleParked,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -64,7 +65,7 @@ export function createReviewSourceModule(
           const sessions = listSessions(deps.dataDir).filter(
             (session) =>
               session.project === deps.projectId &&
-              session.status === "running" &&
+              (session.status === "running" || isStaleParked(session)) &&
               Boolean(session.worktreePath) &&
               existsSync(session.worktreePath),
           );

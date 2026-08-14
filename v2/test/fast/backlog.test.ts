@@ -85,6 +85,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
         shedSwapUsedFraction: 0.9,
       },
     },
+    staleAfterMinutes: 60,
     tags: [],
     projects: {
       api: {

@@ -6,6 +6,7 @@ const SESSION_DISPLAY_ORDER: SessionState[] = [
   "rate_limited",
   "working",
   "waiting",
+  "stale",
   "stopped",
   "killed",
 ];

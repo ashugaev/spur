@@ -724,6 +724,44 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "stopped",
+      stopReason: "stale_timeout",
+      state: "stale",
+      lastActivityAt: recentActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining('GitHub updates on PR #42 "Tighten coverage":'),
+          { interrupt: false },
+        );
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("delivers GitLab updates immediately when the target session is waiting", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",

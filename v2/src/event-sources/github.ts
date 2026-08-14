@@ -13,6 +13,7 @@ import {
   type ReviewSignal,
   type ReviewSnapshot,
   type WorkItemEventData,
+  isStaleParked,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -307,7 +308,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     listSessions(deps.dataDir).filter(
       (session) =>
         session.project === deps.projectId &&
-        session.status === "running" &&
+        (session.status === "running" || isStaleParked(session)) &&
         Boolean(session.worktreePath) &&
         existsSync(session.worktreePath),
     );
