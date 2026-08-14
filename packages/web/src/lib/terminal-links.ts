@@ -21,14 +21,25 @@ const DELIMITER_PAIRS = {
   "}": "{",
 } as const;
 
-export function groupTerminalRows(rows: Array<TerminalBufferRow | undefined>): string[] {
+function fillsLastColumn(text: string, cols: number): boolean {
+  if (text.length < cols) return false;
+  const lastChar = text.charAt(cols - 1);
+  return lastChar.trim() !== "";
+}
+
+export function groupTerminalRows(
+  rows: Array<TerminalBufferRow | undefined>,
+  cols: number,
+): string[] {
   const lines: string[] = [];
   let current: string | null = null;
+  let lastRowFilledLastColumn = false;
 
   const finishCurrent = () => {
     if (current === null) return;
     lines.push(current.trimEnd());
     current = null;
+    lastRowFilledLastColumn = false;
   };
 
   for (const row of rows) {
@@ -41,21 +52,25 @@ export function groupTerminalRows(rows: Array<TerminalBufferRow | undefined>): s
       if (current !== null) {
         current += row.text;
       }
+      lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
       continue;
     }
 
     if (
       current !== null &&
+      lastRowFilledLastColumn &&
       UNTERMINATED_URL_TAIL.test(current) &&
       URL_CHAR_LEADING.test(row.text) &&
       !URL_SCHEME_LEADING.test(row.text)
     ) {
       current += row.text;
+      lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
       continue;
     }
 
     finishCurrent();
     current = row.text;
+    lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
   }
 
   finishCurrent();
@@ -97,10 +112,13 @@ function trimTerminalUrlCandidate(candidate: string): string {
   return trimmed;
 }
 
-export function extractTerminalLinks(rows: Array<TerminalBufferRow | undefined>): TerminalLink[] {
+export function extractTerminalLinks(
+  rows: Array<TerminalBufferRow | undefined>,
+  cols: number,
+): TerminalLink[] {
   const occurrences: TerminalLink[] = [];
 
-  for (const line of groupTerminalRows(rows)) {
+  for (const line of groupTerminalRows(rows, cols)) {
     for (const match of line.matchAll(TERMINAL_URL_PATTERN)) {
       const url = trimTerminalUrlCandidate(match[0]);
       try {

@@ -15,38 +15,43 @@ const padded = (text: string, isWrapped = false): TerminalBufferRow =>
 describe("groupTerminalRows", () => {
   it("joins wrapped rows at full width and trims only the completed logical line", () => {
     expect(
-      groupTerminalRows([
-        row("prefix  "),
-        row("  https://example.com/path   ", true),
-        row("next   "),
-      ]),
+      groupTerminalRows(
+        [row("prefix  "), row("  https://example.com/path   ", true), row("next   ")],
+        COLS,
+      ),
     ).toEqual(["prefix    https://example.com/path", "next"]);
   });
 
   it("drops wrapped orphans at the leading cutoff", () => {
     expect(
-      groupTerminalRows([
-        row("https://cut.example", true),
-        row("/continued", true),
-        row("https://complete.example"),
-      ]),
+      groupTerminalRows(
+        [
+          row("https://cut.example", true),
+          row("/continued", true),
+          row("https://complete.example"),
+        ],
+        COLS,
+      ),
     ).toEqual(["https://complete.example"]);
   });
 
   it("keeps undefined rows as separators and drops every following wrapped orphan", () => {
     expect(
-      groupTerminalRows([
-        row("https://before.example"),
-        undefined,
-        row("https://orphan.example", true),
-        row("/still-orphan", true),
-        row("https://after.example"),
-      ]),
+      groupTerminalRows(
+        [
+          row("https://before.example"),
+          undefined,
+          row("https://orphan.example", true),
+          row("/still-orphan", true),
+          row("https://after.example"),
+        ],
+        COLS,
+      ),
     ).toEqual(["https://before.example", "https://after.example"]);
   });
 
   it("keeps a full-width row with no URL tail as its own logical line", () => {
-    expect(groupTerminalRows([row("x".repeat(COLS)), row("next line")])).toEqual([
+    expect(groupTerminalRows([row("x".repeat(COLS)), row("next line")], COLS)).toEqual([
       "x".repeat(COLS),
       "next line",
     ]);
@@ -55,12 +60,15 @@ describe("groupTerminalRows", () => {
 
 describe("extractTerminalLinks", () => {
   it("accepts ASCII-case-insensitive HTTP schemes and rejects other visible text", () => {
-    const links = extractTerminalLinks([
-      row(
-        "ftp://ftp.example file://local mailto:a@example.com javascript:alert(1) example.com " +
-          "HTTP://UPPER.example/path https://lower.example",
-      ),
-    ]);
+    const links = extractTerminalLinks(
+      [
+        row(
+          "ftp://ftp.example file://local mailto:a@example.com javascript:alert(1) example.com " +
+            "HTTP://UPPER.example/path https://lower.example",
+        ),
+      ],
+      COLS,
+    );
 
     expect(links.map((link) => link.url)).toEqual([
       "https://lower.example",
@@ -69,20 +77,23 @@ describe("extractTerminalLinks", () => {
   });
 
   it("uses rendered OSC labels, not invisible destinations", () => {
-    expect(extractTerminalLinks([row("docs https://visible.example")])).toEqual([
+    expect(extractTerminalLinks([row("docs https://visible.example")], COLS)).toEqual([
       { url: "https://visible.example", hostname: "visible.example" },
     ]);
-    expect(extractTerminalLinks([row("docs")])).toEqual([]);
+    expect(extractTerminalLinks([row("docs")], COLS)).toEqual([]);
   });
 
   it("trims sentence punctuation, quotes, and unbalanced closing delimiters", () => {
-    const links = extractTerminalLinks([
-      row(
-        'https://one.example/a.,:;!? https://two.example/b"> https://three.example/c))) ' +
-          "https://four.example/(balanced) https://five.example/[balanced] " +
-          "https://six.example/{balanced}",
-      ),
-    ]);
+    const links = extractTerminalLinks(
+      [
+        row(
+          'https://one.example/a.,:;!? https://two.example/b"> https://three.example/c))) ' +
+            "https://four.example/(balanced) https://five.example/[balanced] " +
+            "https://six.example/{balanced}",
+        ),
+      ],
+      COLS,
+    );
 
     expect(links.map((link) => link.url)).toEqual([
       "https://six.example/{balanced}",
@@ -96,9 +107,10 @@ describe("extractTerminalLinks", () => {
 
   it("preserves URL suffixes that are not trimming punctuation", () => {
     expect(
-      extractTerminalLinks([
-        row("https://example.com/path/ https://example.com/#frag https://example.com/?q=value"),
-      ]).map((link) => link.url),
+      extractTerminalLinks(
+        [row("https://example.com/path/ https://example.com/#frag https://example.com/?q=value")],
+        COLS,
+      ).map((link) => link.url),
     ).toEqual([
       "https://example.com/?q=value",
       "https://example.com/#frag",
@@ -107,16 +119,19 @@ describe("extractTerminalLinks", () => {
   });
 
   it("rejects invalid and hostless HTTP candidates", () => {
-    expect(extractTerminalLinks([row("http:// http://[invalid")])).toEqual([]);
+    expect(extractTerminalLinks([row("http:// http://[invalid")], COLS)).toEqual([]);
   });
 
   it("deduplicates exact literals at their newest occurrence and orders newest first", () => {
-    const links = extractTerminalLinks([
-      row("https://old.example https://duplicate.example"),
-      row(
-        "https://Case.example https://case.example https://duplicate.example https://right.example",
-      ),
-    ]);
+    const links = extractTerminalLinks(
+      [
+        row("https://old.example https://duplicate.example"),
+        row(
+          "https://Case.example https://case.example https://duplicate.example https://right.example",
+        ),
+      ],
+      COLS,
+    );
 
     expect(links.map((link) => link.url)).toEqual([
       "https://right.example",
@@ -128,7 +143,7 @@ describe("extractTerminalLinks", () => {
   });
 
   it("derives the hostname without changing the exact URL", () => {
-    expect(extractTerminalLinks([row("https://Example.COM:8443/a?q=1#two")])).toEqual([
+    expect(extractTerminalLinks([row("https://Example.COM:8443/a?q=1#two")], COLS)).toEqual([
       { url: "https://Example.COM:8443/a?q=1#two", hostname: "example.com" },
     ]);
   });
@@ -143,7 +158,7 @@ describe("extractTerminalLinks", () => {
       padded("&state=gtD_mHuGv50rZrjpLiaDs4HY7ABLpIx-I1jzPqSam5A"),
     ];
 
-    const links = extractTerminalLinks(rows);
+    const links = extractTerminalLinks(rows, COLS);
 
     expect(links).toHaveLength(1);
     expect(links[0]?.url).toBe(
@@ -161,7 +176,7 @@ describe("extractTerminalLinks", () => {
     const url = `https://example.com/${"a".repeat(COLS - "https://example.com/".length)}`;
     expect(url).toHaveLength(COLS);
 
-    const links = extractTerminalLinks([row(url), row("╌".repeat(COLS))]);
+    const links = extractTerminalLinks([row(url), row("╌".repeat(COLS))], COLS);
 
     expect(links).toEqual([{ url, hostname: "example.com" }]);
   });
@@ -170,9 +185,21 @@ describe("extractTerminalLinks", () => {
     const first = `https://one.example/${"a".repeat(COLS - "https://one.example/".length)}`;
     expect(first).toHaveLength(COLS);
 
-    const links = extractTerminalLinks([first, "https://two.example/b"].map((text) => row(text)));
+    const links = extractTerminalLinks(
+      [first, "https://two.example/b"].map((text) => row(text)),
+      COLS,
+    );
 
     expect(links.map((link) => link.url)).toEqual(["https://two.example/b", first]);
+  });
+
+  it("does not join a hard-wrap tail into a short unpadded row (reviewer repro, unpadded rows)", () => {
+    const links = extractTerminalLinks(
+      [row("Auth complete: https://example.com/done"), row("Now run npm install to continue")],
+      COLS,
+    );
+
+    expect(links).toEqual([{ url: "https://example.com/done", hostname: "example.com" }]);
   });
 });
 
