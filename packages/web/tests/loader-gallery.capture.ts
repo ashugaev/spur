@@ -31,7 +31,6 @@ const expectedScenarios = [
   "session-composer-spinners",
   "slash-suggestions-skeleton",
   "spawn-busy-spinner",
-  "version-compact-loading-bar",
   "version-switch-loading-bar",
   "voice-starting-spinner",
 ] as const;
@@ -269,58 +268,6 @@ test("version switch loading bar", async ({ browser }) => {
         .getByRole("button", { name: "Switch", exact: true })
         .click();
       await expect(page.getByRole("status", { name: "Updating Spur" })).toBeVisible();
-    },
-  });
-});
-
-test("compact version menu loading bar", async ({ browser }) => {
-  await captureScenario({
-    browser,
-    name: "version-compact-loading-bar",
-    surface: "Version footer status / compact LoadingBar",
-    prepare: async (page) => {
-      await mockSessions(page, []);
-      await page.route(
-        "**/api/runtime/info",
-        (route) =>
-          void route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({ version: "1.4.0" }),
-          }),
-      );
-      await page.route(
-        "**/api/runtime/versions",
-        (route) =>
-          void route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({
-              current: "1.4.0",
-              available: [
-                { tag: "1.5.0", publishedAt: "2026-08-11T00:00:00.000Z" },
-                { tag: "1.4.0", publishedAt: "2026-08-01T00:00:00.000Z" },
-              ],
-            }),
-          }),
-      );
-      await page.route(
-        "**/api/runtime/versions/switch",
-        (route) =>
-          void route.fulfill({
-            status: 202,
-            contentType: "application/json",
-            body: JSON.stringify({ accepted: true, version: "1.5.0" }),
-          }),
-      );
-      await page.goto("/");
-      await page.getByRole("button", { name: /Show Spur version information/ }).click();
-      await page.getByRole("button", { name: "Switch Spur to 1.5.0" }).click();
-      await page
-        .getByRole("dialog", { name: "Switch Spur version" })
-        .getByRole("button", { name: "Switch", exact: true })
-        .click();
-      await expect(page.getByRole("status", { name: "Switching Spur to 1.5.0" })).toBeVisible();
     },
   });
 });

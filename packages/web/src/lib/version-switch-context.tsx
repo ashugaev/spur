@@ -31,8 +31,8 @@ export function isRuntimeInfoResponse(value: unknown): value is RuntimeInfoRespo
 
 export type VersionSwitchPhase = "idle" | "switching" | "done" | "failed";
 
-// Shared with VersionMenu's inline status banner so the failure copy stays in
-// sync in the one place users see it repeated (banner + blocking overlay).
+// Failure copy shown by the blocking overlay (VersionSwitchOverlay), the only
+// place users see version-switch status.
 export function versionSwitchFailedMessage(target: string): string {
   return `Switch to ${target} not confirmed — check ~/.spur/logs/install-and-restart.log.`;
 }
