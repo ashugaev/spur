@@ -27303,7 +27303,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       reserveNextSessionIdMock.mockResolvedValue("shp-1");
 
-      const view = await service.spawnShepherd({ prompt: "Watch project health" });
+      const { session: view } = await service.spawnShepherd({ prompt: "Watch project health" });
 
       expect(createWorktreeMock).not.toHaveBeenCalled();
       expect(view.project).toBe("spur-shepherd");
@@ -27427,7 +27427,6 @@ describe("SessionService", () => {
 
       const result = await service.spawnShepherd({
         prompt: "Restart Shepherd",
-        reportDisposition: true,
       });
 
       expect(result.disposition).toBe("spawned");
@@ -27454,7 +27453,7 @@ describe("SessionService", () => {
       });
     }
 
-    it("spawnShepherd reports reuse when requested and sends the prompt to the live session", async () => {
+    it("spawnShepherd reports reuse and sends the prompt to the live session", async () => {
       const sessions = createSessionStore();
       seedRunningShepherdSession(sessions);
       mockClaudeJsonlState("waiting");
@@ -27463,7 +27462,6 @@ describe("SessionService", () => {
 
       const result = await service.spawnShepherd({
         prompt: "Diagnose update",
-        reportDisposition: true,
       });
 
       expect(result.disposition).toBe("reused");
@@ -27487,7 +27485,6 @@ describe("SessionService", () => {
 
       const result = await service.spawnShepherd({
         prompt: "Diagnose update",
-        reportDisposition: true,
       });
 
       expect(result.disposition).toBe("reused");
@@ -27519,7 +27516,6 @@ describe("SessionService", () => {
       await service.spawnShepherd({ prompt: "Initial Shepherd task" });
       const reused = await service.spawnShepherd({
         prompt: "Diagnose update",
-        reportDisposition: true,
       });
       expect(reused.disposition).toBe("reused");
       releaseReady?.();

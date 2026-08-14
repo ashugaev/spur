@@ -20,6 +20,7 @@
 #   NPM, SYSTEMCTL — substitute commands (used by tests)
 #   SPUR_INSTALL_LOG_DIR — override the log directory
 #   SPUR_INSTALL_LOCK_FILE — override the cross-process update lock (used by tests)
+#   SPUR_INSTALL_LOCK_WAIT_SECONDS — lock wait before giving up (default 600)
 #   SPUR_INSTALL_STATUS_FILE — durable deploy status written by the daemon
 
 set -u
@@ -34,7 +35,9 @@ exec >>"$LOG_DIR/install-and-restart.log" 2>&1
 LOCK_FILE="${SPUR_INSTALL_LOCK_FILE:-$HOME/.spur/install-and-restart.lock}"
 mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
-if ! flock 9; then
+# Bounded wait: `spur update` holds the same lock, so an unbounded wait would
+# leave this helper (and the daemon's "running" deploy status) wedged forever.
+if ! flock --wait "${SPUR_INSTALL_LOCK_WAIT_SECONDS:-600}" 9; then
   echo "$(date -u +%FT%TZ) install-and-restart lock failed: $LOCK_FILE"
   exit 1
 fi

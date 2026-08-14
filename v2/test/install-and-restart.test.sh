@@ -14,6 +14,11 @@ trap 'rm -rf "$LOG_DIR"' EXIT
 LOG_FILE="$LOG_DIR/install-and-restart.log"
 LOCK_FILE="$LOG_DIR/install-and-restart.lock"
 
+fail() {
+  echo "FAIL: $1" >&2
+  exit 1
+}
+
 run_helper() {
   SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo bash "$HELPER" "$@"
 }
@@ -242,6 +247,19 @@ LOCK_TRACE="$LOCK_TRACE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE=
 second_pid=$!
 wait "$first_pid" "$second_pid"
 [ "$(tr '\n' ' ' <"$LOCK_TRACE")" = "start end start end " ] || fail "concurrent installs overlapped"
+
+# Case 10b: a held lock makes the helper give up instead of waiting forever.
+flock "$LOCK_FILE" -c "sleep 3" &
+holder_pid=$!
+sleep 0.2
+set +e
+SPUR_INSTALL_LOCK_WAIT_SECONDS=1 SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  NPM=echo SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
+lock_rc=$?
+set -e
+[ "$lock_rc" -eq 1 ] || fail "helper did not give up on a held lock (rc=$lock_rc)"
+grep -q "install-and-restart lock failed" "$LOG_DIR/install-and-restart.log" || fail "missing lock failure log"
+wait "$holder_pid"
 
 # Case 11: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"

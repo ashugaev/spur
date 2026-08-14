@@ -84,7 +84,7 @@ function mockFetch(responses: MockResponses) {
 describe("VersionMenu", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,

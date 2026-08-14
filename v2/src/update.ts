@@ -74,19 +74,11 @@ export function acquireUpdateLock(home = homedir()): () => void {
   mkdirSync(dirname(lockPath), { recursive: true });
   const fd = openSync(lockPath, "w");
   try {
-    execFileSync("flock", ["--nonblock", "9"], {
-      stdio: [
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        "ignore",
-        fd,
-      ],
+    // `flock` locks the open file description, which the child shares through
+    // the inherited fd, so the lock outlives the child and is released only
+    // when this process closes its own descriptor.
+    execFileSync("flock", ["--nonblock", "3"], {
+      stdio: ["ignore", "ignore", "ignore", fd],
     });
   } catch (error) {
     closeSync(fd);

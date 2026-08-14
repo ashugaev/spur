@@ -1284,14 +1284,11 @@ export async function startServer(
           request,
           15_000_000,
         );
-        sendJson(
-          response,
-          201,
-          await service.spawnShepherd({
-            ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
-            ...(body.reportDisposition === true ? { reportDisposition: true } : {}),
-          }),
+        const shepherd = await service.spawnShepherd(
+          typeof body.prompt === "string" ? { prompt: body.prompt } : {},
         );
+        // Legacy callers (web /api/shepherd) still expect the session alone.
+        sendJson(response, 201, body.reportDisposition === true ? shepherd : shepherd.session);
         return;
       }
 

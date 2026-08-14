@@ -10,6 +10,12 @@ import { useVersionSwitch, versionSwitchFailedMessage } from "@/lib/version-swit
 
 type DiagnoseState = "idle" | "spawning" | "sent" | "error";
 
+// Response contract of /api/diagnose-update, which validates it server-side.
+interface DiagnoseUpdateResult {
+  disposition: "spawned" | "reused";
+  session: { id: string; project: string };
+}
+
 const DIAGNOSE_LABEL: Record<DiagnoseState, string> = {
   idle: "Diagnose update",
   spawning: "Diagnose update",
@@ -57,23 +63,9 @@ export function VersionSwitchOverlay() {
         setDiagnoseState("error");
         return;
       }
-      if (
-        typeof payload !== "object" ||
-        payload === null ||
-        Array.isArray(payload) ||
-        ((payload as Record<string, unknown>).disposition !== "spawned" &&
-          (payload as Record<string, unknown>).disposition !== "reused") ||
-        typeof (payload as { session?: { id?: unknown } }).session?.id !== "string" ||
-        typeof (payload as { session?: { project?: unknown } }).session?.project !== "string"
-      ) {
-        setDiagnoseError("Diagnosis request returned an invalid response");
-        setDiagnoseState("error");
-        return;
-      }
-      const result = payload as {
-        disposition: "spawned" | "reused";
-        session: { id: string; project: string };
-      };
+      // /api/diagnose-update validates the daemon body and 502s on any other
+      // shape, so a 2xx payload is already this contract.
+      const result = payload as DiagnoseUpdateResult;
       setDiagnoseResult({ ...result.session, disposition: result.disposition });
       setDiagnoseState("sent");
     } catch (error) {

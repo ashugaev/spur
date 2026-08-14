@@ -39,7 +39,7 @@ function renderOverlay(children?: ReactNode) {
 describe("VersionSwitchOverlay", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,

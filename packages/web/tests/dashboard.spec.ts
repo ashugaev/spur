@@ -44,7 +44,7 @@ test("failed update diagnosis reports Shepherd reuse and links the session", asy
     });
   });
   await page.addInitScript(() => {
-    window.localStorage.setItem("spur.version-switch.target", "1.5.0");
+    window.sessionStorage.setItem("spur.version-switch.target", "1.5.0");
   });
 
   await page.goto("/");

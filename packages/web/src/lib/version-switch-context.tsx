@@ -68,17 +68,20 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
 
   const startSwitch = useCallback((version: string) => {
     reloadedRef.current = false;
-    window.localStorage.setItem(SWITCH_TARGET_STORAGE_KEY, version);
+    window.sessionStorage.setItem(SWITCH_TARGET_STORAGE_KEY, version);
     setState({ phase: "switching", target: version });
   }, []);
 
   const dismiss = useCallback(() => {
-    window.localStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
+    window.sessionStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
     setState(IDLE_STATE);
   }, []);
 
+  // Resume confirmation after the reload the switch itself triggers. Per-tab
+  // storage on purpose: a switch that ends without a dismiss must not block a
+  // later browser session behind the overlay.
   useEffect(() => {
-    const target = window.localStorage.getItem(SWITCH_TARGET_STORAGE_KEY)?.trim();
+    const target = window.sessionStorage.getItem(SWITCH_TARGET_STORAGE_KEY)?.trim();
     if (target) setState({ phase: "switching", target });
   }, []);
 
@@ -103,7 +106,7 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
               // (which renders nothing) exposed with an interactive,
               // stale-state dashboard underneath.
               setState({ phase: "done", target });
-              window.localStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
+              window.sessionStorage.removeItem(SWITCH_TARGET_STORAGE_KEY);
               if (!reloadedRef.current) {
                 reloadedRef.current = true;
                 window.location.reload();

@@ -34,7 +34,7 @@ function mockRuntimeInfoFetch(getVersion: () => string) {
 describe("VersionSwitchProvider", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -144,11 +144,11 @@ describe("VersionSwitchProvider", () => {
 
     expect(result.current.phase).toBe("done");
     expect(window.location.reload).toHaveBeenCalledTimes(1);
-    expect(window.localStorage.getItem("spur.version-switch.target")).toBeNull();
+    expect(window.sessionStorage.getItem("spur.version-switch.target")).toBeNull();
   });
 
   it("resumes confirmation after reload from the persisted target", async () => {
-    window.localStorage.setItem("spur.version-switch.target", "1.5.0");
+    window.sessionStorage.setItem("spur.version-switch.target", "1.5.0");
     mockRuntimeInfoFetch(() => "1.5.0");
     vi.useFakeTimers();
 

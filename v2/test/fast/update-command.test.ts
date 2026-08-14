@@ -289,7 +289,7 @@ describe("createRealUpdateDeps installVersion", () => {
     const deps = createRealUpdateDeps("/home/alek/spur/v2/dist/cli.js", "/tmp/state.json");
     const release = deps.acquireUpdateLock();
     const call = execFileSyncCalls.find((entry) => entry.file === "flock");
-    expect(call?.args).toEqual(["--nonblock", "9"]);
+    expect(call?.args).toEqual(["--nonblock", "3"]);
     release();
   });
 });
