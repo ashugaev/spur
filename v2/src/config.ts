@@ -1567,6 +1567,10 @@ const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
   maxRotationsPerEpisode: 2,
 };
 
+// Minutes a running/waiting session may sit idle before pollAttentionStates
+// parks it (stopReason: "stale_timeout"). 0 disables parking.
+const DEFAULT_STALE_AFTER_MINUTES = 60;
+
 // Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
 // per-agent account stores plug in separately). Instance-only, same footgun as
 // rateLimitReactivation/tags: parsed only when mode === "instance", so a
@@ -2060,6 +2064,11 @@ function parseConfigFile(
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
+    staleAfterMinutes:
+      mode === "instance"
+        ? (asNonNegativeNumber(root["staleAfterMinutes"], "staleAfterMinutes") ??
+          DEFAULT_STALE_AFTER_MINUTES)
+        : DEFAULT_STALE_AFTER_MINUTES,
     projects: normalizedProjects,
     tags,
   };
