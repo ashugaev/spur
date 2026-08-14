@@ -445,6 +445,48 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
   });
 
+  it("rejoins a URL split across hard-wrapped (isWrapped: false) rows into one link", async () => {
+    const COLS = 80;
+    const full =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88" +
+      "ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com";
+    const first = full.slice(0, COLS);
+    const second = full.slice(COLS);
+    normalBuffer.rows = [
+      { text: first, isWrapped: false },
+      { text: second, isWrapped: false },
+    ];
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
+  it("still rejoins a URL split across isWrapped: true rows into one link", async () => {
+    const COLS = 80;
+    const full =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88" +
+      "ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com";
+    const first = full.slice(0, COLS);
+    const second = full.slice(COLS);
+    normalBuffer.rows = [
+      { text: first, isWrapped: false },
+      { text: second, isWrapped: true },
+    ];
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
   it("resets discovery ownership when the session identity changes", async () => {
     normalBuffer.rows = [{ text: "https://session-a.example" }];
     const result = await mountTerminal({ sessionId: "session-a" });

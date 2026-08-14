@@ -8,6 +8,10 @@ import {
 
 const row = (text: string, isWrapped = false): TerminalBufferRow => ({ text, isWrapped });
 
+const COLS = 80;
+const padded = (text: string, isWrapped = false): TerminalBufferRow =>
+  row(text.padEnd(COLS, " "), isWrapped);
+
 describe("groupTerminalRows", () => {
   it("joins wrapped rows at full width and trims only the completed logical line", () => {
     expect(
@@ -39,6 +43,13 @@ describe("groupTerminalRows", () => {
         row("https://after.example"),
       ]),
     ).toEqual(["https://before.example", "https://after.example"]);
+  });
+
+  it("keeps a full-width row with no URL tail as its own logical line", () => {
+    expect(groupTerminalRows([row("x".repeat(COLS)), row("next line")])).toEqual([
+      "x".repeat(COLS),
+      "next line",
+    ]);
   });
 });
 
@@ -120,6 +131,48 @@ describe("extractTerminalLinks", () => {
     expect(extractTerminalLinks([row("https://Example.COM:8443/a?q=1#two")])).toEqual([
       { url: "https://Example.COM:8443/a?q=1#two", hostname: "example.com" },
     ]);
+  });
+
+  it("rejoins a URL that tmux hard-wraps across absolute-CUP-redrawn rows with no isWrapped flag", () => {
+    const rows: TerminalBufferRow[] = [
+      row("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88"),
+      row("ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.co"),
+      row("m%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainf"),
+      row("erence+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_"),
+      row("challenge=lvG-MxxE_L5exPAExSNLsDWiLYghHTwpjTeEh0_jQ6c&code_challenge_method=S256"),
+      padded("&state=gtD_mHuGv50rZrjpLiaDs4HY7ABLpIx-I1jzPqSam5A"),
+    ];
+
+    const links = extractTerminalLinks(rows);
+
+    expect(links).toHaveLength(1);
+    expect(links[0]?.url).toBe(
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88" +
+        "ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.co" +
+        "m%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainf" +
+        "erence+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_" +
+        "challenge=lvG-MxxE_L5exPAExSNLsDWiLYghHTwpjTeEh0_jQ6c&code_challenge_method=S256" +
+        "&state=gtD_mHuGv50rZrjpLiaDs4HY7ABLpIx-I1jzPqSam5A",
+    );
+    expect(links[0]?.hostname).toBe("claude.com");
+  });
+
+  it("stops the hard-wrap join at a URL that fills the last column exactly", () => {
+    const url = `https://example.com/${"a".repeat(COLS - "https://example.com/".length)}`;
+    expect(url).toHaveLength(COLS);
+
+    const links = extractTerminalLinks([row(url), row("╌".repeat(COLS))]);
+
+    expect(links).toEqual([{ url, hostname: "example.com" }]);
+  });
+
+  it("does not join a hard-wrap tail into a row that begins with its own scheme", () => {
+    const first = `https://one.example/${"a".repeat(COLS - "https://one.example/".length)}`;
+    expect(first).toHaveLength(COLS);
+
+    const links = extractTerminalLinks([first, "https://two.example/b"].map((text) => row(text)));
+
+    expect(links.map((link) => link.url)).toEqual(["https://two.example/b", first]);
   });
 });
 

@@ -9,6 +9,10 @@ export interface TerminalLink {
 }
 
 const TERMINAL_URL_PATTERN = /https?:\/\/\S+/giu;
+const URL_CHAR_CLASS = "A-Za-z0-9\\-._~:/?#[\\]@!$&'()*+,;=%";
+const UNTERMINATED_URL_TAIL = new RegExp(`https?://[${URL_CHAR_CLASS}]*$`, "iu");
+const URL_CHAR_LEADING = new RegExp(`^[${URL_CHAR_CLASS}]`, "u");
+const URL_SCHEME_LEADING = /^https?:\/\//iu;
 const SENTENCE_SUFFIX = new Set([".", ",", ":", ";", "!", "?"]);
 const QUOTE_SUFFIX = new Set(["'", '"', "`", ">"]);
 const DELIMITER_PAIRS = {
@@ -33,15 +37,25 @@ export function groupTerminalRows(rows: Array<TerminalBufferRow | undefined>): s
       continue;
     }
 
-    if (!row.isWrapped) {
-      finishCurrent();
-      current = row.text;
+    if (row.isWrapped) {
+      if (current !== null) {
+        current += row.text;
+      }
       continue;
     }
 
-    if (current !== null) {
+    if (
+      current !== null &&
+      UNTERMINATED_URL_TAIL.test(current) &&
+      URL_CHAR_LEADING.test(row.text) &&
+      !URL_SCHEME_LEADING.test(row.text)
+    ) {
       current += row.text;
+      continue;
     }
+
+    finishCurrent();
+    current = row.text;
   }
 
   finishCurrent();
