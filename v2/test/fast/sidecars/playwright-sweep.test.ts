@@ -31,7 +31,7 @@ describe("sweepLeakedPlaywright ps snapshot sharing", () => {
       await import("../../../src/sidecars/playwright.js");
     const bin = resolvePlaywrightMcpBin();
     const row = (pid: number, port: number) =>
-      `${pid} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port ${port}`;
+      `${pid} 1 1000 00:01 node ${bin} --headless --isolated --host 127.0.0.1 --port ${port}`;
     // Neither pid exists on this host, so killProcessTree's identity reads
     // resolve to null (ENOENT) and no real signal is ever sent — this test
     // only asserts on the `ps` fork count, not on kill behavior.

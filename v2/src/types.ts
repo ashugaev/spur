@@ -1090,6 +1090,13 @@ export interface KillSessionRequest {
   skipPrCheck?: boolean;
 }
 
+// `force`: bypass the P2 (env-rooted) duplicate-agent launch guard — see
+// assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
+// (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
+export interface RestoreSessionRequest {
+  force?: boolean;
+}
+
 export interface OpenPrActionRequiredPayload {
   code: "open_pr_action_required";
   sessionId: string;

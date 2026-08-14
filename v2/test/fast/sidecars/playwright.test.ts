@@ -7,8 +7,8 @@ import {
   resolvePlaywrightMcpBin,
   resolvePlaywrightSidecarCommand,
   SPUR_RESERVED_PORT_PLAYWRIGHT,
-  type ProcessInfo,
 } from "../../../src/sidecars/playwright.js";
+import type { ProcessSnapshotEntry } from "../../../src/process-tree.js";
 import { shellEscape } from "../../../src/agents/shell-escape.js";
 
 describe("playwrightMcpUrl", () => {
@@ -146,9 +146,11 @@ describe("lazy bin resolution (MUST-FIX 1)", () => {
 
 describe("isLeakedManagedPlaywright", () => {
   const bin = resolvePlaywrightMcpBin();
-  const leaked: ProcessInfo = {
+  const leaked: ProcessSnapshotEntry = {
     pid: 1000,
     ppid: 1,
+    rssKb: 10_000,
+    elapsedSeconds: 60,
     args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8750`,
   };
 
@@ -165,7 +167,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag non-loopback bindings", () => {
-    const wide: ProcessInfo = {
+    const wide: ProcessSnapshotEntry = {
       ...leaked,
       args: `node ${bin} --headless --isolated --host 0.0.0.0 --port 8750`,
     };
@@ -173,7 +175,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag processes that are not our bin", () => {
-    const other: ProcessInfo = {
+    const other: ProcessSnapshotEntry = {
       ...leaked,
       args: "node /some/other/cli.js --headless --host 127.0.0.1 --port 8750",
     };
@@ -181,7 +183,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag when no --port is present", () => {
-    const noPort: ProcessInfo = {
+    const noPort: ProcessSnapshotEntry = {
       ...leaked,
       args: `node ${bin} --headless --isolated --host 127.0.0.1`,
     };

@@ -679,6 +679,41 @@ describe("runtime-tmux", () => {
     expect(listPanesCalls).toHaveLength(2);
   });
 
+  it("lookupTmuxPanePid separates a failed list-panes from a session that has no pane", async () => {
+    // getTmuxPanePid collapses both into null. A caller reasoning about a
+    // pane's ABSENCE (the duplicate-agent guard) would then treat every
+    // session as pane-less whenever tmux is unreadable, and report each
+    // session's own live agent as unowned.
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        throw new Error("no server running on /tmp/tmux-1000/spur");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxPanePid } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxPanePid("api-1")).toEqual({ status: "unavailable" });
+
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return { stdout: "other-1 1 1 0 4242 /dev/pts/1", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    // tmux answered; this session simply is not in the fleet. That is a real
+    // answer, not a failure.
+    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: null,
+    });
+    expect(await lookupTmuxPanePid("other-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 4242,
+    });
+  });
+
   it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-windows")) {

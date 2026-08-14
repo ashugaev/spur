@@ -32,6 +32,11 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  capturePaneAgentProcesses,
+  findForeignAgentProcessesForSession,
+  terminateAgentProcesses,
+} from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
   collectMcpBindings,
@@ -204,6 +209,7 @@ import {
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
+  lookupTmuxPanePid,
   isProcessRunningInTmux,
   killTmuxSession,
   killTmuxSessionTree,
@@ -216,6 +222,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
   PromptReadyTimeoutError,
+  type TmuxPanePidLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -355,6 +362,7 @@ import {
   type ProjectConfig,
   type HandoffSessionRequest,
   type RespawnSessionRequest,
+  type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type RuntimeInfo,
@@ -432,6 +440,9 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 import { getVersion } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+// Not a message prefix (the message starts with "Session <id> ...") — a
+// substring marker matched via .includes() in isForeignAgentProcessMessage.
+const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
@@ -1418,6 +1429,14 @@ export function buildKillConfirmationRequiredMessage(sessionId: string, reasons:
 
 export function isKillConfirmationRequiredMessage(message: string): boolean {
   return message.startsWith(KILL_CONFIRMATION_REQUIRED_PREFIX);
+}
+
+export function buildForeignAgentProcessMessage(sessionId: string, pid: number): string {
+  return `Session ${sessionId} ${FOREIGN_AGENT_PROCESS_MARKER} (pid ${pid}) outside its pane; restore with force to override`;
+}
+
+export function isForeignAgentProcessMessage(message: string): boolean {
+  return message.includes(FOREIGN_AGENT_PROCESS_MARKER);
 }
 
 function buildSessionEnv(args: {
@@ -7336,8 +7355,17 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
-      if (sessionId && project && placeholderWritten) {
-        await killTmuxSession(sessionId);
+      if (sessionId && project && placeholderWritten && agent) {
+        // This catch wraps every stage from tmux.create through record.write,
+        // so the pane can already hold a real launched agent by the time we
+        // get here (e.g. a waitForTmuxReady timeout or a sendAgentMessage
+        // failure after createTmuxSession succeeded). failOnSurvivors:false —
+        // spawn is already failing; a survivor throw here would bury the
+        // original error instead of surfacing it.
+        await this.killAgentPaneAndConfirmExit(
+          { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+          { failOnSurvivors: false },
+        );
         // Non-mcp project sidecars are desk-shared: a sibling can already be
         // attached to this still-spawning anchor (or, for a failing sibling,
         // the anchor/another sibling can still be live), so this session's
@@ -7385,9 +7413,7 @@ export class SessionService {
           id: sessionId,
           project: request.project,
           workspaceId: failedSpawnSession.workspaceId,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent,
           prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -7461,7 +7487,21 @@ export class SessionService {
     workspacePath: string,
     finalFailure: boolean,
   ): Promise<void> {
-    await killTmuxSession(prepared.sessionId);
+    // Called from the background-spawn retry catch, which wraps every stage
+    // from tmux.create through record.write — same rationale as the
+    // catch block in spawn() above: the pane can already hold a real
+    // launched agent, so this must go through the capture-then-confirm path,
+    // not a raw kill. failOnSurvivors:false: a retry (or the final failure
+    // path) must not throw a second error over the one already in flight.
+    await this.killAgentPaneAndConfirmExit(
+      {
+        id: prepared.sessionId,
+        tmuxSession: prepared.sessionId,
+        agent: prepared.agent,
+        launchCommand: prepared.placeholder.launchCommand,
+      },
+      { failOnSurvivors: false },
+    );
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
     const deskAlive = this.hasRunningWorkspaceMembers(prepared.placeholder);
@@ -9784,6 +9824,127 @@ export class SessionService {
     deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
+  // The single path for killing an agent pane. relaunchSessionInPlace,
+  // restore(), the resume-fallback inside it, and switchAuth all reuse the
+  // SAME tmux session name and session id for the pane they create next, so
+  // a survivor of the kill below is indistinguishable from its own
+  // replacement to every existing probe (isProcessRunningInTmux keys on tty,
+  // confirmAgentExited keys on tmux session name — neither can tell them
+  // apart). Capturing the pane's own process tree BEFORE the kill, then
+  // polling those exact pids after it, is the only way to know the kill
+  // actually landed.
+  // Never throws: every caller sits on a teardown or relaunch path where a
+  // probe failure must not replace the error that actually matters (a spawn
+  // failure, for one). A thrown lookup reads as "unavailable", the same
+  // fail-safe answer a failed `list-panes` produces.
+  private async lookupPanePidQuietly(tmuxSession: string): Promise<TmuxPanePidLookup> {
+    try {
+      return await lookupTmuxPanePid(tmuxSession);
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+
+  private async killAgentPaneAndConfirmExit(
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    options: { failOnSurvivors: boolean },
+  ): Promise<void> {
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    if (paneLookup.status === "unavailable") {
+      // tmux could not be read, so P1 has nothing to verify against. Record
+      // it: the alternative is a silent pass that reads exactly like a clean
+      // teardown.
+      this.logEvent("session.agent_process.pane_pid_unreadable", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
+      });
+    }
+    const capture = await capturePaneAgentProcesses({
+      panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    if (capture.status === "unavailable") {
+      // The process table could not be read, so "no survivors" would be a
+      // guess. Refusing a relaunch is recoverable; launching a duplicate is
+      // not. A teardown that is not about to relaunch still proceeds.
+      this.logEvent("session.agent_process.capture_unavailable", {
+        level: options.failOnSurvivors ? "error" : "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: could not read the process table before killing the agent pane`,
+      });
+      if (options.failOnSurvivors) {
+        throw new Error(
+          `Session ${session.id}: could not read the process table to confirm the prior agent process exited; refusing to launch a replacement`,
+        );
+      }
+    }
+    await killTmuxSession(session.tmuxSession);
+    const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
+    if (outcome.status === "clear") {
+      return;
+    }
+    this.logEvent("session.agent_process.survivors", {
+      level: "error",
+      sessionId: session.id,
+      message: `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL`,
+      details: { pids: outcome.pids },
+    });
+    if (options.failOnSurvivors) {
+      throw new Error(
+        `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL; refusing to launch a replacement`,
+      );
+    }
+  }
+
+  // P2 launch guard: refuses to launch a replacement pane over a live
+  // foreign agent process still carrying this session's id (a prior
+  // instance whose pane P1 could not see, e.g. its tmux pane is already
+  // gone). Never blocks on a scan it could not perform — "unavailable" and
+  // "no findings" both proceed. `force` bypasses this guard only; it never
+  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
+  private async assertNoForeignAgentForSession(
+    session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
+    paneLookup: TmuxPanePidLookup,
+    force: boolean,
+  ): Promise<void> {
+    if (force) {
+      return;
+    }
+    // An unreadable tmux would leave the exclusion set empty, so the session's
+    // OWN live agent would read as foreign. That joins the "unavailable"
+    // branch: this guard must never block on a scan it could not perform.
+    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // exclude) and is safe to scan on.
+    if (paneLookup.status === "unavailable") {
+      this.logEvent("session.agent_process.scan_skipped", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; skipping the foreign-agent scan`,
+      });
+      return;
+    }
+    const scan = await findForeignAgentProcessesForSession({
+      sessionId: session.id,
+      processMatchers: sessionProcessMatchers(session),
+      excludePanePid: paneLookup.panePid,
+    });
+    if (scan.status !== "ok") {
+      return;
+    }
+    const [firstForeign] = scan.pids;
+    if (firstForeign === undefined) {
+      return;
+    }
+    this.logEvent("session.agent_process.foreign", {
+      level: "warn",
+      sessionId: session.id,
+      message: `Session ${session.id} already has a live agent process outside its pane`,
+      details: { pids: scan.pids },
+    });
+    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
+  }
+
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
@@ -9856,7 +10017,7 @@ export class SessionService {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
       if (!request.skipRuntimeTeardown) {
-        await killTmuxSession(session.tmuxSession);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
@@ -9964,7 +10125,7 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       await this.pushTelegramNotice(
@@ -10262,7 +10423,12 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    await killTmuxSession(session.tmuxSession);
+    await this.assertNoForeignAgentForSession(
+      session,
+      await this.lookupPanePidQuietly(session.tmuxSession),
+      false,
+    );
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
@@ -10380,7 +10546,7 @@ export class SessionService {
           failure,
         },
       });
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
       // Mint a fresh claude id for the fallback launch (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id) — the pinned id
       // may already own a transcript, and claude rejects --session-id on it.
@@ -10442,7 +10608,7 @@ export class SessionService {
     );
   }
 
-  async restore(sessionId: string): Promise<SessionView> {
+  async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10501,6 +10667,11 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    await this.assertNoForeignAgentForSession(
+      current,
+      await this.lookupPanePidQuietly(current.tmuxSession),
+      request.force === true,
+    );
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -10576,7 +10747,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
       const pinnedClaudeId =
@@ -10760,7 +10931,7 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
@@ -10826,7 +10997,7 @@ export class SessionService {
   // conversation without resending the original prompt), then delegate the
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
-  async reopen(sessionId: string): Promise<SessionView> {
+  async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -10836,13 +11007,16 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.reopenLocked(sessionId);
+      return await this.reopenLocked(sessionId, request);
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
   }
 
-  private async reopenLocked(sessionId: string): Promise<SessionView> {
+  private async reopenLocked(
+    sessionId: string,
+    request: RestoreSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -10934,7 +11108,7 @@ export class SessionService {
     await this.refreshDashboardCacheEntry(record);
 
     try {
-      return await this.restore(sessionId);
+      return await this.restore(sessionId, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The completed record's Telegram binding, artifacts, and work-item
@@ -10969,10 +11143,10 @@ export class SessionService {
       // restore() itself kills the tmux pane it created before rethrowing
       // for every failure inside its own try/catch (including the fresh
       // pane created by createTmuxSession). Tear down defensively here too —
-      // killTmuxSession/cleanupSessionServices are best-effort and safe to
-      // call on an already-dead pane — to cover a pane restore() created but
-      // didn't get to kill before this catch ran.
-      await killTmuxSession(latest.tmuxSession);
+      // killAgentPaneAndConfirmExit/cleanupSessionServices are best-effort and
+      // safe to call on an already-dead pane — to cover a pane restore()
+      // created but didn't get to kill before this catch ran.
+      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
       await this.cleanupSessionServices(latest);
       const rolledBack: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(latest),
@@ -11063,8 +11237,12 @@ export class SessionService {
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
     // Session was launched against an account dir directly.
-    // Relaunch once to migrate onto the new account's session home.
-    await killTmuxSession(updated.tmuxSession);
+    // Relaunch once to migrate onto the new account's session home. This is
+    // the pane's real teardown — the kill below must carry the P1
+    // survivor guard itself: by the time ensureSessionReadyForSend below
+    // reaches relaunchSessionInPlace, the pane is already gone, so its own
+    // pane-pid capture would find nothing to check.
+    await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
     const relaunched = await this.ensureSessionReadyForSend(updated);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -11245,6 +11423,13 @@ export class SessionService {
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
+    // A completed record is never killed by the branch below (it's gated on
+    // status !== "completed"), so it can still legitimately own a live agent
+    // pane. Close that source out before spawning its replacement, or the
+    // fleet ends up with two live agents on the same original session id.
+    if (session.status === "completed") {
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    }
     // Unlike handoff, respawn needs no replacingSessionId exclusion: the
     // status guard above requires completed/killed/errored, none of which
     // countLiveSessions treats as live, and the kill() below (source cleanup
@@ -11329,7 +11514,7 @@ export class SessionService {
         };
         writeSession(this.config.dataDir, stopped);
         this.stateCache.delete(sessionId);
-        await killTmuxSession(session.tmuxSession);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(stopped);
         sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
       }
