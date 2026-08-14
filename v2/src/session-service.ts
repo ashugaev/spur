@@ -214,6 +214,7 @@ import {
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
+  lookupTmuxPanePid,
   isProcessRunningInTmux,
   killTmuxSession,
   killTmuxSessionTree,
@@ -226,6 +227,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
   PromptReadyTimeoutError,
+  type TmuxPanePidLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -9687,16 +9689,15 @@ export class SessionService {
   // apart). Capturing the pane's own process tree BEFORE the kill, then
   // polling those exact pids after it, is the only way to know the kill
   // actually landed.
-  // "absent" is the only answer that makes a null pane pid trustworthy: it
-  // means there is genuinely no pane, so nothing was missed. "exists" and
-  // "unreadable" both mean a null pane pid tells us nothing. Never throws —
-  // both callers run on teardown paths where a probe failure must not replace
-  // the error that actually matters (a spawn failure, for one).
-  private async probePaneState(tmuxSession: string): Promise<"exists" | "absent" | "unreadable"> {
+  // Never throws: every caller sits on a teardown or relaunch path where a
+  // probe failure must not replace the error that actually matters (a spawn
+  // failure, for one). A thrown lookup reads as "unavailable", the same
+  // fail-safe answer a failed `list-panes` produces.
+  private async lookupPanePidQuietly(tmuxSession: string): Promise<TmuxPanePidLookup> {
     try {
-      return (await tmuxSessionExists(tmuxSession)) ? "exists" : "absent";
+      return await lookupTmuxPanePid(tmuxSession);
     } catch {
-      return "unreadable";
+      return { status: "unavailable" };
     }
   }
 
@@ -9704,11 +9705,11 @@ export class SessionService {
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const panePid = await getTmuxPanePid(session.tmuxSession);
-    if (panePid === null && (await this.probePaneState(session.tmuxSession)) !== "absent") {
-      // The pane is there (or tmux could not say), so P1 has nothing to
-      // verify against. Record it: the alternative is a silent pass that
-      // reads exactly like a clean teardown.
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    if (paneLookup.status === "unavailable") {
+      // tmux could not be read, so P1 has nothing to verify against. Record
+      // it: the alternative is a silent pass that reads exactly like a clean
+      // teardown.
       this.logEvent("session.agent_process.pane_pid_unreadable", {
         level: "warn",
         sessionId: session.id,
@@ -9716,7 +9717,7 @@ export class SessionService {
       });
     }
     const capture = await capturePaneAgentProcesses({
-      panePid,
+      panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {
@@ -9760,19 +9761,18 @@ export class SessionService {
   // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
-    panePid: number | null,
+    paneLookup: TmuxPanePidLookup,
     force: boolean,
   ): Promise<void> {
     if (force) {
       return;
     }
-    // A null pane pid means either "this session has no pane" (nothing to
-    // exclude, so the scan is sound) or "tmux was unreadable" (the exclusion
-    // set would be empty and the session's OWN live agent would read as
-    // foreign). Only the first is safe to scan on; the second joins the
-    // "unavailable" branch, because this guard must never block on a scan it
-    // could not perform.
-    if (panePid === null && (await this.probePaneState(session.tmuxSession)) !== "absent") {
+    // An unreadable tmux would leave the exclusion set empty, so the session's
+    // OWN live agent would read as foreign. That joins the "unavailable"
+    // branch: this guard must never block on a scan it could not perform.
+    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // exclude) and is safe to scan on.
+    if (paneLookup.status === "unavailable") {
       this.logEvent("session.agent_process.scan_skipped", {
         level: "warn",
         sessionId: session.id,
@@ -9783,7 +9783,7 @@ export class SessionService {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: session.id,
       processMatchers: sessionProcessMatchers(session),
-      excludePanePid: panePid,
+      excludePanePid: paneLookup.panePid,
     });
     if (scan.status !== "ok") {
       return;
@@ -10279,8 +10279,11 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    const panePid = await getTmuxPanePid(session.tmuxSession);
-    await this.assertNoForeignAgentForSession(session, panePid, false);
+    await this.assertNoForeignAgentForSession(
+      session,
+      await this.lookupPanePidQuietly(session.tmuxSession),
+      false,
+    );
     await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
@@ -10520,8 +10523,11 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
-    const restorePanePid = await getTmuxPanePid(current.tmuxSession);
-    await this.assertNoForeignAgentForSession(current, restorePanePid, request.force === true);
+    await this.assertNoForeignAgentForSession(
+      current,
+      await this.lookupPanePidQuietly(current.tmuxSession),
+      request.force === true,
+    );
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the

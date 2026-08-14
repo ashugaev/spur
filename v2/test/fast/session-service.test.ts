@@ -134,6 +134,12 @@ const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${nam
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
+const lookupTmuxPanePidMock = vi.fn(() =>
+  Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
+    status: "ok",
+    panePid: null,
+  }),
+);
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
@@ -558,6 +564,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     listTmuxSessionNames: listTmuxSessionNamesMock,
     getTmuxSessionActivity: getTmuxSessionActivityMock,
     getTmuxPanePid: getTmuxPanePidMock,
+    lookupTmuxPanePid: lookupTmuxPanePidMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     killTmuxSession: killTmuxSessionMock,
@@ -1225,6 +1232,7 @@ describe("SessionService", () => {
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
+    lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);
@@ -28770,7 +28778,7 @@ describe("SessionService", () => {
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
-      getTmuxPanePidMock.mockResolvedValue(4242);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4242 });
       const capturedRefs = [{ pid: 4242, identity: "starttime-4242" }];
       capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: capturedRefs });
 
@@ -28868,7 +28876,7 @@ describe("SessionService", () => {
       // pane pid on an existing tmux session the guard deliberately skips,
       // because the exclusion set would be empty and the session's own agent
       // would read as foreign.
-      getTmuxPanePidMock.mockResolvedValue(4242);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4242 });
       findForeignAgentProcessesForSessionMock.mockResolvedValue({
         status: "ok",
         pids: [777],
@@ -28886,17 +28894,15 @@ describe("SessionService", () => {
     });
 
     it("skips the foreign-agent scan when the pane pid is unreadable, rather than calling the session's own agent foreign", async () => {
-      // getTmuxPanePid returns null both for "no pane" and for "tmux could
-      // not be read". On the second, P2's exclusion set would be empty, so
-      // the session's OWN live pane agent would be reported foreign and the
-      // relaunch would throw — and relaunchSessionInPlace hard-codes
-      // force=false, so send/switchAuth would wedge with no override.
+      // An unreadable tmux leaves P2's exclusion set empty, so the session's
+      // OWN live pane agent would be reported foreign and the relaunch would
+      // throw — and relaunchSessionInPlace hard-codes force=false, so
+      // send/switchAuth would wedge with no override anywhere.
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
-      getTmuxPanePidMock.mockResolvedValue(null);
-      tmuxSessionExistsMock.mockResolvedValue(true);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" });
       findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [777] });
 
       const service = await createDisposedSessionService();
@@ -28905,6 +28911,27 @@ describe("SessionService", () => {
 
       expect(restored.status).toBe("running");
       expect(findForeignAgentProcessesForSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("still scans when tmux is readable and the session simply has no pane", async () => {
+      // The counterpart to the skip above: "ok" with a null pane pid is a
+      // real answer, not a failure. A session whose pane is already gone is
+      // exactly where a pane-orphaned survivor hides, so the scan must run —
+      // collapsing this into the unavailable branch would blind the guard on
+      // its most important case.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [777] });
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/777/);
+      expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ excludePanePid: null }),
+      );
     });
 
     it("does not block restore() when the foreign-agent scan is 'unavailable'", async () => {
