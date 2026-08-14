@@ -21,10 +21,21 @@ const DELIMITER_PAIRS = {
   "}": "{",
 } as const;
 
-function fillsLastColumn(text: string, cols: number): boolean {
-  if (text.length < cols) return false;
-  const lastChar = text.charAt(cols - 1);
-  return lastChar.trim() !== "";
+const LEADING_WHITESPACE = /^\s+/u;
+const INTERIOR_WHITESPACE = /\s/u;
+
+// A row reaches the wrap boundary once its trimmed content fills the row, with
+// one column of slack: a TUI (e.g. an agent CLI) wraps its own output one
+// column before the terminal's hard-wrap column.
+function isWrapBoundary(text: string, cols: number): boolean {
+  return text.trimEnd().length >= cols - 1;
+}
+
+// A genuine hard-wrapped URL continuation is one unbroken token once its
+// leading TUI gutter (hanging indent) and trailing pad are stripped. Anything
+// with interior whitespace is prose, not a URL continuation.
+function isUnbrokenToken(text: string): boolean {
+  return !INTERIOR_WHITESPACE.test(text.trim());
 }
 
 export function groupTerminalRows(
@@ -33,13 +44,13 @@ export function groupTerminalRows(
 ): string[] {
   const lines: string[] = [];
   let current: string | null = null;
-  let lastRowFilledLastColumn = false;
+  let atWrapBoundary = false;
 
   const finishCurrent = () => {
     if (current === null) return;
     lines.push(current.trimEnd());
     current = null;
-    lastRowFilledLastColumn = false;
+    atWrapBoundary = false;
   };
 
   for (const row of rows) {
@@ -52,25 +63,28 @@ export function groupTerminalRows(
       if (current !== null) {
         current += row.text;
       }
-      lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
+      atWrapBoundary = isWrapBoundary(row.text, cols);
       continue;
     }
 
+    const continuation = row.text.replace(LEADING_WHITESPACE, "");
+
     if (
       current !== null &&
-      lastRowFilledLastColumn &&
-      UNTERMINATED_URL_TAIL.test(current) &&
-      URL_CHAR_LEADING.test(row.text) &&
-      !URL_SCHEME_LEADING.test(row.text)
+      atWrapBoundary &&
+      UNTERMINATED_URL_TAIL.test(current.trimEnd()) &&
+      URL_CHAR_LEADING.test(continuation) &&
+      !URL_SCHEME_LEADING.test(continuation) &&
+      isUnbrokenToken(continuation)
     ) {
-      current += row.text;
-      lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
+      current = current.trimEnd() + continuation;
+      atWrapBoundary = isWrapBoundary(row.text, cols);
       continue;
     }
 
     finishCurrent();
     current = row.text;
-    lastRowFilledLastColumn = fillsLastColumn(row.text, cols);
+    atWrapBoundary = isWrapBoundary(row.text, cols);
   }
 
   finishCurrent();

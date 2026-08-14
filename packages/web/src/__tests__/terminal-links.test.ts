@@ -201,6 +201,66 @@ describe("extractTerminalLinks", () => {
 
     expect(links).toEqual([{ url: "https://example.com/done", hostname: "example.com" }]);
   });
+
+  it("rejoins an agent-TUI hard-wrapped URL with a hanging gutter (measured claude TUI, cols=181)", () => {
+    const COLS181 = 181;
+    const pad181 = (text: string, isWrapped = false): TerminalBufferRow =>
+      row(text.padEnd(COLS181, " "), isWrapped);
+
+    const rows: TerminalBufferRow[] = [
+      pad181(
+        "❯ Reply with exactly this URL on one line, nothing else: https://login.microsoftonline.com/common/oauth2/v2.0/authorize?code=abc123def456&redirect_uri=https%3A%2F%2Fexample.com%2Fc",
+      ),
+      pad181(
+        "  ode%2Fcallback&client_id=9d1c250a-e61b-44d9-88ed-1a2b3c4d5e6f&scope=openid%20profile%20offline_access&state=xyz789abcdef",
+      ),
+      pad181(""),
+      pad181(
+        "● https://login.microsoftonline.com/common/oauth2/v2.0/authorize?code=abc123def456&redirect_uri=https%3A%2F%2Fexample.com%2Fcode%2Fcallback&client_id=9d1c250a-e61b-44d9-88ed-1a2b3c4",
+      ),
+      pad181("  d5e6f&scope=openid%20profile%20offline_access&state=xyz789abcdef"),
+    ];
+
+    const links = extractTerminalLinks(rows, COLS181);
+
+    expect(links.map((link) => link.url)).toEqual([
+      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?code=abc123def456&redirect_uri=https%3A%2F%2Fexample.com%2Fcode%2Fcallback&client_id=9d1c250a-e61b-44d9-88ed-1a2b3c4d5e6f&scope=openid%20profile%20offline_access&state=xyz789abcdef",
+    ]);
+  });
+
+  it("rejoins an agent-TUI hard-wrapped URL at mobile width (measured claude TUI, cols=46)", () => {
+    const COLS46 = 46;
+    const pad46 = (text: string): TerminalBufferRow => row(text.padEnd(COLS46, " "), false);
+
+    // Real capture: output rows fill column 46; input-echo rows stop at 45.
+    const rows: TerminalBufferRow[] = [
+      pad46("● https://login.microsoftonline.com/common/oau"),
+      pad46("  th2/v2.0/authorize?code=abc123def456&redirec"),
+      pad46("  t_uri=https%3A%2F%2Fexample.com%2Fcode%2Fcal"),
+      pad46("  lback&client_id=9d1c250a-e61b-44d9-88ed-1a2b"),
+      pad46("  3c4d5e6f&scope=openid%20profile%20offline_ac"),
+      pad46("  cess&state=xyz789abcdef"),
+    ];
+
+    const links = extractTerminalLinks(rows, COLS46);
+
+    expect(links.map((link) => link.url)).toEqual([
+      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?code=abc123def456&redirect_uri=https%3A%2F%2Fexample.com%2Fcode%2Fcallback&client_id=9d1c250a-e61b-44d9-88ed-1a2b3c4d5e6f&scope=openid%20profile%20offline_access&state=xyz789abcdef",
+    ]);
+  });
+
+  it("does not join a full-width URL row into an unrelated indented sentence", () => {
+    const prefix = "● https://example.com/";
+    const url = prefix.slice(2) + "a".repeat(COLS - prefix.length);
+    expect(prefix.length + "a".repeat(COLS - prefix.length).length).toBe(COLS);
+
+    const links = extractTerminalLinks(
+      [padded(prefix + "a".repeat(COLS - prefix.length)), padded("  Next sentence, unrelated.")],
+      COLS,
+    );
+
+    expect(links.map((link) => link.url)).toEqual([url]);
+  });
 });
 
 describe("areTerminalLinksEqual", () => {
