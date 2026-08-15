@@ -10,8 +10,8 @@ import { cn } from "@/lib/cn";
 import type { AgentName } from "@/lib/agents";
 import {
   resolvePreselectedModelId,
-  useResolvedSpawnDefaults,
   type CarrySpawnModel,
+  type ResolvedSpawnDefaults,
 } from "@/lib/spawn-defaults";
 import type { AgentModel, AgentModelsResponse } from "@/lib/types";
 
@@ -21,9 +21,12 @@ interface ModelSelectProps {
   agent: AgentName;
   value: string | null;
   onChange: (id: string | null) => void;
-  // The project this model launches into; resolves the project-scoped
-  // default (rung 3) and the workspace mode Dashboard reads separately.
-  projectId: string;
+  // The project-scoped resolved defaults (model rung 3, and the workspace
+  // mode the owning component reads separately). Fetched once by the owning
+  // component (via useResolvedSpawnDefaults) and passed down, so a modal
+  // with both a ModelSelect and its own workspace-mode UI issues exactly one
+  // request instead of two racing copies of the same answer.
+  spawnDefaults: ResolvedSpawnDefaults;
   // The running session's model, carried across a same-agent respawn or
   // handoff (rung 1). null when there is nothing to carry, e.g. a fresh
   // Dashboard spawn.
@@ -31,10 +34,11 @@ interface ModelSelectProps {
   // Fires whenever the model is or isn't submittable yet: true once both the
   // model list and the project-scoped defaults have settled (loaded,
   // errored, or come back empty — a settled-empty catalog is a valid,
-  // submittable state with `value` staying null), OR immediately if `value`
-  // already carries a concrete id (e.g. a respawn/handoff seeded from the
-  // session's current model). The single source callers gate submit on,
-  // instead of inferring it from `value === null`.
+  // submittable state with `value` staying null). Never true early just
+  // because `value` is already non-null: a caller-seeded value (e.g. a
+  // carried session model) still needs the settled catalog to confirm it
+  // through `carry`'s isListed() filter. The single source callers gate
+  // submit on, instead of inferring it from `value === null`.
   onResolvedChange: (resolved: boolean) => void;
   ariaLabel?: string;
 }
@@ -47,7 +51,7 @@ export function ModelSelect({
   agent,
   value,
   onChange,
-  projectId,
+  spawnDefaults,
   carry,
   onResolvedChange,
   ariaLabel = "Model",
@@ -60,7 +64,6 @@ export function ModelSelect({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const favorites = useFavorites(FAVORITES_STORAGE_KEY);
-  const spawnDefaults = useResolvedSpawnDefaults(projectId, agent);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const onResolvedChangeRef = useRef(onResolvedChange);
@@ -109,13 +112,14 @@ export function ModelSelect({
   // settles with an empty list (nothing to preselect); the label
   // distinguishes those two rather than showing a placeholder sentinel.
   const settled = !loading && !spawnDefaults.loading;
-  // Resolved is settled-or-already-concrete: a caller that seeds `value` up
-  // front (a respawn/handoff carrying the session's current model) already
-  // holds a submittable selection and shouldn't wait on the catalog fetch to
-  // re-confirm it. Once unsettled, only settling (not a value change alone)
-  // can flip this back to true, so a genuinely in-flight resolution with no
-  // value yet still reports unresolved.
-  const resolved = settled || value !== null;
+  // Resolved is exactly "settled": every rung of the precedence chain,
+  // including a carried session model (rung 1), must clear the isListed()
+  // filter inside resolvePreselectedModelId before a value counts as
+  // submittable. A caller must never seed `value` directly from an
+  // unfiltered source (e.g. session.model) to fast-path this — that would
+  // let a model that has since left the catalog stay selected and
+  // submittable ahead of the fetch that would have caught it.
+  const resolved = settled;
 
   useEffect(() => {
     onResolvedChangeRef.current(resolved);
@@ -168,12 +172,14 @@ export function ModelSelect({
     contentDeps: [loading, error, orderedModels],
   });
 
+  // null while unresolved: the button renders a motion-only Skeleton for
+  // that case instead of a visible wait-text label like "Resolving…".
   const selectedLabel =
     value !== null
       ? (models.find((m) => m.id === value)?.label ?? value)
       : settled
         ? "No models"
-        : "Resolving…";
+        : null;
 
   return (
     <div className="relative" ref={containerRef}>
@@ -186,7 +192,13 @@ export function ModelSelect({
         onClick={() => setOpen((current) => !current)}
         type="button"
       >
-        <span className="truncate">{selectedLabel}</span>
+        <span className="truncate">
+          {selectedLabel !== null ? (
+            selectedLabel
+          ) : (
+            <Skeleton className="h-3 w-16" label="Resolving model" />
+          )}
+        </span>
         <span aria-hidden="true" className="text-[var(--color-text-tertiary)]">
           ▾
         </span>
@@ -264,8 +276,13 @@ export function ModelSelect({
                       <span className="block truncate font-bold" title={model.label}>
                         {model.label}
                         {model.isDefault ? (
+                          // The agent's own catalog default (e.g. Claude's
+                          // default model), not the value the precedence
+                          // chain above preselects — a different row can be
+                          // the actual selection. Worded so it never reads
+                          // as "the default choice" for this control.
                           <span className="ml-1 text-[10px] font-normal text-[var(--color-text-tertiary)]">
-                            (default)
+                            (catalog default)
                           </span>
                         ) : null}
                       </span>

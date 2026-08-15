@@ -35,7 +35,7 @@ const spawnMode: SpawnModalMode = {
   model: {
     value: null,
     onChange: vi.fn(),
-    projectId: "p1",
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
     carry: null,
     onResolvedChange: vi.fn(),
   },
@@ -51,7 +51,7 @@ const respawnMode: SpawnModalMode = {
   model: {
     value: null,
     onChange: vi.fn(),
-    projectId: "p1",
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
     carry: null,
     onResolvedChange: vi.fn(),
   },
@@ -109,6 +109,15 @@ describe("SpawnModal", () => {
     expect(screen.getByLabelText("Plan")).toBeInTheDocument();
     expect(screen.getByLabelText("Self-destruct")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
+  });
+
+  it("explains the disabled project select instead of showing a blank box when no projects are configured", () => {
+    renderModal({
+      ...spawnMode,
+      project: { value: "", onChange: vi.fn(), options: [] },
+    });
+    expect(screen.getByLabelText("Spawn project")).toBeDisabled();
+    expect(screen.getByText("No projects configured yet.")).toBeInTheDocument();
   });
 
   it("spawn mode selects expose only concrete options, never a Default/Select placeholder", () => {

@@ -1542,8 +1542,10 @@ export function Dashboard() {
     setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
     // A restored draft's workspace mode is a real prior choice, not the
     // resolver's fill-in; a fresh project pick (no draft) re-enters auto mode
-    // so the project-resolved default applies once it lands.
-    spawnWorkspaceModeAutoRef.current = draft?.workspaceMode === undefined;
+    // so the project-resolved default applies once it lands. workspaceMode
+    // is a required, validated field of SpawnDraft, so this is exactly
+    // "no draft was found" — not a per-field undefined check.
+    spawnWorkspaceModeAutoRef.current = draft === null;
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
@@ -1594,11 +1596,21 @@ export function Dashboard() {
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
 
+  // Fetched once here and passed down into ModelSelect (mode.model.spawnDefaults)
+  // instead of letting it fetch its own copy — one request per project+agent,
+  // and the workspace-mode default below and the model rung 3 default both
+  // read the same settle.
   const spawnDefaults = useResolvedSpawnDefaults(spawnProjectId, spawnAgent);
   useEffect(() => {
     if (!spawnWorkspaceModeAutoRef.current || spawnDefaults.worktree === null) return;
     setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
   }, [spawnDefaults.worktree]);
+  // While still on the auto-derived workspace mode, an in-flight or failed
+  // spawn-defaults request means the true project default is unknown; block
+  // submit rather than silently spawning against the "worktree" fallback
+  // state. A manual pick (auto ref false) always overrides this.
+  const spawnWorkspaceModeUnresolved =
+    spawnWorkspaceModeAutoRef.current && (spawnDefaults.loading || spawnDefaults.error !== null);
 
   const spawnDraft = useMemo<SpawnDraft | null>(() => {
     if (!spawnProjectId) return null;
@@ -2607,7 +2619,7 @@ export function Dashboard() {
                     if (spawnModel !== null) spawnDraftDirtyRef.current = true;
                     setSpawnModel(next);
                   },
-                  projectId: spawnProjectId,
+                  spawnDefaults,
                   carry: null,
                   onResolvedChange: setSpawnModelResolved,
                 },
@@ -2640,6 +2652,7 @@ export function Dashboard() {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
                     spawnDraftDirtyRef.current = true;
+                    spawnWorkspaceModeAutoRef.current = false;
                     setSpawnWorkspaceMode(next);
                   },
                 },
@@ -2685,6 +2698,12 @@ export function Dashboard() {
                       <p className="text-xs text-[var(--color-text-tertiary)]">
                         exists on origin — will track it
                       </p>
+                    ) : null}
+                    {spawnWorkspaceModeAutoRef.current && spawnDefaults.error ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        couldn&apos;t resolve this project&apos;s workspace default:{" "}
+                        {spawnDefaults.error} — pick worktree or shared to continue
+                      </div>
                     ) : null}
                   </>
                 ),
@@ -2743,7 +2762,12 @@ export function Dashboard() {
                   : null
               }
               submitBusyAriaLabel="Spawning session"
-              submitDisabled={spawning || !spawnProjectId.trim() || !spawnModelResolved}
+              submitDisabled={
+                spawning ||
+                !spawnProjectId.trim() ||
+                !spawnModelResolved ||
+                spawnWorkspaceModeUnresolved
+              }
               submitLabel="Spawn"
               submitting={spawning}
               title="Spawn Session"

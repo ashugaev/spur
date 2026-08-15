@@ -20,7 +20,7 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
-import type { CarrySpawnModel } from "@/lib/spawn-defaults";
+import type { CarrySpawnModel, ResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
@@ -34,7 +34,8 @@ export interface FieldControl<T> {
 // settled/unsettled signal callers gate submit on (see ModelSelect's
 // onResolvedChange) instead of inferring it from a null value.
 export interface ModelFieldControl extends FieldControl<string | null> {
-  projectId: string;
+  // Owned and fetched once by the caller (see ModelSelectProps.spawnDefaults).
+  spawnDefaults: ResolvedSpawnDefaults;
   carry: CarrySpawnModel | null;
   onResolvedChange: (resolved: boolean) => void;
 }
@@ -197,7 +198,7 @@ function ModeFields({
               carry={mode.model.carry}
               onChange={mode.model.onChange}
               onResolvedChange={mode.model.onResolvedChange}
-              projectId={mode.model.projectId}
+              spawnDefaults={mode.model.spawnDefaults}
               value={mode.model.value}
             />
           </div>
@@ -216,6 +217,9 @@ function ModeFields({
             </select>
           ) : null}
         </div>
+        {mode.project.options.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-tertiary)]">No projects configured yet.</p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <input
             aria-label="branch name"
@@ -278,7 +282,7 @@ function ModeFields({
             carry={mode.model.carry}
             onChange={mode.model.onChange}
             onResolvedChange={mode.model.onResolvedChange}
-            projectId={mode.model.projectId}
+            spawnDefaults={mode.model.spawnDefaults}
             value={mode.model.value}
           />
         </div>

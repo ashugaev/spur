@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelSelect } from "@/components/ModelSelect.js";
-import type { AgentModel, SpawnDefaultsResponse } from "@/lib/types.js";
+import type { ResolvedSpawnDefaults } from "@/lib/spawn-defaults.js";
+import type { AgentModel } from "@/lib/types.js";
 
 const CLAUDE_MODELS: AgentModel[] = [
   { id: "opus", label: "Opus", isDefault: true },
@@ -12,21 +13,28 @@ const CLAUDE_MODELS: AgentModel[] = [
 
 const CODEX_MODELS: AgentModel[] = [{ id: "codex-model-id", label: "Codex model" }];
 
-function mockSpurFetch(options: {
-  models?: Record<string, AgentModel[]>;
-  defaults?: SpawnDefaultsResponse;
-}) {
-  const defaults: SpawnDefaultsResponse = options.defaults ?? { model: null, worktree: true };
+// The owning component (Dashboard, SessionDetail) now fetches spawn-defaults
+// once and passes the result down; ModelSelect no longer fetches it itself.
+// Most tests only care about the model catalog, so default to an
+// already-settled, no-project-default answer.
+const SETTLED_NO_DEFAULT: ResolvedSpawnDefaults = {
+  model: null,
+  worktree: null,
+  loading: false,
+  error: null,
+};
+
+function mockModelsFetch(models: Record<string, AgentModel[]>) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     const parsed = new URL(url, "http://localhost");
     if (parsed.pathname === "/api/models") {
       const agent = parsed.searchParams.get("agent") ?? "";
-      const models = options.models?.[agent] ?? [];
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ models }) } as Response);
-    }
-    if (parsed.pathname.endsWith("/spawn-defaults")) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(defaults) } as Response);
+      const list = models[agent] ?? [];
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ models: list }),
+      } as Response);
     }
     return Promise.reject(new Error(`unexpected fetch ${url}`));
   });
@@ -43,14 +51,14 @@ afterEach(() => {
 
 describe("ModelSelect", () => {
   it("opens the menu and filters models by search", async () => {
-    vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
     render(
       <ModelSelect
         agent="claude"
         carry={null}
         onChange={vi.fn()}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={SETTLED_NO_DEFAULT}
         value={null}
       />,
     );
@@ -65,14 +73,14 @@ describe("ModelSelect", () => {
   });
 
   it("never renders a Default menu row", async () => {
-    vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
     render(
       <ModelSelect
         agent="claude"
         carry={null}
         onChange={vi.fn()}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={SETTLED_NO_DEFAULT}
         value="sonnet"
       />,
     );
@@ -81,10 +89,15 @@ describe("ModelSelect", () => {
     await waitFor(() => expect(screen.getByRole("menuitem", { name: /Opus/ })).toBeInTheDocument());
     expect(screen.queryByRole("menuitem", { name: "Default" })).not.toBeInTheDocument();
     expect(screen.queryByText("Default")).not.toBeInTheDocument();
+    // Opus carries the agent's own catalog isDefault flag, but "sonnet" is
+    // selected here — the badge must never read as "the selected/preselected
+    // choice" for this control, only as the agent catalog's own default.
+    expect(screen.queryByText("(default)")).not.toBeInTheDocument();
+    expect(screen.getByText("(catalog default)")).toBeInTheDocument();
   });
 
-  it("shows Resolving… before the fetches settle, then the resolved concrete label", async () => {
-    vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+  it("shows a motion-only resolving indicator before the fetches settle, then the resolved concrete label", async () => {
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
 
     function Harness() {
       const [value, setValue] = useState<string | null>(null);
@@ -94,7 +107,7 @@ describe("ModelSelect", () => {
           carry={null}
           onChange={setValue}
           onResolvedChange={vi.fn()}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value={value}
         />
       );
@@ -102,21 +115,26 @@ describe("ModelSelect", () => {
 
     render(<Harness />);
 
-    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Resolving…");
+    // No visible wait-text label — a motion-only Skeleton instead.
+    expect(
+      within(screen.getByRole("button", { name: "Model" })).getByRole("status", {
+        name: "Resolving model",
+      }),
+    ).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus"),
     );
   });
 
   it("pins a favorited model to the top and persists it", async () => {
-    vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
     render(
       <ModelSelect
         agent="claude"
         carry={null}
         onChange={vi.fn()}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={SETTLED_NO_DEFAULT}
         value={null}
       />,
     );
@@ -138,20 +156,14 @@ describe("ModelSelect", () => {
   it("preselects the first favorite over the project-resolved default", async () => {
     window.localStorage.setItem("spur:model-favorites", JSON.stringify(["claude:haiku"]));
     const onChange = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      mockSpurFetch({
-        models: { claude: CLAUDE_MODELS },
-        defaults: { model: "opus", worktree: true },
-      }),
-    );
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
     render(
       <ModelSelect
         agent="claude"
         carry={null}
         onChange={onChange}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={{ model: "opus", worktree: true, loading: false, error: null }}
         value={null}
       />,
     );
@@ -161,17 +173,14 @@ describe("ModelSelect", () => {
 
   it("resets the selection when the agent changes to a list that lacks it", async () => {
     const onChange = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      mockSpurFetch({ models: { claude: CLAUDE_MODELS, codex: CODEX_MODELS } }),
-    );
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS, codex: CODEX_MODELS }));
     const { rerender } = render(
       <ModelSelect
         agent="claude"
         carry={null}
         onChange={onChange}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={SETTLED_NO_DEFAULT}
         value="opus"
       />,
     );
@@ -183,7 +192,7 @@ describe("ModelSelect", () => {
         carry={null}
         onChange={onChange}
         onResolvedChange={vi.fn()}
-        projectId="proj"
+        spawnDefaults={SETTLED_NO_DEFAULT}
         value="opus"
       />,
     );
@@ -191,7 +200,7 @@ describe("ModelSelect", () => {
   });
 
   it("re-pins to a concrete model after a stale-selection reset without looping", async () => {
-    vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
     const onChangeSpy = vi.fn();
 
     function Harness() {
@@ -205,7 +214,7 @@ describe("ModelSelect", () => {
             setValue(next);
           }}
           onResolvedChange={vi.fn()}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value={value}
         />
       );
@@ -225,13 +234,13 @@ describe("ModelSelect", () => {
   });
 
   describe("onResolvedChange", () => {
-    it("never reports resolved on the pre-effect mount render, even when both fetches settle fast", async () => {
-      // Regression guard: `loading` (and useResolvedSpawnDefaults' `loading`)
-      // must start true, not false. If either started false, the very first
-      // render — before the mount effect has set loading — would compute
-      // `settled` as true and fire a spurious onResolvedChange(true) ahead of
-      // the real one, even though nothing has actually resolved yet.
-      vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    it("never reports resolved on the pre-effect mount render, even when the models fetch settles fast", async () => {
+      // Regression guard: ModelSelect's own `loading` must start true, not
+      // false. If it started false, the very first render — before the
+      // mount effect has set loading — would compute `settled` as true and
+      // fire a spurious onResolvedChange(true) ahead of the real one, even
+      // though the models fetch hasn't actually resolved yet.
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
       const onResolvedChange = vi.fn();
       render(
         <ModelSelect
@@ -239,20 +248,20 @@ describe("ModelSelect", () => {
           carry={null}
           onChange={vi.fn()}
           onResolvedChange={onResolvedChange}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value={null}
         />,
       );
 
       // Checked synchronously, right after the mount commit: the very first
       // call recorded must be `false`, never `true`, regardless of how fast
-      // the underlying fetches go on to settle.
+      // the underlying fetch goes on to settle.
       expect(onResolvedChange.mock.calls[0]).toEqual([false]);
 
       await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
     });
 
-    it("reports unresolved while in flight, then resolved once settled with a concrete model", async () => {
+    it("reports unresolved while the model list is in flight, then resolved once settled with a concrete model", async () => {
       let resolveModels: ((response: Response) => void) | undefined;
       const pendingModels = new Promise<Response>((resolve) => {
         resolveModels = resolve;
@@ -263,12 +272,6 @@ describe("ModelSelect", () => {
           const url = typeof input === "string" ? input : input.toString();
           const parsed = new URL(url, "http://localhost");
           if (parsed.pathname === "/api/models") return pendingModels;
-          if (parsed.pathname.endsWith("/spawn-defaults")) {
-            return Promise.resolve({
-              ok: true,
-              json: () => Promise.resolve({ model: null, worktree: true }),
-            } as Response);
-          }
           return Promise.reject(new Error(`unexpected fetch ${url}`));
         }) as unknown as typeof fetch,
       );
@@ -282,7 +285,7 @@ describe("ModelSelect", () => {
             carry={null}
             onChange={setValue}
             onResolvedChange={onResolvedChange}
-            projectId="proj"
+            spawnDefaults={SETTLED_NO_DEFAULT}
             value={value}
           />
         );
@@ -292,7 +295,11 @@ describe("ModelSelect", () => {
 
       expect(onResolvedChange).toHaveBeenCalledWith(false);
       expect(onResolvedChange).not.toHaveBeenCalledWith(true);
-      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Resolving…");
+      expect(
+        within(screen.getByRole("button", { name: "Model" })).getByRole("status", {
+          name: "Resolving model",
+        }),
+      ).toBeInTheDocument();
 
       resolveModels?.(
         new Response(JSON.stringify({ models: CLAUDE_MODELS }), {
@@ -307,8 +314,43 @@ describe("ModelSelect", () => {
       expect(onResolvedChange).toHaveBeenLastCalledWith(true);
     });
 
+    it("stays unresolved while the caller's spawnDefaults is still loading, even once the model list has settled", async () => {
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      const onResolvedChange = vi.fn();
+      const { rerender } = render(
+        <ModelSelect
+          agent="claude"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={{ model: null, worktree: null, loading: true, error: null }}
+          value={null}
+        />,
+      );
+
+      // The model list itself resolves quickly, but the caller-owned
+      // spawnDefaults fetch is still in flight; settle must wait on both.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true);
+
+      rerender(
+        <ModelSelect
+          agent="claude"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={{ model: null, worktree: true, loading: false, error: null }}
+          value={null}
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+    });
+
     it("reports resolved with a null value once the catalog settles empty", async () => {
-      vi.stubGlobal("fetch", mockSpurFetch({ models: {} }));
+      vi.stubGlobal("fetch", mockModelsFetch({}));
       const onResolvedChange = vi.fn();
       const onChange = vi.fn();
       render(
@@ -317,7 +359,7 @@ describe("ModelSelect", () => {
           carry={null}
           onChange={onChange}
           onResolvedChange={onResolvedChange}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value={null}
         />,
       );
@@ -340,7 +382,7 @@ describe("ModelSelect", () => {
           carry={null}
           onChange={onChange}
           onResolvedChange={onResolvedChange}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value={null}
         />,
       );
@@ -349,8 +391,14 @@ describe("ModelSelect", () => {
       expect(onChange).not.toHaveBeenCalled();
     });
 
-    it("reports resolved immediately when a concrete value is already provided, before any fetch settles", () => {
-      vi.stubGlobal("fetch", mockSpurFetch({ models: { claude: CLAUDE_MODELS } }));
+    it("does not report resolved just because a caller-seeded value is already non-null, before any fetch settles", async () => {
+      // A caller must seed `value` as null and rely on `carry` alone (see
+      // SessionDetail's openRespawnEditor): a value seeded directly from an
+      // unfiltered source, like session.model, would otherwise report
+      // resolved immediately even for a model that has since left the
+      // catalog. Reported here with a value the seed would produce, to
+      // confirm the settle signal never trusts it early regardless.
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
       const onResolvedChange = vi.fn();
       render(
         <ModelSelect
@@ -358,13 +406,15 @@ describe("ModelSelect", () => {
           carry={{ agent: "claude", model: "opus" }}
           onChange={vi.fn()}
           onResolvedChange={onResolvedChange}
-          projectId="proj"
+          spawnDefaults={SETTLED_NO_DEFAULT}
           value="opus"
         />,
       );
 
-      expect(onResolvedChange).toHaveBeenCalledWith(true);
-      expect(onResolvedChange).not.toHaveBeenCalledWith(false);
+      expect(onResolvedChange).toHaveBeenCalledWith(false);
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true);
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
     });
   });
 });

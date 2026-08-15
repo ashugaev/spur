@@ -910,6 +910,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(
@@ -942,6 +946,7 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByAltText("edited.png")).toBeInTheDocument();
     });
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -968,6 +973,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnPosts += 1;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -979,6 +988,7 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
     const respawnButton = screen.getByRole("button", { name: "Respawn" });
+    await waitFor(() => expect(respawnButton).not.toBeDisabled());
     fireEvent.click(respawnButton);
     fireEvent.click(respawnButton);
 
@@ -1005,6 +1015,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         respawnCalls.push(body);
@@ -1026,6 +1040,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -1104,7 +1119,8 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    // Opens already carrying the session's own model directly (no rung needed).
+    // Opens with the session's own model resolved through the carry rung,
+    // once the catalog settles (not seeded directly ahead of that check).
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Sonnet");
     });
@@ -1214,10 +1230,15 @@ describe("SessionDetail voice input", () => {
     expect(respawnBody?.agent).toBe("cursor");
   });
 
-  it("keeps Respawn disabled while the model resolves after an agent switch, enables once settled", async () => {
-    let resolveModels: ((response: Response) => void) | undefined;
-    const pendingModels = new Promise<Response>((resolve) => {
-      resolveModels = resolve;
+  it("keeps Respawn disabled until the carried model clears the catalog filter, then re-disables and re-settles across an agent switch", async () => {
+    let resolveClaudeModels: ((response: Response) => void) | undefined;
+    const pendingClaudeModels = new Promise<Response>((resolve) => {
+      resolveClaudeModels = resolve;
+    });
+    let cursorModelsRequested = false;
+    let resolveCursorModels: ((response: Response) => void) | undefined;
+    const pendingCursorModels = new Promise<Response>((resolve) => {
+      resolveCursorModels = resolve;
     });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1230,7 +1251,11 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url.startsWith("/api/models")) return pendingModels;
+      if (url === "/api/models?agent=cursor") {
+        cursorModelsRequested = true;
+        return pendingCursorModels;
+      }
+      if (url.startsWith("/api/models")) return pendingClaudeModels;
       if (url.startsWith("/api/projects/api/spawn-defaults")) {
         return new Response(JSON.stringify({ model: null, worktree: true }));
       }
@@ -1240,15 +1265,34 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    // Carried from session.model, resolved immediately without a fetch.
-    expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    // Carried from session.model, but not yet confirmed against the catalog:
+    // must stay disabled until that fetch settles, not enable immediately.
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+    // The control must not be seeded directly from session.model ahead of
+    // that confirmation either — it should still read as unresolved (a
+    // motion-only indicator), not show the (unconfirmed) carried label.
+    expect(
+      within(screen.getByRole("button", { name: "Respawn model" })).getByRole("status", {
+        name: "Resolving model",
+      }),
+    ).toBeInTheDocument();
+
+    resolveClaudeModels?.(
+      new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }), {
+        status: 200,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
 
     fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
       target: { value: "cursor" },
     });
     expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+    await waitFor(() => expect(cursorModelsRequested).toBe(true));
 
-    resolveModels?.(
+    resolveCursorModels?.(
       new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }), {
         status: 200,
       }),
@@ -1318,6 +1362,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -1328,6 +1376,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -1446,6 +1495,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
       }
@@ -1458,6 +1511,7 @@ describe("SessionDetail voice input", () => {
     fireEvent.change(screen.getByPlaceholderText(/^Initial message\.\.\./), {
       target: { value: "Retry with new plan" },
     });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {

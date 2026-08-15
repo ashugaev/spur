@@ -41,7 +41,7 @@ export function resolvePreselectedModelId(args: {
   return models[0]?.id ?? null;
 }
 
-interface ResolvedSpawnDefaults {
+export interface ResolvedSpawnDefaults {
   model: string | null;
   worktree: boolean | null;
   loading: boolean;

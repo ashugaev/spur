@@ -566,8 +566,10 @@ describe("Dashboard project create/delete", () => {
 
   it("spawns with the project-resolved model and workspace mode when the user touches neither control", async () => {
     let spawnInit: RequestInit | undefined;
+    let spawnDefaultsRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) spawnDefaultsRequests += 1;
       if (url === "/api/runtime/resources") {
         return new Response(JSON.stringify({ available: false }));
       }
@@ -658,6 +660,112 @@ describe("Dashboard project create/delete", () => {
       overrides?: { worktree: boolean };
     };
     expect(body.model).toBe("sonnet");
+    expect(body.overrides).toEqual({ worktree: false });
+    // Dashboard fetches this once and passes it into ModelSelect; ModelSelect
+    // must not also fetch its own copy for the same project+agent.
+    expect(spawnDefaultsRequests).toBe(1);
+  });
+
+  it("blocks submit and surfaces an error instead of silently guessing worktree when spawn-defaults fails", async () => {
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+
+    // The model resolves fine; the workspace default request fails. Submit
+    // must stay disabled — never fall through to sending the "worktree"
+    // fallback state as if it were the project's real configured default.
+    await waitFor(() => {
+      expect(within(dialog).getByRole("button", { name: "Spawn model" })).toHaveTextContent(
+        "Sonnet",
+      );
+    });
+    expect(submitButton()).toBeDisabled();
+    expect(within(dialog).getByText(/daemon unreachable/)).toBeInTheDocument();
+
+    // Only a manual pick unblocks it, and only the user's own explicit
+    // choice is what gets sent — never a guess.
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "shared" },
+    });
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
     expect(body.overrides).toEqual({ worktree: false });
   });
 });

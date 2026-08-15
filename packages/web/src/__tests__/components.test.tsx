@@ -303,16 +303,14 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(
-          JSON.stringify({
-            projectId: "api",
-            prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
-            agent: "claude",
-            model: "opus",
-            overrides: { worktree: true },
-            slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
-          }),
-        );
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+          agent: "claude",
+          model: "opus",
+          overrides: { worktree: true },
+          slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
+        });
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-backlog-1" }),
           { status: 201 },
@@ -1371,20 +1369,30 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
       if (url.startsWith("/api/models"))
-        return new Response(JSON.stringify({ models: [{ id: "auto", label: "Auto" }] }));
+        // A real cursor catalog never surfaces only "auto" as an option
+        // (that id is the pre-rewrite placeholder DEFAULT_CURSOR_MODEL
+        // launches actually resolve away from, see spawnDefaults); a
+        // concrete second entry keeps this test from re-encoding that
+        // sentinel as if it were a normal model choice.
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "composer-1.5", label: "Composer 1.5" },
+              { id: "auto", label: "Auto" },
+            ],
+          }),
+        );
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(
-          JSON.stringify({
-            projectId: "api",
-            prompt: "",
-            agent: "cursor",
-            model: "auto",
-            overrides: { worktree: true },
-          }),
-        );
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "",
+          agent: "cursor",
+          model: "composer-1.5",
+          overrides: { worktree: true },
+        });
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-cursor-1", agent: "cursor" }),
           { status: 201 },
@@ -1418,15 +1426,16 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "",
-            agent: "cursor",
-            model: "auto",
-            overrides: { worktree: true },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "",
+      agent: "cursor",
+      model: "composer-1.5",
+      overrides: { worktree: true },
     });
   });
 
@@ -1447,15 +1456,13 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(
-          JSON.stringify({
-            projectId: "api",
-            prompt: "",
-            agent: "claude",
-            model: "opus",
-            overrides: { worktree: true },
-          }),
-        );
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "",
+          agent: "claude",
+          model: "opus",
+          overrides: { worktree: true },
+        });
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -1488,15 +1495,16 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "",
-            agent: "claude",
-            model: "opus",
-            overrides: { worktree: true },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
     });
   });
 
@@ -1550,19 +1558,20 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "Ship it",
-            agent: "claude",
-            model: "opus",
-            overrides: { worktree: true },
-            selfDestruct: {
-              enabled: true,
-              conditions: "tests pass",
-            },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "Ship it",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -1625,16 +1634,17 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "Ship it",
-            agent: "claude",
-            model: "opus",
-            overrides: { worktree: true },
-            selfDestruct: { enabled: true },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "Ship it",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
+      selfDestruct: { enabled: true },
     });
   });
 
@@ -1944,16 +1954,17 @@ describe("Dashboard", () => {
           expect.objectContaining({
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              projectId: "api",
-              prompt: value,
-              agent: "claude",
-              model: "opus",
-              overrides: { worktree: true },
-            }),
           }),
         );
         expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      });
+      const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+      expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+        projectId: "api",
+        prompt: value,
+        agent: "claude",
+        model: "opus",
+        overrides: { worktree: true },
       });
     },
   );

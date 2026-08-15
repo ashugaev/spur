@@ -16,6 +16,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -1638,6 +1639,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // Submit gates on this, not on `handoffModel === null` — a settled-empty
   // catalog also has a null model but is a valid, submittable state.
   const [handoffModelResolved, setHandoffModelResolved] = useState(false);
+  // Fetched once here and passed down into each modal's ModelSelect, instead
+  // of letting ModelSelect fetch its own copy (see Dashboard's spawnDefaults
+  // for the same pattern). projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const respawnSpawnDefaults = useResolvedSpawnDefaults(
+    respawnOpen && session ? session.projectId : "",
+    respawnAgent ?? "claude",
+  );
+  const handoffSpawnDefaults = useResolvedSpawnDefaults(
+    handoffOpen && session ? session.projectId : "",
+    handoffAgent ?? "claude",
+  );
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -2533,7 +2546,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
-    setRespawnModel(session.model ?? null);
+    // Not session.model directly: that would seed an unfiltered value ahead
+    // of ModelSelect's resolver, bypassing the isListed() check the `carry`
+    // rung otherwise applies (a model the session ran that has since left
+    // the agent's catalog would stay selected and submittable). Passing
+    // carry lets the resolver re-derive the same value, filtered.
+    setRespawnModel(null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -3756,7 +3774,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
                         onResolvedChange={setHandoffModelResolved}
-                        projectId={session.projectId}
+                        spawnDefaults={handoffSpawnDefaults}
                         value={handoffModel}
                       />
                     </div>
@@ -3834,7 +3852,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 model: {
                   value: respawnModel,
                   onChange: setRespawnModel,
-                  projectId: session.projectId,
+                  spawnDefaults: respawnSpawnDefaults,
                   carry: { agent: session.agent, model: session.model },
                   onResolvedChange: setRespawnModelResolved,
                 },
