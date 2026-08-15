@@ -2170,7 +2170,9 @@ export function createProgram(cliEntrypoint: string): Command {
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
-          const instanceConfig = loadInstanceConfigReadOnly(getConfigPath(command.parent as Command));
+          const instanceConfig = loadInstanceConfigReadOnly(
+            getConfigPath(command.parent as Command),
+          );
           if (instanceConfig.status === "ok") {
             hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }

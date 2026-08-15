@@ -216,9 +216,9 @@ describe("spur cache CLI", () => {
         },
       };
     });
-    await expect(
-      parseCache(["--prune", "--yes"], ["--config", selectedPath]),
-    ).rejects.toThrow("requires a resolved instance config");
+    await expect(parseCache(["--prune", "--yes"], ["--config", selectedPath])).rejects.toThrow(
+      "requires a resolved instance config",
+    );
     expect(loadInstanceConfigReadOnlyMock).toHaveBeenCalledWith(selectedPath);
     expect(planCachePruneMock).not.toHaveBeenCalled();
     expect(executePruneMock).not.toHaveBeenCalled();

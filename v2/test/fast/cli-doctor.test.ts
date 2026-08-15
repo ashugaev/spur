@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
+import type * as WorkspaceModule from "../../src/workspace.js";
 
 const { loadInstanceConfigReadOnlyMock, collectHostInstallChecksMock, writeStdoutMock } =
   vi.hoisted(() => ({
@@ -26,9 +27,10 @@ vi.mock("../../src/host-install.js", () => ({
   runNpmInit: vi.fn(),
 }));
 
-vi.mock("../../src/workspace.js", () => ({
-  resolveDoctorRepoRoot: vi.fn(async (cwd: string) => cwd),
-}));
+vi.mock("../../src/workspace.js", async () => {
+  const actual = await vi.importActual<typeof WorkspaceModule>("../../src/workspace.js");
+  return { ...actual, resolveDoctorRepoRoot: vi.fn(async (cwd: string) => cwd) };
+});
 
 vi.mock("../../src/io.js", () => ({
   writeStderr: vi.fn(),
