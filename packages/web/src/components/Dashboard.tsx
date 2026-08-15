@@ -1609,8 +1609,9 @@ export function Dashboard() {
   // Fetched once here and passed down into ModelSelect (mode.model.spawnDefaults)
   // instead of letting it fetch its own copy — one request per project+agent,
   // and the workspace-mode default below and the model rung 3 default both
-  // read the same settle.
-  const spawnDefaults = useResolvedSpawnDefaults(spawnProjectId, spawnAgent);
+  // read the same settle. projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const spawnDefaults = useResolvedSpawnDefaults(spawnOpen ? spawnProjectId : "", spawnAgent);
   useEffect(() => {
     if (!spawnWorkspaceModeAuto || spawnDefaults.worktree === null) return;
     setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
@@ -1746,6 +1747,12 @@ export function Dashboard() {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
     if (!project || !prompt) return;
+    // Same gate as submit: while still on the auto-derived workspace mode,
+    // an in-flight or failed spawn-defaults request means spawnWorkspaceMode
+    // is still the hardcoded "worktree" fallback, not the project's real
+    // default. Firing preflight against it would compute a branch suggestion
+    // for the wrong mode. Re-runs (and re-debounces) once the defaults settle.
+    if (spawnWorkspaceModeUnresolved) return;
 
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -1775,7 +1782,14 @@ export function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
+  }, [
+    spawnProjectId,
+    spawnPrompt,
+    spawnAgent,
+    spawnWorkspaceMode,
+    spawnDefaultBranch,
+    spawnWorkspaceModeUnresolved,
+  ]);
 
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 

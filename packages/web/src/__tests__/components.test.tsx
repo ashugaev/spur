@@ -2455,6 +2455,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       if (url === "/api/models?agent=claude")
         return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight") {
         return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
       }
@@ -2515,6 +2517,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       if (url === "/api/models?agent=claude")
         return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight") {
         return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
       }

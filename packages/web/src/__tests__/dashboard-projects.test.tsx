@@ -667,6 +667,65 @@ describe("Dashboard project create/delete", () => {
     expect(spawnDefaultsRequests).toBe(1);
   });
 
+  it("does not fetch spawn-defaults while the Spawn modal stays closed", async () => {
+    let spawnDefaultsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) spawnDefaultsRequests += 1;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "sonnet", label: "Sonnet" },
+              { id: "opus", label: "Opus" },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: "sonnet", worktree: false }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    // Force-resolve the project list (which also drives spawnProjectId via
+    // the sync effect, independent of the Spawn modal) before asserting no
+    // spawn-defaults request fired: the Spawn modal itself is still closed.
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+    openProjectMenu();
+    await waitFor(() => {
+      expect(screen.getByRole("menuitemradio", { name: "API" })).toBeInTheDocument();
+    });
+    fireEvent.click(projectFilterButton());
+    expect(spawnDefaultsRequests).toBe(0);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    await waitFor(() => {
+      expect(spawnDefaultsRequests).toBe(1);
+    });
+  });
+
   it("blocks submit and surfaces an error instead of silently guessing worktree when spawn-defaults fails", async () => {
     let spawnInit: RequestInit | undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -768,6 +827,90 @@ describe("Dashboard project create/delete", () => {
     });
     const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
     expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("does not fire preflight against the unresolved 'worktree' fallback mode while spawn-defaults is still pending", async () => {
+    let resolveSpawnDefaults: ((response: Response) => void) | undefined;
+    const pendingSpawnDefaults = new Promise<Response>((resolve) => {
+      resolveSpawnDefaults = resolve;
+    });
+    const preflightRequests: Array<{
+      projectId?: string;
+      prompt?: string;
+      agent?: string;
+      overrides?: { worktree: boolean };
+    }> = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      // The project's real default is "shared" (worktree: false), but this
+      // never settles until the test resolves it below, holding
+      // spawnWorkspaceMode on its hardcoded "worktree" initial value.
+      if (url.startsWith("/api/projects/api/spawn-defaults")) return pendingSpawnDefaults;
+      if (url === "/api/preflight") {
+        const body = JSON.parse(init?.body as string) as {
+          projectId?: string;
+          prompt?: string;
+          agent?: string;
+          overrides?: { worktree: boolean };
+        };
+        preflightRequests.push(body);
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    // Wait past the 500ms preflight debounce while spawn-defaults is still
+    // pending: no preflight request should fire against the unresolved,
+    // still-"worktree" fallback mode.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(preflightRequests).toEqual([]);
+
+    // Once spawn-defaults settles to the real "shared" default, preflight
+    // fires with the now-correct, resolved mode — never with the stale
+    // worktree:true fallback.
+    resolveSpawnDefaults?.(new Response(JSON.stringify({ model: "sonnet", worktree: false })));
+    await waitFor(() => {
+      expect(preflightRequests).toEqual([
+        {
+          projectId: "api",
+          prompt: "Do the thing",
+          agent: "claude",
+          overrides: { worktree: false },
+        },
+      ]);
+    });
   });
 
   it("unblocks submit when the user confirms the already-selected workspace mode after a spawn-defaults failure", async () => {
