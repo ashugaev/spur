@@ -63,6 +63,7 @@ interface RetryState {
 interface DeliveryFailure {
   attempts: number;
   nextAttemptAt: number;
+  recordedAt: number;
 }
 
 // Rate-limit suppression is deliberately excluded from the failure/backoff
@@ -731,7 +732,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     batch: PendingBatch,
   ): Promise<SessionView | null> => {
     try {
-      return await deps.sessionService.getForTrigger(batch.batch.sessionId);
+      return await deps.sessionService.get(batch.batch.sessionId);
     } catch (error) {
       clearBatch(queueKey);
       const message = error instanceof Error ? error.message : String(error);
@@ -792,13 +793,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       );
       return;
     }
+    const now = Date.now();
     const backoff = DELIVERY_RETRY_BASE_MS * 2 ** (attempts - 1);
-    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: Date.now() + backoff });
+    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: now + backoff, recordedAt: now });
   };
 
   const isInDeliveryBackoff = (queueKey: string): boolean => {
     const failure = deliveryFailures.get(queueKey);
     return failure !== undefined && Date.now() < failure.nextAttemptAt;
+  };
+
+  // Clears a stale delivery-failure entry when the session has restarted since
+  // the failure was recorded. A restart invalidates the prior failure context,
+  // so backoff should not block the fresh session.
+  const clearBackoffIfRestarted = (queueKey: string, session: SessionView): void => {
+    const failure = deliveryFailures.get(queueKey);
+    if (failure && sessionRestartedSince(session, failure.recordedAt)) {
+      deliveryFailures.delete(queueKey);
+    }
   };
 
   // Delivers outside the CI-failed retry path and, on a thrown error, feeds
@@ -927,6 +939,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
     if (deliverable) {
@@ -1041,6 +1054,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     // A delivery already failing its backoff window stays queued for the flush
     // loop; a fresh event must not bypass the backoff and re-spam the target.
+    // If the session restarted since the failure, the stale backoff is cleared.
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
     if (session.state !== "working" && session.state !== "needs_input") return;

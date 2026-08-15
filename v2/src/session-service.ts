@@ -6120,24 +6120,6 @@ export class SessionService {
     return this.enrich(session);
   }
 
-  // Same as get() but suppresses restore warmup for the duration of the call.
-  // Triggers use this so they see the agent's actual state (e.g. waiting) and
-  // can gate delivery on the send window rather than forcing interrupt:true
-  // against a session that only appears "working" due to warmup.
-  async getForTrigger(sessionId: string): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
-    const saved = this.restoreWarmupUntil.get(session.id);
-    this.restoreWarmupUntil.delete(session.id);
-    try {
-      return await this.enrich(session);
-    } finally {
-      if (saved !== undefined) this.restoreWarmupUntil.set(session.id, saved);
-    }
-  }
-
   listAvailableBacklog(): AvailableBacklogItem[] {
     const items: AvailableBacklogItem[] = [];
     for (const [projectId, project] of Object.entries(this.config.projects)) {

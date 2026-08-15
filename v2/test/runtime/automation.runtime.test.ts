@@ -1116,6 +1116,11 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           const agentLogBeforeRestore = await context.readAgentLog(session.id);
           expect(countOccurrences(agentLogBeforeRestore, conflictMarker)).toBe(1);
 
+          await pollUntil(async () => readEventLog(context.dataDir).map((entry) => entry.event), {
+            timeoutMs: 5_000,
+            accept: (events) => events.includes("trigger.send.delivered"),
+          });
+
           await service.pause(session.id);
 
           await pollUntil(async () => service.get(session.id), {
