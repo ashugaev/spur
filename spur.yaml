@@ -104,7 +104,8 @@ projects:
         spawnDeskGroup: true
         spawn:
           restrictWrites: true
-          allowedTriggers: ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"]
+          allowedTriggers:
+            ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"]
           blocks:
             - agent: claude
               model: sonnet

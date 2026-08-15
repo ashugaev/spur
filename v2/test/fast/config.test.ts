@@ -2681,7 +2681,11 @@ projects:
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
       trigger.spawn.allowedTriggers,
-    ]).toEqual([true, undefined, ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"]]);
+    ]).toEqual([
+      true,
+      undefined,
+      ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"],
+    ]);
     expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
     expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
