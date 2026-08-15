@@ -122,6 +122,11 @@ function sessionFixture(overrides?: Partial<SpurSessionView>) {
     id: "api-a1",
     project: "api",
     agent: "claude",
+    // A real session always has a resolved launch model; respawn/handoff
+    // carry it forward (rung 1) so their model control opens pre-resolved
+    // without a network round trip. Tests that need the model absent (e.g.
+    // header display) override with `model: undefined` explicitly.
+    model: "sonnet",
     prompt: "Fix auth",
     branch: "feat/auth",
     worktree: true,
@@ -236,7 +241,7 @@ describe("SessionDetail header", () => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        return new Response(JSON.stringify(sessionFixture({ model: undefined })), { status: 200 });
       }
 
       if (url === "/api/sessions/api-a1/conversation") {
@@ -946,6 +951,7 @@ describe("SessionDetail voice input", () => {
       prompt: "Re-run with screenshot",
       startupAttachmentIds: ["1715000000000-source.png"],
       attachments: [{ name: "edited.png", data: expect.any(String) }],
+      model: "sonnet",
     });
   });
 
@@ -1060,6 +1066,103 @@ describe("SessionDetail voice input", () => {
     expect(select.value).toBe("codex");
   });
 
+  it("re-carries the session's model when switching back to its original agent, ahead of the catalog default", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ agent: "claude", model: "sonnet" }),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      // Same catalog for every agent; "opus" ranks first and carries
+      // isDefault, so it is what rung 4 (first list entry) would pick absent
+      // a carry or favorite.
+      if (url.startsWith("/api/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "opus", label: "Opus", isDefault: true },
+              { id: "sonnet", label: "Sonnet" },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    // Opens already carrying the session's own model directly (no rung needed).
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Sonnet");
+    });
+
+    // Switching to a different agent clears the carry (agent mismatch); the
+    // control falls through to the catalog's first entry.
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "codex" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Opus");
+    });
+
+    // Switching back to the session's own agent re-enters the carry rung,
+    // which must win over the catalog default it just resolved to.
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "claude" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Sonnet");
+    });
+  });
+
+  it("keeps Respawn disabled while the model is unresolved, then enables it once it settles", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ model: undefined }),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+  });
+
   it("includes the selected agent in the respawn payload when changed", async () => {
     let respawnBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -1077,6 +1180,15 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      // Switching to a different agent clears the carried model, so the
+      // control re-resolves against that agent's own catalog before submit
+      // re-enables.
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -1089,6 +1201,10 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
       target: { value: "cursor" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
     });
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 

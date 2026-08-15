@@ -95,6 +95,7 @@ import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/proje
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -3156,6 +3157,45 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(502);
       expect(payload.error).toBe("daemon down");
+    });
+
+    // ── GET /api/projects/:id/spawn-defaults ──────────────────────────────
+
+    it("GET /api/projects/:id/spawn-defaults forwards the agent to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ model: "sonnet", worktree: false });
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { model: string | null; worktree: boolean };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/api/spawn-defaults?agent=claude");
+      expect(payload).toEqual({ model: "sonnet", worktree: false });
+    });
+
+    it("GET /api/projects/:id/spawn-defaults rejects an unsupported agent without calling the daemon", async () => {
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=nope"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/projects/:id/spawn-defaults surfaces the daemon's error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
     });
   });
 });

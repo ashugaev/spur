@@ -36,14 +36,18 @@ describe("spawn draft storage", () => {
     expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toEqual(draft);
     expect(readSpawnDraft("other-project", window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(spawnDraftStorageKey(draft.projectId))).toContain(
-      '"version":1',
+      '"version":2',
     );
   });
 
   it.each([
     ["malformed", "not-json"],
     ["old schema", JSON.stringify({ ...draft, version: 0, savedAt: NOW })],
-    ["stale", JSON.stringify({ ...draft, version: 1, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
+    ["stale", JSON.stringify({ ...draft, version: 2, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
+    [
+      "a current-version draft holding the retired default workspace mode",
+      JSON.stringify({ ...draft, workspaceMode: "default", version: 2, savedAt: NOW }),
+    ],
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
     window.localStorage.setItem(key, value);

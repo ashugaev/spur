@@ -63,13 +63,15 @@ function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSes
 
 test.describe("spawn modal capture", () => {
   test("desktop spawn, shepherd, respawn, and desk modals", async ({ page }) => {
-    await mockModels(page);
-    await mockSlashCommands(page);
     await mockSessions(
       page,
       [makeWorkingSession({ id: "capture-spawn-1", project: "my-project" })],
       DEFAULT_PROJECTS,
     );
+    // Registered after mockSessions so this catalog wins (Playwright routes
+    // match most-recently-registered first).
+    await mockModels(page);
+    await mockSlashCommands(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -120,13 +122,13 @@ test.describe("spawn modal capture", () => {
 
   test("mobile spawn modal stays in viewport", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await mockModels(page);
-    await mockSlashCommands(page);
     await mockSessions(
       page,
       [makeWorkingSession({ id: "capture-spawn-mobile", project: "my-project" })],
       DEFAULT_PROJECTS,
     );
+    await mockModels(page);
+    await mockSlashCommands(page);
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();

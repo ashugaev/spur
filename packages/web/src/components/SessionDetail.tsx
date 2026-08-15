@@ -1958,7 +1958,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
-      if (respawnModel !== null) payload.model = respawnModel;
+      payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2036,8 +2036,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session || !handoffAgent) return;
     setBusyAction("handoff");
     try {
-      const payload: Record<string, unknown> = { agent: handoffAgent };
-      if (handoffModel !== null) payload.model = handoffModel;
+      const payload: Record<string, unknown> = { agent: handoffAgent, model: handoffModel };
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
@@ -3594,7 +3593,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <ModelSelect
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
+                        carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
+                        projectId={session.projectId}
                         value={handoffModel}
                       />
                     </div>
@@ -3637,7 +3638,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </button>
                       <button
                         className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={busyAction === "handoff"}
+                        disabled={busyAction === "handoff" || handoffModel === null}
                         onClick={() => void handleHandoff()}
                         type="button"
                       >
@@ -3667,7 +3668,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
               mode={{
                 kind: "respawn",
-                model: { value: respawnModel, onChange: setRespawnModel },
+                model: {
+                  value: respawnModel,
+                  onChange: setRespawnModel,
+                  projectId: session.projectId,
+                  carry: { agent: session.agent, model: session.model },
+                },
                 artifactSlot:
                   startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
@@ -3735,6 +3741,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               submitBusyLabel="Respawning..."
               submitDisabled={
                 busyAction === "respawn" ||
+                respawnModel === null ||
                 (!respawnPrompt.trim() &&
                   respawnStartupAttachmentIds.length === 0 &&
                   respawnAttachments.length === 0)

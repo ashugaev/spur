@@ -79,7 +79,7 @@ async function fillSpawnForm(
     project?: string;
     prompt?: string;
     branch?: string;
-    workspaceMode?: "default" | "worktree" | "shared";
+    workspaceMode?: "worktree" | "shared";
     baseBranch?: string;
     planMode?: boolean;
     selfDestruct?: boolean;
@@ -2242,8 +2242,9 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
 
-    // Project select (contains "Select project" option)
-    await expect(page.getByRole("option", { name: /select project/i })).toBeAttached();
+    // Project select exposes only the configured project, never a placeholder.
+    await expect(page.getByRole("option", { name: /select project/i })).toHaveCount(0);
+    await expect(page.getByRole("option", { name: "my-project" })).toBeAttached();
     // Agent select
     await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
@@ -2933,6 +2934,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         projectId: "other-project",
         prompt: placeholder.prompt,
         agent: "claude",
+        model: "opus",
         branch: "feature/spawn-payload",
         planMode: true,
         steps: ["Audit the repository", "Implement the retry flow"],
@@ -2950,7 +2952,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
-    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
     await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
     await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
@@ -3005,6 +3007,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
         projectId: "my-project",
         prompt: placeholder.prompt,
         agent: "claude",
+        model: "opus",
+        overrides: { worktree: true },
         selfDestruct: { enabled: true },
       },
     ]);

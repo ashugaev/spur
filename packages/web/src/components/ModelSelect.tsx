@@ -7,6 +7,11 @@ import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useFavorites } from "@/hooks/useFavorites";
 import { cn } from "@/lib/cn";
 import type { AgentName } from "@/lib/agents";
+import {
+  resolvePreselectedModelId,
+  useResolvedSpawnDefaults,
+  type CarrySpawnModel,
+} from "@/lib/spawn-defaults";
 import type { AgentModel, AgentModelsResponse } from "@/lib/types";
 
 const FAVORITES_STORAGE_KEY = "spur:model-favorites";
@@ -15,6 +20,13 @@ interface ModelSelectProps {
   agent: AgentName;
   value: string | null;
   onChange: (id: string | null) => void;
+  // The project this model launches into; resolves the project-scoped
+  // default (rung 3) and the workspace mode Dashboard reads separately.
+  projectId: string;
+  // The running session's model, carried across a same-agent respawn or
+  // handoff (rung 1). null when there is nothing to carry, e.g. a fresh
+  // Dashboard spawn.
+  carry: CarrySpawnModel | null;
   ariaLabel?: string;
 }
 
@@ -22,13 +34,21 @@ function favoriteKey(agent: AgentName, id: string): string {
   return `${agent}:${id}`;
 }
 
-export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: ModelSelectProps) {
+export function ModelSelect({
+  agent,
+  value,
+  onChange,
+  projectId,
+  carry,
+  ariaLabel = "Model",
+}: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const favorites = useFavorites(FAVORITES_STORAGE_KEY);
+  const spawnDefaults = useResolvedSpawnDefaults(projectId, agent);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -71,6 +91,35 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
 
   const isFavorite = (model: AgentModel) => favorites.has(favoriteKey(agent, model.id));
 
+  // Once both fetches settle, preselect a concrete model instead of leaving
+  // the field on a "server decides" sentinel. Only runs while unresolved: the
+  // reset above re-enters this by nulling a stale selection, and a resolved
+  // id can never be re-nulled by this effect, so the two never loop.
+  useEffect(() => {
+    if (value !== null || loading || spawnDefaults.loading) return;
+    const favoriteIds = new Set(
+      models.filter((model) => favorites.has(favoriteKey(agent, model.id))).map((m) => m.id),
+    );
+    const resolved = resolvePreselectedModelId({
+      agent,
+      models,
+      favoriteIds,
+      carry,
+      projectDefaultModelId: spawnDefaults.model,
+    });
+    if (resolved !== null) onChangeRef.current(resolved);
+  }, [
+    value,
+    loading,
+    spawnDefaults.loading,
+    spawnDefaults.model,
+    models,
+    favorites.keys,
+    agent,
+    carry?.agent,
+    carry?.model,
+  ]);
+
   const orderedModels = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const filtered = needle
@@ -89,8 +138,16 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
     contentDeps: [loading, error, orderedModels],
   });
 
+  // value stays null both while a fetch is in flight and once resolution
+  // settles with an empty list (nothing to preselect); the label
+  // distinguishes those two rather than showing a placeholder sentinel.
+  const settled = !loading && !spawnDefaults.loading;
   const selectedLabel =
-    value === null ? "Default" : (models.find((m) => m.id === value)?.label ?? value);
+    value !== null
+      ? (models.find((m) => m.id === value)?.label ?? value)
+      : settled
+        ? "No models"
+        : "Resolving…";
 
   return (
     <div className="relative" ref={containerRef}>
@@ -126,20 +183,6 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
             value={query}
           />
           <div className="flex flex-col overflow-y-auto overflow-x-hidden">
-            <button
-              className={cn(
-                "flex w-full items-center border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition hover:bg-[var(--color-hover-overlay)]",
-                value === null ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]",
-              )}
-              onClick={() => {
-                onChange(null);
-                setOpen(false);
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <span className="font-bold">Default</span>
-            </button>
             {loading ? (
               <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
                 Loading…

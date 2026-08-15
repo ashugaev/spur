@@ -53,6 +53,7 @@ import {
   writeSpawnDraft,
   type SpawnDraft,
 } from "@/lib/spawn-draft";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
@@ -526,16 +527,12 @@ function readLocationSearch(): string {
   return window.location.search;
 }
 
-function buildSpawnOverrides(
-  workspaceMode: WorkspaceMode,
-  defaultBranch: string,
-): SpawnOverrides | undefined {
+function buildSpawnOverrides(workspaceMode: WorkspaceMode, defaultBranch: string): SpawnOverrides {
   if (workspaceMode === "worktree") {
     const trimmed = defaultBranch.trim();
     return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
   }
-  if (workspaceMode === "shared") return { worktree: false };
-  return undefined;
+  return { worktree: false };
 }
 
 function projectOptionLabel(project: ProjectInfo): string {
@@ -1059,7 +1056,11 @@ export function Dashboard() {
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("default");
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("worktree");
+  // True while spawnWorkspaceMode still tracks the project-resolved default
+  // (nothing chosen by hand yet); the resolver effect below only writes to
+  // spawnWorkspaceMode while this holds, so it never clobbers a manual pick.
+  const spawnWorkspaceModeAutoRef = useRef(true);
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1516,7 +1517,11 @@ export function Dashboard() {
     setSpawnSelfDestruct(draft?.selfDestruct ?? false);
     setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
     setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
-    setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
+    // A restored draft's workspace mode is a real prior choice, not the
+    // resolver's fill-in; a fresh project pick (no draft) re-enters auto mode
+    // so the project-resolved default applies once it lands.
+    spawnWorkspaceModeAutoRef.current = draft?.workspaceMode === undefined;
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
@@ -1565,6 +1570,12 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  const spawnDefaults = useResolvedSpawnDefaults(spawnProjectId, spawnAgent);
+  useEffect(() => {
+    if (!spawnWorkspaceModeAutoRef.current || spawnDefaults.worktree === null) return;
+    setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
+  }, [spawnDefaults.worktree]);
 
   const spawnDraft = useMemo<SpawnDraft | null>(() => {
     if (!spawnProjectId) return null;
@@ -1697,8 +1708,12 @@ export function Dashboard() {
     let cancelled = false;
     const timer = setTimeout(() => {
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-      const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
-      if (overrides) payload.overrides = overrides;
+      const payload: Record<string, unknown> = {
+        projectId: project,
+        prompt,
+        agent: spawnAgent,
+        overrides,
+      };
 
       fetch("/api/preflight", {
         method: "POST",
@@ -1765,8 +1780,9 @@ export function Dashboard() {
         projectId: nextProjectId,
         prompt: nextPrompt,
         agent: spawnAgent,
+        model: spawnModel,
+        overrides,
       };
-      if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
@@ -1781,7 +1797,6 @@ export function Dashboard() {
         };
       }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
       if (spawnTrackerUrl) {
         payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
       }
@@ -1815,7 +1830,8 @@ export function Dashboard() {
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
-      setSpawnWorkspaceMode("default");
+      spawnWorkspaceModeAutoRef.current = true;
+      setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
       setSpawnPinnedProjectId(null);
@@ -2557,6 +2573,8 @@ export function Dashboard() {
                   spawnDraftDirtyRef.current = true;
                   setSpawnModel(next);
                 },
+                projectId: spawnProjectId,
+                carry: null,
               },
               branch: {
                 value: spawnBranch,
@@ -2575,6 +2593,7 @@ export function Dashboard() {
                 value: spawnWorkspaceMode,
                 onChange: (next) => {
                   spawnDraftDirtyRef.current = true;
+                  spawnWorkspaceModeAutoRef.current = false;
                   setSpawnWorkspaceMode(next);
                 },
               },
@@ -2678,7 +2697,7 @@ export function Dashboard() {
                 : null
             }
             submitBusyLabel="Spawning..."
-            submitDisabled={spawning || !spawnProjectId.trim()}
+            submitDisabled={spawning || !spawnProjectId.trim() || spawnModel === null}
             submitLabel="Spawn"
             submitting={spawning}
             title="Spawn Session"

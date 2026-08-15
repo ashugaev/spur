@@ -34,6 +34,14 @@ export interface AgentModelsResponse {
   models: AgentModel[];
 }
 
+// What a spawn would resolve to for this project+agent if the request named
+// neither field. `model` is null when the agent has no configured or built-in
+// default.
+export interface SpawnDefaultsResponse {
+  model: string | null;
+  worktree: boolean;
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -492,7 +500,7 @@ export interface SpawnOverrides {
   defaultBranch?: string;
 }
 
-export type WorkspaceMode = "default" | "worktree" | "shared";
+export type WorkspaceMode = "worktree" | "shared";
 
 export function toDashboardSession(
   session: SpurSessionView,

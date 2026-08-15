@@ -1,7 +1,7 @@
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { WorkspaceMode } from "@/lib/types";
 
-const SPAWN_DRAFT_VERSION = 1;
+const SPAWN_DRAFT_VERSION = 2;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const SPAWN_DRAFT_STORAGE_PREFIX = "spur:spawn-draft";
 
@@ -44,7 +44,7 @@ function isAgentName(value: unknown): value is AgentName {
 }
 
 function isWorkspaceMode(value: unknown): value is WorkspaceMode {
-  return value === "default" || value === "worktree" || value === "shared";
+  return value === "worktree" || value === "shared";
 }
 
 function isStoredSpawnDraft(

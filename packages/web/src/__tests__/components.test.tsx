@@ -297,6 +297,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(init?.body).toBe(
@@ -304,6 +308,8 @@ describe("Dashboard", () => {
             projectId: "api",
             prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
             agent: "claude",
+            model: "opus",
+            overrides: { worktree: true },
             slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
           }),
         );
@@ -417,7 +423,7 @@ describe("Dashboard", () => {
       "Work on WEB-18: Fix billing\n\nhttps://jira.example.com/browse/WEB-18",
     );
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
@@ -1348,7 +1354,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
@@ -1364,9 +1370,21 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "auto", label: "Auto" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }));
+        expect(init?.body).toBe(
+          JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            agent: "cursor",
+            model: "auto",
+            overrides: { worktree: true },
+          }),
+        );
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-cursor-1", agent: "cursor" }),
           { status: 201 },
@@ -1389,6 +1407,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1397,7 +1418,13 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }),
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            agent: "cursor",
+            model: "auto",
+            overrides: { worktree: true },
+          }),
         }),
       );
     });
@@ -1414,9 +1441,21 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }));
+        expect(init?.body).toBe(
+          JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            agent: "claude",
+            model: "opus",
+            overrides: { worktree: true },
+          }),
+        );
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -1434,7 +1473,9 @@ describe("Dashboard", () => {
     });
 
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
-    expect(spawnButton).toBeEnabled();
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
     expect(screen.getByText("⌘ + ⏎")).toBeInTheDocument();
     expect(screen.queryByText("⌘/Ctrl+Enter")).not.toBeInTheDocument();
@@ -1447,7 +1488,13 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "",
+            agent: "claude",
+            model: "opus",
+            overrides: { worktree: true },
+          }),
         }),
       );
     });
@@ -1464,6 +1511,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
@@ -1487,7 +1538,11 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
       target: { value: "  tests pass  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
+    fireEvent.click(spawnButton);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -1499,6 +1554,8 @@ describe("Dashboard", () => {
             projectId: "api",
             prompt: "Ship it",
             agent: "claude",
+            model: "opus",
+            overrides: { worktree: true },
             selfDestruct: {
               enabled: true,
               conditions: "tests pass",
@@ -1524,6 +1581,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
@@ -1552,7 +1613,11 @@ describe("Dashboard", () => {
     );
     expect(conditionsField).toHaveValue("");
 
-    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
+    fireEvent.click(spawnButton);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -1564,6 +1629,8 @@ describe("Dashboard", () => {
             projectId: "api",
             prompt: "Ship it",
             agent: "claude",
+            model: "opus",
+            overrides: { worktree: true },
             selfDestruct: { enabled: true },
           }),
         }),
