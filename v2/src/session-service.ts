@@ -3696,16 +3696,22 @@ export class SessionService {
   // The resolved model/worktree a spawn would pick for this project+agent if
   // the caller sent neither. Lets the client preselect a concrete option
   // instead of a "server decides" sentinel. Reuses the exact spawn-time
-  // resolution functions so the shown value is always what launches.
-  spawnDefaults(projectId: string, agent: AgentName): SpawnDefaultsResponse {
+  // resolution functions, including the per-agent launch-model rewrite (e.g.
+  // cursor's "auto" -> a concrete model id), so the shown value is always
+  // what launches.
+  async spawnDefaults(projectId: string, agent: AgentName): Promise<SpawnDefaultsResponse> {
     let project: ProjectConfig;
     try {
       project = this.getProject(projectId);
     } catch {
       throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
     }
+    const model = await resolveAgentLaunchModel(
+      agent,
+      resolveSpawnModel({ requestModel: undefined, resolvedAgent: agent, project }),
+    );
     return {
-      model: resolveSpawnModel({ requestModel: undefined, resolvedAgent: agent, project }) ?? null,
+      model: model ?? null,
       worktree: resolveSpawnWorktree(project, undefined),
     };
   }

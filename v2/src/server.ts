@@ -967,7 +967,7 @@ export async function startServer(
           sendError(response, 400, `Unsupported agent: ${rawAgent}`);
           return;
         }
-        sendJson(response, 200, service.spawnDefaults(spawnDefaultsProjectId, agent));
+        sendJson(response, 200, await service.spawnDefaults(spawnDefaultsProjectId, agent));
         return;
       }
 

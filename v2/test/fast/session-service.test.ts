@@ -1798,6 +1798,25 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("spawnDefaults resolves cursor's launch model, not the pre-rewrite default", async () => {
+    // "api" has no defaultModels.cursor, so resolveSpawnModel alone yields
+    // DEFAULT_CURSOR_MODEL ("auto"); spawnDefaults must still return the
+    // concrete model cursor actually launches, same as a real spawn does.
+    resolveCursorLaunchModelMock.mockReset().mockImplementation(async (model) => {
+      expect(model).toBe("auto");
+      return "composer-1.5";
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.spawnDefaults("api", "cursor")).resolves.toEqual({
+      model: "composer-1.5",
+      worktree: true,
+    });
+    expect(resolveCursorLaunchModelMock).toHaveBeenCalledWith("auto");
+    service.dispose();
+  });
+
   it("spawn-time subscriptions persist a state-<target> record on the new session and the returned view", async () => {
     const sessions = createSessionStore();
     sessions.set("watched-1", runningSession({ id: "watched-1" }));
