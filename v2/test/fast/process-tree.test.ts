@@ -221,15 +221,22 @@ describe("snapshotProcesses", () => {
   });
 
   it("bounds ps enumeration and degrades to unavailable on timeout", async () => {
+    let capturedFile: string | undefined;
+    let capturedArgs: string[] | undefined;
+    let capturedOptions: { encoding: string; timeout: number; maxBuffer: number } | undefined;
+
     const snapshot = await snapshotProcesses(async (file, args, options) => {
-      expect(file).toBe("ps");
-      expect(args).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
-      expect(options).toMatchObject({ encoding: "utf8", timeout: 2_000 });
-      expect(options.maxBuffer).toBeGreaterThan(0);
+      capturedFile = file;
+      capturedArgs = args;
+      capturedOptions = options;
       throw new Error("ps timed out");
     });
 
     expect(snapshot).toEqual({ status: "unavailable" });
+    expect(capturedFile).toBe("ps");
+    expect(capturedArgs).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
+    expect(capturedOptions).toMatchObject({ encoding: "utf8", timeout: 2_000 });
+    expect(capturedOptions?.maxBuffer).toBeGreaterThan(0);
   });
 });
 
