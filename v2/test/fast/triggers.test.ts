@@ -734,6 +734,112 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("retains the first-arrival deadline when a second event merges into the same queue key", async () => {
+    const secondEvent = {
+      name: "github:comment",
+      projectId: "api",
+      sourceId: "pr-watch",
+      data: {
+        sessionId: "api-1",
+        repo: "acme/api",
+        prNumber: 42,
+        prTitle: "Tighten coverage",
+        signals: [{ key: "comment:2", kind: "comment", text: "A follow-up comment." }],
+      },
+    };
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      storedSnapshot([
+        { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+        { key: "comment:2", kind: "comment", text: "A follow-up comment." },
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent("comment:1"));
+      // Advance to ~25s; second event arrives before the 30s window expires.
+      await vi.advanceTimersByTimeAsync(25_000);
+      bus.emit(secondEvent);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // The original deadline is ~30s from t0 (not extended by the merge).
+      // Advance 5s more (total 30s from first event) — window expires, delivery fires.
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A follow-up comment."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers on first flush tick when SPUR_IDLE_WAIT_BEFORE_FLUSH_MS is 0", async () => {
+    process.env["SPUR_IDLE_WAIT_BEFORE_FLUSH_MS"] = "0";
+    try {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("A new comment arrived."),
+          { interrupt: false },
+        );
+      } finally {
+        await controller.stop();
+      }
+    } finally {
+      delete process.env["SPUR_IDLE_WAIT_BEFORE_FLUSH_MS"];
+    }
+  });
+
   it("delivers GitLab updates via flush loop when the target session is waiting", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -2286,6 +2392,47 @@ describe("startConfiguredTriggers", () => {
     } finally {
       await controller.stop();
       vi.useFakeTimers();
+    }
+  });
+
+  it("delivers interrupt:true trigger with interrupt:false after window when session is waiting", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      // No early delivery — window must expire first.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Window expires; delivers with interrupt:false (session is not working).
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
     }
   });
 
