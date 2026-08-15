@@ -28155,6 +28155,96 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("fires exactly one catch-up interval wake once a completed session is revived, then re-arms to a future time", async () => {
+      const sessions = seedShepherdSession({
+        status: "completed",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:59:00.000Z",
+          intervalMs: 60_000,
+          message: "Stale interval wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      // Suppressed while completed: no send, no advance.
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T09:59:00.000Z");
+
+      // Revive the session (mirrors what reopen() does to a completed session).
+      const revived = sessions.get("shp-1");
+      if (!revived) throw new Error("session missing");
+      sessions.set("shp-1", {
+        ...revived,
+        status: "running",
+        updatedAt: "2026-03-18T10:00:05.000Z",
+      });
+
+      await advanceSeconds(5);
+
+      // Exactly one catch-up wake fires, and nextDueAt re-arms past the current time.
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      const rearmedNextDueAt = sessions.get("shp-1")?.intervalWake?.nextDueAt;
+      expect(rearmedNextDueAt).toBeDefined();
+      expect(Date.parse(rearmedNextDueAt as string)).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:10.000Z"),
+      );
+
+      await advanceSeconds(5);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("fires an armed interval wake on a stopped session", async () => {
+      const sessions = seedShepherdSession({
+        status: "stopped",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:59:00.000Z",
+          intervalMs: 60_000,
+          message: "Stale interval wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(Date.parse(sessions.get("shp-1")?.intervalWake?.nextDueAt ?? "")).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:00.000Z"),
+      );
+      service.dispose();
+    });
+
+    it("fires an armed interval wake on a paused session", async () => {
+      const sessions = seedShepherdSession({
+        status: "paused",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:59:00.000Z",
+          intervalMs: 60_000,
+          message: "Stale interval wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(Date.parse(sessions.get("shp-1")?.intervalWake?.nextDueAt ?? "")).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:00.000Z"),
+      );
+      service.dispose();
+    });
+
     it("fires a far-past-due daily wake once and jumps to the next occurrence", async () => {
       const sessions = seedShepherdSession({
         dailyWake: {

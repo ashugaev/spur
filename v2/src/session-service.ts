@@ -3232,8 +3232,12 @@ export class SessionService {
             JSON.stringify(current.intervalWake) === JSON.stringify(session.intervalWake) &&
             JSON.stringify(current.dailyWake) === JSON.stringify(session.dailyWake);
           if (claimed) {
-            const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = current;
-            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            // Preserve updatedAt: this write only drops dead schedule fields
+            // on a session GC already treats as terminal, it is bookkeeping
+            // not session activity, and bumping it would reset the killed
+            // session's GC clock (ageInDays(newestUpdatedAt) in
+            // session-gc.ts classifyGroup), delaying its archival.
+            const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...cleared } = current;
             writeSession(this.config.dataDir, cleared);
             const event =
               current.dailyWake && !current.intervalWake
