@@ -30,10 +30,13 @@ export interface FieldControl<T> {
 }
 
 // A model FieldControl plus the two inputs ModelSelect needs to resolve a
-// concrete preselection instead of a "server decides" sentinel.
+// concrete preselection instead of a "server decides" sentinel, plus the
+// settled/unsettled signal callers gate submit on (see ModelSelect's
+// onResolvedChange) instead of inferring it from a null value.
 export interface ModelFieldControl extends FieldControl<string | null> {
   projectId: string;
   carry: CarrySpawnModel | null;
+  onResolvedChange: (resolved: boolean) => void;
 }
 
 export interface ToggleControl {
@@ -193,6 +196,7 @@ function ModeFields({
               ariaLabel="Spawn model"
               carry={mode.model.carry}
               onChange={mode.model.onChange}
+              onResolvedChange={mode.model.onResolvedChange}
               projectId={mode.model.projectId}
               value={mode.model.value}
             />
@@ -273,6 +277,7 @@ function ModeFields({
             ariaLabel="Respawn model"
             carry={mode.model.carry}
             onChange={mode.model.onChange}
+            onResolvedChange={mode.model.onResolvedChange}
             projectId={mode.model.projectId}
             value={mode.model.value}
           />

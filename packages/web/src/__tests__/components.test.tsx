@@ -1958,6 +1958,120 @@ describe("Dashboard", () => {
     },
   );
 
+  it("keeps Spawn disabled while the model resolves, enables once settled with a concrete model", async () => {
+    let resolveModels: ((response: Response) => void) | undefined;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models")) return pendingModels;
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
+
+    resolveModels?.(
+      new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Spawn enabled and omits model from the payload when the catalog settles empty", async () => {
+    let spawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/spawn") {
+        spawnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("No models");
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(spawnBody).not.toBeNull();
+    });
+    expect(spawnBody).not.toHaveProperty("model");
+  });
+
+  it("keeps Spawn enabled and omits model from the payload when the models fetch errors", async () => {
+    let spawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models")) throw new Error("network down");
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/spawn") {
+        spawnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(spawnBody).not.toBeNull();
+    });
+    expect(spawnBody).not.toHaveProperty("model");
+  });
+
   it("toggles voice recording from the spawn prompt with Cmd+.", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

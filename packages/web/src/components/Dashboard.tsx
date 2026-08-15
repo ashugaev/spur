@@ -1059,6 +1059,10 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself. Submit
+  // gates on this, not on `spawnModel === null` — a settled-empty catalog
+  // also has a null model but is a valid, submittable state.
+  const [spawnModelResolved, setSpawnModelResolved] = useState(false);
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
@@ -1801,9 +1805,11 @@ export function Dashboard() {
         projectId: nextProjectId,
         prompt: nextPrompt,
         agent: spawnAgent,
-        model: spawnModel,
-        overrides,
       };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
+      if (spawnModel !== null) payload.model = spawnModel;
+      payload.overrides = overrides;
       if (effectiveSessionMode) payload.mode = effectiveSessionMode;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
@@ -2603,6 +2609,7 @@ export function Dashboard() {
                   },
                   projectId: spawnProjectId,
                   carry: null,
+                  onResolvedChange: setSpawnModelResolved,
                 },
                 ...(spawnModeOptions.length > 0
                   ? {
@@ -2736,7 +2743,7 @@ export function Dashboard() {
                   : null
               }
               submitBusyAriaLabel="Spawning session"
-              submitDisabled={spawning || !spawnProjectId.trim() || spawnModel === null}
+              submitDisabled={spawning || !spawnProjectId.trim() || !spawnModelResolved}
               submitLabel="Spawn"
               submitting={spawning}
               title="Spawn Session"

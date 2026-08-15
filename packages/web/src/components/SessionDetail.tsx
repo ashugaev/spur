@@ -1621,6 +1621,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `respawnModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [respawnModelResolved, setRespawnModelResolved] = useState(false);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
@@ -1630,6 +1634,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `handoffModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [handoffModelResolved, setHandoffModelResolved] = useState(false);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -2023,7 +2031,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
-      payload.model = respawnModel;
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2101,7 +2111,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session || !handoffAgent) return;
     setBusyAction("handoff");
     try {
-      const payload: Record<string, unknown> = { agent: handoffAgent, model: handoffModel };
+      const payload: Record<string, unknown> = { agent: handoffAgent };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
+      if (handoffModel !== null) payload.model = handoffModel;
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
@@ -3742,6 +3755,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         ariaLabel="Handoff model"
                         carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
+                        onResolvedChange={setHandoffModelResolved}
                         projectId={session.projectId}
                         value={handoffModel}
                       />
@@ -3787,7 +3801,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         aria-busy={busyAction === "handoff" || undefined}
                         aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                         className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={busyAction === "handoff" || handoffModel === null}
+                        disabled={busyAction === "handoff" || !handoffModelResolved}
                         onClick={() => void handleHandoff()}
                         type="button"
                       >
@@ -3822,6 +3836,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   onChange: setRespawnModel,
                   projectId: session.projectId,
                   carry: { agent: session.agent, model: session.model },
+                  onResolvedChange: setRespawnModelResolved,
                 },
                 artifactSlot:
                   startupArtifacts.length > 0 ? (
@@ -3890,7 +3905,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               submitBusyAriaLabel="Respawning session"
               submitDisabled={
                 busyAction === "respawn" ||
-                respawnModel === null ||
+                !respawnModelResolved ||
                 (!respawnPrompt.trim() &&
                   respawnStartupAttachmentIds.length === 0 &&
                   respawnAttachments.length === 0)

@@ -28,6 +28,14 @@ interface ModelSelectProps {
   // handoff (rung 1). null when there is nothing to carry, e.g. a fresh
   // Dashboard spawn.
   carry: CarrySpawnModel | null;
+  // Fires whenever the model is or isn't submittable yet: true once both the
+  // model list and the project-scoped defaults have settled (loaded,
+  // errored, or come back empty — a settled-empty catalog is a valid,
+  // submittable state with `value` staying null), OR immediately if `value`
+  // already carries a concrete id (e.g. a respawn/handoff seeded from the
+  // session's current model). The single source callers gate submit on,
+  // instead of inferring it from `value === null`.
+  onResolvedChange: (resolved: boolean) => void;
   ariaLabel?: string;
 }
 
@@ -41,17 +49,22 @@ export function ModelSelect({
   onChange,
   projectId,
   carry,
+  onResolvedChange,
   ariaLabel = "Model",
 }: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
-  const [loading, setLoading] = useState(false);
+  // Starts true: the mount effect below always kicks off a fetch for the
+  // current agent, so the pre-effect render must not read as settled.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const favorites = useFavorites(FAVORITES_STORAGE_KEY);
   const spawnDefaults = useResolvedSpawnDefaults(projectId, agent);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onResolvedChangeRef = useRef(onResolvedChange);
+  onResolvedChangeRef.current = onResolvedChange;
 
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +104,22 @@ export function ModelSelect({
   }, [models, loading, value]);
 
   const isFavorite = (model: AgentModel) => favorites.has(favoriteKey(agent, model.id));
+
+  // value stays null both while a fetch is in flight and once resolution
+  // settles with an empty list (nothing to preselect); the label
+  // distinguishes those two rather than showing a placeholder sentinel.
+  const settled = !loading && !spawnDefaults.loading;
+  // Resolved is settled-or-already-concrete: a caller that seeds `value` up
+  // front (a respawn/handoff carrying the session's current model) already
+  // holds a submittable selection and shouldn't wait on the catalog fetch to
+  // re-confirm it. Once unsettled, only settling (not a value change alone)
+  // can flip this back to true, so a genuinely in-flight resolution with no
+  // value yet still reports unresolved.
+  const resolved = settled || value !== null;
+
+  useEffect(() => {
+    onResolvedChangeRef.current(resolved);
+  }, [resolved]);
 
   // Once both fetches settle, preselect a concrete model instead of leaving
   // the field on a "server decides" sentinel. Only runs while unresolved: the
@@ -139,10 +168,6 @@ export function ModelSelect({
     contentDeps: [loading, error, orderedModels],
   });
 
-  // value stays null both while a fetch is in flight and once resolution
-  // settles with an empty list (nothing to preselect); the label
-  // distinguishes those two rather than showing a placeholder sentinel.
-  const settled = !loading && !spawnDefaults.loading;
   const selectedLabel =
     value !== null
       ? (models.find((m) => m.id === value)?.label ?? value)

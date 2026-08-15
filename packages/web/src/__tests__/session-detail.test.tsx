@@ -1214,6 +1214,93 @@ describe("SessionDetail voice input", () => {
     expect(respawnBody?.agent).toBe("cursor");
   });
 
+  it("keeps Respawn disabled while the model resolves after an agent switch, enables once settled", async () => {
+    let resolveModels: ((response: Response) => void) | undefined;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) return pendingModels;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    // Carried from session.model, resolved immediately without a fetch.
+    expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "cursor" },
+    });
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+
+    resolveModels?.(
+      new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }), {
+        status: 200,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Respawn enabled and omits model from the payload when the switched agent's catalog settles empty", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "cursor" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(respawnBody).not.toBeNull();
+    });
+    expect(respawnBody).not.toHaveProperty("model");
+  });
+
   it("omits the agent from the respawn payload when unchanged", async () => {
     let respawnBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -1247,6 +1334,82 @@ describe("SessionDetail voice input", () => {
       expect(respawnBody).not.toBeNull();
     });
     expect(respawnBody && "agent" in respawnBody).toBe(false);
+  });
+
+  it("keeps Handoff disabled while the model resolves, enables once settled with a concrete model", async () => {
+    let resolveModels: ((response: Response) => void) | undefined;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      // The handoff target agent always differs from the session's own
+      // agent, so nothing carries over here; the model always starts
+      // unresolved.
+      if (url.startsWith("/api/models")) return pendingModels;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
+    expect(submitButton).toBeDisabled();
+
+    resolveModels?.(
+      new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }), {
+        status: 200,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(submitButton).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Handoff enabled and omits model from the payload when the catalog settles empty", async () => {
+    let handoffBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url === "/api/sessions/api-a1/handoff" && init?.method === "POST") {
+        handoffBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
+    await waitFor(() => {
+      expect(submitButton).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton);
+
+    await waitFor(() => {
+      expect(handoffBody).not.toBeNull();
+    });
+    expect(handoffBody).not.toHaveProperty("model");
   });
 
   it("renders slash suggestions and input history in the respawn modal footer", async () => {

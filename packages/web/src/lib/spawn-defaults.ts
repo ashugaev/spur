@@ -55,10 +55,13 @@ export function useResolvedSpawnDefaults(
   projectId: string,
   agent: AgentName,
 ): ResolvedSpawnDefaults {
+  // loading starts true whenever a projectId is already known at mount: the
+  // effect below fetches unconditionally in that case, so the pre-effect
+  // render must not read as settled.
   const [state, setState] = useState<ResolvedSpawnDefaults>({
     model: null,
     worktree: null,
-    loading: false,
+    loading: Boolean(projectId),
     error: null,
   });
 

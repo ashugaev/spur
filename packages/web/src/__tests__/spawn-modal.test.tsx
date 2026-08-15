@@ -32,7 +32,13 @@ function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
 const spawnMode: SpawnModalMode = {
   kind: "spawn",
   project: { value: "", onChange: vi.fn(), options: [{ id: "p1", label: "Project One" }] },
-  model: { value: null, onChange: vi.fn(), projectId: "p1", carry: null },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    projectId: "p1",
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
   branch: { value: "", onChange: vi.fn() },
   workspaceMode: { value: "worktree", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
@@ -42,7 +48,13 @@ const spawnMode: SpawnModalMode = {
 
 const respawnMode: SpawnModalMode = {
   kind: "respawn",
-  model: { value: null, onChange: vi.fn(), projectId: "p1", carry: null },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    projectId: "p1",
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
 };
 
 const deskMode: SpawnModalMode = {
