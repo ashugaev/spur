@@ -15417,7 +15417,14 @@ describe("SessionService", () => {
 
     const result = await service.complete("api-1", { prAction: "close" });
 
-    expect(ghMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      "pr",
+      "close",
+      "42",
+      "--repo",
+      "acme/api",
+    );
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(removeWorktreeMock).toHaveBeenCalled();
     expect(result.status).toBe("completed");
@@ -15457,7 +15464,14 @@ describe("SessionService", () => {
 
     const result = await service.complete("api-1", { prAction: "close" });
 
-    expect(ghMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      "pr",
+      "close",
+      "42",
+      "--repo",
+      "acme/api",
+    );
     expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
@@ -19706,7 +19720,14 @@ describe("SessionService", () => {
 
     const result = await service.kill("api-1", { force: true, prAction: "close" });
 
-    expect(ghMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      "pr",
+      "close",
+      "42",
+      "--repo",
+      "acme/api",
+    );
     expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
