@@ -881,6 +881,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    const deliverable = isDeliverableState(session);
     const retry = retryStates.get(queueKey);
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
@@ -900,36 +901,35 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
-    const deliverable = isDeliverableState(session);
-    const isWorking = session.state === "working";
-    if (!deliverable && !(isWorking && retry.interrupt)) {
+      const interrupt = retry.interrupt && session.state === "working";
+      if (!deliverable && !interrupt) {
+        return;
+      }
+
+      const now = Date.now();
+      if (retry.nextAttemptAt !== null && now < retry.nextAttemptAt) {
+        return;
+      }
+
+      // Escalation (interrupt=true, working) bypasses the window gate.
+      if (!interrupt && now < batch.notBeforeAt) {
+        return;
+      }
+
+      retry.attempts += 1;
+      retry.nextAttemptAt =
+        retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
+      await deliverBatch(queueKey, batch, interrupt, {
+        attempt: retry.attempts,
+        clearAfter: false,
+        keepRetryState: true,
+      });
       return;
     }
-
-    const now = Date.now();
-    if (retry.nextAttemptAt !== null && now < retry.nextAttemptAt) {
-      return;
-    }
-
-    // Escalation (interrupt=true, working) bypasses the window gate.
-    if (deliverable && now < batch.notBeforeAt) {
-      return;
-    }
-
-    retry.attempts += 1;
-    retry.nextAttemptAt =
-      retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
-    await deliverBatch(queueKey, batch, retry.interrupt && isWorking, {
-      attempt: retry.attempts,
-      clearAfter: false,
-      keepRetryState: true,
-    });
-    return;
-  }
 
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
+    if (deliverable) {
       if (Date.now() < batch.notBeforeAt) return;
       interruptedKeys.delete(queueKey);
       await deliverAndTrackFailure(queueKey, batch, false);

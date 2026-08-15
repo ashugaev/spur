@@ -526,6 +526,14 @@ function ciFailedEvent() {
   };
 }
 
+function mergeConflictSignal(): ReviewSignal {
+  return {
+    key: "merge_conflict",
+    kind: "merge_conflict",
+    text: "Merge conflicts are blocking this PR.",
+  };
+}
+
 function mergeConflictEvent() {
   return {
     name: "github:merge_conflict",
@@ -536,13 +544,7 @@ function mergeConflictEvent() {
       repo: "acme/api",
       prNumber: 42,
       prTitle: "Tighten coverage",
-      signals: [
-        {
-          key: "merge_conflict",
-          kind: "merge_conflict",
-          text: "Merge conflicts are blocking this PR.",
-        },
-      ],
+      signals: [mergeConflictSignal()],
     },
   };
 }
@@ -555,6 +557,10 @@ function ciSnapshot(): ReviewSnapshot {
       text: "CI is failing: test suite.",
     },
   ]);
+}
+
+function mergeConflictSnapshot(): ReviewSnapshot {
+  return storedSnapshot([mergeConflictSignal()]);
 }
 
 function cronEvent() {
@@ -654,6 +660,10 @@ async function loadTriggersModule() {
   return import("../../src/triggers.js");
 }
 
+async function advanceSendWindow(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(35_000);
+}
+
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -699,7 +709,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining('GitHub updates on PR #42 "Tighten coverage":'),
@@ -750,7 +760,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(gitlabEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining('GitLab updates on merge request #42 "Tighten coverage":'),
@@ -795,7 +805,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       const delivered = deliverMock.mock.calls[0]?.[1];
       expect(typeof delivered).toBe("string");
@@ -851,7 +861,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
@@ -982,7 +992,7 @@ describe("startConfiguredTriggers", () => {
         expect(getMock).toHaveBeenCalledTimes(2);
       });
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(inputLogEntries("api-1")).toEqual([
@@ -1063,9 +1073,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      storedSnapshot([{ key: "merge_conflict", kind: "merge_conflict", text: "Merge conflicts are blocking this PR." }]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1082,7 +1090,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(mergeConflictEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
@@ -1241,7 +1249,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
@@ -1340,7 +1348,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(ciFailedEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
 
       snapshot = storedSnapshot([]);
@@ -1440,7 +1448,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1849,7 +1857,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(serviceEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       const delivered = deliverMock.mock.calls[0]?.[1];
       expect(typeof delivered).toBe("string");
@@ -1899,7 +1907,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -1992,7 +2000,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -2124,7 +2132,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -2292,15 +2300,7 @@ describe("startConfiguredTriggers", () => {
       .fn()
       .mockRejectedValueOnce(new Error("agent busy"))
       .mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      storedSnapshot([
-        {
-          key: "merge_conflict",
-          kind: "merge_conflict",
-          text: "Merge conflicts are blocking this PR.",
-        },
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -3034,7 +3034,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
@@ -3188,7 +3188,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, "api:send:api-1");
     } finally {
@@ -3335,7 +3335,7 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.restored",
       );
-      await vi.advanceTimersByTimeAsync(35_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("A new comment arrived."),
