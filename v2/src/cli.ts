@@ -2161,7 +2161,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
     .option("--scaffold", "Write spur.yaml when no project config is found")
-    .action(async (options) => {
+    .action(async (options, command) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
@@ -2170,7 +2170,7 @@ export function createProgram(cliEntrypoint: string): Command {
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
-          const instanceConfig = loadInstanceConfigReadOnly();
+          const instanceConfig = loadInstanceConfigReadOnly(getConfigPath(command.parent as Command));
           if (instanceConfig.status === "ok") {
             hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }

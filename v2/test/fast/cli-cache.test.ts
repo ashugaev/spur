@@ -202,10 +202,24 @@ describe("spur cache CLI", () => {
   });
 
   it("--config to absent file rejects --prune --yes before planning", async () => {
-    loadInstanceConfigReadOnlyMock.mockReturnValue({ status: "absent" });
+    const selectedPath = "/nonexistent/spur.yaml";
+    loadInstanceConfigReadOnlyMock.mockImplementation((input?: string) => {
+      if (input === selectedPath) return { status: "absent" };
+      return {
+        status: "ok",
+        config: {
+          configPath: join(tempDir, "config.yaml"),
+          dataDir: join(tempDir, ".spur"),
+          worktreeDir: join(tempDir, ".spur", "worktrees"),
+          tmux: { socketName: "spur-test" },
+          projects: {},
+        },
+      };
+    });
     await expect(
-      parseCache(["--prune", "--yes"], ["--config", "/nonexistent/spur.yaml"]),
+      parseCache(["--prune", "--yes"], ["--config", selectedPath]),
     ).rejects.toThrow("requires a resolved instance config");
+    expect(loadInstanceConfigReadOnlyMock).toHaveBeenCalledWith(selectedPath);
     expect(planCachePruneMock).not.toHaveBeenCalled();
     expect(executePruneMock).not.toHaveBeenCalled();
   });
