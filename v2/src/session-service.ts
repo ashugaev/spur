@@ -6915,6 +6915,17 @@ export class SessionService {
           projectId: record.project,
           message: `Failed to replay stale sidecar ${name} for ${record.id}: ${sidecarMessage}`,
         });
+        // startSidecarWithDependencies rejecting mid-DAG never reassigns
+        // `updated` above, even when a dependency of `name` started and
+        // persisted successfully before the throw (dependsOn runs its own
+        // sub-starts first, each of which writes the record on success). Pick
+        // up whatever landed on disk so the next name in this loop — and the
+        // final return below — never overwrite that dependency's reservation
+        // with this stale, pre-attempt in-memory copy.
+        const fresh = readSession(this.config.dataDir, record.id);
+        if (fresh) {
+          updated = fresh;
+        }
       }
     }
     delete updated.stopReason;
