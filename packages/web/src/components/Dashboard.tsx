@@ -1080,13 +1080,10 @@ export function Dashboard() {
   // True while spawnWorkspaceMode still tracks the project-resolved default
   // (nothing chosen by hand yet); the resolver effect below only writes to
   // spawnWorkspaceMode while this holds, so it never clobbers a manual pick.
-  const spawnWorkspaceModeAutoRef = useRef(true);
-  // Bumped whenever spawnWorkspaceModeAutoRef flips without an accompanying
-  // state change (e.g. a mousedown-only interaction) — a plain ref mutation
-  // does not itself schedule a re-render, so submitDisabled (read from the
-  // ref during render) would otherwise stay stale until some unrelated
-  // state update happened to follow.
-  const [, forceSpawnWorkspaceModeRerender] = useState(0);
+  // Real state, not a ref: submitDisabled and the error banner both read it
+  // during render, so a flip must itself schedule the re-render that shows
+  // it — no separate force-render bump, and nothing to keep in sync by hand.
+  const [spawnWorkspaceModeAuto, setSpawnWorkspaceModeAuto] = useState(true);
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1555,7 +1552,7 @@ export function Dashboard() {
     // so the project-resolved default applies once it lands. workspaceMode
     // is a required, validated field of SpawnDraft, so this is exactly
     // "no draft was found" — not a per-field undefined check.
-    spawnWorkspaceModeAutoRef.current = draft === null;
+    setSpawnWorkspaceModeAuto(draft === null);
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
@@ -1612,15 +1609,15 @@ export function Dashboard() {
   // read the same settle.
   const spawnDefaults = useResolvedSpawnDefaults(spawnProjectId, spawnAgent);
   useEffect(() => {
-    if (!spawnWorkspaceModeAutoRef.current || spawnDefaults.worktree === null) return;
+    if (!spawnWorkspaceModeAuto || spawnDefaults.worktree === null) return;
     setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
-  }, [spawnDefaults.worktree]);
+  }, [spawnWorkspaceModeAuto, spawnDefaults.worktree]);
   // While still on the auto-derived workspace mode, an in-flight or failed
   // spawn-defaults request means the true project default is unknown; block
   // submit rather than silently spawning against the "worktree" fallback
-  // state. A manual pick (auto ref false) always overrides this.
+  // state. A manual pick (auto false) always overrides this.
   const spawnWorkspaceModeUnresolved =
-    spawnWorkspaceModeAutoRef.current && (spawnDefaults.loading || spawnDefaults.error !== null);
+    spawnWorkspaceModeAuto && (spawnDefaults.loading || spawnDefaults.error !== null);
 
   const spawnDraft = useMemo<SpawnDraft | null>(() => {
     if (!spawnProjectId) return null;
@@ -1881,7 +1878,7 @@ export function Dashboard() {
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
-      spawnWorkspaceModeAutoRef.current = true;
+      setSpawnWorkspaceModeAuto(true);
       setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
@@ -2665,17 +2662,8 @@ export function Dashboard() {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
                     spawnDraftDirtyRef.current = true;
-                    spawnWorkspaceModeAutoRef.current = false;
+                    setSpawnWorkspaceModeAuto(false);
                     setSpawnWorkspaceMode(next);
-                  },
-                  // Re-picking the option already shown fires no change
-                  // event (native <select>, and React's value tracking
-                  // suppresses it too) — mousedown fires on every
-                  // interaction regardless, so a workspace-default error
-                  // banner's "pick worktree or shared" is never inert.
-                  onMouseDown: () => {
-                    spawnWorkspaceModeAutoRef.current = false;
-                    forceSpawnWorkspaceModeRerender((n) => n + 1);
                   },
                 },
                 planMode: {
@@ -2721,10 +2709,36 @@ export function Dashboard() {
                         exists on origin — will track it
                       </p>
                     ) : null}
-                    {spawnWorkspaceModeAutoRef.current && spawnDefaults.error ? (
-                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                        couldn&apos;t resolve this project&apos;s workspace default:{" "}
-                        {spawnDefaults.error} — pick worktree or shared to continue
+                    {spawnWorkspaceModeAuto && spawnDefaults.error ? (
+                      <div className="flex flex-wrap items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        <span>
+                          couldn&apos;t resolve this project&apos;s workspace default:{" "}
+                          {spawnDefaults.error}
+                        </span>
+                        <span className="flex gap-2">
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              spawnDraftDirtyRef.current = true;
+                              setSpawnWorkspaceModeAuto(false);
+                              setSpawnWorkspaceMode("worktree");
+                            }}
+                            type="button"
+                          >
+                            Use worktree
+                          </button>
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              spawnDraftDirtyRef.current = true;
+                              setSpawnWorkspaceModeAuto(false);
+                              setSpawnWorkspaceMode("shared");
+                            }}
+                            type="button"
+                          >
+                            Use shared
+                          </button>
+                        </span>
                       </div>
                     ) : null}
                     {spawnModelError ? (

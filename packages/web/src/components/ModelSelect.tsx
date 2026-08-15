@@ -189,12 +189,16 @@ export function ModelSelect({
   });
 
   // null while unresolved: the button renders a motion-only Skeleton for
-  // that case instead of a visible wait-text label like "Resolving…".
+  // that case instead of a visible wait-text label like "Resolving…". A
+  // settled error reads distinctly from a settled-but-genuinely-empty
+  // catalog — both leave `value` null, but they are not the same fact.
   const selectedLabel =
     value !== null
       ? (models.find((m) => m.id === value)?.label ?? value)
       : settled
-        ? "No models"
+        ? error !== null
+          ? "Model list unavailable"
+          : "No models"
         : null;
 
   return (

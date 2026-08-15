@@ -27,12 +27,6 @@ export interface FieldControl<T> {
   value: T;
   onChange: (next: T) => void;
   onBlur?: () => void;
-  // Fires on any interaction with the control, even one that leaves its
-  // value unchanged (e.g. re-picking the option already selected in a
-  // native <select> fires no change event, in the browser or in jsdom).
-  // Used where "the user touched this" must be observable independent of
-  // whether the value actually moved.
-  onMouseDown?: () => void;
 }
 
 // A model FieldControl plus the two inputs ModelSelect needs to resolve a
@@ -239,7 +233,6 @@ function ModeFields({
             aria-label="workspace mode"
             className={INPUT_CLASS}
             onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
-            onMouseDown={mode.workspaceMode.onMouseDown}
             value={mode.workspaceMode.value}
           >
             <option value="worktree">Worktree</option>

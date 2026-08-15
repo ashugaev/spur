@@ -769,7 +769,7 @@ describe("Dashboard project create/delete", () => {
     expect(body.overrides).toEqual({ worktree: false });
   });
 
-  it("unblocks submit when the user re-picks the already-selected workspace mode after a spawn-defaults failure", async () => {
+  it("unblocks submit when the user confirms the already-selected workspace mode after a spawn-defaults failure", async () => {
     let spawnInit: RequestInit | undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -851,14 +851,15 @@ describe("Dashboard project create/delete", () => {
     });
     expect(submitButton()).toBeDisabled();
 
-    // The select already shows "Worktree" (the initial state); re-picking
-    // the same option fires no change event (native <select>, and React's
-    // controlled-value tracking suppresses it too even in jsdom) — a real
-    // user re-confirming the displayed value must still unblock submit.
+    // The select already shows "Worktree" (the initial state), so re-picking
+    // it from the select itself fires no native change event — a real
+    // <select> does not notify on a same-value re-selection, in any
+    // browser. The error banner's explicit "Use worktree" action is a real
+    // <button>, so it always fires a click regardless of input modality and
+    // regardless of whether the confirmed value matches what's shown.
     const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
     expect(workspaceModeSelect).toHaveValue("worktree");
-    fireEvent.mouseDown(workspaceModeSelect);
-    fireEvent.change(workspaceModeSelect, { target: { value: "worktree" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Use worktree" }));
 
     await waitFor(() => {
       expect(submitButton()).not.toBeDisabled();
@@ -870,5 +871,182 @@ describe("Dashboard project create/delete", () => {
     });
     const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
     expect(body.overrides).toEqual({ worktree: true });
+  });
+
+  it("still applies the project's real workspace default after a mousedown-then-dismiss that picks nothing", async () => {
+    // B1 regression: opening the workspace-mode select and dismissing it
+    // without picking anything is a look-only interaction. It must not be
+    // mistaken for a manual override — the project's real (slow-to-arrive)
+    // default must still land once the spawn-defaults request settles.
+    let resolveSpawnDefaults: ((response: Response) => void) | undefined;
+    const pendingSpawnDefaults = new Promise<Response>((resolve) => {
+      resolveSpawnDefaults = resolve;
+    });
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) return pendingSpawnDefaults;
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    // Open the native select (mousedown) and dismiss it without choosing an
+    // option — a look-only pass, no confirmation. (Not simulated via an
+    // Escape keydown: that bubbles to the modal's own window-level Escape
+    // handler in jsdom, closing the whole modal — a real native <select>
+    // popup's dismissal is opaque to the page and never does that.)
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    expect(workspaceModeSelect).toHaveValue("worktree");
+    fireEvent.mouseDown(workspaceModeSelect);
+    fireEvent.blur(workspaceModeSelect);
+
+    resolveSpawnDefaults?.(
+      new Response(JSON.stringify({ model: null, worktree: false }), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("confirms the workspace mode via keyboard activation of the banner action, with no mousedown involved", async () => {
+    // The gate must clear from any input modality — not just a mouse click.
+    // A real <button> fires a click on Enter/Space when focused, regardless
+    // of device; asserted here without ever dispatching a mousedown, to
+    // keep this distinct from the mouse-driven case above.
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(within(dialog).getByText(/daemon unreachable/)).toBeInTheDocument();
+    });
+    expect(submitButton()).toBeDisabled();
+
+    const useSharedButton = within(dialog).getByRole("button", { name: "Use shared" });
+    useSharedButton.focus();
+    fireEvent.keyDown(useSharedButton, { key: "Enter" });
+    fireEvent.click(useSharedButton);
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole("combobox", { name: "workspace mode" })).toHaveValue(
+        "shared",
+      );
+      expect(submitButton()).not.toBeDisabled();
+    });
   });
 });

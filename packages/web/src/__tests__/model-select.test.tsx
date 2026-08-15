@@ -392,6 +392,13 @@ describe("ModelSelect", () => {
       );
 
       await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
+      // B2: the closed control's own label must not read the same as a
+      // genuinely empty catalog — the user should not have to open the
+      // dropdown to learn the list simply failed to load.
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+        "Model list unavailable",
+      );
+      expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent("No models");
       // Stays this way — never flips to resolved on its own.
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
