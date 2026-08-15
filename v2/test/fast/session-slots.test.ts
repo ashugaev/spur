@@ -238,8 +238,26 @@ describe("session slots", () => {
     expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
     expect(sidecar).toContain('action="start"');
     expect(sidecar).toContain(
-      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
+      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" || "${PARAM_EXPANSION_OPEN}1-}" == "ports" ]]`,
     );
+  });
+
+  it("forwards the ports action through to the CLI's sidecar group", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-2",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const out = execFileSync(join(toolDir, "spur-sidecar"), ["ports", "--help"], {
+      encoding: "utf8",
+    });
+
+    expect(out).toContain("Print this session's reserved sidecar ports.");
+    expect(out).not.toContain("--clear-port");
   });
 
   it("blocks git push with global options when the current branch is invalid", async () => {

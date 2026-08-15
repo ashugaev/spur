@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -203,6 +203,8 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 `autoStart` applies when the main session spawns, restores, or recovers a dead agent — a session whose pane comes back gets its `autoStart` sidecars back too. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
+
+The reserved port lands in the SIDECAR's env, never the agent's, and it is reserved after the agent pane's own env is already frozen — there is no `SPUR_RESERVED_PORT_*` to read in the session shell. Read it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (add `--name <name>` to filter one sidecar, `--json` for JSON). Always the explicit `$SPUR_SESSION_TOOL_DIR/` form — a login shell can drop the tool dir from `PATH`, and a bare `spur-sidecar` then resolves to nothing or the wrong install. Output is one tab-separated line per reserved port, `<sidecar>  <portId>  <env>  <port>  <alive|dead>`, sorted by sidecar then port id; nothing prints and exit is 0 when no port is reserved. Works from any desk member — the port is owner-resolved server-side.
 
 A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk group](configuration.md#desk-groups), started and stopped from any member.
 
