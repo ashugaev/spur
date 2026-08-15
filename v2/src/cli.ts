@@ -2037,16 +2037,30 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = await collectHostInstallChecks();
+          const collectedChecks = await collectHostInstallChecks();
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
           const instanceConfig = loadInstanceConfigReadOnly();
           if (instanceConfig.status === "ok") {
-            hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+            collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }
+          // `configRegistryPaths` rides on the "config-registry" check purely
+          // as an internal carrier from `collectHostInstallChecks` to here
+          // (see the field's doc comment in host-install.ts). The documented
+          // public shape only has it at the top level of `DoctorResult`, so
+          // strip it off the check before `hostChecks` is JSON-serialized —
+          // otherwise `--json` emits the same array twice.
           const configRegistryPaths =
-            hostChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ?? [];
+            collectedChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ??
+            [];
+          const hostChecks = collectedChecks.map((check) => {
+            if (check.id !== "config-registry" || check.configRegistryPaths === undefined) {
+              return check;
+            }
+            const { configRegistryPaths: _perPathEntries, ...checkWithoutPaths } = check;
+            return checkWithoutPaths;
+          });
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {

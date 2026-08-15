@@ -424,10 +424,14 @@ describe("checkConfigRegistry", () => {
     const deadPath = join(rootDir, "missing.yaml");
     const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
     await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    // Never written — both missing AND inside worktreeDir. The missing-file
+    // check runs first in `checkConfigRegistry`, so this must classify as
+    // "dead", not "worktree-internal".
+    const deadAndWorktreeInternalPath = join(worktreeDir, "proj", "sess", "missing-spur.yaml");
     await writeFile(
       join(dataDir, "config-registry.json"),
       JSON.stringify({
-        configPaths: [livePath, deadPath, worktreeInternalPath],
+        configPaths: [livePath, deadPath, worktreeInternalPath, deadAndWorktreeInternalPath],
         unconfiguredProjects: [],
       }),
       "utf8",
@@ -439,6 +443,7 @@ describe("checkConfigRegistry", () => {
       { path: livePath, state: "alive" },
       { path: deadPath, state: "dead" },
       { path: worktreeInternalPath, state: "worktree-internal" },
+      { path: deadAndWorktreeInternalPath, state: "dead" },
     ]);
   });
 });
