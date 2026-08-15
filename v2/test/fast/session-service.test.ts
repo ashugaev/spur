@@ -28001,7 +28001,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("clears a daily wake on a completed session instead of logging a failure", async () => {
+    it("suppresses a daily wake on a completed session without failing or advancing it", async () => {
       const sessions = seedShepherdSession({
         status: "completed",
         dailyWake: {
@@ -28026,26 +28026,81 @@ describe("SessionService", () => {
         logSpurEventMock.mock.calls.filter(
           ([, entry]) => entry.event === "session.wake.daily_cancelled",
         ).length,
+      ).toBe(0);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("keeps a daily wake armed on an errored session without sending", async () => {
+      const sessions = seedShepherdSession({
+        status: "errored",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-16T10:06:00.000Z",
+          message: "Stale daily wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("clears an interval wake on a killed session without sending", async () => {
+      const sessions = seedShepherdSession({
+        status: "killed",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:59:00.000Z",
+          intervalMs: 60_000,
+          message: "Stale interval wake",
+          stopCondition: "Stop condition",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_cancelled",
+        ).length,
       ).toBe(1);
       const cancelledCall = logSpurEventMock.mock.calls.find(
-        ([, entry]) => entry.event === "session.wake.daily_cancelled",
+        ([, entry]) => entry.event === "session.wake.interval_cancelled",
       );
       expect(cancelledCall?.[1].details).toEqual({
         reason: "session_terminal",
-        status: "completed",
+        status: "killed",
       });
-      expect(sessions.get("shp-1")?.dailyWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
 
       await advanceSeconds(5);
       expect(
         logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.wake.daily_cancelled",
+          ([, entry]) => entry.event === "session.wake.interval_cancelled",
         ).length,
       ).toBe(1);
       service.dispose();
     });
 
-    it("clears an interval wake on a completed session without sending", async () => {
+    it("keeps an interval wake armed on a completed session without sending", async () => {
       const sessions = seedShepherdSession({
         status: "completed",
         intervalWake: {
@@ -28070,33 +28125,8 @@ describe("SessionService", () => {
         logSpurEventMock.mock.calls.filter(
           ([, entry]) => entry.event === "session.wake.interval_cancelled",
         ).length,
-      ).toBe(1);
-      expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
-      service.dispose();
-    });
-
-    it("clears a daily wake on a killed session without sending", async () => {
-      const sessions = seedShepherdSession({
-        status: "killed",
-        dailyWake: {
-          dailyAt: ["10:06"],
-          nextDueAt: "2026-03-16T10:06:00.000Z",
-          message: "Stale daily wake",
-          stopCondition: "Stop condition",
-        },
-      });
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      await advanceSeconds(5);
-
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.wake.daily_cancelled",
-        ).length,
-      ).toBe(1);
-      expect(sessions.get("shp-1")?.dailyWake).toBeUndefined();
+      ).toBe(0);
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T09:59:00.000Z");
       service.dispose();
     });
 

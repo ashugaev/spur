@@ -3209,20 +3209,26 @@ export class SessionService {
           }
         }
 
-        // A completed/killed session can never receive another wake: reap.ts
-        // and the restart path never revive it. Clear intervalWake/dailyWake
-        // here so this loop stops re-visiting it every tick and spamming
-        // interval_failed/daily_failed for a send() that can only throw
-        // "Session is not running". Deliberately does NOT `continue`: the
+        // A killed session is never revived (reopen() only accepts
+        // "completed", session-service.ts:11069-11074), so its schedule is
+        // dead weight: clear intervalWake/dailyWake here so this loop stops
+        // re-visiting it every tick and spamming interval_failed/daily_failed
+        // for a send() that can only throw "Session is not running". Every
+        // other status — stopped, paused, errored, and completed itself — can
+        // still come back (restore() or reopen()), so its schedule stays
+        // armed-but-suppressed via the isRestorableStatus guards below rather
+        // than being dropped here. Deliberately does NOT `continue`: the
         // reactivation blocks below (auto-rotate, rate-limit, server-error)
         // still need to run for every status.
-        if (
-          isTerminalSessionStatus(session.status) &&
-          (session.intervalWake || session.dailyWake)
-        ) {
-          const current = readSession(this.config.dataDir, session.id) ?? session;
+        if (session.status === "killed" && (session.intervalWake || session.dailyWake)) {
+          // A null read means the session GC sweep (executeSessionGc) archived
+          // the record between this tick's listSessions snapshot and here.
+          // Falling back to the stale snapshot would resurrect an archived
+          // record via writeSession; skip the clear entirely instead.
+          const current = readSession(this.config.dataDir, session.id);
           const claimed =
-            isTerminalSessionStatus(current.status) &&
+            current !== null &&
+            current.status === "killed" &&
             JSON.stringify(current.intervalWake) === JSON.stringify(session.intervalWake) &&
             JSON.stringify(current.dailyWake) === JSON.stringify(session.dailyWake);
           if (claimed) {
