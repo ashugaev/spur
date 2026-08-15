@@ -39,6 +39,12 @@ interface SwitchSuccess {
   version: string;
 }
 
+interface SwitchInProgress {
+  error: string;
+  inProgress: true;
+  version: string;
+}
+
 function isReleaseEntry(value: unknown): value is ReleaseEntry {
   return (
     typeof value === "object" &&
@@ -62,8 +68,27 @@ function isSwitchSuccess(value: unknown): value is SwitchSuccess {
   return v.accepted === true && typeof v.version === "string";
 }
 
-function messageForSwitchError(status: number, daemonError: string | null): string {
-  if (status === 409) return "Cannot switch — daemon is running from a source checkout.";
+function isSwitchInProgress(value: unknown): value is SwitchInProgress {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.error === "string" &&
+    result.inProgress === true &&
+    typeof result.version === "string"
+  );
+}
+
+function messageForSwitchError(
+  status: number,
+  payload: unknown,
+  daemonError: string | null,
+): string {
+  if (status === 409 && isSwitchInProgress(payload)) {
+    return `Update to ${payload.version} is already in progress.`;
+  }
+  if (status === 409 && daemonError === "running from source checkout") {
+    return "Cannot switch — daemon is running from a source checkout.";
+  }
   if (status === 503 && daemonError === "npm registry unreachable") {
     return "npm registry unreachable — try again in a minute.";
   }
@@ -120,7 +145,7 @@ export function VersionMenu() {
       const payload = await readResponsePayload(response);
       if (response.status !== 202 || !isSwitchSuccess(payload)) {
         const daemonError = responseErrorMessage(payload, "");
-        throw new Error(messageForSwitchError(response.status, daemonError || null));
+        throw new Error(messageForSwitchError(response.status, payload, daemonError || null));
       }
       return payload;
     },

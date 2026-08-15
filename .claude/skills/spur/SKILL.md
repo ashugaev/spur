@@ -11,6 +11,8 @@ WHAT SPUR IS
 
   CLI plus a local HTTP daemon, default `127.0.0.1:4310`, plus a web UI (default `5555`, no runtime logic of its own). "spawn an agent" means this, not the built-in Agent/Task tool.
   Agents `claude`, `codex`, `cursor` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
+  `POST /shepherd/spawn` can report whether it spawned or reused the Shepherd; response contract: `docs/commands.md#shepherd-wake`.
+  Deploy-switch acceptance and durable status: `docs/commands.md#surface`.
 
 INTERFACES
 

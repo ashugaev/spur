@@ -7334,6 +7334,11 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
+      const latestPlaceholder = readSession(this.config.dataDir, updatedRecord.id);
+      if (latestPlaceholder && hasQueuedMessages(latestPlaceholder)) {
+        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestPlaceholder), true);
+      }
+
       writeSession(this.config.dataDir, updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -8408,7 +8413,9 @@ export class SessionService {
     return placeholder;
   }
 
-  async spawnShepherd(request: { prompt?: string } = {}): Promise<SessionView> {
+  async spawnShepherd(
+    request: { prompt?: string } = {},
+  ): Promise<{ disposition: "spawned" | "reused"; session: SessionView }> {
     const prompt = request.prompt?.trim() ?? "";
     const reusable = listSessions(this.config.dataDir)
       .filter(
@@ -8418,17 +8425,28 @@ export class SessionService {
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {
-      if (prompt && reusable.status !== "spawning") {
-        return this.send(reusable.id, { message: prompt });
+      let session: SessionView;
+      if (prompt && reusable.status === "spawning") {
+        const queued = queuedMessages(reusable);
+        const updated = queued.includes(prompt)
+          ? reusable
+          : withQueuedMessages({ ...reusable, updatedAt: nowIso() }, [...queued, prompt], true);
+        if (updated !== reusable) writeSession(this.config.dataDir, updated);
+        session = await this.enrich(updated);
+      } else if (prompt) {
+        session = await this.send(reusable.id, { message: prompt });
+      } else {
+        session = await this.enrich(reusable);
       }
-      return this.enrich(reusable);
+      return { disposition: "reused", session };
     }
-    return this.spawnInBackground({
+    const session = await this.spawnInBackground({
       project: SHEPHERD_PROJECT_ID,
       prompt,
       agent: "claude",
       overrides: { worktree: false },
     });
+    return { disposition: "spawned", session };
   }
 
   async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {

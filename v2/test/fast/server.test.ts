@@ -873,6 +873,70 @@ describe("startServer", () => {
     }
   });
 
+  it("returns the Shepherd session alone unless reportDisposition is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSpawnShepherd = SessionService.prototype.spawnShepherd;
+    const prompts: Array<string | undefined> = [];
+    SessionService.prototype.spawnShepherd = async function mockSpawnShepherd(request = {}) {
+      prompts.push(request.prompt);
+      return {
+        disposition: "reused" as const,
+        session: { id: "shp-1", project: "spur-shepherd" } as never,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const legacy = await fetch(`http://127.0.0.1:${port}/shepherd/spawn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "check health" }),
+      });
+      expect(legacy.status).toBe(201);
+      await expect(legacy.json()).resolves.toEqual({ id: "shp-1", project: "spur-shepherd" });
+
+      const reported = await fetch(`http://127.0.0.1:${port}/shepherd/spawn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "diagnose", reportDisposition: true }),
+      });
+      expect(reported.status).toBe(201);
+      await expect(reported.json()).resolves.toEqual({
+        disposition: "reused",
+        session: { id: "shp-1", project: "spur-shepherd" },
+      });
+      expect(prompts).toEqual(["check health", "diagnose"]);
+    } finally {
+      SessionService.prototype.spawnShepherd = originalSpawnShepherd;
+      await server.stop();
+    }
+  });
+
   it("returns structured conflict JSON when complete needs a pull request action", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
