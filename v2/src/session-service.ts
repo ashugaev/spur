@@ -1704,6 +1704,29 @@ function buildLastActivityAt(
   ).toISOString();
 }
 
+// Park-specific activity resolver, deliberately NOT buildLastActivityAt.
+// lastActivityAt legitimately takes the max of the transcript signal AND
+// session.updatedAt, because every consumer of lastActivityAt (the UI, sort
+// order, hasUnseenAttention) wants "the latest thing that happened to this
+// session at all" — including a routine record write (agentSessionId
+// capture, a PR field update, a slot unlink, a serverError/rateLimitedAt
+// clear). The stale-park clock must not: a routine write is not the agent
+// doing anything, and folding it in would reset the idle clock on every
+// such write, making the feature inert in practice while every unit test
+// (which only ever drives the pure predicate against a synthetic
+// lastActivityAt) stays green. This resolver is transcript-first and
+// deliberately does NOT fall back to classified.runtime.tmuxActivityAt: tmux
+// activity is an attach clock (bumped by opening the web terminal, not by
+// agent output), so falling back to it would keep an attached session
+// unparkable forever and measure a never-attached one against a timestamp
+// that means nothing. Returns null when there is no transcript signal at
+// all; callers must treat null as "never park" (fail safe), not "park now".
+function resolveParkActivityAt(
+  classified: Pick<SessionStateResult, "agentActivityAt">,
+): Date | null {
+  return classified.agentActivityAt ?? null;
+}
+
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
 // owned, non-mcp) and per-session (mcp) entries, so a going-terminal write
 // must strip per-name, not wholesale: an anchor-owned entry survives while
@@ -3236,16 +3259,43 @@ export class SessionService {
                 },
               });
             } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.wake.failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-                details: {
-                  dueAt: scheduledWake.dueAt,
-                },
-              });
+              if (error instanceof SessionAdmissionDeniedError) {
+                // Admission refused this stale-parked wake, not a delivery
+                // failure — the occurrence above was already claimed
+                // (scheduledWake cleared and persisted) before this send
+                // attempt, so losing it here would drop the wake forever.
+                // Re-arm the exact same occurrence (CAS: only if nothing
+                // else re-armed/cancelled it in the meantime) so the next
+                // poll tick retries once the fleet has headroom again.
+                const afterDenial = readSession(this.config.dataDir, session.id);
+                if (afterDenial && !afterDenial.scheduledWake) {
+                  writeSession(this.config.dataDir, {
+                    ...afterDenial,
+                    scheduledWake,
+                    updatedAt: nowIso(),
+                  });
+                }
+                this.logEvent("session.wake.deferred", {
+                  level: "warn",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
+                  details: {
+                    dueAt: scheduledWake.dueAt,
+                  },
+                });
+              } else {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.wake.failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                  details: {
+                    dueAt: scheduledWake.dueAt,
+                  },
+                });
+              }
             }
           }
         }
@@ -3297,17 +3347,47 @@ export class SessionService {
                 },
               });
             } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.wake.interval_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send interval wake to ${session.id}: ${message}`,
-                details: {
-                  nextDueAt,
-                  intervalMs: intervalWake.intervalMs,
-                },
-              });
+              if (error instanceof SessionAdmissionDeniedError) {
+                // Same reasoning as the scheduled-wake branch above: this
+                // occurrence was already claimed (nextDueAt advanced and
+                // persisted) before the send attempt. Roll nextDueAt back to
+                // the occurrence that was just refused (CAS: only if nothing
+                // else re-armed it meanwhile) so the next poll tick retries
+                // it promptly instead of waiting a full interval.
+                const afterDenial = readSession(this.config.dataDir, session.id);
+                if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+                  writeSession(this.config.dataDir, {
+                    ...afterDenial,
+                    intervalWake: {
+                      ...afterDenial.intervalWake,
+                      nextDueAt: intervalWake.nextDueAt,
+                    },
+                    updatedAt: nowIso(),
+                  });
+                }
+                this.logEvent("session.wake.interval_deferred", {
+                  level: "warn",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Deferred interval wake for ${session.id}: ${error.message}`,
+                  details: {
+                    nextDueAt,
+                    intervalMs: intervalWake.intervalMs,
+                  },
+                });
+              } else {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.wake.interval_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send interval wake to ${session.id}: ${message}`,
+                  details: {
+                    nextDueAt,
+                    intervalMs: intervalWake.intervalMs,
+                  },
+                });
+              }
             }
           }
         }
@@ -3540,17 +3620,44 @@ export class SessionService {
               },
             });
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.daily_failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send daily wake to ${session.id}: ${message}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
+            if (error instanceof SessionAdmissionDeniedError) {
+              // Same reasoning as the scheduled/interval branches above:
+              // this occurrence was already claimed (nextDueAt advanced and
+              // persisted) before the send attempt. Roll nextDueAt back to
+              // the occurrence that was just refused (CAS: only if nothing
+              // else re-armed it meanwhile) so the next poll tick retries it
+              // promptly instead of waiting until tomorrow.
+              const afterDenial = readSession(this.config.dataDir, session.id);
+              if (afterDenial && afterDenial.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+                writeSession(this.config.dataDir, {
+                  ...afterDenial,
+                  dailyWake: { ...dailyWake },
+                  updatedAt: nowIso(),
+                });
+              }
+              this.logEvent("session.wake.daily_deferred", {
+                level: "warn",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Deferred daily wake for ${session.id}: ${error.message}`,
+                details: {
+                  nextDueAt: dailyWake.nextDueAt,
+                  dailyAt: dailyWake.dailyAt,
+                },
+              });
+            } else {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.daily_failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send daily wake to ${session.id}: ${message}`,
+                details: {
+                  nextDueAt: dailyWake.nextDueAt,
+                  dailyAt: dailyWake.dailyAt,
+                },
+              });
+            }
           }
         }
       }
@@ -4268,19 +4375,40 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
-          const view = await this.enrich(session, claudeAccounts, allSessions, sidecarProcSnapshot);
+          const { view, classified } = await this.enrichWithClassified(
+            session,
+            claudeAccounts,
+            allSessions,
+            sidecarProcSnapshot,
+          );
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
+          // Gated on genuine transcript activity (resolveParkActivityAt), not
+          // view.lastActivityAt: that value is the UI-facing max of agent
+          // activity AND every routine record write, so gating on it directly
+          // would reset the idle clock on writes that are not the agent doing
+          // anything (see resolveParkActivityAt's own comment). A null result
+          // means no transcript signal exists at all — fail safe and never
+          // park rather than fall back to the tmux attach clock.
+          const parkActivityAt = resolveParkActivityAt(classified);
           if (
             session.project !== SHEPHERD_PROJECT_ID &&
             !this.spawnsInFlight.has(session.id) &&
             !this.isInRestoreWarmup(session.id) &&
             !this.shouldRunDelivery(session) &&
-            shouldParkForStale(view, this.resolveStaleAfterMs(session))
+            parkActivityAt !== null &&
+            shouldParkForStale(
+              {
+                status: view.status,
+                state: view.state,
+                lastActivityAt: parkActivityAt.toISOString(),
+              },
+              this.resolveStaleAfterMs(session),
+            )
           ) {
             await this.parkStaleSession(view);
             continue;
@@ -10740,6 +10868,18 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
+    // A stale-parked session holds zero live slots (isLiveSessionRecord
+    // excludes it by design), so nothing gates how many of them a single
+    // poll cycle can wake at once without this. Gated to stale-parked only:
+    // an ordinary dead-pane recovery is relaunching a session that already
+    // held its slot, so it must not be re-denied here. Thrown before
+    // anything below touches the pane (killAgentPaneAndConfirmExit runs
+    // inside relaunchSessionInPlace, further down) so a refusal never kills
+    // a live process or does any destructive work.
+    if (isStaleParked(session)) {
+      this.assertAdmissible(session.project, "wake");
+    }
+
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
     // starts the MCP sidecar before this session's status is guaranteed
@@ -10811,6 +10951,17 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
+    // Carried the same leniency as restore()'s own resolution: an unmoded
+    // session, or one whose mode was renamed/removed out from under it,
+    // degrades to no-mode with a warning rather than blocking recovery.
+    const mode = resolveCarriedSessionMode(session.mode, project.modes, (message) =>
+      this.logEvent("session.mode.dropped", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message,
+      }),
+    );
     const planOptions = {
       ...withAgentModeOptions(
         withProjectAgentOptions(session.agent, project, {
@@ -10862,6 +11013,18 @@ export class SessionService {
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
+    // True whenever this relaunch ends up starting a brand-new agent process
+    // with no native resume (no agentSessionId to resume from, or the resume
+    // attempt below throws and the catch falls back to a fresh launch). A
+    // fresh launch has zero conversation memory, so — unlike a successful
+    // native resume, which stays silent by design — it must be handed its
+    // task context back the same way restore() does, or the next message
+    // written to its pane becomes message #1 of a blank conversation. This is
+    // not stale-specific: relaunchSessionInPlace is the one recovery path
+    // shared by every dead-pane relaunch (stale wake and ordinary dead-pane
+    // recovery alike), so the fix applies uniformly here rather than forking
+    // behavior on why the pane died.
+    let usedFreshLaunch = !recoveryPlan;
     try {
       await createTmuxSession({
         sessionName: session.tmuxSession,
@@ -10908,6 +11071,7 @@ export class SessionService {
         },
       });
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+      usedFreshLaunch = true;
       // Mint a fresh claude id for the fallback launch (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id) — the pinned id
       // may already own a transcript, and claude rejects --session-id on it.
@@ -10944,6 +11108,46 @@ export class SessionService {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
           cause: error,
         });
+      }
+    }
+
+    if (usedFreshLaunch) {
+      // Pane confirmed alive by the checks above; deliver task context before
+      // returning so it lands before any caller (send/deliverPrepared/
+      // tryDeliverQueuedMessage/switchAuth) writes the triggering event to
+      // this same pane.
+      this.logEvent("session.recover.continuity_lost", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
+        details: {
+          agent: session.agent,
+          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+        },
+      });
+      const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+      const recoveryContextMessage = buildInitialMessage(
+        buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+        recoverySidecarNames,
+        this.config.tags,
+        project.branchNaming?.regex,
+        session.selfDestruct,
+      );
+      const recoveryPaneTarget = {
+        id: session.id,
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: persistedLaunchCommand,
+        worktreePath: session.worktreePath,
+        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+      };
+      if (session.agent === "codex") {
+        await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
+          agent: session.agent,
+        });
+      } else {
+        await this.sendAgentMessage(recoveryPaneTarget, recoveryContextMessage);
       }
     }
 
@@ -12770,7 +12974,7 @@ export class SessionService {
   // report-only warning when crossed so the condition stays visible.
   private assertAdmissible(
     projectId: string,
-    context: "spawn" | "restore",
+    context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
@@ -12788,8 +12992,11 @@ export class SessionService {
         legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
       }
 
+      // A wake reuses the restore floor: it relaunches an already-existing
+      // parked session in place, the same shape of memory pressure as a
+      // restore, not a brand-new spawn.
       const contextFloor =
-        context === "restore"
+        context === "restore" || context === "wake"
           ? admission.memoryGuard.restoreFloorBytes
           : admission.memoryGuard.admissionFloorBytes;
       if (memory.availableBytes < contextFloor) {
@@ -13796,6 +14003,24 @@ export class SessionService {
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<SessionView> {
+    return (
+      await this.enrichWithClassified(session, claudeAccounts, sessionBatch, sidecarProcSnapshot)
+    ).view;
+  }
+
+  // Same work as enrich(), plus the raw classified result — needed by the
+  // stale-park gate (pollAttentionStates), which must key park eligibility
+  // off genuine transcript activity (see resolveParkActivityAt), not off
+  // view.lastActivityAt (the UI-facing value, deliberately the max of
+  // agent activity AND every routine record write). A second call would
+  // mean a second classifySessionRecord pass (JSONL read) per session per
+  // sweep tick; this split keeps it to exactly one.
+  private async enrichWithClassified(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+    sidecarProcSnapshot?: ProcSnapshot,
+  ): Promise<{ view: SessionView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
@@ -13869,7 +14094,7 @@ export class SessionService {
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 
-    return {
+    const view: SessionView = {
       ...session,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -13894,6 +14119,7 @@ export class SessionService {
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
+    return { view, classified };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {

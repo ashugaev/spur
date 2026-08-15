@@ -927,12 +927,27 @@ async function advanceSeconds(seconds: number): Promise<void> {
   }
 }
 
-function mockClaudeJsonlState(state: string) {
+function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number }) {
   readClaudeJsonlStateMock.mockResolvedValue({
     state,
-    reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    reader: {
+      filePath: "test.jsonl",
+      lastOffset: 0,
+      lastMtimeMs: options?.lastMtimeMs ?? 0,
+      tailRecords: [],
+    },
   });
 }
+
+// The stale-park gate now keys off genuine transcript activity
+// (resolveParkActivityAt), not off any tmux-attach fallback: lastMtimeMs: 0
+// (mockClaudeJsonlState/mockCursorJsonlState's default) means "no structured
+// artifact" in production (activityAtFromMs(0) === null, see its own
+// comment) and must therefore never park. Stale-mode tests exercising the
+// REAL park decision need a genuinely old, non-zero mtime instead — this is
+// that fixed idle timestamp, matching staleParkableSession's own
+// 65-minutes-idle fixture and mockAgentWaitingState's codex branch.
+const STALE_PARK_ACTIVITY_MS = Date.parse("2026-03-18T09:00:00.000Z");
 
 function mockClaudeSessionStatus(state: string, status: string) {
   readClaudeSessionStatusMock.mockResolvedValue({
@@ -943,16 +958,46 @@ function mockClaudeSessionStatus(state: string, status: string) {
   });
 }
 
-function mockCursorJsonlState(state: string) {
+function mockCursorJsonlState(state: string, options?: { lastMtimeMs?: number }) {
   readCursorJsonlStateMock.mockResolvedValue({
     state,
     reader: {
       filePath: "/tmp/.cursor/projects/test/agent-transcripts/chat-api-1/chat-api-1.jsonl",
       lastOffset: 0,
-      lastMtimeMs: 0,
+      lastMtimeMs: options?.lastMtimeMs ?? 0,
       tailRecords: [],
     },
   });
+}
+
+type StaleMatrixAgent = "claude" | "codex" | "cursor";
+
+// Puts classification at "waiting" for the given agent, using each agent's
+// own state source: claude/cursor read their JSONL transcript state, codex
+// reads its hook state (stateStrategy "hook", see AGENT_ADAPTERS).
+function mockAgentWaitingState(agent: StaleMatrixAgent): void {
+  if (agent === "codex") {
+    // updatedAt deliberately old (matches staleParkableSession's 65-minutes-
+    // idle fixture): the park scenario derives idle time from this hook
+    // timestamp, and a near-"now" value (as other codex classification
+    // tests use) would mask staleness and never park.
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T09:00:00.000Z",
+    });
+    return;
+  }
+  if (agent === "cursor") {
+    mockCursorJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+    return;
+  }
+  mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+}
+
+function agentLaunchCommand(agent: StaleMatrixAgent): string {
+  if (agent === "codex") return "codex --dangerously-bypass-approvals-and-sandbox";
+  if (agent === "cursor") return "cursor-agent";
+  return "claude --dangerously-skip-permissions";
 }
 
 function mockExitedThenRestoredProcess() {
@@ -29865,6 +29910,11 @@ describe("SessionService", () => {
         claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
         sessionBatch?: SessionRecord[],
       ): Promise<SessionView>;
+      enrichWithClassified(
+        session: SessionRecord,
+        claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+        sessionBatch?: SessionRecord[],
+      ): Promise<{ view: SessionView; classified: unknown }>;
       pollAttentionStates(baseline: boolean): Promise<void>;
     };
 
@@ -29906,11 +29956,15 @@ describe("SessionService", () => {
       const internals = service as unknown as SessionScopedStateInternals;
       await drainBaselineTicks(internals);
       const capturedViews: SessionView[] = [];
-      const enrich = internals.enrich.bind(internals);
-      vi.spyOn(internals, "enrich").mockImplementation(async (...args) => {
-        const view = await enrich(...args);
-        capturedViews.push(view);
-        return view;
+      // pollAttentionStates' park gate (DEFECT 3) needs the raw classified
+      // result alongside the view, so it calls enrichWithClassified directly
+      // rather than the thin enrich() wrapper — spy on the real work-doing
+      // method, not the wrapper it no longer goes through.
+      const enrichWithClassified = internals.enrichWithClassified.bind(internals);
+      vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+        const result = await enrichWithClassified(...args);
+        capturedViews.push(result.view);
+        return result;
       });
       listSessionsMock.mockClear();
 
@@ -30625,7 +30679,7 @@ describe("SessionService", () => {
             },
           },
         });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession({ sidecarNames: ["proxy"] }));
         sidecarTmuxAliveMock.mockResolvedValue(true);
@@ -30833,7 +30887,7 @@ describe("SessionService", () => {
         // isProcessRunningInTmux stays true throughout, exactly as it would
         // for a session that never stopped being live.
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
 
@@ -30860,7 +30914,7 @@ describe("SessionService", () => {
         // post-teardown re-read — parkStaleSession must not overwrite it out
         // of existence.
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
         let agentPaneKilled = false;
@@ -30905,7 +30959,7 @@ describe("SessionService", () => {
         // would be stranded on disk forever. The abandon branch must kick
         // the delivery runner itself so it — not reconcile — wins the race.
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
         let agentPaneKilled = false;
@@ -30975,7 +31029,7 @@ describe("SessionService", () => {
         // woke this sweep. Parking anyway keeps the derived state "stale",
         // which stays open, so the event survives.
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
         let agentPaneKilled = false;
@@ -31025,7 +31079,7 @@ describe("SessionService", () => {
             },
           },
         });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
@@ -31069,6 +31123,104 @@ describe("SessionService", () => {
       });
     });
 
+    describe("DEFECT 3: park-specific activity resolution", () => {
+      it("a benign record write mid-idle does not reset the park clock", async () => {
+        // A routine writeSession (agentSessionId capture, a PR field update, a
+        // slot unlink, a serverError/rateLimitedAt clear...) bumps
+        // session.updatedAt without the agent doing anything. Gating park
+        // eligibility on the max of updatedAt and agent activity (the way
+        // lastActivityAt legitimately does for the UI) would let that write
+        // reset the idle clock and make parking never fire in practice. The
+        // park gate must key off genuine transcript activity alone.
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          staleParkableSession({
+            // A record write landed a minute ago — recent, unlike the
+            // genuinely stale transcript activity above.
+            updatedAt: "2026-03-18T10:04:00.000Z",
+          }),
+        );
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(1);
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(sessions.get("api-1")?.stopReason).toBe("stale_timeout");
+        service.dispose();
+      });
+
+      it("a session with an open terminal (recent tmux attach) but no agent activity still parks", async () => {
+        // tmux session_activity is an attach clock, not an agent-activity
+        // signal (bumped by opening the web terminal, not by agent output).
+        // The park gate must never fall back to it: an attached session
+        // must not become permanently unparkable.
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+        // A fresh attach, well inside the idle window.
+        getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(1);
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(sessions.get("api-1")?.stopReason).toBe("stale_timeout");
+        service.dispose();
+      });
+
+      it("a session with no transcript activity signal at all is never parked (fails safe)", async () => {
+        // state can read "waiting" off claude's own status file even when no
+        // jsonl activity mtime exists at all (readClaudeJsonlStateMock stays
+        // at its default null — see beforeEach). With no transcript signal,
+        // resolveParkActivityAt returns null, and the gate must fail safe:
+        // never park rather than treat "no evidence" as "idle forever".
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeSessionStatus("waiting", "idle");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+    });
+
     describe("GAP 1: park vs. delivery race", () => {
       it("backs off (kills nothing) when a queued-message delivery is already in flight", async () => {
         // A delivery already past its own queueDeliveryInFlight registration
@@ -31076,7 +31228,7 @@ describe("SessionService", () => {
         // in-flight turn that today's post-hoc abandon check (further down
         // in parkStaleSession) is too late to undo.
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
 
@@ -31402,7 +31554,7 @@ describe("SessionService", () => {
 
       it("releases staleParkInFlight once the park finishes, letting the next send() through", async () => {
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
-        mockClaudeJsonlState("waiting");
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
         sessions.set("api-1", staleParkableSession());
         let agentPaneKilled = false;
@@ -31726,6 +31878,323 @@ describe("SessionService", () => {
         const persisted = sessions.get("api-1");
         expect(persisted).not.toHaveProperty("stopReason");
         expect(persisted).not.toHaveProperty("staleSidecars");
+      });
+    });
+
+    describe.each<StaleMatrixAgent>(["claude", "codex", "cursor"])("agent matrix: %s", (agent) => {
+      it("parks a running+waiting session idle past the threshold: kills the pane and captures live sidecars", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          staleAfterMinutes: 60,
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: { proxy: { command: "pnpm proxy" } },
+            },
+          },
+        });
+        mockAgentWaitingState(agent);
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          staleParkableSession({
+            agent,
+            launchCommand: agentLaunchCommand(agent),
+            agentSessionId: "session-uuid",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        const persisted = sessions.get("api-1");
+        expect(persisted?.status).toBe("stopped");
+        expect(persisted?.stopReason).toBe("stale_timeout");
+        expect(persisted?.staleSidecars).toEqual(["proxy"]);
+        service.dispose();
+      });
+
+      it("wake via send(): relaunches, replays sidecars, delivers the message, clears stopReason/staleSidecars — pane write ordered after both the process check and the sidecar replay", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: { proxy: { command: "pnpm proxy" } },
+            },
+          },
+        });
+        mockAgentWaitingState(agent);
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          id: "api-1",
+          project: "api",
+          agent,
+          agentSessionId: "session-uuid",
+          prompt: "hello",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          tmuxSession: "api-1",
+          launchCommand: agentLaunchCommand(agent),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T09:00:00.000Z",
+        });
+        listSessionsMock.mockReturnValue([]);
+        // State-keyed rather than an ordered mockResolvedValueOnce — see
+        // the session-service test order flake note: a background sweep
+        // can consume an ordered once-value meant for this call.
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+
+        const order: string[] = [];
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+          order.push("createTmuxSession");
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => {
+          order.push("isProcessRunningInTmux");
+          return true;
+        });
+        createTmuxSidecarSessionMock.mockImplementation(async () => {
+          order.push("createTmuxSidecarSession");
+        });
+        sendMessageToTmuxMock.mockImplementation(async () => {
+          order.push("sendMessageToTmux");
+        });
+
+        const service = await createDisposedSessionService();
+        const result = await service.send("api-1", { message: "resume", queue: false });
+
+        expect(result.status).toBe("running");
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("resume"),
+          expect.anything(),
+        );
+        const persisted = sessions.get("api-1");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted).not.toHaveProperty("staleSidecars");
+
+        // Real ordering assertion: the pane write happens strictly after
+        // both the agent-process confirmation and the sidecar replay, not
+        // merely "eventually".
+        const createIdx = order.indexOf("createTmuxSession");
+        const confirmIdx = order.indexOf("isProcessRunningInTmux");
+        const sidecarIdx = order.indexOf("createTmuxSidecarSession");
+        const sendIdx = order.indexOf("sendMessageToTmux");
+        expect(createIdx).toBeGreaterThanOrEqual(0);
+        expect(confirmIdx).toBeGreaterThan(createIdx);
+        expect(sidecarIdx).toBeGreaterThan(confirmIdx);
+        expect(sendIdx).toBeGreaterThan(sidecarIdx);
+      });
+
+      it("manual restore(): sends no restore message, replays staleSidecars, and clears stopReason/staleSidecars", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: { proxy: { command: "pnpm proxy" } },
+            },
+          },
+        });
+        mockAgentWaitingState(agent);
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          id: "api-1",
+          project: "api",
+          agent,
+          agentSessionId: "session-uuid",
+          prompt: "hello",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          tmuxSession: "api-1",
+          launchCommand: agentLaunchCommand(agent),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T09:00:00.000Z",
+        });
+        mockExitedThenRestoredProcess();
+
+        const service = await createDisposedSessionService();
+        const restored = await service.restore("api-1");
+
+        expect(restored.status).toBe("running");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        const persisted = sessions.get("api-1");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted).not.toHaveProperty("staleSidecars");
+      });
+
+      it("fresh-launch fallback on native-resume failure resends the original task prompt (wrapped as restore context) before the triggering message", async () => {
+        // relaunchSessionInPlace's fresh-launch fallback starts a blank agent
+        // process (no --resume, no piped prompt) whenever native resume is
+        // unavailable or fails, so the agent has zero conversation memory.
+        // Left alone, whatever real message triggered the wake becomes,
+        // from the agent's perspective, the first message of a brand new
+        // session with no task context at all. The fix resends the original
+        // task prompt (through the same restore-prompt machinery restore()
+        // uses) before the triggering message is written to the same pane.
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        mockAgentWaitingState(agent);
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          id: "api-1",
+          project: "api",
+          agent,
+          agentSessionId: "session-uuid",
+          prompt: "the original task prompt",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          tmuxSession: "api-1",
+          launchCommand: agentLaunchCommand(agent),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T09:00:00.000Z",
+        });
+        listSessionsMock.mockReturnValue([]);
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        // First createTmuxSession/waitForTmuxReady attempt is the native
+        // resume attempt; make it fail so relaunchSessionInPlace falls back
+        // to a fresh launch (its catch block only fires when a
+        // recoveryPlan existed, i.e. agentSessionId was present).
+        let createTmuxSessionCalls = 0;
+        createTmuxSessionMock.mockImplementation(async () => {
+          createTmuxSessionCalls += 1;
+          relaunched = true;
+        });
+        waitForTmuxReadyMock.mockImplementationOnce(async () => {
+          throw new Error("resume failed");
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => true);
+
+        const service = await createDisposedSessionService();
+        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+
+        expect(result.status).toBe("running");
+        expect(createTmuxSessionCalls).toBe(2);
+        // The fresh-launch fallback's own createTmuxSession call carries no
+        // --resume/session-id continuation flag.
+        const fallbackLaunchCommand = createTmuxSessionMock.mock.calls[1]?.[0]?.launchCommand;
+        expect(fallbackLaunchCommand).not.toContain("resume");
+        // sendMessageToTmux is called twice: first the resent task context
+        // (so the fresh agent process is not blank), then the real
+        // triggering message — in that order.
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
+        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+      });
+    });
+
+    describe("DEFECT 2: admission gate on the wake path", () => {
+      it("caps concurrent stale-parked wakes at the global admission limit and defers (never drops) a refused scheduled wake", async () => {
+        // A stale-parked session holds zero live slots (isLiveSessionRecord
+        // excludes it), so nothing bounded how many of them one poll cycle
+        // could wake at once before this fix. Three parked sessions each
+        // carry a due one-shot scheduledWake; an already-live occupier plus
+        // a cap of 2 leaves room for exactly ONE of them to wake this tick.
+        // The other two must be refused by assertAdmissible("wake") and
+        // re-armed — not lost — so the next poll tick retries them.
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, maxLiveSessions: 2 },
+        });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "occupier",
+          sessionRecord({ id: "occupier", status: "running", tmuxSession: "occupier" }),
+        );
+        for (const id of ["parked-1", "parked-2", "parked-3"]) {
+          sessions.set(
+            id,
+            sessionRecord({
+              id,
+              status: "stopped",
+              stopReason: "stale_timeout",
+              tmuxSession: id,
+              scheduledWake: { dueAt: "2026-03-18T10:00:00.000Z", message: `wake ${id}` },
+            }),
+          );
+        }
+        // Pane is gone for every parked session until its own relaunch
+        // creates it; state-keyed per tmux session name, not an ordered
+        // mockResolvedValueOnce (see the session-service test order flake
+        // note).
+        const relaunchedTmux = new Set<string>();
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => relaunchedTmux.has(name));
+        createTmuxSessionMock.mockImplementation(
+          async ({ sessionName }: { sessionName: string }) => {
+            relaunchedTmux.add(sessionName);
+          },
+        );
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await advanceSeconds(1);
+
+        const runningIds = [...sessions.values()]
+          .filter((session) => session.status === "running")
+          .map((session) => session.id)
+          .sort();
+        // Exactly the cap: the occupier plus one woken parked session, never
+        // more.
+        expect(runningIds).toHaveLength(2);
+        expect(runningIds).toContain("occupier");
+        const wokenId = runningIds.find((id) => id !== "occupier");
+        expect(wokenId).toBeDefined();
+        expect(sessions.get(wokenId as string)?.scheduledWake).toBeUndefined();
+
+        const deferredIds = ["parked-1", "parked-2", "parked-3"].filter((id) => id !== wokenId);
+        expect(deferredIds).toHaveLength(2);
+        for (const id of deferredIds) {
+          const persisted = sessions.get(id);
+          // Refused, not dropped: still parked, and the exact same
+          // scheduledWake occurrence is still armed for the next tick.
+          expect(persisted?.status).toBe("stopped");
+          expect(persisted?.stopReason).toBe("stale_timeout");
+          expect(persisted?.scheduledWake).toEqual({
+            dueAt: "2026-03-18T10:00:00.000Z",
+            message: `wake ${id}`,
+          });
+        }
+        const deferredEvents = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.wake.deferred");
+        expect(deferredEvents.map((entry) => entry.sessionId).sort()).toEqual(deferredIds.sort());
+        service.dispose();
       });
     });
 
