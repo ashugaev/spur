@@ -51,6 +51,7 @@ interface PendingBatch {
   customPrompt: string | undefined;
   customPromptRecorded: boolean;
   batch: SendBatch;
+  notBeforeAt: number;
 }
 
 interface RetryState {
@@ -572,6 +573,7 @@ function mergeIntoBatch(
     customPrompt,
     customPromptRecorded: false,
     batch: incoming,
+    notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
   };
 }
 
@@ -898,29 +900,36 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
-      if (!retry.interrupt && !isDeliverableState(session)) {
-        return;
-      }
-
-      const now = Date.now();
-      if (retry.nextAttemptAt !== null && now < retry.nextAttemptAt) {
-        return;
-      }
-
-      retry.attempts += 1;
-      retry.nextAttemptAt =
-        retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
-      await deliverBatch(queueKey, batch, retry.interrupt && !isDeliverableState(session), {
-        attempt: retry.attempts,
-        clearAfter: false,
-        keepRetryState: true,
-      });
+    const deliverable = isDeliverableState(session);
+    if (!retry.interrupt && !deliverable) {
       return;
     }
+
+    const now = Date.now();
+    if (retry.nextAttemptAt !== null && now < retry.nextAttemptAt) {
+      return;
+    }
+
+    // Escalation (interrupt=true, !deliverable) bypasses the window gate.
+    if (deliverable && now < batch.notBeforeAt) {
+      return;
+    }
+
+    retry.attempts += 1;
+    retry.nextAttemptAt =
+      retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
+    await deliverBatch(queueKey, batch, retry.interrupt && !deliverable, {
+      attempt: retry.attempts,
+      clearAfter: false,
+      keepRetryState: true,
+    });
+    return;
+  }
 
     if (isInDeliveryBackoff(queueKey)) return;
 
     if (isDeliverableState(session)) {
+      if (Date.now() < batch.notBeforeAt) return;
       interruptedKeys.delete(queueKey);
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
@@ -1033,11 +1042,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     // loop; a fresh event must not bypass the backoff and re-spam the target.
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
-      await deliverAndTrackFailure(queueKey, batch, false);
-      return;
-    }
-
     if (session.state !== "working" && session.state !== "needs_input") return;
     if (session.state === "needs_input" || !trigger.send.interrupt) return;
 
@@ -1092,6 +1096,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         customPrompt: sendTrigger.send.prompt,
         customPromptRecorded: false,
         batch,
+        notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
       });
       // Without this, a restored ci_failed batch would skip the retry/backoff
       // branch entirely (no retryStates entry) and deliver once immediately
