@@ -2251,8 +2251,8 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--json", "Print raw JSON")
     .option("--prune", "Preview or execute deletion of prunable entries (dry-run without --yes)")
     .option("--yes", "Confirm --prune non-interactively; required to actually delete anything")
-    .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }) => {
-      const instanceConfig = loadInstanceConfigReadOnly();
+    .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }, command) => {
+      const instanceConfig = loadInstanceConfigReadOnly(getConfigPath(command.parent as Command));
       if (options.prune && options.yes && instanceConfig.status !== "ok") {
         throw new Error(
           `--prune --yes requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,

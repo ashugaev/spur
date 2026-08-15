@@ -47,9 +47,15 @@ vi.mock("../../src/config.js", async () => {
   return { ...actual, loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock };
 });
 
-async function parseCache(args: string[]): Promise<void> {
+async function parseCache(args: string[], globalArgs: string[] = []): Promise<void> {
   const { createProgram } = await import("../../src/cli.js");
-  await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "cache", ...args]);
+  await createProgram("/tmp/dist/cli.js").parseAsync([
+    "node",
+    "spur",
+    ...globalArgs,
+    "cache",
+    ...args,
+  ]);
 }
 
 // `executePrune`'s guard resolves the "tmp" cache root to the literal "/tmp"
@@ -193,6 +199,36 @@ describe("spur cache CLI", () => {
     );
     expect(planCachePruneMock).not.toHaveBeenCalled();
     expect(executePruneMock).not.toHaveBeenCalled();
+  });
+
+  it("--config to absent file rejects --prune --yes before planning", async () => {
+    loadInstanceConfigReadOnlyMock.mockReturnValue({ status: "absent" });
+    await expect(
+      parseCache(["--prune", "--yes"], ["--config", "/nonexistent/spur.yaml"]),
+    ).rejects.toThrow("requires a resolved instance config");
+    expect(planCachePruneMock).not.toHaveBeenCalled();
+    expect(executePruneMock).not.toHaveBeenCalled();
+  });
+
+  it("--config path is forwarded to loadInstanceConfigReadOnly", async () => {
+    let capturedInput: string | undefined;
+    loadInstanceConfigReadOnlyMock.mockImplementation((input?: string) => {
+      capturedInput = input;
+      return {
+        status: "ok",
+        config: {
+          configPath: join(tempDir, "custom.yaml"),
+          dataDir: join(tempDir, ".spur"),
+          worktreeDir: join(tempDir, ".spur", "worktrees"),
+          tmux: { socketName: "spur-test" },
+          projects: {},
+        },
+      };
+    });
+    const configPath = join(tempDir, "custom.yaml");
+    await parseCache(["--prune", "--yes"], ["--config", configPath]);
+    expect(capturedInput).toBe(configPath);
+    expect(executePruneMock).toHaveBeenCalledTimes(1);
   });
 
   it("calls executePrune with the prunable candidates with --prune --yes", async () => {
