@@ -1598,17 +1598,13 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      // t=0: event queued; t=30000: window opens, first flush delivers and fails.
-      // recordedAt≈30000, nextAttemptAt≈40000.
+      // t=30000: window opens, flush delivers and fails.
+      // recordedAt≈30000, nextAttemptAt≈40000 (10s backoff window).
       bus.emit(githubEvent());
       await vi.advanceTimersByTimeAsync(30_001);
       expect(deliverMock).toHaveBeenCalledTimes(1);
 
-      // t=35000: still inside 10s backoff — no retry.
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(deliverMock).toHaveBeenCalledTimes(1);
-
-      // Session restarted: stateHistory records a stopped entry after the failure.
+      // Session restarted: stopped entry after the failure at t≈30000.
       getMock.mockResolvedValue({
         ...session,
         stateHistory: [
@@ -1616,7 +1612,8 @@ describe("startConfiguredTriggers", () => {
         ],
       });
 
-      // t=40000: flush sees restart evidence → clears stale backoff → delivers.
+      // t=35000: strictly inside 10s backoff window (nextAttemptAt=40000).
+      // clearBackoffIfRestarted detects the stopped transition → clears → delivers.
       await vi.advanceTimersByTimeAsync(5_000);
       expect(deliverMock).toHaveBeenCalledTimes(2);
     } finally {
@@ -1663,6 +1660,73 @@ describe("startConfiguredTriggers", () => {
       // t=40000: backoff expires naturally → retry proceeds.
       await vi.advanceTimersByTimeAsync(5_000);
       expect(deliverMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("clears delivery-failure backoff at handleSendEvent when interrupt session restarted, delivering immediately", async () => {
+    const session = {
+      id: "api-1",
+      status: "running" as const,
+      state: "working" as const,
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(session);
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("pane write failed"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => mergeConflictSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      // First event: handleSendEvent fires interrupt delivery immediately (working).
+      // Delivery throws → recordedAt≈0, nextAttemptAt≈10000.
+      bus.emit(mergeConflictEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock.mock.calls[0]).toEqual([
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      ]);
+
+      // t=5000: flush fires; session has no restart history → clearBackoffIfRestarted
+      // is a no-op → backoff holds → skip. (Also validates flushPending call-site
+      // does NOT clear without restart evidence.)
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // Session restarted: stopped entry after the failure at t≈0.
+      getMock.mockResolvedValue({
+        ...session,
+        stateHistory: [
+          { state: "stopped", at: new Date(Date.now()).toISOString(), source: "status" as const },
+        ],
+      });
+
+      // Second event before natural backoff expiry (t<10000).
+      // handleSendEvent: clearBackoffIfRestarted detects stopped → clears →
+      // proceeds past isInDeliveryBackoff → delivers with interrupt:true.
+      bus.emit(mergeConflictEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(deliverMock.mock.calls[1]).toEqual([
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      ]);
     } finally {
       await controller.stop();
     }
