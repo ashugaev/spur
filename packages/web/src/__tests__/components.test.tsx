@@ -564,7 +564,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
@@ -1649,6 +1649,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -1685,6 +1689,9 @@ describe("Dashboard", () => {
       expect(screen.getByAltText("spawn.png")).toBeInTheDocument();
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1905,6 +1912,10 @@ describe("Dashboard", () => {
           return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
         if (url === "/api/sessions")
           return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+        if (url.startsWith("/api/models"))
+          return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+        if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
         if (url === "/api/spawn")
           return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
         throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1922,6 +1933,9 @@ describe("Dashboard", () => {
       });
       const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
       fireEvent.change(prompt, { target: { value } });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+      });
       fireEvent.keyDown(prompt, keydown);
 
       await waitFor(() => {
@@ -1930,7 +1944,13 @@ describe("Dashboard", () => {
           expect.objectContaining({
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
+            body: JSON.stringify({
+              projectId: "api",
+              prompt: value,
+              agent: "claude",
+              model: "opus",
+              overrides: { worktree: true },
+            }),
           }),
         );
         expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
@@ -2157,6 +2177,8 @@ describe("Dashboard", () => {
           { status: 200 },
         );
       }
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2311,13 +2333,14 @@ describe("Dashboard", () => {
       model: null,
       branch: "feature/explicit-branch",
       branchIsExplicit: true,
-      workspaceMode: "default",
+      workspaceMode: "worktree",
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2409,13 +2432,14 @@ describe("Dashboard", () => {
       model: null,
       branch: "",
       branchIsExplicit: false,
-      workspaceMode: "default",
+      workspaceMode: "worktree",
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2465,13 +2489,14 @@ describe("Dashboard", () => {
       model: null,
       branch: "feature/sp-draft",
       branchIsExplicit: true,
-      workspaceMode: "default",
+      workspaceMode: "worktree",
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
     const client = createTestQueryClient();
     const Wrapper = ({ children }: { children: ReactNode }) => (
@@ -2532,6 +2557,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn")
         return new Response(JSON.stringify(spawnedSession), { status: 201 });
       if (url === "/api/sessions")
@@ -2562,6 +2591,9 @@ describe("Dashboard", () => {
 
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Ship it" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
@@ -2612,6 +2644,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
@@ -2631,6 +2667,9 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Spawn in matching filter" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
@@ -2673,6 +2712,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
@@ -2698,6 +2741,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Spawn in another project" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -2722,6 +2768,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn")
         return new Response(JSON.stringify({ error: "Daemon down" }), { status: 502 });
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -2737,6 +2787,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Keep this prompt" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
@@ -2776,6 +2829,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         spawnCalls += 1;
         return pendingSpawn;
@@ -2796,6 +2853,9 @@ describe("Dashboard", () => {
     });
 
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).not.toBeDisabled();
+    });
     fireEvent.click(spawnButton);
     fireEvent.click(spawnButton);
 
@@ -3066,6 +3126,199 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: "Stub" })).toBeNull();
     expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
     expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
+  });
+
+  describe("spawn session mode picker", () => {
+    function payloadWithModes() {
+      return {
+        projects: [
+          {
+            id: "api",
+            name: "API",
+            configured: true,
+            prefix: "api",
+            path: "/repo/api",
+          },
+          {
+            id: "moded",
+            name: "Moded",
+            configured: true,
+            prefix: "mod",
+            path: "/repo/moded",
+            modes: {
+              manager: { skill: "manager", default: true },
+              council: { skill: "council" },
+            },
+          },
+        ],
+        sessions: [],
+      };
+    }
+
+    function mockSpawnPickerFetch(onSpawn: (body: unknown) => Response) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+        if (url === "/api/sessions") return new Response(JSON.stringify(payloadWithModes()));
+        if (url.startsWith("/api/models"))
+          return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+        if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
+        if (url === "/api/spawn") {
+          return onSpawn(init?.body ? JSON.parse(String(init.body)) : null);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    it("shows the combobox preselected to the default mode for a project with modes", async () => {
+      mockSpawnPickerFetch(() => new Response(JSON.stringify(sessionsPayload().sessions[0])));
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      expect(modeSelect).toHaveValue("manager");
+      expect(within(modeSelect).getByRole("option", { name: "council" })).toBeInTheDocument();
+    });
+
+    it("posts the picked non-default mode as `mode` on spawn", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      fireEvent.change(modeSelect, { target: { value: "council" } });
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).toMatchObject({ mode: "council" });
+    });
+
+    it("renders no combobox and posts no mode key for a project without modes", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
+
+      expect(
+        screen.queryByRole("combobox", { name: "Spawn session mode" }),
+      ).not.toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).not.toHaveProperty("mode");
+    });
+
+    it("reconciles a stored draft's stale mode name to the project default on restore and on spawn", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+      window.localStorage.setItem("spur:last-spawn-project", "moded");
+      writeSpawnDraft({
+        projectId: "moded",
+        prompt: "Stale mode draft",
+        agent: "claude",
+        model: null,
+        branch: "",
+        branchIsExplicit: false,
+        workspaceMode: "worktree",
+        defaultBranch: "",
+        planMode: false,
+        selfDestruct: false,
+        selfDestructConditions: "",
+        steps: [],
+        trackerUrl: null,
+        sessionMode: "ghost-mode-removed-from-config",
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
+      expect(modeSelect).toHaveValue("manager");
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).toMatchObject({ mode: "manager" });
+    });
+
+    it("drops the mode from the next spawn when switching from a moded to an unmoded project", async () => {
+      let spawnBody: unknown = null;
+      const fetchMock = mockSpawnPickerFetch((body) => {
+        spawnBody = body;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      });
+
+      render(<Dashboard />);
+      await screen.findByRole("button", { name: "Spawn Session" });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "moded" },
+      });
+      await screen.findByRole("combobox", { name: "Spawn session mode" });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
+      expect(
+        screen.queryByRole("combobox", { name: "Spawn session mode" }),
+      ).not.toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/spawn", expect.anything());
+      });
+      expect(spawnBody).not.toHaveProperty("mode");
+    });
   });
 });
 

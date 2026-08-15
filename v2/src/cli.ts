@@ -9,7 +9,7 @@ import {
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -35,9 +35,11 @@ import {
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
+  loadInstanceConfigReadOnly,
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
+import { checkAgentProcessOwnership } from "./agent-processes.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
@@ -60,14 +62,23 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
-import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import {
+  isForeignAgentProcessMessage,
+  isKillConfirmationRequiredMessage,
+  isRestorableSession,
+} from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
-import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import {
+  buildMergedConfig,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
+  readConfigRegistryFile,
+} from "./registry.js";
 import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
@@ -297,6 +308,46 @@ function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
   return lines.join("\n");
 }
 
+// 1-based numbered queue: real entries only (the ones remove/flush can act
+// on); pipeline steps render separately, unnumbered, since they are not a
+// valid remove/flush target.
+function renderQueuedMessages(sessionId: string, session: SessionView): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const pipelineMessages = session.queuedMessages?.pipelineMessages ?? [];
+  if (messages.length === 0 && pipelineMessages.length === 0) {
+    return dimText(`No queued messages for ${sessionId}.`);
+  }
+  const lines: string[] = [];
+  messages.forEach((message, index) => {
+    lines.push(`${boldText(`#${index + 1}`)} ${message}`);
+  });
+  if (pipelineMessages.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push(dimText("Auto steps (not selectable):"));
+    for (const stepMessage of pipelineMessages) {
+      lines.push(dimText(`- ${stepMessage}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+function resolveQueuedMessageByIndex(
+  sessionId: string,
+  session: SessionView,
+  index: number,
+): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const message = index >= 1 ? messages[index - 1] : undefined;
+  if (message === undefined) {
+    throw new Error(
+      `Index ${index} is out of range: ${sessionId} has ${messages.length} queued message(s)`,
+    );
+  }
+  return message;
+}
+
 function renderSessionMemoryList(sessionId: string, response: SessionMemoryListResponse): string {
   if (response.records.length === 0) {
     return dimText(`No session memory for ${sessionId}.`);
@@ -385,7 +436,8 @@ function getConfigPath(program: Command): string | undefined {
 export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
-  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
+  const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
   const project = config.projects[projectId];
   if (!project) {
     throw new Error(`Unknown project: ${projectId}`);
@@ -399,7 +451,7 @@ function prepareInstanceConfig(program: Command): { configPath: string; initiali
   return ensured;
 }
 
-async function maybeAutoConnectProject(
+export async function maybeAutoConnectProject(
   cliEntrypoint: string,
   configPath: string,
   explicitProjectConfigPath?: string,
@@ -421,6 +473,9 @@ async function maybeAutoConnectProject(
   }
   const projectConfigPath = [...candidates][0];
   if (!projectConfigPath) {
+    return {};
+  }
+  if (isInsideWorktreeDir(projectConfigPath, loadConfig(configPath).worktreeDir)) {
     return {};
   }
 
@@ -1161,6 +1216,13 @@ function helpNotes(command: Command): string[] {
       "Session memory is daemon-managed and scoped to one existing session id.",
     ];
   }
+  if (command.name() === "queue") {
+    return [
+      "Exact forms: `spur queue <sessionId> list`, `remove <index>`, `flush <index>`.",
+      "`remove`/`flush` take a 1-based index from the most recent `list`; the CLI resolves it to exact text via a fresh read immediately before acting.",
+      "A pipeline-derived auto step is never a valid index — only real queued messages are numbered.",
+    ];
+  }
   return [];
 }
 
@@ -1232,9 +1294,11 @@ async function runInteractiveSessionList(
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
   let pendingRespawnConfirmationSessionId: string | null = null;
+  let pendingRestoreConfirmationSessionId: string | null = null;
   const clearPendingConfirmations = (): void => {
     pendingKillConfirmationSessionId = null;
     pendingRespawnConfirmationSessionId = null;
+    pendingRestoreConfirmationSessionId = null;
   };
   let attachedPane: {
     tmuxSession: string;
@@ -1367,6 +1431,12 @@ async function runInteractiveSessionList(
   };
 
   const restoreSelectedSession = async (): Promise<void> => {
+    // Disarm the other verbs' confirmations up front, including on the early
+    // returns below: pressing r must never leave a kill or respawn armed for
+    // a later single keypress. Restore's own pending survives — that is the
+    // latch forceRestore reads.
+    pendingKillConfirmationSessionId = null;
+    pendingRespawnConfirmationSessionId = null;
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     if (!isRestorableSession(session)) {
@@ -1375,15 +1445,19 @@ async function runInteractiveSessionList(
       return;
     }
 
+    const forceRestore = pendingRestoreConfirmationSessionId === session.id;
+
     busy = true;
-    statusMessage = brandLine(`Restoring ${session.id}...`);
+    statusMessage = brandLine(
+      forceRestore ? `Restoring ${session.id} anyway...` : `Restoring ${session.id}...`,
+    );
     render();
 
     try {
       const restored = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/restore`,
-        {},
+        forceRestore ? { force: true } : {},
         configPath,
       );
       sessions = replaceListedSession(sessions, restored);
@@ -1392,7 +1466,15 @@ async function runInteractiveSessionList(
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
+      if (!forceRestore && isForeignAgentProcessMessage(message)) {
+        pendingKillConfirmationSessionId = null;
+        pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = session.id;
+        statusMessage = brandLine(`${message}. Press r again to restore anyway.`);
+      } else {
+        clearPendingConfirmations();
+        statusMessage = brandLine(message);
+      }
     } finally {
       busy = false;
       render();
@@ -1570,6 +1652,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!force && isKillConfirmationRequiredMessage(message)) {
         pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingKillConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
       } else {
@@ -1620,6 +1703,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!forceRespawn && isKillConfirmationRequiredMessage(message)) {
         pendingKillConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingRespawnConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press s again to respawn anyway.`);
       } else {
@@ -1708,7 +1792,6 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
-        clearPendingConfirmations();
         void restoreSelectedSession().catch(fail);
         return;
       }
@@ -1938,6 +2021,13 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
           const hostChecks = await collectHostInstallChecks();
+          // Read-only: never bootstrap-writes the instance config. "absent"
+          // (never initialized) and "invalid" (unparsable) both skip the
+          // check entirely — there is no dataDir to scan sessions under.
+          const instanceConfig = loadInstanceConfigReadOnly();
+          if (instanceConfig.status === "ok") {
+            hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+          }
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
@@ -2076,6 +2166,10 @@ export function createProgram(cliEntrypoint: string): Command {
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
     )
     .option(
+      "--mode <name>",
+      "Session mode from projects.<id>.modes; overrides the project default mode",
+    )
+    .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
@@ -2162,6 +2256,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
@@ -2243,7 +2338,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to connect");
       }
@@ -2268,7 +2363,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to disconnect");
       }
@@ -2580,13 +2675,21 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("reopen")
     .description("Restart a completed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
+    .option(
+      "--force",
+      "Reopen even if a live agent process for this session id already exists outside its pane",
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true } = {};
+      if (options.force) {
+        body.force = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "reopening session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath, body),
         success: (session) => `Reopened ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2721,6 +2824,75 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("queue")
+    .description("Manage a session's message queue.")
+    .usage("<sessionId> <list|remove|flush> [index]")
+    .argument("<sessionId>", "Session id")
+    .argument("<action>", "list, remove, or flush")
+    .argument("[index]", "1-based queue index (remove/flush only)")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (sessionId: string, action: string, index: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        if (action === "list") {
+          if (index !== undefined) {
+            throw new Error("queue list does not accept an index");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading queue for ${sessionId}`,
+            action: () =>
+              getJson<SessionView>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}`,
+                configPath,
+              ),
+            render: (session) => renderQueuedMessages(sessionId, session),
+          });
+          return;
+        }
+
+        if (action !== "remove" && action !== "flush") {
+          throw new Error("queue action must be list, remove, or flush");
+        }
+
+        const parsedIndex = index === undefined ? NaN : Number(index);
+        if (!Number.isInteger(parsedIndex)) {
+          throw new Error(`queue ${action} requires a 1-based index`);
+        }
+
+        // Resolved text is captured here so the success line can echo what
+        // was acted on: the GET -> POST window is one round trip wide, so
+        // this may act on a slightly different queue than an earlier `list`
+        // printed, and the caller must see which text actually moved.
+        let resolvedMessage = "";
+        await outputResult({
+          json: Boolean(options.json),
+          label: `${action === "remove" ? "removing" : "flushing"} queued message #${parsedIndex}`,
+          action: async () => {
+            const session = await getJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}`,
+              configPath,
+            );
+            resolvedMessage = resolveQueuedMessageByIndex(sessionId, session, parsedIndex);
+            return postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/queue/${action}`,
+              { message: resolvedMessage },
+              configPath,
+            );
+          },
+          success: () =>
+            action === "remove"
+              ? `Removed queued message: ${resolvedMessage}`
+              : `Flushed queued message: ${resolvedMessage}`,
+          render: renderSessionCard,
+        });
+      },
+    );
 
   program
     .command("memory")

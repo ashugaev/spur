@@ -95,6 +95,17 @@ describe("readWorkspaceState", () => {
     expect(readWorkspaceState(dataDir, "api-1")).toEqual({});
   });
 
+  it("accepts only true as the manual title override marker", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "workspaces", "api-1.json");
+    mkdirSync(join(dataDir, "workspaces"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ manualTitleOverride: "true" }), "utf-8");
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({});
+
+    writeFileSync(path, JSON.stringify({ manualTitleOverride: true }), "utf-8");
+    expect(readWorkspaceState(dataDir, "api-1")).toEqual({ manualTitleOverride: true });
+  });
+
   it("keeps only well-formed links and tags", async () => {
     const dataDir = await newDataDir();
     const path = join(dataDir, "workspaces", "api-1.json");
@@ -117,15 +128,17 @@ describe("readWorkspaceState", () => {
 });
 
 describe("writeWorkspaceState / readWorkspaceState round-trip", () => {
-  it("round-trips slots and pr", async () => {
+  it("round-trips slots, pr, and the manual title override marker", async () => {
     const dataDir = await newDataDir();
     writeWorkspaceState(dataDir, "api-1", {
       slots: { title: "My title", links: [{ label: "pr", url: "https://x" }], tags: ["bug"] },
       pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      manualTitleOverride: true,
     });
     const state = readWorkspaceState(dataDir, "api-1");
     expect(state?.slots?.title).toBe("My title");
     expect(state?.pr?.number).toBe(42);
+    expect(state?.manualTitleOverride).toBe(true);
   });
 
   it("omits absent fields rather than writing them as null/undefined", async () => {

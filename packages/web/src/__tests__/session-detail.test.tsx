@@ -1885,7 +1885,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 
-    expect(within(dialog).getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Clearing conflicting port" }),
+    ).toBeDisabled();
     expect(
       within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" }),
     ).toBeDisabled();
@@ -2036,10 +2038,16 @@ describe("SessionDetail voice input", () => {
     expect(dialogSection).not.toBeNull();
     expect(queuedSection).not.toBeNull();
 
-    const dialogText = within(dialogSection as HTMLElement).getByText(longToken);
+    // The Dialog heading renders as soon as ConversationView mounts (e.g. while
+    // isWorking), which can be before the /conversation fetch resolves, so the
+    // assistant text must be awaited rather than queried synchronously.
+    const dialogText = await within(dialogSection as HTMLElement).findByText(longToken);
     expect(dialogText).toHaveClass("[overflow-wrap:anywhere]");
     expect(dialogText.parentElement).toHaveClass("min-w-0");
 
+    // The queued-messages heading and its text both come from the same
+    // /api/sessions/api-a1 fetch (session.queuedMessages), so once the
+    // heading is in the DOM the text is already there too — no race here.
     const queuedText = within(queuedSection as HTMLElement).getByText(longToken);
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });
@@ -2560,6 +2568,147 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail queue controls", () => {
+  it("removes and flushes real queued rows only, leaves auto-step rows uncontrolled, and surfaces a 409 toast", async () => {
+    let queuedMessages: {
+      messages: string[];
+      awaitingPrompt: boolean;
+      pipelineMessages: string[];
+    } = {
+      messages: ["first follow-up", "second follow-up"],
+      awaitingPrompt: false,
+      pipelineMessages: ["Ship the feature — step 2/3: implement"],
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ queuedMessages })), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/remove" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        if (body.message === "second follow-up") {
+          return new Response(JSON.stringify({ error: "Delivery already in flight for api-a1" }), {
+            status: 409,
+          });
+        }
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+    expect(screen.getByText("Ship the feature — step 2/3: implement")).toBeInTheDocument();
+
+    // Both controls render only on the two real queued rows, never on the
+    // auto (pipeline-derived) row.
+    expect(screen.getAllByLabelText(/^Remove queued message #\d+$/)).toHaveLength(2);
+    expect(screen.getAllByLabelText(/^Send queued message #\d+ now$/)).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "first follow-up" }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("first follow-up")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+
+    // Flushing the remaining row hits a 409 (delivery already in flight):
+    // the row stays and the daemon's message surfaces as an error toast.
+    fireEvent.click(screen.getByLabelText("Send queued message #1 now"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "second follow-up" }),
+      });
+    });
+    expect(await screen.findByText("Delivery already in flight for api-a1")).toBeInTheDocument();
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+  });
+
+  it("announces the busy state on a per-row control via aria-busy and a swapped aria-label, for a screen reader, not only the visible spinner", async () => {
+    let resolveFlush: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              queuedMessages: { messages: ["first follow-up"], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveFlush = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    const flushButton = screen.getByLabelText("Send queued message #1 now");
+    const removeButton = screen.getByLabelText("Remove queued message #1");
+    expect(flushButton).not.toHaveAttribute("aria-busy");
+    expect(removeButton).not.toHaveAttribute("aria-busy");
+
+    fireEvent.click(flushButton);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Sending queued message #1…")).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+    });
+    // The remove button on the SAME row stays idle — only the control the
+    // user actually triggered announces busy.
+    expect(screen.getByLabelText("Remove queued message #1")).not.toHaveAttribute("aria-busy");
+
+    resolveFlush!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute("aria-busy");
+    });
+    fetchMock.mockRestore();
   });
 });
 

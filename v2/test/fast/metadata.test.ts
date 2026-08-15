@@ -511,6 +511,29 @@ describe("sidecarProcs", () => {
   });
 });
 
+describe("agentSessionId", () => {
+  it("keeps agentSessionId across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      id: "api-1",
+      tmuxSession: "api-1",
+      agentSessionId: "native-session-1",
+    });
+
+    expect(readSession(dataDir, "api-1")?.agentSessionId).toBe("native-session-1");
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();
@@ -544,7 +567,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("persists a native session.pr binding when reading a legacy GitHub pr slot", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });
@@ -603,7 +626,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("does not rewrite non-GitHub pr links into native bindings", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });
@@ -634,7 +657,7 @@ describe("session metadata PR migration", () => {
   });
 
   it("rewrites legacy github-pr GitLab links into generic pr slots", async () => {
-    const dataDir = await createTempDir("spur-metadata-test-");
+    const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
     const sessionPath = join(sessionDir, "api-a1b2.json");
     mkdirSync(sessionDir, { recursive: true });
@@ -709,6 +732,29 @@ describe("session metadata PR migration", () => {
         },
       }),
     );
+  });
+
+  it("preserves mode when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      mode: "council",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ mode: "council" }));
   });
 
   it("preserves wake state when writing, reading, and listing session records", async () => {

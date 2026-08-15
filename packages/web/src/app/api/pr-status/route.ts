@@ -199,9 +199,9 @@ function normalizeGitLabCiStatus(status: string | null | undefined): CiStatus {
 }
 
 function normalizeGitLabState(mergeRequest: GitLabMergeRequestResponse): PrState {
-  if (mergeRequest.draft === true || mergeRequest.work_in_progress === true) return "draft";
   if (mergeRequest.merged_at) return "merged";
   if (mergeRequest.state === "closed") return "closed";
+  if (mergeRequest.draft === true || mergeRequest.work_in_progress === true) return "draft";
   return "open";
 }
 

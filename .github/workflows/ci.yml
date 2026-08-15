@@ -31,6 +31,7 @@ jobs:
       - run: pnpm test
       - run: pnpm test:deploy
       - run: bash v2/test/npm-init.test.sh
+      - run: bash v2/test/install-and-restart.test.sh
 
   playwright:
     name: Playwright E2E

@@ -360,6 +360,8 @@ export interface SidecarConfig {
   agents?: AgentName[];
   /** Present when this sidecar exposes an MCP server to the launching agent. */
   mcp?: SidecarMcpConfig;
+  /** Overrides sidecarGc.idleTtlMinutes for this sidecar only. */
+  idleTtlMinutes?: number;
 }
 
 export interface SidecarPortConfig {
@@ -408,6 +410,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -538,6 +541,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface SessionModeConfig {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -554,6 +562,7 @@ export interface ProjectConfig {
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
+  modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
@@ -698,6 +707,11 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  sidecarGc: {
+    enabled: boolean;
+    idleTtlMinutes: number;
+    maxAgeWarnMinutes: number;
+  };
   admission: AdmissionConfig;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
@@ -720,6 +734,19 @@ export interface SessionPipelineState {
 export interface SessionQueuedMessagesState {
   messages: string[];
   awaitingPrompt: boolean;
+}
+
+// View-only shape: `messages` carries only real queued entries (the ones a
+// remove/flush control can act on), `pipelineMessages` carries derived future
+// pipeline step text separately and is omitted when empty. Kept distinct
+// from SessionQueuedMessagesState (the persisted record shape, whitelisted
+// to exactly two fields by metadata.ts's normalizeQueuedMessagesState) so a
+// pipeline-derived string can never be mistaken for a real queued message at
+// the type level.
+export interface SessionQueuedMessagesView {
+  messages: string[];
+  awaitingPrompt: boolean;
+  pipelineMessages?: string[];
 }
 
 export interface SessionScheduledWakeState {
@@ -798,6 +825,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -889,9 +917,13 @@ export interface SessionSidecarView {
   alive: boolean;
   ports: SidecarPortView[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
+  ageWarn?: boolean;
 }
 
-export interface SessionView extends SessionRecord {
+export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -905,6 +937,7 @@ export interface SessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  queuedMessages?: SessionQueuedMessagesView;
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -962,6 +995,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -974,7 +1008,6 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  allowUnvalidatedFallbackBranch?: boolean;
   // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
@@ -1057,6 +1090,13 @@ export interface KillSessionRequest {
   skipPrCheck?: boolean;
 }
 
+// `force`: bypass the P2 (env-rooted) duplicate-agent launch guard — see
+// assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
+// (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
+export interface RestoreSessionRequest {
+  force?: boolean;
+}
+
 export interface OpenPrActionRequiredPayload {
   code: "open_pr_action_required";
   sessionId: string;
@@ -1114,6 +1154,7 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
 }
 
 // What a spawn would resolve to for this project+agent if the request named

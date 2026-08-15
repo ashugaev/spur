@@ -28,6 +28,7 @@ import {
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
+  type SessionModeConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -62,7 +63,7 @@ import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
-const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;
@@ -309,6 +310,7 @@ function parseTriggerSpawnBlock(
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
+  const mode = asOptionalString(raw["mode"], `${label}.mode`);
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -324,6 +326,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -360,6 +363,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "mode",
       "branch",
       "overrides",
       "selfDestruct",
@@ -1134,12 +1138,17 @@ function parseSidecars(
         );
       }
     }
+    const idleTtlMinutes = asOptionalPositiveInteger(
+      entryRaw["idleTtlMinutes"],
+      `${entryLabel}.idleTtlMinutes`,
+    );
     result[name] = {
       command,
       autoStart,
       ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
       ...(env ? { env } : {}),
       ...(ports ? { ports } : {}),
+      ...(idleTtlMinutes !== undefined ? { idleTtlMinutes } : {}),
     };
   }
   validateSidecarDependencies(label, result);
@@ -1335,6 +1344,43 @@ function parseTrigger(
   };
 }
 
+function parseModes(
+  projectId: string,
+  value: unknown,
+): Record<string, SessionModeConfig> | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.modes`;
+  const raw = asObject(value, label);
+  // Object.create(null): a mode literally named "__proto__" must land as a
+  // genuine own key, not silently mutate the prototype and vanish from
+  // Object.entries below.
+  const modes: Record<string, SessionModeConfig> = Object.create(null);
+  let defaultName: string | undefined;
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!VALID_ID_RE.test(name)) {
+      throw new Error(`${label}.${name} is invalid: mode names must match ${VALID_ID_RE.source}`);
+    }
+    const entryLabel = `${label}.${name}`;
+    const entryRaw = asObject(entry, entryLabel);
+    const skill = asString(entryRaw["skill"], `${entryLabel}.skill`);
+    if (skill.trim().length === 0) {
+      throw new Error(`${entryLabel}.skill must be a non-empty string`);
+    }
+    const isDefault = asOptionalBoolean(entryRaw["default"], `${entryLabel}.default`);
+    if (isDefault === true) {
+      if (defaultName !== undefined) {
+        throw new Error(`${label}: at most one mode may set default: true`);
+      }
+      defaultName = name;
+    }
+    modes[name] = {
+      skill,
+      ...(isDefault !== undefined ? { default: isDefault } : {}),
+    };
+  }
+  return modes;
+}
+
 function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
   if (!VALID_ID_RE.test(projectId)) {
     throw new Error(
@@ -1377,6 +1423,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1468,6 +1515,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
+    ...(modes !== undefined ? { modes } : {}),
     sources,
     backlog,
     triggers,
@@ -1594,6 +1642,35 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
       asOptionalPositiveInteger(root["maxGroupsPerSweep"], "sessionGc.maxGroupsPerSweep") ??
       DEFAULT_SESSION_GC.maxGroupsPerSweep,
     statuses: parseSessionGcStatuses(root["statuses"]),
+  };
+}
+
+// Ship enabled by default (unlike sessionGc): this reaper is a memory-safety
+// control that kills a restartable sidecar process, never a worktree or a
+// record, so the destructive-by-default caution sessionGc needs does not
+// apply here.
+export const DEFAULT_SIDECAR_GC: AppConfig["sidecarGc"] = {
+  enabled: true,
+  idleTtlMinutes: 120,
+  maxAgeWarnMinutes: 360,
+};
+
+// Instance-only, same footgun as sessionGc/authRotation/rateLimitReactivation:
+// parsed only when mode === "instance", so a per-project sidecarGc block is
+// silently ignored.
+function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
+  if (value === undefined) {
+    return DEFAULT_SIDECAR_GC;
+  }
+  const root = asObject(value, "sidecarGc");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "sidecarGc.enabled") ?? DEFAULT_SIDECAR_GC.enabled,
+    idleTtlMinutes:
+      asOptionalPositiveInteger(root["idleTtlMinutes"], "sidecarGc.idleTtlMinutes") ??
+      DEFAULT_SIDECAR_GC.idleTtlMinutes,
+    maxAgeWarnMinutes:
+      asOptionalPositiveInteger(root["maxAgeWarnMinutes"], "sidecarGc.maxAgeWarnMinutes") ??
+      DEFAULT_SIDECAR_GC.maxAgeWarnMinutes,
   };
 }
 
@@ -1981,6 +2058,7 @@ function parseConfigFile(
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
     projects: normalizedProjects,
     tags,

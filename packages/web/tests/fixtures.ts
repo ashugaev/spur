@@ -5,6 +5,7 @@ import type {
   SpurSessionSidecarView,
   SpurSessionView,
 } from "../src/lib/types";
+import type { PrState } from "../src/lib/pr-status-shape";
 
 const NOW = new Date().toISOString();
 
@@ -395,6 +396,22 @@ export async function mockPrStatusBatch(
   return { count: () => requestCount };
 }
 
+export async function mockPrState(page: Page, state: PrState): Promise<void> {
+  await page.route(/\/api\/pr-status\?/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state,
+        ciStatus: null,
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    });
+  });
+}
+
 export async function mockTagCatalog(page: Page): Promise<void> {
   await page.route("/api/tags", (route) => {
     void route.fulfill({
@@ -418,9 +435,8 @@ export async function gotoMocked(
 ): Promise<void> {
   await mockSessions(page, sessions, projects);
   await page.goto(path);
-  // Wait for the loading state to clear — the dashboard replaces "Loading..."
-  // with actual content once the first mocked fetch resolves.
-  await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
+  // Wait for route-level feedback to clear before interacting with content.
+  await page.waitForFunction(() => !document.querySelector(".loader-bar, .loader-centered-mark"), {
     timeout: 8000,
   });
 }

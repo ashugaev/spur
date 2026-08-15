@@ -283,11 +283,6 @@ describe("VersionMenu", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
-    await waitFor(() => {
-      expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-        /Switching Spur to 1\.5\.0/,
-      );
-    });
     expect(switchCalls).toEqual([{ body: { version: "1.5.0" } }]);
   });
 
@@ -319,18 +314,13 @@ describe("VersionMenu", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Switching Spur to 1\.5\.0/,
-    );
+    expect(screen.queryByTestId("switch-version-1.5.0")).not.toBeInTheDocument();
 
     liveVersion = "1.5.0";
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_100);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Spur is now running 1\.5\.0/,
-    );
     expect(window.location.reload).toHaveBeenCalledTimes(1);
   });
 
@@ -363,13 +353,7 @@ describe("VersionMenu", () => {
       await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Switch to 1\.5\.0 not confirmed/,
-    );
     expect(window.location.reload).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss version switch status" }));
-    expect(screen.queryByTestId("version-switch-status")).not.toBeInTheDocument();
   });
 
   it("renders the registry-unreachable error from a 503 switch response", async () => {

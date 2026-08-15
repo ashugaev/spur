@@ -80,6 +80,7 @@ export class PreflightBranchValidationError extends Error {
 }
 
 export interface SpawnPreflightResult {
+  noProjectBranchRequirements?: true;
   branch?: string;
 }
 
@@ -108,7 +109,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   return [
     "You are running a Spur spawn preflight before worktree creation.",
     `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
-    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions define no branch-naming rules, OR when they do but this task gives you no information to construct a name that satisfies them; in those cases Spur uses its default naming. Otherwise return a branch name that satisfies the rules.`,
+    `Return ${PREFLIGHT_DEFER_SENTINEL} only when the project instructions define no branch-naming rules. Otherwise return a branch that satisfies the rules.`,
     "Do not include JSON, markdown, quotes, or prose.",
     "If you return a branch, return only the branch name.",
     "",
@@ -119,7 +120,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
           "",
           "Previous attempt feedback:",
           args.feedback,
-          "Return a corrected branch name, or defer if the project rules do not define one.",
+          `Return a corrected branch name. Use ${PREFLIGHT_DEFER_SENTINEL} only when the project defines no branch-naming rules.`,
         ]
       : []),
     "",
@@ -130,20 +131,10 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
-  if (!/\s/.test(trimmed)) return { branch: trimmed };
-  // Salvage: the model put prose around the answer. Scan non-empty lines
-  // bottom-up (the answer is usually last) for a bare single-token git ref.
-  const lines = trimmed
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!line) continue;
-    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
-    if (isPlausibleGitRef(line)) return { branch: line };
+  if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
+    return { noProjectBranchRequirements: true };
   }
+  if (isPlausibleGitRef(trimmed)) return { branch: trimmed };
   throw new Error(
     `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
   );

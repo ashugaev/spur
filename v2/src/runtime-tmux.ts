@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode } from "./agents/index.js";
+import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -191,16 +191,27 @@ interface FleetPaneEntry {
   allTtys: string[];
 }
 
-const fleetPaneCache = new Map<string, ProbeCacheEntry<Map<string, FleetPaneEntry>>>();
+// `readable: false` means the `list-panes` fork itself failed, so the empty
+// map is "could not look" rather than "no panes exist". Callers that only need
+// pane state can keep reading `panes` and treat both the same; a caller
+// deciding something about a pane's ABSENCE must check `readable` first (see
+// lookupTmuxPanePid).
+interface FleetPaneSnapshot {
+  readable: boolean;
+  panes: Map<string, FleetPaneEntry>;
+}
+
+const fleetPaneCache = new Map<string, ProbeCacheEntry<FleetPaneSnapshot>>();
 const FLEET_PANE_CACHE_KEY = "panes";
 
 // Fleet-wide pane state in ONE fork (`list-panes -a`) instead of one
 // `list-panes`/`display-message #{pane_dead}` per session. tmuxPaneDead,
 // getTmuxPanePid, and isProcessRunningInTmux's tty lookup all reroute through
 // this cached snapshot.
-function getFleetPaneSnapshot(): Promise<Map<string, FleetPaneEntry>> {
+function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
   return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
     const panes = new Map<string, FleetPaneEntry>();
+    let readable = true;
     try {
       const out = await tmux(
         "list-panes",
@@ -234,9 +245,11 @@ function getFleetPaneSnapshot(): Promise<Map<string, FleetPaneEntry>> {
       }
     } catch {
       // No tmux server running (or another list-panes failure) — an empty
-      // fleet, never a thrown error.
+      // fleet, never a thrown error. `readable: false` keeps that
+      // distinguishable from a server that answered with no panes.
+      readable = false;
     }
-    return panes;
+    return { readable, panes };
   });
 }
 
@@ -249,7 +262,7 @@ export async function tmuxPaneDead(
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
   }
-  const panes = await getFleetPaneSnapshot();
+  const { panes } = await getFleetPaneSnapshot();
   return panes.get(sessionName)?.activePaneDead ?? true;
 }
 
@@ -257,7 +270,7 @@ const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
-const AGENT_READY_TIMEOUT_MS = 30_000;
+const AGENT_READY_TIMEOUT_MS = 120_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -458,8 +471,35 @@ export async function getTmuxPanePid(
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
   }
-  const panes = await getFleetPaneSnapshot();
+  const { panes } = await getFleetPaneSnapshot();
   return panes.get(sessionName)?.activePanePid ?? null;
+}
+
+export type TmuxPanePidLookup =
+  | { status: "ok"; panePid: number | null }
+  | { status: "unavailable" };
+
+// Same read as getTmuxPanePid, but keeps "tmux could not be read" apart from
+// "this session has no pane". getTmuxPanePid collapses both into null, which
+// is fine for a caller that only wants a signal target — but a caller reasoning
+// about a pane's ABSENCE cannot use it: with a failed `list-panes` every
+// session looks pane-less, and the duplicate-agent guard would then treat a
+// session's own live agent as unowned (see assertNoForeignAgentForSession).
+//
+// "ok" with `panePid: null` is a real answer: tmux replied and this session has
+// no active pane pid.
+export async function lookupTmuxPanePid(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<TmuxPanePidLookup> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
+  const { readable, panes } = await getFleetPaneSnapshot();
+  if (!readable) {
+    return { status: "unavailable" };
+  }
+  return { status: "ok", panePid: panes.get(sessionName)?.activePanePid ?? null };
 }
 
 interface PsRow {
@@ -523,7 +563,7 @@ function getPsSnapshot(): Promise<PsRow[]> {
 export async function getFleetSessionRssBytes(
   liveSessionByWorkspaceId: ReadonlyMap<string, string> = new Map(),
 ): Promise<Map<string, number>> {
-  const [panes, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  const [{ panes }, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
   const rssKbByTty = new Map<string, number>();
   for (const row of psRows) {
     if (!row.tty) continue;
@@ -562,7 +602,7 @@ export async function isProcessRunningInTmux(
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
   }
   try {
-    const panes = await getFleetPaneSnapshot();
+    const { panes } = await getFleetPaneSnapshot();
     const ttys = panes.get(sessionName)?.allTtys ?? [];
     if (ttys.length === 0) {
       return false;
@@ -752,7 +792,11 @@ export async function sendMessageToTmux(
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  if (options?.interrupt) {
+  const sendInterruptKey =
+    options?.interrupt === true &&
+    options.agent !== undefined &&
+    agentSendsInterruptKey(options.agent);
+  if (sendInterruptKey) {
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
@@ -810,6 +854,18 @@ function tmuxReadyPollJitterMs(sessionName: string): number {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   }
   return hash % AGENT_READY_POLL_JITTER_MAX_MS;
+}
+
+export class PromptReadyTimeoutError extends Error {
+  readonly elapsedMs: number;
+
+  constructor(args: { sessionName: string; elapsedMs: number; detail: string }) {
+    super(
+      `Timed out waiting for tmux session "${args.sessionName}" to reach the agent prompt${args.detail}`,
+    );
+    this.name = "PromptReadyTimeoutError";
+    this.elapsedMs = args.elapsedMs;
+  }
 }
 
 export async function waitForTmuxReady(
@@ -876,9 +932,7 @@ export async function waitForTmuxReady(
   const detail = lastCapture.trim()
     ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
     : "";
-  throw new Error(
-    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt${detail}`,
-  );
+  throw new PromptReadyTimeoutError({ sessionName, elapsedMs: Date.now() - startedAt, detail });
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {

@@ -63,11 +63,42 @@ if [ -n "$INSTALL_PREFIX" ]; then
   npm_install_args+=(--prefix "$INSTALL_PREFIX")
 fi
 npm_install_args+=("$PACKAGE@$VERSION")
+
+PREVIOUS_VERSION=""
+_VALIDATOR_TMP=""
+trap '[ -n "${_VALIDATOR_TMP:-}" ] && rm -rf "$_VALIDATOR_TMP"' EXIT
+if [ -n "$INSTALL_PREFIX" ]; then
+  _prev_pkg="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/package.json"
+  PREVIOUS_VERSION="$(node -e 'try{console.log(require(process.argv[1]).version)}catch(_){}' "$_prev_pkg" 2>/dev/null || true)"
+  _prev_validator="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/scripts/verify-package-files.sh"
+  _prev_list="$INSTALL_PREFIX/lib/node_modules/$PACKAGE/required-package-files.txt"
+  if [ -f "$_prev_validator" ] && [ -f "$_prev_list" ]; then
+    _VALIDATOR_TMP="$(mktemp -d)"
+    mkdir -p "$_VALIDATOR_TMP/scripts"
+    cp "$_prev_validator" "$_VALIDATOR_TMP/scripts/"
+    cp "$_prev_list" "$_VALIDATOR_TMP/"
+  fi
+fi
+
 "$NPM" "${npm_install_args[@]}"
 install_rc=$?
 if [ "$install_rc" -ne 0 ]; then
   echo "$(date -u +%FT%TZ) install-and-restart npm install failed rc=$install_rc"
   exit "$install_rc"
+fi
+
+if [ -n "$INSTALL_PREFIX" ] && [ -n "$_VALIDATOR_TMP" ]; then
+  PKG_ROOT="$INSTALL_PREFIX/lib/node_modules/$PACKAGE"
+  if ! bash "$_VALIDATOR_TMP/scripts/verify-package-files.sh" "$PKG_ROOT"; then
+    echo "$(date -u +%FT%TZ) install-and-restart package validation failed"
+    if [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
+      "$NPM" "${_rollback_args[@]}"
+      _rollback_rc=$?
+      echo "$(date -u +%FT%TZ) install-and-restart rollback install rc=$_rollback_rc"
+    fi
+    exit 1
+  fi
 fi
 
 # node-pty ships a prebuilt linux binary inside the published tarball's
@@ -93,6 +124,15 @@ if { [ -z "$SYSTEMCTL_RAW" ] || [ "$SYSTEMCTL_RAW" = "systemctl --user" ]; } && 
   "$spur_bin" reinit
   reinit_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$reinit_rc"
+  if [ "$reinit_rc" -ne 0 ] && [ -n "$INSTALL_PREFIX" ] && [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
+    "$NPM" "${_rollback_args[@]}"
+    _rollback_rc=$?
+    echo "$(date -u +%FT%TZ) install-and-restart rollback install rc=$_rollback_rc"
+    "$spur_bin" reinit
+    _rollback_reinit_rc=$?
+    echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$_rollback_reinit_rc"
+  fi
   exit "$reinit_rc"
 fi
 

@@ -428,7 +428,14 @@ After the file and the session metadata are set, wait for more instructions.`,
 
 afterEach(async () => {
   while (cleanupItems.length > 0) {
-    await cleanupSmokeItem(popCleanupItem());
+    const item = popCleanupItem();
+    try {
+      await cleanupSmokeItem(item);
+    } catch (error) {
+      // one item's cleanup failure must not abandon the rest of the drain.
+      // eslint-disable-next-line no-console
+      console.warn(`cleanupSmokeItem failed for ${item.rootDir}: ${String(error)}`);
+    }
   }
 });
 

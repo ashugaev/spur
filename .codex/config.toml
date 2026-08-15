@@ -42,6 +42,10 @@ config_file = "agents/reference-researcher.toml"
 description = "Adversarial review gate. Try to falsify that the implementation satisfies each acceptance criterion. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer."
 config_file = "agents/reviewer.toml"
 
+[agents.spec-critic]
+description = "Adversarially falsify the architect's executable spec before the developer builds — verify each cited fact, the change map, and every acceptance criterion's bound verification. Returns SPEC_APPROVED, SPEC_CHANGES_REQUESTED, or SPEC_REJECTED. Use after architect, before developer. Skip Tier 0, which produces no spec."
+config_file = "agents/spec-critic.toml"
+
 [agents.tester]
 description = "Validation gate. Runs targeted checks, Spur CLI validation, builds, and a lean Spur code check. Uses browser only for UI tasks. Returns PASS or FAIL."
 config_file = "agents/tester.toml"

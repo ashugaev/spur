@@ -63,7 +63,7 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
     onSubmit,
     submitting: false,
     submitLabel: "Go",
-    submitBusyLabel: "Going...",
+    submitBusyAriaLabel: "Going",
     submitDisabled: false,
     showCancel: false,
     agent: "claude" as const,
@@ -101,16 +101,47 @@ describe("SpawnModal", () => {
 
   it("spawn mode selects expose only concrete options, never a Default/Select placeholder", () => {
     renderModal(spawnMode);
-    const projectOptions = screen
-      .getByLabelText("Spawn project")
-      .querySelectorAll("option");
-    expect(projectOptions).toHaveLength(spawnMode.kind === "spawn" ? spawnMode.project.options.length : 0);
+    const projectOptions = screen.getByLabelText("Spawn project").querySelectorAll("option");
+    expect(projectOptions).toHaveLength(
+      spawnMode.kind === "spawn" ? spawnMode.project.options.length : 0,
+    );
     expect([...projectOptions].map((option) => option.textContent)).toEqual(["Project One"]);
 
     const workspaceOptions = [
       ...screen.getByLabelText("workspace mode").querySelectorAll("option"),
     ].map((option) => option.textContent);
     expect(workspaceOptions).toEqual(["Worktree", "Shared"]);
+  });
+
+  it("spawn mode renders no session mode combobox when sessionMode is undefined", () => {
+    renderModal(spawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+  });
+
+  it("spawn mode renders the session mode combobox with options and fires onChange", () => {
+    const onChange = vi.fn();
+    renderModal({
+      ...spawnMode,
+      sessionMode: {
+        value: "manager",
+        onChange,
+        options: [
+          { value: "manager", label: "manager" },
+          { value: "council", label: "council" },
+        ],
+      },
+    });
+    const select = screen.getByRole("combobox", { name: "Spawn session mode" });
+    expect(select).toHaveValue("manager");
+    fireEvent.change(select, { target: { value: "council" } });
+    expect(onChange).toHaveBeenCalledWith("council");
+  });
+
+  it("respawn and desk modes render no session mode combobox", () => {
+    renderModal(respawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+    renderModal(deskMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
   });
 
   it("respawn mode renders agent + model + prompt only", () => {
@@ -173,10 +204,12 @@ describe("SpawnModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a spinner and busy label on the submit button while submitting", () => {
+  it("shows a spinner and accessible verb on the submit button while submitting", () => {
     renderModal(deskMode, { submitting: true, submitDisabled: true });
-    const submitButton = screen.getByRole("button", { name: "Going..." });
+    const submitButton = screen.getByRole("button", { name: "Going" });
     expect(submitButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(screen.getByText("Go").parentElement).toHaveClass("invisible");
+    expect(submitButton).toHaveAttribute("aria-busy", "true");
     expect(submitButton).toBeDisabled();
   });
 

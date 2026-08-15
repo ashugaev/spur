@@ -23,6 +23,7 @@ const draft: SpawnDraft = {
   selfDestructConditions: "After CI passes",
   steps: ["Implement", "Test"],
   trackerUrl: "https://example.com/issues/1",
+  sessionMode: "manager",
 };
 
 describe("spawn draft storage", () => {
@@ -43,10 +44,18 @@ describe("spawn draft storage", () => {
   it.each([
     ["malformed", "not-json"],
     ["old schema", JSON.stringify({ ...draft, version: 0, savedAt: NOW })],
+    [
+      "a pre-existing v1 draft (superseded by the retired default workspace mode fix)",
+      JSON.stringify({ ...draft, version: 1, savedAt: NOW }),
+    ],
     ["stale", JSON.stringify({ ...draft, version: 2, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
     [
       "a current-version draft holding the retired default workspace mode",
       JSON.stringify({ ...draft, workspaceMode: "default", version: 2, savedAt: NOW }),
+    ],
+    [
+      "a current-version draft with a non-string sessionMode",
+      JSON.stringify({ ...draft, sessionMode: 42, version: 2, savedAt: NOW }),
     ],
   ])("discards %s storage", (_label, value) => {
     const key = spawnDraftStorageKey(draft.projectId);
@@ -54,6 +63,20 @@ describe("spawn draft storage", () => {
 
     expect(readSpawnDraft(draft.projectId, window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it("restores a current-version draft with no sessionMode key, yielding sessionMode null", () => {
+    const { sessionMode: _sessionMode, ...draftWithoutSessionMode } = draft;
+    const key = spawnDraftStorageKey(draft.projectId);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...draftWithoutSessionMode, version: 2, savedAt: NOW }),
+    );
+
+    const restored = readSpawnDraft(draft.projectId, window.localStorage, NOW);
+    expect(restored).not.toBeNull();
+    expect(restored?.sessionMode).toBeNull();
+    expect(restored?.prompt).toBe(draft.prompt);
   });
 
   it("clears only the confirmed project's draft", () => {

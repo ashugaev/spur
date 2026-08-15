@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import type * as timersPromisesModule from "node:timers/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarClaims,
   collectTree,
@@ -18,6 +19,25 @@ import {
 } from "../../../src/sidecars/reap.js";
 import type { SessionRecord } from "../../../src/types.js";
 import { createTempDir } from "../../helpers/common.js";
+
+// Spy on the module's own sleep so timing assertions can count invocations
+// instead of trusting wall-clock, which a loaded CI host can blow past even
+// when the implementation is correct (a single `ps` fork can itself take
+// hundreds of ms under contention). Defaults to the real delay so every
+// other test in this file — including the real-process reap below — keeps
+// its actual timing; only the ONE test that needs invocation counts
+// overrides it.
+const timerPromisesSleepMock = vi.hoisted(() => vi.fn<(ms: number) => Promise<void>>());
+
+vi.mock("node:timers/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof timersPromisesModule>();
+  return { ...actual, setTimeout: timerPromisesSleepMock };
+});
+
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+  timerPromisesSleepMock.mockReset().mockImplementation((ms: number) => actual.setTimeout(ms));
+});
 
 // Narrows `T | undefined` without a non-null assertion.
 function must<T>(value: T | undefined, message: string): T {
@@ -369,22 +389,29 @@ describe("_computeSurvivorCandidatesForTests", () => {
 
 describe("confirmReaps", () => {
   it("sleeps ONE shared grace window regardless of pending count", async () => {
+    // Deterministic by call count, not wall-clock: a loaded host can push a
+    // single real sleep well past any fixed millisecond budget, which would
+    // make a timing-based assertion flaky without the implementation ever
+    // regressing. Skip the real delay entirely and just count invocations.
+    timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
     const pendings = [1, 2, 3].map((n) => ({
       sessionName: `sidecar-${n}`,
       panePid: null,
       // A pid that certainly doesn't exist — still exercises the sleep path
-      // (tree non-empty) without requiring a real spawned process.
+      // (tree non-empty) without requiring a real spawned process. It also
+      // fails process.kill(pid, 0) with ESRCH on the very first probe, so
+      // confirmGone's own interval sleep is never reached — the only sleep
+      // call left to observe is confirmReaps' shared grace window.
       tree: [900000 + n],
       ownedGroups: [],
       snapshot: { ok: true, byPid: new Map(), byPgid: new Map() } as ProcSnapshot,
     }));
-    const startedAt = Date.now();
     const outcomes = await confirmReaps(pendings, 100);
-    const elapsedMs = Date.now() - startedAt;
     expect(outcomes).toHaveLength(3);
-    // Three serial 100ms sleeps would take >=300ms; one shared window stays
-    // well under that.
-    expect(elapsedMs).toBeLessThan(250);
+    // One shared window sleeps exactly once; per-pending sleeping would call
+    // this three times, once per pending.
+    expect(timerPromisesSleepMock).toHaveBeenCalledTimes(1);
+    expect(timerPromisesSleepMock).toHaveBeenCalledWith(100);
   });
 
   it("reaps a real spawned process tree with zero survivors", async () => {
@@ -395,14 +422,28 @@ describe("confirmReaps", () => {
     const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
     const pid = must(child.pid, "expected a spawned pid");
     try {
+      // Let the child settle before the baseline snapshot. `ps -o etimes`
+      // reads a still-warming-up /proc/<pid>/stat can occasionally report a
+      // wildly wrong (huge) elapsed time for a pid snapshotted within
+      // microseconds of its own fork — reproduced directly against this
+      // host's `ps`. `computeSurvivorCandidates` would then read the later,
+      // correct, much-smaller etimes as "went backwards" and treat this pid
+      // as already reused, skipping it entirely. A real tmux pane is never
+      // this fresh when reaped, so this settle delay matches production
+      // usage rather than masking anything under test.
+      await new Promise((resolve) => setTimeout(resolve, 30));
       const snapshot = await snapshotProcesses();
       expect(snapshot.byPid.has(pid)).toBe(true);
       const tree = collectTree(pid, snapshot);
       const pending = { sessionName: "test", panePid: pid, tree, ownedGroups: [], snapshot };
       const [outcome] = await confirmReaps([pending], 50);
+      // `survivors: []` IS the death proof: confirmGone only reaches it via
+      // its own bounded ESRCH-polling loop. A second ad hoc probe here
+      // (wait-then-single-kill(pid, 0)) adds no coverage and races real pid
+      // reuse under CI contention — the kernel is free to hand the just-
+      // freed pid to an unrelated live process before this line runs,
+      // making `toThrow()` fail even though the spawned tree is long dead.
       expect(outcome?.survivors).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(() => process.kill(pid, 0)).toThrow();
     } finally {
       killGroupSafely(pid);
     }
@@ -472,9 +513,11 @@ describe("reapRecordedIdentity", () => {
         .split(/\s+/);
       const starttime = Number.parseInt(fields[19] ?? "", 10);
       const outcome = await reapRecordedIdentity({ pid, pgid: row.pgid, starttime }, "/tmp");
+      // See the identical note in "reaps a real spawned process tree with
+      // zero survivors" above: `survivors: []` already proves death via
+      // confirmGone's own bounded ESRCH polling; a second wait-then-probe
+      // here races real pid reuse under load instead of adding coverage.
       expect(outcome?.survivors).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(() => process.kill(pid, 0)).toThrow();
     } finally {
       killGroupSafely(pid);
     }

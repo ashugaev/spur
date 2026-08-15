@@ -81,7 +81,13 @@ describe("ModelSelect", () => {
     function Harness() {
       const [value, setValue] = useState<string | null>(null);
       return (
-        <ModelSelect agent="claude" carry={null} onChange={setValue} projectId="proj" value={value} />
+        <ModelSelect
+          agent="claude"
+          carry={null}
+          onChange={setValue}
+          projectId="proj"
+          value={value}
+        />
       );
     }
 
@@ -137,13 +143,7 @@ describe("ModelSelect", () => {
       mockSpurFetch({ models: { claude: CLAUDE_MODELS, codex: CODEX_MODELS } }),
     );
     const { rerender } = render(
-      <ModelSelect
-        agent="claude"
-        carry={null}
-        onChange={onChange}
-        projectId="proj"
-        value="opus"
-      />,
+      <ModelSelect agent="claude" carry={null} onChange={onChange} projectId="proj" value="opus" />,
     );
     await waitFor(() => expect(onChange).not.toHaveBeenCalled());
 

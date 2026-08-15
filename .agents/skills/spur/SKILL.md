@@ -17,6 +17,7 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
   Inside a live session `$SPUR_SESSION_TOOL_DIR` is first on `PATH`: holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+  Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS
 
@@ -25,10 +26,14 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Spawn preflight returns one strict line. Only explicit no-project-rules sentinel bypasses fallback `branchNaming`; malformed or failed results exhaust preflight retries then fail spawn. Contract: `docs/commands.md`.
+  Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.
+  Sidecar reap: `sidecarGc` (on by default) kills an idle or unowned non-MCP project sidecar, workspace-wide; an established connection on a reserved port vetoes every reap rule. Rule order `docs/configuration.md#sidecar-reaping`; implementation `v2/src/sidecars/policy.ts`.
+  Sidecar port collision: a sidecar start refuses when this workspace's own recorded port reservation for this sidecar matches another live workspace's recorded reservation, and that port is actually free right now — an occupied colliding port self-heals via the normal free-port scan, and a shared declared range alone never refuses (each workspace draws a distinct free port from it). No reuse, no auto-reap; `clearPort` bypasses the check; scoped to the same project only. Contract `docs/configuration.md#sidecar-reaping`; implementation `v2/src/session-service.ts` `refuseOverlappingCrossWorkspaceSidecar`.
   `eventLog`/`userActionLog` size caps, archive retention, terminal-shard compaction, and the `data-dir-log-bytes` doctor warn: `docs/configuration.md#event-log-retention`. Instance config only.
   Registry merge order: instance config first, then connected configs in stored order. First project id or `sessionPrefix` owner wins; later colliding configs stay registered and retry after ownership or order changes.
-  Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, and protect the instance path. One canonical problem path emits one warning per daemon lifetime.
+  Registry scans retain live-parent misses and lookup errors, prune dead-parent paths, collapse canonical aliases, and protect the instance path. One canonical problem path emits one warning per daemon lifetime. A separate worktree-internal filter runs at boot and every connect/disconnect and keeps a path inside `worktreeDir` out of the merge and the next registry write; `connect`/`disconnect` reject a non-absolute path, and `connect` also rejects a worktree-internal one, both 400. `spur doctor` check `config-registry` (`warn`, no exit-code effect) flags dead, worktree-internal, and over-cap entries — see `docs/configuration.md#config-registry`. Boot also logs one read-only `daemon.registry.count` event with the read count and the worktree-internal drop count, no prune, no registry-file write.
   A running session overrides its project only from the `spur.yaml` in its own session directory — the worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
   `emitExisting: true` on a work-item source (`github` with `query`, `sentry`, `github-ci`) emits the suppressed first-poll backlog once, capped at 10.
 
@@ -40,6 +45,7 @@ SAFETY
   Never run `spur gc --execute` against a data dir you do not own. It removes worktrees and archives records. Point `--config` at a temp data dir for development; a bare `spur gc` is a dry run and the only safe form elsewhere.
   The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on); `--expose-web` binds `0.0.0.0` and is public. Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user — treat each source (Telegram, GitHub comments, Jira) as untrusted input.
   For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.
+  `restore`/`reopen` refuse to relaunch over a live agent process still carrying that session id (a foreign process, the pane's own process surviving the kill escalation, or an unreadable process table, where "no survivors" would be a guess) so a session never ends up with two live agent processes. `--force` (CLI) or a second `r` on the same selection in `spur list` bypasses only the foreign-process refusal, never a confirmed survivor or an unreadable table. A teardown with no relaunch behind it proceeds rather than refusing, so a wedged process can never make a session unkillable. `spur doctor`'s `agent-process-ownership` check reports unowned agent processes at `warn`; detail in `docs/commands.md`.
 
 IN THIS REPO
 

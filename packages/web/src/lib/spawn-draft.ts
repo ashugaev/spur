@@ -19,6 +19,7 @@ export interface SpawnDraft {
   selfDestructConditions: string;
   steps: string[];
   trackerUrl: string | null;
+  sessionMode: string | null;
 }
 
 interface StoredSpawnDraft extends SpawnDraft {
@@ -73,7 +74,10 @@ function isStoredSpawnDraft(
     typeof draft.selfDestructConditions === "string" &&
     Array.isArray(draft.steps) &&
     draft.steps.every((step) => typeof step === "string") &&
-    (draft.trackerUrl === null || typeof draft.trackerUrl === "string")
+    (draft.trackerUrl === null || typeof draft.trackerUrl === "string") &&
+    (draft.sessionMode === undefined ||
+      draft.sessionMode === null ||
+      typeof draft.sessionMode === "string")
   );
 }
 
@@ -93,7 +97,7 @@ export function readSpawnDraft(
       return null;
     }
     const { version: _version, savedAt: _savedAt, ...draft } = parsed;
-    return draft;
+    return { ...draft, sessionMode: draft.sessionMode ?? null };
   } catch {
     try {
       storage.removeItem(key);
