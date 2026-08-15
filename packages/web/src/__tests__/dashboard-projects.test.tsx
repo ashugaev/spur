@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
+import { writeSpawnDraft } from "@/lib/spawn-draft";
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -983,11 +984,10 @@ describe("Dashboard project create/delete", () => {
     expect(body.overrides).toEqual({ worktree: false });
   });
 
-  it("confirms the workspace mode via keyboard activation of the banner action, with no mousedown involved", async () => {
-    // The gate must clear from any input modality — not just a mouse click.
-    // A real <button> fires a click on Enter/Space when focused, regardless
-    // of device; asserted here without ever dispatching a mousedown, to
-    // keep this distinct from the mouse-driven case above.
+  it("confirms the workspace mode via the banner's 'Use shared' action", async () => {
+    // jsdom does not synthesize a click from a keydown, so this only
+    // exercises a real click (as the case above does for "Use worktree");
+    // it is not keyboard-modality coverage.
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
@@ -1038,8 +1038,6 @@ describe("Dashboard project create/delete", () => {
     expect(submitButton()).toBeDisabled();
 
     const useSharedButton = within(dialog).getByRole("button", { name: "Use shared" });
-    useSharedButton.focus();
-    fireEvent.keyDown(useSharedButton, { key: "Enter" });
     fireEvent.click(useSharedButton);
 
     await waitFor(() => {
@@ -1048,5 +1046,136 @@ describe("Dashboard project create/delete", () => {
       );
       expect(submitButton()).not.toBeDisabled();
     });
+  });
+
+  it("re-derives the workspace mode from the newly selected project after a project switch, even with a stored draft", async () => {
+    // B1 regression: a stored draft's workspaceMode is a prior choice for
+    // whatever project it was confirmed against, not for every project. On
+    // reopen with a draft present, switching the "Spawn project" picker to a
+    // different project must not leave the old value (draft or previous
+    // project's default) on screen — it must re-resolve to the newly
+    // selected project's own configured default.
+    writeSpawnDraft({
+      prompt: "",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "worktree",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+    });
+    window.localStorage.setItem("spur:last-spawn-project", "api");
+
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "web-a1",
+            project: "web",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "web-a1",
+            worktree: false,
+            tmuxSession: "web-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/web",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    // The restored draft (workspaceMode: "worktree") agrees with the
+    // initial project's ("api") own resolved default, so this alone doesn't
+    // distinguish the bug.
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("worktree");
+    });
+
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "web" },
+    });
+
+    // "web" is configured shared. The shown mode must follow it, not the
+    // stale draft/previous-project value.
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
   });
 });

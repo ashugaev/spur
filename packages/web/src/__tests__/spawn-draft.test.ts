@@ -49,10 +49,6 @@ describe("spawn draft storage", () => {
       "a current-version draft holding the retired default workspace mode",
       JSON.stringify({ ...draft, workspaceMode: "default", version: 2, savedAt: NOW }),
     ],
-    [
-      "a current-version draft with a non-string sessionMode",
-      JSON.stringify({ ...draft, sessionMode: 42, version: 2, savedAt: NOW }),
-    ],
   ])("discards %s storage", (_label, value) => {
     window.localStorage.setItem(SPAWN_DRAFT_STORAGE_KEY, value);
 

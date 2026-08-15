@@ -1587,6 +1587,12 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
+    // Switching project inside the modal is not a confirmation of workspace
+    // mode for the newly selected project — any workspace mode shown so far
+    // (restored draft or a prior project's default) was never confirmed
+    // against this project, so re-enter auto mode and let the effect below
+    // fill in the new project's resolved default once it lands.
+    setSpawnWorkspaceModeAuto(true);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
