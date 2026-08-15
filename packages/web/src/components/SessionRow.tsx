@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
-import { formatRelativeTime, getSessionTitle } from "@/lib/format";
+import { formatRelativeTime, formatSidecarAge, getSessionTitle } from "@/lib/format";
 import {
   isReviewLinkLabel,
   isTrackerLinkLabel,
@@ -171,24 +171,31 @@ function RunningSidecarIndicator({
             Running Sidecars
           </span>
           <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
-            {sidecars.map((sidecar) =>
-              sidecar.url ? (
-                <a
-                  className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
-                  href={sidecar.url}
-                  key={sidecar.name}
-                  rel="noreferrer"
-                  target="_blank"
-                  title={sidecar.url}
-                >
-                  {sidecar.name}
-                </a>
-              ) : (
-                <span className="min-w-0 break-all" key={sidecar.name}>
-                  {sidecar.name}
-                </span>
-              ),
-            )}
+            {sidecars.map((sidecar) => (
+              <span className="flex min-w-0 items-baseline gap-1.5" key={sidecar.name}>
+                {sidecar.url ? (
+                  <a
+                    className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
+                    href={sidecar.url}
+                    rel="noreferrer"
+                    target="_blank"
+                    title={sidecar.url}
+                  >
+                    {sidecar.name}
+                  </a>
+                ) : (
+                  <span className="min-w-0 break-all">{sidecar.name}</span>
+                )}
+                {sidecar.ageSeconds !== undefined ? (
+                  <span
+                    className={`shrink-0 ${sidecar.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
+                    data-testid={`dashboard-sidecar-age-${sidecar.name}`}
+                  >
+                    {formatSidecarAge(sidecar.ageSeconds)}
+                  </span>
+                ) : null}
+              </span>
+            ))}
           </span>
         </span>
       ) : null}
@@ -201,7 +208,7 @@ interface SessionRowProps {
   deskMemberCount?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 

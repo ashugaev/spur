@@ -9,9 +9,11 @@ import { writeSession } from "../../src/metadata.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
+  SessionResourceNotFoundError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -82,9 +84,14 @@ describe("startServer", () => {
       await server.stop();
     }
 
-    const events = readEventLog(dataDir).filter(
-      (entry) => entry.event !== "daemon.memory.unbounded",
-    );
+    // Host memory pressure fires these on a loaded runner and not on an idle
+    // box. This test pins the startup/shutdown sequence, not memory behavior.
+    const hostMemoryEvents = new Set([
+      "daemon.memory.unbounded",
+      "daemon.memory.shed",
+      "daemon.memory.shed.failed",
+    ]);
+    const events = readEventLog(dataDir).filter((entry) => !hostMemoryEvents.has(entry.event));
     expect(events[0]).toMatchObject({
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
@@ -871,6 +878,70 @@ describe("startServer", () => {
     }
   });
 
+  it("returns the Shepherd session alone unless reportDisposition is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSpawnShepherd = SessionService.prototype.spawnShepherd;
+    const prompts: Array<string | undefined> = [];
+    SessionService.prototype.spawnShepherd = async function mockSpawnShepherd(request = {}) {
+      prompts.push(request.prompt);
+      return {
+        disposition: "reused" as const,
+        session: { id: "shp-1", project: "spur-shepherd" } as never,
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const legacy = await fetch(`http://127.0.0.1:${port}/shepherd/spawn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "check health" }),
+      });
+      expect(legacy.status).toBe(201);
+      await expect(legacy.json()).resolves.toEqual({ id: "shp-1", project: "spur-shepherd" });
+
+      const reported = await fetch(`http://127.0.0.1:${port}/shepherd/spawn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "diagnose", reportDisposition: true }),
+      });
+      expect(reported.status).toBe(201);
+      await expect(reported.json()).resolves.toEqual({
+        disposition: "reused",
+        session: { id: "shp-1", project: "spur-shepherd" },
+      });
+      expect(prompts).toEqual(["check health", "diagnose"]);
+    } finally {
+      SessionService.prototype.spawnShepherd = originalSpawnShepherd;
+      await server.stop();
+    }
+  });
+
   it("returns structured conflict JSON when complete needs a pull request action", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1096,6 +1167,156 @@ describe("startServer", () => {
       expect(response.status).toBe(409);
     } finally {
       SessionService.prototype.send = originalSend;
+      await server.stop();
+    }
+  });
+
+  it("maps queue remove/flush 404 (not queued) and 409 (delivery in flight), and 400 on an empty message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(sessionId, message) {
+      if (message === "not queued") {
+        throw new SessionResourceNotFoundError(`Message not found in queue for ${sessionId}`);
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      if (message === "in flight") {
+        throw new QueueDeliveryInFlightError("Delivery already in flight for demo-1");
+      }
+      throw new Error(`unexpected message: ${message}`);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const notFound = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "not queued" }),
+      });
+      expect(notFound.status).toBe(404);
+
+      const inFlight = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "in flight" }),
+      });
+      expect(inFlight.status).toBe(409);
+
+      const emptyMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "" }),
+      });
+      expect(emptyMessage.status).toBe(400);
+
+      const missingMessage = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(missingMessage.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      await server.stop();
+    }
+  });
+
+  it("forwards a trimmed message to queue remove/flush, so validation and lookup agree on normalization (PR #708 comment 3)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRemove = SessionService.prototype.removeQueuedMessage;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const receivedRemove: string[] = [];
+    const receivedFlush: string[] = [];
+    SessionService.prototype.removeQueuedMessage = async function mockRemove(_sessionId, message) {
+      receivedRemove.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(_sessionId, message) {
+      receivedFlush.push(message);
+      return { id: "demo-1" } as unknown as SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const remove = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "  padded text  " }),
+      });
+      expect(remove.status).toBe(200);
+      expect(receivedRemove).toEqual(["padded text"]);
+
+      const flush = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/flush`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "\tanother\n" }),
+      });
+      expect(flush.status).toBe(200);
+      expect(receivedFlush).toEqual(["another"]);
+
+      // Whitespace-only still counts as empty after trimming.
+      const whitespaceOnly = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/queue/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "   " }),
+      });
+      expect(whitespaceOnly.status).toBe(400);
+    } finally {
+      SessionService.prototype.removeQueuedMessage = originalRemove;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
       await server.stop();
     }
   });
@@ -3149,6 +3370,75 @@ describe("startServer", () => {
       });
       expect(response.status).toBe(400);
       expect(readConfigRegistryFile(dataDir).configPaths).not.toContain(worktreeConfigPath);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("drops a registered project directory at boot and rejects connecting one with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const extraProjectDir = join(root, "extra-project");
+    const extraConfigPath = join(extraProjectDir, "spur.yaml");
+    await mkdir(extraProjectDir, { recursive: true });
+    await writeFile(
+      extraConfigPath,
+      [
+        "projects:",
+        "  extra:",
+        `    path: ${extraProjectDir}`,
+        "    sessionPrefix: extra",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: [extraProjectDir, extraConfigPath],
+      unconfiguredProjects: [],
+    });
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const bootRegistry = readConfigRegistryFile(dataDir);
+      expect(bootRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(bootRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraProjectDir }),
+      });
+      expect(response.status).toBe(400);
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.configPaths).not.toContain(extraProjectDir);
+      expect(finalRegistry.configPaths).toContain(fs.realpathSync(extraConfigPath));
     } finally {
       await server.stop();
     }

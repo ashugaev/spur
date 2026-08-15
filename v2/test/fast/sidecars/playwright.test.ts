@@ -9,8 +9,8 @@ import {
   resolvePlaywrightMcpBin,
   resolvePlaywrightSidecarCommand,
   SPUR_RESERVED_PORT_PLAYWRIGHT,
-  type ProcessInfo,
 } from "../../../src/sidecars/playwright.js";
+import type { ProcessSnapshotEntry } from "../../../src/process-tree.js";
 import { shellEscape } from "../../../src/agents/shell-escape.js";
 
 describe("playwrightMcpUrl", () => {
@@ -92,12 +92,12 @@ describe("resolvePlaywrightSidecarCommand", () => {
     // The shape the sweep would face without exec: the shell holds the
     // unexpanded port (no digits) and node's ppid is that shell, so neither
     // process is matchable and the whole tree leaks.
-    const shell: ProcessInfo = {
+    const shell: Pick<ProcessSnapshotEntry, "pid" | "ppid" | "args"> = {
       pid: 2000,
       ppid: 1,
       args: `sh -lc node ${bin} --headless --isolated --host 127.0.0.1 --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
     };
-    const nodeUnderShell: ProcessInfo = {
+    const nodeUnderShell: Pick<ProcessSnapshotEntry, "pid" | "ppid" | "args"> = {
       pid: 2001,
       ppid: 2000,
       args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8751`,
@@ -178,9 +178,11 @@ describe("lazy bin resolution (MUST-FIX 1)", () => {
 
 describe("isLeakedManagedPlaywright", () => {
   const bin = resolvePlaywrightMcpBin();
-  const leaked: ProcessInfo = {
+  const leaked: ProcessSnapshotEntry = {
     pid: 1000,
     ppid: 1,
+    rssKb: 10_000,
+    elapsedSeconds: 60,
     args: `node ${bin} --headless --isolated --host 127.0.0.1 --port 8750`,
   };
 
@@ -197,7 +199,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag non-loopback bindings", () => {
-    const wide: ProcessInfo = {
+    const wide: ProcessSnapshotEntry = {
       ...leaked,
       args: `node ${bin} --headless --isolated --host 0.0.0.0 --port 8750`,
     };
@@ -205,7 +207,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag processes that are not our bin", () => {
-    const other: ProcessInfo = {
+    const other: ProcessSnapshotEntry = {
       ...leaked,
       args: "node /some/other/cli.js --headless --host 127.0.0.1 --port 8750",
     };
@@ -213,7 +215,7 @@ describe("isLeakedManagedPlaywright", () => {
   });
 
   it("does not flag when no --port is present", () => {
-    const noPort: ProcessInfo = {
+    const noPort: ProcessSnapshotEntry = {
       ...leaked,
       args: `node ${bin} --headless --isolated --host 127.0.0.1`,
     };
@@ -251,14 +253,14 @@ describe("sweepLeakedPlaywright", () => {
     vi.resetModules();
     vi.doMock("node:child_process", () => ({
       // listProcesses passes an options object, so the callback is the last
-      // argument, not the third.
+      // argument, not the third. Rows are `ps -eo pid=,ppid=,rss=,etime=,args=`.
       execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
         const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
           stdout: [
-            `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
-            `${browser} ${server} /opt/chromium --headless --remote-debugging-pipe`,
-            `${renderer} ${browser} /opt/chromium --type=renderer`,
+            `${server} 1 108000 05:00 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799`,
+            `${browser} ${server} 85000 04:59 /opt/chromium --headless --remote-debugging-pipe`,
+            `${renderer} ${browser} 42000 04:58 /opt/chromium --type=renderer`,
             "",
           ].join("\n"),
         });
@@ -293,7 +295,7 @@ describe("sweepLeakedPlaywright", () => {
       execFile: (_cmd: string, _args: string[], ...rest: unknown[]) => {
         const cb = rest.at(-1) as (e: null, r: { stdout: string }) => void;
         cb(null, {
-          stdout: `${server} 1 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
+          stdout: `${server} 1 108000 05:00 node ${bin} --headless --isolated --host 127.0.0.1 --port 8799\n`,
         });
       },
     }));

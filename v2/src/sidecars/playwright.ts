@@ -3,11 +3,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
-import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
-
-// Re-exported for callers/tests that import the shared process-info shape
-// through this module.
-export type { ProcessInfo };
+import { killProcessTree, listProcesses, type ProcessSnapshotEntry } from "../process-tree.js";
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -163,7 +159,7 @@ function extractPlaywrightPort(args: string): number | undefined {
  *  (c) it has been reparented to init (ppid === 1) — an orphan.
  */
 export function isLeakedManagedPlaywright(
-  proc: ProcessInfo,
+  proc: Pick<ProcessSnapshotEntry, "ppid" | "args">,
   ownedPorts: ReadonlySet<number>,
 ): boolean {
   const bin = resolvePlaywrightMcpBin();

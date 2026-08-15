@@ -368,9 +368,8 @@ export async function gotoMocked(
 ): Promise<void> {
   await mockSessions(page, sessions, projects);
   await page.goto(path);
-  // Wait for the loading state to clear — the dashboard replaces "Loading..."
-  // with actual content once the first mocked fetch resolves.
-  await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
+  // Wait for route-level feedback to clear before interacting with content.
+  await page.waitForFunction(() => !document.querySelector(".loader-bar, .loader-centered-mark"), {
     timeout: 8000,
   });
 }

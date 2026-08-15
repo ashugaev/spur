@@ -1,0 +1,447 @@
+// Attributes live agent processes to the session that owns them.
+//
+// DECISION RULE: ownership keys on the session id carried in a process'
+// SPUR_SESSION environment (or, for a pane's own children, on descent from
+// the pane pid) — never on cwd/worktree. Multiple sessions legitimately
+// share one working directory (shared-desk siblings, a worktree:false
+// project), so grouping by cwd produces false positives; the session id is
+// the only fact that is unique per launch.
+import { setTimeout as sleep } from "node:timers/promises";
+import { agentProcessMatchers } from "./agents/index.js";
+import { listSessions } from "./metadata.js";
+import {
+  canReadProcessEnv,
+  collectDescendants,
+  listProcesses,
+  readProcessEnvValue,
+  readProcessIdentity,
+  signalPid,
+  snapshotProcesses,
+  snapshotProcessLiveness,
+  type ProcessIdentityReader,
+  type ProcessSnapshotEntry,
+} from "./process-tree.js";
+import type { AgentName } from "./types.js";
+// Type-only: checkAgentProcessOwnership adapts a scan into the doctor
+// registry's shared check shape.
+import type { HostInstallCheck } from "./host-install.js";
+
+// pid plus an identity token, because P1's escalation signals these pids up
+// to three grace windows (~6s) after capturing them, and the pane is killed
+// before the first signal — so a captured pid can be recycled inside that
+// window. `identity` is the /proc starttime, which changes when the number is
+// reused; null means this platform cannot verify identity (no procfs), which
+// callers must read as "cannot tell", never as "not my process".
+//
+// rss/age/args belong to the doctor-facing UnownedAgentProcess below, which is
+// built straight from ProcessSnapshotEntry via toFinding, not from this type.
+export interface AgentProcessRef {
+  pid: number;
+  identity: string | null;
+}
+
+// A captured pid is still OUR process when it is alive AND its identity token
+// is unchanged. A changed token means the number was recycled: do not signal
+// it, and do not count it as a survivor — it is a different process, so
+// neither action would be about our agent. A null token (no procfs) degrades
+// to the liveness answer alone.
+async function isStillSameProcess(
+  ref: AgentProcessRef,
+  readIdentity: ProcessIdentityReader,
+): Promise<boolean> {
+  if (ref.identity === null) {
+    return true;
+  }
+  return (await readIdentity(ref.pid)) === ref.identity;
+}
+
+// Same word-boundary matching isProcessRunningInTmux (runtime-tmux.ts) uses,
+// applied to the whole process table instead of a tty-filtered slice — this
+// module deliberately never touches tmux (see the module header of the
+// caller-supplies-panePid contract below).
+function compileMatchers(matchers: readonly string[]): RegExp[] {
+  return matchers
+    .filter((matcher) => matcher.trim().length > 0)
+    .map(
+      (matcher) => new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
+    );
+}
+
+// Collapses a set of candidate pids to the shallowest members of their own
+// ancestry: a pid covered by another candidate's descendant tree is dropped.
+// Ancestry is resolved over the FULL process table (not just the
+// candidates), so an intermediate non-matching process (a shell wrapper, for
+// example) does not break the chain.
+//
+// A genuine OS ppid chain cannot cycle, but a synthetic/adversarial process
+// table (or a pid-reuse race caught mid-transition) could — collectDescendants
+// bounds that with its own `seen` set, so two candidates on a ppid cycle
+// mutually "cover" each other here. Filtering both would return [] and
+// suppress a real verdict entirely, so a mutual pair is resolved by keeping
+// the lower pid instead of dropping both.
+function collapseToShallowest(
+  pids: number[],
+  allProcesses: readonly ProcessSnapshotEntry[],
+): number[] {
+  if (pids.length <= 1) {
+    return pids;
+  }
+  const descendantsOf = new Map<number, Set<number>>();
+  for (const pid of pids) {
+    descendantsOf.set(pid, new Set(collectDescendants(pid, allProcesses)));
+  }
+  const covered = new Set<number>();
+  for (const pid of pids) {
+    for (const other of pids) {
+      if (other === pid) continue;
+      const otherCoversPid = descendantsOf.get(other)?.has(pid) ?? false;
+      if (!otherCoversPid) continue;
+      const pidCoversOther = descendantsOf.get(pid)?.has(other) ?? false;
+      if (pidCoversOther) {
+        // Mutual coverage: a ppid cycle joins pid and other. Keep the lower
+        // pid deterministically instead of dropping both.
+        if (pid > other) {
+          covered.add(pid);
+        }
+        continue;
+      }
+      covered.add(pid);
+    }
+  }
+  return pids.filter((pid) => !covered.has(pid));
+}
+
+// ONE ps snapshot per call, not one fork per pid — the poll loop below can
+// run this up to 21 times per grace window per stage. "unavailable" (the
+// snapshot could not be taken) must never read as "everyone died this
+// round": every pid is kept as still alive so the poll keeps going instead
+// of falsely declaring a survivor gone.
+async function filterAliveRefs(
+  refs: readonly AgentProcessRef[],
+  readIdentity: ProcessIdentityReader,
+): Promise<AgentProcessRef[]> {
+  const snapshot = await snapshotProcessLiveness();
+  const alive =
+    snapshot.status === "unavailable"
+      ? [...refs]
+      : refs.filter((ref) => snapshot.alivePids.has(ref.pid));
+  const kept: AgentProcessRef[] = [];
+  for (const ref of alive) {
+    if (await isStillSameProcess(ref, readIdentity)) {
+      kept.push(ref);
+    }
+  }
+  return kept;
+}
+
+async function pollUntilDead(
+  refs: readonly AgentProcessRef[],
+  graceMs: number,
+  pollMs: number,
+  readIdentity: ProcessIdentityReader,
+): Promise<AgentProcessRef[]> {
+  const deadline = Date.now() + graceMs;
+  let alive = await filterAliveRefs(refs, readIdentity);
+  while (alive.length > 0 && Date.now() < deadline) {
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    alive = await filterAliveRefs(alive, readIdentity);
+  }
+  return alive;
+}
+
+export type PaneAgentCapture =
+  | { status: "ok"; processes: AgentProcessRef[] }
+  | { status: "unavailable" };
+
+const CAPTURE_RETRY_DELAY_MS = 100;
+
+// P1, pane-rooted and exact: descendants of `panePid` whose args match this
+// session's own agent matchers. `panePid: null` (pane already gone, or the
+// caller never resolved one) reads as an empty capture — never throws.
+//
+// "unavailable" when the process table could not be read. That must NOT
+// collapse into an empty capture: an empty capture makes
+// terminateAgentProcesses report "clear", which would let a
+// failOnSurvivors:true caller relaunch over a possibly-live agent — the exact
+// duplicate this module exists to prevent. Same fail-safe policy as
+// snapshotProcessLiveness. One retry first, since a `ps` failure here is
+// usually transient fork pressure.
+export async function capturePaneAgentProcesses(input: {
+  panePid: number | null;
+  processMatchers: readonly string[];
+}): Promise<PaneAgentCapture> {
+  if (input.panePid === null) {
+    return { status: "ok", processes: [] };
+  }
+  const matchers = compileMatchers(input.processMatchers);
+  if (matchers.length === 0) {
+    return { status: "ok", processes: [] };
+  }
+  let snapshot = await snapshotProcesses();
+  if (snapshot.status === "unavailable") {
+    await sleep(CAPTURE_RETRY_DELAY_MS);
+    snapshot = await snapshotProcesses();
+  }
+  if (snapshot.status === "unavailable") {
+    return { status: "unavailable" };
+  }
+  const processes = snapshot.processes;
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const orderedPids = collectDescendants(input.panePid, processes);
+  const refs: AgentProcessRef[] = [];
+  for (const pid of orderedPids) {
+    const proc = byPid.get(pid);
+    if (proc && matchers.some((matcher) => matcher.test(proc.args))) {
+      refs.push({ pid: proc.pid, identity: await readProcessIdentity(proc.pid) });
+    }
+  }
+  return { status: "ok", processes: refs };
+}
+
+export type AgentTerminationOutcome = { status: "clear" } | { status: "survivors"; pids: number[] };
+
+const DEFAULT_GRACE_MS = 2_000;
+const POLL_MS = 100;
+
+// Poll -> SIGHUP -> poll -> SIGTERM -> poll -> SIGKILL -> poll. `processes`
+// is expected root-first (capturePaneAgentProcesses' order); signalling
+// walks it leaves-first so a parent is never signalled before its children.
+// Portable: signals, a `ps`-based liveness probe, and an identity re-check
+// that no-ops where /proc is absent.
+//
+// Every round re-verifies identity before signalling, so a pid recycled after
+// the pane was killed is dropped rather than signalled or counted as a
+// survivor (see isStillSameProcess).
+export async function terminateAgentProcesses(
+  processes: readonly AgentProcessRef[],
+  options?: {
+    hupGraceMs?: number;
+    termGraceMs?: number;
+    killGraceMs?: number;
+    readIdentity?: ProcessIdentityReader;
+  },
+): Promise<AgentTerminationOutcome> {
+  const hupGraceMs = options?.hupGraceMs ?? DEFAULT_GRACE_MS;
+  const termGraceMs = options?.termGraceMs ?? DEFAULT_GRACE_MS;
+  const killGraceMs = options?.killGraceMs ?? DEFAULT_GRACE_MS;
+  const readIdentity = options?.readIdentity ?? readProcessIdentity;
+
+  let survivors = await filterAliveRefs([...processes].reverse(), readIdentity);
+  if (survivors.length === 0) {
+    return { status: "clear" };
+  }
+
+  for (const signal of ["SIGHUP", "SIGTERM", "SIGKILL"] as const) {
+    const graceMs =
+      signal === "SIGHUP" ? hupGraceMs : signal === "SIGTERM" ? termGraceMs : killGraceMs;
+    for (const ref of survivors) signalPid(ref.pid, signal);
+    survivors = await pollUntilDead(survivors, graceMs, POLL_MS, readIdentity);
+    if (survivors.length === 0) {
+      return { status: "clear" };
+    }
+  }
+
+  return { status: "survivors", pids: survivors.map((ref) => ref.pid) };
+}
+
+// pids only: this scan is a launch-guard verdict, never a signalling target,
+// so it needs no identity token (contrast AgentProcessRef, whose pids get
+// signalled after a delay).
+export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; pids: number[] };
+
+// P2, env-rooted and heuristic launch guard: processes carrying
+// SPUR_SESSION === sessionId that are not this pane's own children
+// (excludePanePid's descendants), collapsed to their shallowest ancestor.
+// "unavailable" when this platform cannot read process environments — the
+// caller MUST treat that as "no finding", never as "duplicate".
+export async function findForeignAgentProcessesForSession(input: {
+  sessionId: string;
+  processMatchers: readonly string[];
+  excludePanePid: number | null;
+}): Promise<SessionAgentScan> {
+  if (!(await canReadProcessEnv())) {
+    return { status: "unavailable" };
+  }
+  const matchers = compileMatchers(input.processMatchers);
+  if (matchers.length === 0) {
+    return { status: "ok", pids: [] };
+  }
+  const processes = await listProcesses();
+  const excluded = new Set(
+    input.excludePanePid !== null ? collectDescendants(input.excludePanePid, processes) : [],
+  );
+  const candidates = processes.filter(
+    (proc) => !excluded.has(proc.pid) && matchers.some((matcher) => matcher.test(proc.args)),
+  );
+
+  const sameSession: ProcessSnapshotEntry[] = [];
+  for (const proc of candidates) {
+    const envRead = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
+    if (envRead.status === "ok" && envRead.value === input.sessionId) {
+      sameSession.push(proc);
+    }
+  }
+
+  return {
+    status: "ok",
+    pids: collapseToShallowest(
+      sameSession.map((proc) => proc.pid),
+      processes,
+    ),
+  };
+}
+
+export type UnownedAgentReason = "duplicate_for_session" | "terminal_record" | "unknown_session";
+
+export interface UnownedAgentProcess {
+  pid: number;
+  rssKb: number;
+  elapsedSeconds: number;
+  sessionId: string;
+  agent: AgentName | null;
+  worktreePath: string;
+  reason: UnownedAgentReason;
+}
+
+export type UnownedAgentScan =
+  | { status: "unavailable" }
+  | { status: "ok"; processes: UnownedAgentProcess[] };
+
+function toFinding(
+  proc: ProcessSnapshotEntry,
+  sessionId: string,
+  agent: AgentName | null,
+  worktreePath: string,
+  reason: UnownedAgentReason,
+): UnownedAgentProcess {
+  return {
+    pid: proc.pid,
+    rssKb: proc.rssKb,
+    elapsedSeconds: proc.elapsedSeconds,
+    sessionId,
+    agent,
+    worktreePath,
+    reason,
+  };
+}
+
+// P2, doctor-facing: every live agent process, grouped by the SPUR_SESSION it
+// carries, checked against the session record it claims to belong to.
+//  - no matching record at all: "unknown_session" (a lingering process from a
+//    deleted/unindexed session).
+//  - record is completed/killed: "terminal_record" — I3's "not completed or
+//    killed" is the only status set that may legitimately own a live agent,
+//    so ANY process here is a finding.
+//  - record is live (not terminal) and more than one process, after
+//    ancestor/descendant collapse, carries its session id:
+//    "duplicate_for_session".
+//  - record is live and exactly one process (post-collapse) carries its
+//    session id: not a finding — I3.
+export async function scanUnownedAgentProcesses(dataDir: string): Promise<UnownedAgentScan> {
+  if (!(await canReadProcessEnv())) {
+    return { status: "unavailable" };
+  }
+  const sessions = listSessions(dataDir);
+  const sessionById = new Map(sessions.map((session) => [session.id, session]));
+  const matcherSet = new Set<string>();
+  for (const session of sessions) {
+    for (const matcher of agentProcessMatchers(session.agent, session.launchCommand)) {
+      matcherSet.add(matcher);
+    }
+  }
+  if (matcherSet.size === 0) {
+    return { status: "ok", processes: [] };
+  }
+  const matchers = compileMatchers([...matcherSet]);
+  const processes = await listProcesses();
+  const candidates = processes.filter((proc) =>
+    matchers.some((matcher) => matcher.test(proc.args)),
+  );
+
+  const bySessionId = new Map<string, ProcessSnapshotEntry[]>();
+  for (const proc of candidates) {
+    const envRead = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
+    if (envRead.status !== "ok" || !envRead.value) continue;
+    const group = bySessionId.get(envRead.value) ?? [];
+    group.push(proc);
+    bySessionId.set(envRead.value, group);
+  }
+
+  const findings: UnownedAgentProcess[] = [];
+  for (const [sessionId, group] of bySessionId) {
+    const byPid = new Map(group.map((proc) => [proc.pid, proc]));
+    const roots = collapseToShallowest(
+      group.map((proc) => proc.pid),
+      processes,
+    )
+      .map((pid) => byPid.get(pid))
+      .filter((proc): proc is ProcessSnapshotEntry => proc !== undefined);
+
+    const session = sessionById.get(sessionId);
+    if (!session) {
+      for (const proc of roots) {
+        findings.push(toFinding(proc, sessionId, null, "", "unknown_session"));
+      }
+      continue;
+    }
+    const terminal = session.status === "completed" || session.status === "killed";
+    if (terminal) {
+      for (const proc of roots) {
+        findings.push(
+          toFinding(proc, sessionId, session.agent, session.worktreePath, "terminal_record"),
+        );
+      }
+      continue;
+    }
+    if (roots.length > 1) {
+      for (const proc of roots) {
+        findings.push(
+          toFinding(proc, sessionId, session.agent, session.worktreePath, "duplicate_for_session"),
+        );
+      }
+    }
+  }
+  return { status: "ok", processes: findings };
+}
+
+function formatAge(elapsedSeconds: number): string {
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes > 0 ? `${hours}h${remainderMinutes}m` : `${hours}h`;
+}
+
+// Doctor adapter. Read-only, never signals. A finding is a leaked process to
+// clean up, not a broken install — severity stays "warn" and never flips the
+// doctor exit code.
+export async function checkAgentProcessOwnership(dataDir: string): Promise<HostInstallCheck> {
+  const scan = await scanUnownedAgentProcesses(dataDir);
+  if (scan.status === "unavailable") {
+    return {
+      id: "agent-process-ownership",
+      ok: true,
+      severity: "info",
+      detail: "cannot determine agent process ownership on this platform",
+    };
+  }
+  if (scan.processes.length === 0) {
+    return {
+      id: "agent-process-ownership",
+      ok: true,
+      severity: "info",
+      detail: "no unowned agent processes found",
+    };
+  }
+  const lines = scan.processes.map(
+    (proc) =>
+      `pid ${proc.pid} agent ${proc.agent ?? "unknown"} session ${proc.sessionId} reason ${proc.reason} rss ${(proc.rssKb / 1024).toFixed(1)}MB age ${formatAge(proc.elapsedSeconds)} worktree ${proc.worktreePath || "unknown"}`,
+  );
+  return {
+    id: "agent-process-ownership",
+    ok: false,
+    severity: "warn",
+    detail: `${scan.processes.length} unowned agent process(es) found:\n${lines.join("\n")}`,
+  };
+}

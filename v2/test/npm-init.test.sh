@@ -22,6 +22,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NPM_INIT_SRC="$HERE/../scripts/npm-init.sh"
+VERIFY_PACKAGE_FILES_SRC="$HERE/../scripts/verify-package-files.sh"
+REQUIRED_FILES_LIST="$HERE/../required-package-files.txt"
 DEPLOY_WEB_UNIT="$HERE/../deploy/spur-web.npm.service"
 
 WORK_DIR="$(mktemp -d)"
@@ -44,7 +46,9 @@ setup_scenario() {
     "$pkg_root/web/dist-server"
 
   cp "$NPM_INIT_SRC" "$pkg_root/scripts/npm-init.sh"
-  chmod +x "$pkg_root/scripts/npm-init.sh"
+  cp "$VERIFY_PACKAGE_FILES_SRC" "$pkg_root/scripts/verify-package-files.sh"
+  cp "$REQUIRED_FILES_LIST" "$pkg_root/required-package-files.txt"
+  chmod +x "$pkg_root/scripts/npm-init.sh" "$pkg_root/scripts/verify-package-files.sh"
 
   : >"$pkg_root/deploy/spur-daemon.npm.service"
   cp "$DEPLOY_WEB_UNIT" "$pkg_root/deploy/spur-web.npm.service"
@@ -342,5 +346,34 @@ set -e
   fail "npm-init.sh must remove a pre-existing spur-direct-terminal.service"
 
 echo "npm-init.test.sh: stale-terminal-unit scenario OK"
+
+# --- Scenario 7: restart hands the configured web port from old to new -----
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario port-handoff)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+SYSTEMCTL_TRACE="$WORK_DIR/systemctl-trace"
+cat >"$FAKE_BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$SYSTEMCTL_TRACE"
+if [ "$1" = "is-active" ]; then exit 0; fi
+exit 0
+EOF
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo 200
+EOF
+chmod +x "$FAKE_BIN/systemctl" "$FAKE_BIN/curl"
+OUT_FILE="$WORK_DIR/port-handoff-output.log"
+SYSTEMCTL_TRACE="$SYSTEMCTL_TRACE" HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --web-port 6200 --no-tailscale >"$OUT_FILE" 2>&1
+grep -q '^Environment=PORT=6200$' "$FAKE_HOME/.config/systemd/user/spur-web.service" ||
+  fail "configured web port was not preserved in the installed unit"
+handoff_trace="$(grep -E '^--user (stop spur-web|restart spur-daemon|start spur-web)' "$SYSTEMCTL_TRACE" | tr '\n' '|')"
+[ "$handoff_trace" = "--user stop spur-web.service|--user restart spur-daemon.service|--user start spur-web.service|" ] ||
+  fail "web restart did not stop old web before starting the new unit: $handoff_trace"
+
+echo "npm-init.test.sh: port-handoff scenario OK"
 
 echo "npm-init.test.sh: OK"

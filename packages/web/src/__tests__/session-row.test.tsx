@@ -312,6 +312,40 @@ describe("SessionRow", () => {
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
 
+  it("colors a dashboard sidecar age by ageWarn, not a fresh sidecar's age", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runningSidecars: [
+            { name: "stale-sidecar", ageSeconds: 50_000, ageWarn: true },
+            { name: "fresh-sidecar", ageSeconds: 5, ageWarn: false },
+          ],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+
+    const staleAge = screen.getByTestId("dashboard-sidecar-age-stale-sidecar");
+    const freshAge = screen.getByTestId("dashboard-sidecar-age-fresh-sidecar");
+    expect(staleAge).toHaveClass("text-[var(--color-status-attention)]");
+    expect(freshAge).toHaveClass("text-[var(--color-text-tertiary)]");
+    expect(freshAge).not.toHaveClass("text-[var(--color-status-attention)]");
+  });
+
   it("shows daily wake timer details from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",

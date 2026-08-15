@@ -10,7 +10,6 @@ import { AlertIcon } from "@/components/icons/AlertIcon";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
-  versionSwitchFailedMessage,
   type RuntimeInfoResponse,
 } from "@/lib/version-switch-context";
 import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
@@ -40,6 +39,12 @@ interface SwitchSuccess {
   version: string;
 }
 
+interface SwitchInProgress {
+  error: string;
+  inProgress: true;
+  version: string;
+}
+
 function isReleaseEntry(value: unknown): value is ReleaseEntry {
   return (
     typeof value === "object" &&
@@ -63,8 +68,27 @@ function isSwitchSuccess(value: unknown): value is SwitchSuccess {
   return v.accepted === true && typeof v.version === "string";
 }
 
-function messageForSwitchError(status: number, daemonError: string | null): string {
-  if (status === 409) return "Cannot switch — daemon is running from a source checkout.";
+function isSwitchInProgress(value: unknown): value is SwitchInProgress {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.error === "string" &&
+    result.inProgress === true &&
+    typeof result.version === "string"
+  );
+}
+
+function messageForSwitchError(
+  status: number,
+  payload: unknown,
+  daemonError: string | null,
+): string {
+  if (status === 409 && isSwitchInProgress(payload)) {
+    return `Update to ${payload.version} is already in progress.`;
+  }
+  if (status === 409 && daemonError === "running from source checkout") {
+    return "Cannot switch — daemon is running from a source checkout.";
+  }
   if (status === 503 && daemonError === "npm registry unreachable") {
     return "npm registry unreachable — try again in a minute.";
   }
@@ -77,20 +101,9 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
   return "Switch failed. Check the daemon log and try again.";
 }
 
-function switchStatusMessage(phase: "switching" | "done" | "failed", target: string): string {
-  if (phase === "switching") return `Switching Spur to ${target}…`;
-  if (phase === "done") return `Spur is now running ${target}.`;
-  return versionSwitchFailedMessage(target);
-}
-
 export function VersionMenu() {
   const popover = useFooterPopover();
-  const {
-    phase: switchPhase,
-    target: switchTarget,
-    startSwitch,
-    dismiss: dismissVersionSwitch,
-  } = useVersionSwitch();
+  const { phase: switchPhase, startSwitch, dismiss: dismissVersionSwitch } = useVersionSwitch();
   const [pending, setPending] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -132,7 +145,7 @@ export function VersionMenu() {
       const payload = await readResponsePayload(response);
       if (response.status !== 202 || !isSwitchSuccess(payload)) {
         const daemonError = responseErrorMessage(payload, "");
-        throw new Error(messageForSwitchError(response.status, daemonError || null));
+        throw new Error(messageForSwitchError(response.status, payload, daemonError || null));
       }
       return payload;
     },
@@ -221,30 +234,6 @@ export function VersionMenu() {
           />
         )}
       </button>
-      {switchPhase !== "idle" && switchTarget ? (
-        <div
-          aria-live="polite"
-          className={`absolute bottom-full right-0 z-50 mb-1.5 flex w-[min(20rem,calc(100vw-1rem))] items-start justify-between gap-2 border bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] ${
-            switchPhase === "failed"
-              ? "border-[var(--color-status-error)] text-[var(--color-status-error)]"
-              : "border-[var(--color-status-attention)] text-[var(--color-status-attention)]"
-          }`}
-          data-testid="version-switch-status"
-          role="status"
-        >
-          <span>{switchStatusMessage(switchPhase, switchTarget)}</span>
-          {switchPhase !== "switching" ? (
-            <button
-              aria-label="Dismiss version switch status"
-              className="font-bold outline-none transition-opacity hover:opacity-70 focus-visible:opacity-70"
-              type="button"
-              onClick={dismissVersionSwitch}
-            >
-              ×
-            </button>
-          ) : null}
-        </div>
-      ) : null}
       {popover.open && switchPhase === "idle" ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">

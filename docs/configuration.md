@@ -25,7 +25,7 @@ Dead-entry removal (a path that is not an existing file — deleted, or now a di
 
 Completing or killing a session also runs a narrow unregister step for its worktree's config path. In the common case that path is already excluded by the worktree-internal filter above (it sits inside the current `worktreeDir`), so the step is a no-op; it only removes a registry entry that outlived the filter because it was registered under a `worktreeDir` the host has since reconfigured away from.
 
-`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
+`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`. `spur doctor --json` additionally carries a `configRegistryPaths` array — every registered path with its `alive`/`dead`/`worktree-internal` state; the human-readable output renders it as one line per path once non-empty.
 
 Daemon boot logs one `daemon.registry.count` event to `events.jsonl`: how many registry paths it read, and how many the worktree-internal filter dropped. Read-only — it never prunes or rewrites the registry file. Pair it with the `config-registry` doctor check above to tell whether a warn came from a growing registry or a one-off spike.
 
@@ -248,12 +248,13 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.maxLiveSessions`: optional positive integer. Per-project cap on top of the global `admission.maxLiveSessions` cap — a spawn or restore that would put this project over its own cap is refused even while the host is under the global cap. Works in both instance and project config.
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
+- `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. See [Sidecar reaping](#sidecar-reaping).
 - `projects.<id>.mcp.exclude`: optional array of MCP server names, default `[]`. Host/global servers Spur drops from this project's claude and codex sessions. See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.
-- `projects.<id>.preflight`: optional object; enables branch suggestion before worktree creation.
-- `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in rule-or-defer prompt.
+- `projects.<id>.preflight`: optional object; enables strict branch preflight before worktree creation. The agent returns one branch name or `NO_PROJECT_RULES` only.
+- `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in branch-or-no-rules prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
@@ -289,7 +290,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `spawn.overrides.defaultBranch` / `spawn[].overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `spawn.autoComplete`: when `true`, Spur completes the spawned session only after it has existed 5+ minutes and is `waiting`; `working`, `needs_input`, paused, and spawning block completion.
 - `spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk, and rejects mixed resolved `overrides.worktree`/`overrides.defaultBranch`.
-- `send.interrupt`: optional boolean, default `false`. `false` queues while `working`/`needs_input`, dedupes, flushes when `waiting`. `true` interrupts immediately while `working`; `needs_input` still queues.
+- `send.interrupt`: optional boolean, default `false`. `false` queues while `working`/`needs_input`, dedupes, flushes when `waiting`. `true` interrupts immediately while `working`; `needs_input` still queues. `cursor` sessions never receive the `Ctrl-C` keystroke — the message is typed into the running turn, which cursor-agent queues itself; `claude` and `codex` are interrupted first.
 - `send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 - `projects.<id>.backlog.<backlogId>.source`: required source id; must be a `jira` source.
 - `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
@@ -306,6 +307,9 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
+- `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
+- `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
+- `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 - `eventLog.hotBytes`: optional, default `134217728` (128MB). Instance config only. See [Event log retention](#event-log-retention).
 - `eventLog.shardHotBytes`: optional, default `16777216` (16MB).
@@ -345,6 +349,40 @@ The 1-second sampler reads host `MemAvailable` plus daemon-cgroup `memory.curren
 Below the critical floor, each tick stops at most one safe sidecar. Session shedding starts after 12 seconds of continuous low host RAM. Host RAM at half the critical floor, capped at 2 GiB, or finite cgroup-max headroom at that threshold bypasses the grace period: the tick tries one sidecar, re-samples pressure, then pauses at most one session if pressure still authorizes it. `memory.high` alone permits sidecar shedding, never session shedding. Session order remains `rate_limited` before `waiting`, oldest `updatedAt` first. Sidecar order remains all built-in MCP sidecars before project sidecars. `working`, `needs_input`, restore-warmup, unclassifiable sessions, and protected shared sidecars stay untouched. Paused sessions remain restorable.
 
 RAM pressure closes at the admission floor. Cgroup-high pressure closes below its threshold by the smaller of 10% or the emergency threshold. Finite-max pressure closes above twice the emergency headroom. Swap-only shedding starts disarmed after daemon startup, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt before another recovery. Recovery and healthy ticks emit no memory event. Actions, partial failures, and edge-triggered exhaustion retain `daemon.memory.shed` / `daemon.memory.shed.failed`; other memory events remain `session.admission.denied`, `session.admission.memory_guard`, and startup warning `daemon.memory.unbounded`.
+
+## Sidecar reaping
+
+`sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars declared under `projects.<id>.sidecars`. A built-in MCP sidecar (`playwright`) is never a candidate. The pass runs on the daemon's sidecar-reaper tick and once at boot.
+
+A reap kills the sidecar's tmux pane process tree, drops its recorded process, and unlinks its published slot link (a stale reap would otherwise leave a slot pointing at a dead server). Session record, worktree, and port reservation survive; a restart is a normal sidecar start ([Sidecars](commands.md#sidecars)).
+
+A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads that workspace, not one session.
+
+Active workspace: at least one member is `running` or `spawning`, or at least one member sits in restore warmup. A one-session workspace reads its own status. Members that are `stopped`, `paused`, `errored`, `completed`, or `killed` count as inactive.
+
+Idle time: now minus the newest activity over all workspace members, where a member's activity is its dashboard `lastActivityAt`, falling back to its record `updatedAt`. One active member holds the shared sidecar for the rest.
+
+Decision per sidecar, first match wins:
+
+1. `sidecarGc.enabled: false` — keep.
+2. MCP sidecar — keep.
+3. No live pane and no recorded process — keep.
+4. Established TCP connection on any port reserved for this sidecar — keep. Outranks every reap rule below, on any owner status.
+5. Connection probe unreadable on any of those ports — keep.
+6. Owner record gone — reap.
+7. Worktree gone — reap.
+8. Workspace not active — reap, whatever the idle time.
+9. No parsable activity timestamp on any member — keep.
+10. Idle time at or past the sidecar's `idleTtlMinutes` — reap.
+11. Otherwise — keep.
+
+Predicting a dev server: it survives a pass while something holds a connection to one of its reserved ports (rule 4), or while its workspace stays active (rule 8) with idle time under the TTL (rule 10). The probe reads recorded reservations only — a sidecar that reserved no port and has no live pane gets no rule-4/5 veto at all. A live pane whose sidecar declares ports but has no recorded reservation still keeps under rule 5 (an unprovable probe, not a clean "no connection" read) rather than falling through to the idle rules.
+
+Each pass logs `session.sidecar.reaped` per kill with the matched rule and the freed tree RSS, and `session.sidecar.age_warning` per kept sidecar whose process age reached `maxAgeWarnMinutes` — throttled to once per sidecar per `maxAgeWarnMinutes` window, not once per tick, so a connection-held idle sidecar stays without repeating the warning every tick.
+
+Every session view (daemon `GET /sessions`, `GET /sessions/<id>`, and the dashboard) carries each sidecar's `ageSeconds` (elapsed seconds since the recorded identity's process start, omitted when unresolvable) and `ageWarn` (true once `ageSeconds` reaches `maxAgeWarnMinutes` — the same threshold `session.sidecar.age_warning` fires at, so the UI and the event agree). The session detail page, the dashboard's running-sidecars row, and `spur list` ([list](commands.md#list)) all render the age and mark an over-threshold one so a stale sidecar is visible without a manual check.
+
+Cross-workspace port collision: a sidecar start refuses when this workspace's own recorded port reservation for this sidecar exactly matches another (live) workspace's recorded reservation for one of its non-MCP sidecars in the same project, AND that port is actually free right now. A declared `ports` range shared by several sidecars (by design — each workspace draws a distinct free port from it) never triggers this on its own, and neither does an occupied colliding port: the normal reservation reuse gate already declines to reuse an occupied port and falls through to the free-port scan, so the start self-heals onto a different port instead. The error names the holding workspace and its sidecar. Spur reuses no pane and reaps nothing across a workspace boundary — stop that sidecar or its owning session first. A same-workspace sidecar, a different project, a holder with no live pane, and an explicit `clearPort` on the start request all refuse nothing — `clearPort` is itself a user-driven override of a conflicting reservation.
 
 ## Events
 

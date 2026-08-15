@@ -103,6 +103,10 @@ export interface SpurSessionSidecarView {
   alive: boolean;
   ports?: SpurSidecarPort[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
+  ageWarn?: boolean;
 }
 
 export interface SpurSidecarPortConflictCandidate {
@@ -270,6 +274,7 @@ export interface SpurSessionView {
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
@@ -441,6 +446,10 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
 export interface DashboardRunningSidecar {
   name: string;
   url?: string;
+  /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
+  ageWarn?: boolean;
 }
 
 export interface DashboardSession {
@@ -471,6 +480,7 @@ export interface DashboardSession {
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
@@ -507,12 +517,25 @@ export function toDashboardSession(
   const links = session.slots?.links ?? [];
   const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
   const runningSidecarNames = session.runningSidecarNames ?? [];
+  const sidecarViewsByName = new Map((session.sidecars ?? []).map((sc) => [sc.name, sc]));
   const runningSidecars = runningSidecarNames.map((name) => {
     const url = sidecarLinkUrls.get(name);
-    return url ? { name, url } : { name };
+    const view = sidecarViewsByName.get(name);
+    return {
+      name,
+      ...(url ? { url } : {}),
+      ...(view?.ageSeconds !== undefined ? { ageSeconds: view.ageSeconds } : {}),
+      ...(view?.ageWarn !== undefined ? { ageWarn: view.ageWarn } : {}),
+    };
   });
   const tags = session.slots?.tags ?? [];
-  const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
+  const queuedMessages = {
+    messages: session.queuedMessages?.messages ?? [],
+    awaitingPrompt: session.queuedMessages?.awaitingPrompt ?? false,
+    ...(session.queuedMessages?.pipelineMessages !== undefined
+      ? { pipelineMessages: session.queuedMessages.pipelineMessages }
+      : {}),
+  };
   return {
     id: session.id,
     projectId: session.project,
