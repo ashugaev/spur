@@ -81,12 +81,16 @@ New worktree branches fetch `origin`, fast-forward the base branch when only beh
 spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --every 30m --until "done condition" [message...]
 spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
+spur wake <sessionId> --cancel
 ```
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` and the message retries through the queue drain (below) like any other queued message.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. `--every <duration>` repeats at a fixed interval and also requires `--until`. `--cancel` drops any recurring (`--every` or `--daily-at`) wake for the session; it cannot combine with the scheduling options. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily or interval occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` / `session.wake.interval_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` / `session.wake.interval_sent` and the message retries through the queue drain (below) like any other queued message.
+
+A recurring wake (`--every` or `--daily-at`) only fires while the session's status is restorable (`running`, `stopped`, `paused`). Once the session goes `completed` or `killed`, the daemon drops the schedule on its next tick and logs `session.wake.interval_cancelled` (or `session.wake.daily_cancelled` for a daily-only wake) instead of repeatedly failing to send. An `errored` session keeps its recurring wake armed but silent — it stays due without firing until the session restores, at which point the first tick after restore fires one immediate catch-up wake.
 
 ## list
 

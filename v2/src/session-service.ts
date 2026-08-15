@@ -3209,8 +3209,49 @@ export class SessionService {
           }
         }
 
+        // A completed/killed session can never receive another wake: reap.ts
+        // and the restart path never revive it. Clear intervalWake/dailyWake
+        // here so this loop stops re-visiting it every tick and spamming
+        // interval_failed/daily_failed for a send() that can only throw
+        // "Session is not running". Deliberately does NOT `continue`: the
+        // reactivation blocks below (auto-rotate, rate-limit, server-error)
+        // still need to run for every status.
+        if (
+          isTerminalSessionStatus(session.status) &&
+          (session.intervalWake || session.dailyWake)
+        ) {
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          const claimed =
+            isTerminalSessionStatus(current.status) &&
+            JSON.stringify(current.intervalWake) === JSON.stringify(session.intervalWake) &&
+            JSON.stringify(current.dailyWake) === JSON.stringify(session.dailyWake);
+          if (claimed) {
+            const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+            const event =
+              current.dailyWake && !current.intervalWake
+                ? "session.wake.daily_cancelled"
+                : "session.wake.interval_cancelled";
+            this.logEvent(event, {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Cancelled recurring wake for ${session.id}: session is ${current.status}`,
+              details: {
+                reason: "session_terminal",
+                status: current.status,
+              },
+            });
+          }
+        }
+
         const intervalWake = session.intervalWake;
-        if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
+        if (
+          isRestorableStatus(session.status) &&
+          intervalWake &&
+          Date.parse(intervalWake.nextDueAt) <= now
+        ) {
           // Claim the due tick BEFORE sending: advance nextDueAt to the next
           // future interval (catching up past any missed intervals) and persist
           // it first. A slow or failing send must not leave the wake due, or the
@@ -3418,7 +3459,11 @@ export class SessionService {
         }
 
         const dailyWake = session.dailyWake;
-        if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
+        if (
+          !isRestorableStatus(session.status) ||
+          !dailyWake ||
+          Date.parse(dailyWake.nextDueAt) > now
+        ) {
           continue;
         }
         // Claim the due occurrence BEFORE sending: advance nextDueAt to the
