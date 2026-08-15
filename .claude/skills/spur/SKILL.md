@@ -18,7 +18,7 @@ INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
-  `$SPUR_SESSION_TOOL_DIR` holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. A login shell rebuilds `PATH` and drops the tool dir prefix `buildSessionEnv` set, so a bare tool name can resolve elsewhere — always call by the explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+  `$SPUR_SESSION_TOOL_DIR` holds `spur` (bound to this session's config), `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path; a login shell rebuilds `PATH` and drops the tool dir. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
   Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS
@@ -47,7 +47,7 @@ SAFETY
   Never run `spur gc --execute` against a data dir you do not own. It removes worktrees and archives records. Point `--config` at a temp data dir for development; a bare `spur gc` is a dry run and the only safe form elsewhere.
   The web UI binds `127.0.0.1`, plus the tailnet IP once `spur init` brings Tailscale up (default on); `--expose-web` binds `0.0.0.0` and is public. Agents run full-access, so any prompt reaching one runs arbitrary commands as the daemon user — treat each source (Telegram, GitHub comments, Jira) as untrusted input.
   For dev servers and test helpers inside a session use `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, not a bare `pnpm dev` / `next dev`: Spur reserves the port, ties teardown to the session, and captures output into the session log.
-  Read a sidecar's reserved port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; the port lives only in the sidecar's own env, reserved after the pane env already froze. Contract: `docs/commands.md#sidecars`.
+  Read a sidecar's reserved port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`, never from the pane env and never by grepping `/proc` or session state. Contract: `docs/commands.md#sidecars`.
   `restore`/`reopen` refuse to relaunch over a live agent process still carrying that session id (a foreign process, the pane's own process surviving the kill escalation, or an unreadable process table, where "no survivors" would be a guess) so a session never ends up with two live agent processes. `--force` (CLI) or a second `r` on the same selection in `spur list` bypasses only the foreign-process refusal, never a confirmed survivor or an unreadable table. A teardown with no relaunch behind it proceeds rather than refusing, so a wedged process can never make a session unkillable. `spur doctor`'s `agent-process-ownership` check reports unowned agent processes at `warn`; detail in `docs/commands.md`.
 
 IN THIS REPO
