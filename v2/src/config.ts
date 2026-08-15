@@ -1573,8 +1573,11 @@ const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
 };
 
 // Minutes a running/waiting session may sit idle before pollAttentionStates
-// parks it (stopReason: "stale_timeout"). 0 disables parking.
-const DEFAULT_STALE_AFTER_MINUTES = 60;
+// parks it (stopReason: "stale_timeout"). 0 disables parking. 12 hours: long
+// enough that a session pausing overnight between review rounds is still there
+// in the morning, short enough that a forgotten one does not hold its pane and
+// sidecars for days.
+const DEFAULT_STALE_AFTER_MINUTES = 720;
 
 // Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
 // per-agent account stores plug in separately). Instance-only, same footgun as

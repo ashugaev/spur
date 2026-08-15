@@ -4182,6 +4182,19 @@ projects:
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
   });
 
+  it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(720);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBeUndefined();
+  });
+
   it("parses projects.<id>.staleAfterMinutes as a per-project override", async () => {
     const configPath = await writeConfig(`
 staleAfterMinutes: 60
