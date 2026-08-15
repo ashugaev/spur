@@ -83,6 +83,29 @@ describe("parseCursorModelsOutput", () => {
 });
 
 describe("listAgentModels cursor", () => {
+  it("bounds the `cursor models` shell-out with a timeout, so a hung CLI can't stall the request indefinitely", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-timeout";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: { timeout?: number },
+        cb: (err: Error | null) => void,
+      ) => {
+        cb(new Error("ETIMEDOUT"));
+      },
+    );
+    const models = await listAgentModels("cursor");
+    // Same graceful degrade as any other exec failure (e.g. cursor missing).
+    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    // Asserted after the call, not inside the mock implementation: a thrown
+    // expectation there would be swallowed by listCursorModels' catch-all
+    // and silently pass as just another "exec failed" case.
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [, , opts] = execFileMock.mock.calls[0] as [string, string[], { timeout?: number }];
+    expect(opts.timeout).toBe(5_000);
+  });
+
   it("returns a fallback list when the exec fails", async () => {
     process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-missing";
     execFileMock.mockImplementation(

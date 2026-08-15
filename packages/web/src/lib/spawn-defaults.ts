@@ -72,8 +72,14 @@ export function useResolvedSpawnDefaults(
     }
     let cancelled = false;
     setState({ model: null, worktree: null, loading: true, error: null });
+    // Backstop above the server-side 8s spurRequest timeout (packages/web/
+    // src/app/api/projects/[id]/spawn-defaults/route.ts): that bound should
+    // always resolve this first, but a client-side ceiling means a stalled
+    // request settles into the error state — never an indefinite disable —
+    // even if that upstream bound is ever bypassed or missing.
     void fetch(
       `/api/projects/${encodeURIComponent(projectId)}/spawn-defaults?agent=${encodeURIComponent(agent)}`,
+      { signal: AbortSignal.timeout(12_000) },
     )
       .then(async (response) => {
         const payload = (await response.json()) as SpawnDefaultsResponse | { error?: string };

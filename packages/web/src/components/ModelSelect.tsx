@@ -31,15 +31,21 @@ interface ModelSelectProps {
   // handoff (rung 1). null when there is nothing to carry, e.g. a fresh
   // Dashboard spawn.
   carry: CarrySpawnModel | null;
-  // Fires whenever the model is or isn't submittable yet: true once both the
-  // model list and the project-scoped defaults have settled (loaded,
-  // errored, or come back empty — a settled-empty catalog is a valid,
-  // submittable state with `value` staying null). Never true early just
+  // Fires whenever the model is/isn't submittable, and with what error (if
+  // any) to show. `resolved` is true once both the model list and the
+  // project-scoped defaults have settled AND the model list did not error —
+  // a settled-EMPTY catalog is a valid, submittable state with `value`
+  // staying null, but a settled-ERRORED one is not: it stays unresolved
+  // (blocking submit) the same way an unresolved workspace-mode default
+  // does, rather than silently proceeding as if the catalog were just
+  // empty. `error` is this control's own model-fetch failure message (not
+  // the caller's separate spawn-defaults error); the caller surfaces it
+  // wherever it already surfaces that one, so both fetches share one error
+  // presentation instead of two different ones. Never true early just
   // because `value` is already non-null: a caller-seeded value (e.g. a
   // carried session model) still needs the settled catalog to confirm it
-  // through `carry`'s isListed() filter. The single source callers gate
-  // submit on, instead of inferring it from `value === null`.
-  onResolvedChange: (resolved: boolean) => void;
+  // through `carry`'s isListed() filter.
+  onResolvedChange: (resolved: boolean, error: string | null) => void;
   ariaLabel?: string;
 }
 
@@ -73,7 +79,14 @@ export function ModelSelect({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetch(`/api/models?agent=${encodeURIComponent(agent)}`)
+    // Backstop above the server-side 8s spurRequest timeout (packages/web/
+    // src/app/api/models/route.ts): that bound should always resolve this
+    // first, but a client-side ceiling means a stalled request settles into
+    // the error state — never an indefinite disable — even if that upstream
+    // bound is ever bypassed or missing.
+    void fetch(`/api/models?agent=${encodeURIComponent(agent)}`, {
+      signal: AbortSignal.timeout(12_000),
+    })
       .then(async (response) => {
         const payload = (await response.json()) as AgentModelsResponse | { error?: string };
         if (cancelled) return;
@@ -112,18 +125,21 @@ export function ModelSelect({
   // settles with an empty list (nothing to preselect); the label
   // distinguishes those two rather than showing a placeholder sentinel.
   const settled = !loading && !spawnDefaults.loading;
-  // Resolved is exactly "settled": every rung of the precedence chain,
-  // including a carried session model (rung 1), must clear the isListed()
-  // filter inside resolvePreselectedModelId before a value counts as
-  // submittable. A caller must never seed `value` directly from an
-  // unfiltered source (e.g. session.model) to fast-path this — that would
-  // let a model that has since left the catalog stay selected and
-  // submittable ahead of the fetch that would have caught it.
-  const resolved = settled;
+  // Resolved is "settled and the model list didn't error": every rung of
+  // the precedence chain, including a carried session model (rung 1), must
+  // clear the isListed() filter inside resolvePreselectedModelId before a
+  // value counts as submittable. A caller must never seed `value` directly
+  // from an unfiltered source (e.g. session.model) to fast-path this — that
+  // would let a model that has since left the catalog stay selected and
+  // submittable ahead of the fetch that would have caught it. A model-fetch
+  // error is treated like an unresolved workspace-mode default, not like a
+  // genuinely empty catalog: it keeps blocking submit instead of settling
+  // into "enabled, model omitted".
+  const resolved = settled && error === null;
 
   useEffect(() => {
-    onResolvedChangeRef.current(resolved);
-  }, [resolved]);
+    onResolvedChangeRef.current(resolved, error);
+  }, [resolved, error]);
 
   // Once both fetches settle, preselect a concrete model instead of leaving
   // the field on a "server decides" sentinel. Only runs while unresolved: the

@@ -2045,9 +2045,13 @@ describe("Dashboard", () => {
     expect(spawnBody).not.toHaveProperty("model");
   });
 
-  it("keeps Spawn enabled and omits model from the payload when the models fetch errors", async () => {
-    let spawnBody: Record<string, unknown> | null = null;
-    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+  it("keeps Spawn disabled and shows an error banner when the models fetch errors, distinct from a genuinely empty catalog", async () => {
+    // F3: a model-fetch error is not the same as a settled-empty catalog —
+    // it must keep blocking submit and surface what failed, the same way an
+    // unresolved workspace-mode default does, instead of silently spawning
+    // with model omitted as if nothing were wrong.
+    let spawnCalled = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
@@ -2055,11 +2059,12 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-      if (url.startsWith("/api/models")) throw new Error("network down");
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ error: "network down" }), { status: 502 });
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
-        spawnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        spawnCalled = true;
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2073,14 +2078,16 @@ describe("Dashboard", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      expect(screen.getByText(/couldn't load the model catalog: network down/)).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
 
-    await waitFor(() => {
-      expect(spawnBody).not.toBeNull();
-    });
-    expect(spawnBody).not.toHaveProperty("model");
+    // Stays disabled — an errored catalog fetch has no manual escape hatch
+    // the way workspace mode does (there is no model to hand-pick when the
+    // list itself never loaded).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
+    expect(spawnCalled).toBe(false);
   });
 
   it("toggles voice recording from the spawn prompt with Cmd+.", async () => {

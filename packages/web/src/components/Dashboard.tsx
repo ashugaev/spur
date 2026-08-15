@@ -1063,6 +1063,10 @@ export function Dashboard() {
   // gates on this, not on `spawnModel === null` — a settled-empty catalog
   // also has a null model but is a valid, submittable state.
   const [spawnModelResolved, setSpawnModelResolved] = useState(false);
+  // The model catalog's own fetch error (distinct from spawnDefaults.error
+  // below); ModelSelect keeps `resolved` false while this is set, same as an
+  // unresolved workspace-mode default, and this surfaces in the same banner.
+  const [spawnModelError, setSpawnModelError] = useState<string | null>(null);
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
@@ -1077,6 +1081,12 @@ export function Dashboard() {
   // (nothing chosen by hand yet); the resolver effect below only writes to
   // spawnWorkspaceMode while this holds, so it never clobbers a manual pick.
   const spawnWorkspaceModeAutoRef = useRef(true);
+  // Bumped whenever spawnWorkspaceModeAutoRef flips without an accompanying
+  // state change (e.g. a mousedown-only interaction) — a plain ref mutation
+  // does not itself schedule a re-render, so submitDisabled (read from the
+  // ref during render) would otherwise stay stale until some unrelated
+  // state update happened to follow.
+  const [, forceSpawnWorkspaceModeRerender] = useState(0);
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -2621,7 +2631,10 @@ export function Dashboard() {
                   },
                   spawnDefaults,
                   carry: null,
-                  onResolvedChange: setSpawnModelResolved,
+                  onResolvedChange: (resolved, error) => {
+                    setSpawnModelResolved(resolved);
+                    setSpawnModelError(error);
+                  },
                 },
                 ...(spawnModeOptions.length > 0
                   ? {
@@ -2654,6 +2667,15 @@ export function Dashboard() {
                     spawnDraftDirtyRef.current = true;
                     spawnWorkspaceModeAutoRef.current = false;
                     setSpawnWorkspaceMode(next);
+                  },
+                  // Re-picking the option already shown fires no change
+                  // event (native <select>, and React's value tracking
+                  // suppresses it too) — mousedown fires on every
+                  // interaction regardless, so a workspace-default error
+                  // banner's "pick worktree or shared" is never inert.
+                  onMouseDown: () => {
+                    spawnWorkspaceModeAutoRef.current = false;
+                    forceSpawnWorkspaceModeRerender((n) => n + 1);
                   },
                 },
                 planMode: {
@@ -2703,6 +2725,11 @@ export function Dashboard() {
                       <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                         couldn&apos;t resolve this project&apos;s workspace default:{" "}
                         {spawnDefaults.error} — pick worktree or shared to continue
+                      </div>
+                    ) : null}
+                    {spawnModelError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        couldn&apos;t load the model catalog: {spawnModelError}
                       </div>
                     ) : null}
                   </>

@@ -3373,6 +3373,7 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
       expect(mockedSpurRequestJson).toHaveBeenCalledWith(
         "/projects/api/spawn-defaults?agent=claude",
+        { timeoutMs: 8_000 },
       );
       expect(payload).toEqual({ model: "sonnet", worktree: false });
     });

@@ -15,8 +15,12 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: `Unsupported agent: ${agent}` }, { status: 400 });
   }
   try {
+    // For cursor this resolves through the same `cursor models` shell-out as
+    // /api/models; bound the round trip so a stalled CLI settles into an
+    // error instead of leaving the caller (and submit) unresolved forever.
     const payload = await spurRequestJson<SpawnDefaultsResponse>(
       `/projects/${encodeURIComponent(id)}/spawn-defaults?agent=${encodeURIComponent(agent)}`,
+      { timeoutMs: 8_000 },
     );
     return NextResponse.json(payload);
   } catch (error) {

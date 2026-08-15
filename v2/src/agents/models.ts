@@ -143,7 +143,16 @@ async function listCursorModels(): Promise<AgentModel[]> {
   }
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], { encoding: "utf8" }));
+    // Bounded so a hung `cursor` binary can't leave this (and the HTTP
+    // request that awaits it, e.g. /models or /projects/:id/spawn-defaults)
+    // unresolved indefinitely. Under the client-facing 8s spurRequest
+    // timeout (packages/web/src/lib/spur-daemon.ts) so a stall still
+    // resolves here first, into the same graceful fallback as "no cursor
+    // CLI", rather than the caller timing out on a still-running process.
+    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }));
   } catch {
     return CURSOR_FALLBACK_MODELS;
   }

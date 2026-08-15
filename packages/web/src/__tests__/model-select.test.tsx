@@ -256,9 +256,9 @@ describe("ModelSelect", () => {
       // Checked synchronously, right after the mount commit: the very first
       // call recorded must be `false`, never `true`, regardless of how fast
       // the underlying fetch goes on to settle.
-      expect(onResolvedChange.mock.calls[0]).toEqual([false]);
+      expect(onResolvedChange.mock.calls[0]).toEqual([false, null]);
 
-      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, null));
     });
 
     it("reports unresolved while the model list is in flight, then resolved once settled with a concrete model", async () => {
@@ -293,8 +293,8 @@ describe("ModelSelect", () => {
 
       render(<Harness />);
 
-      expect(onResolvedChange).toHaveBeenCalledWith(false);
-      expect(onResolvedChange).not.toHaveBeenCalledWith(true);
+      expect(onResolvedChange).toHaveBeenCalledWith(false, null);
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true, null);
       expect(
         within(screen.getByRole("button", { name: "Model" })).getByRole("status", {
           name: "Resolving model",
@@ -311,7 +311,7 @@ describe("ModelSelect", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus"),
       );
-      expect(onResolvedChange).toHaveBeenLastCalledWith(true);
+      expect(onResolvedChange).toHaveBeenLastCalledWith(true, null);
     });
 
     it("stays unresolved while the caller's spawnDefaults is still loading, even once the model list has settled", async () => {
@@ -333,7 +333,7 @@ describe("ModelSelect", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
-      expect(onResolvedChange).not.toHaveBeenCalledWith(true);
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true, null);
 
       rerender(
         <ModelSelect
@@ -346,7 +346,7 @@ describe("ModelSelect", () => {
         />,
       );
 
-      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, null));
     });
 
     it("reports resolved with a null value once the catalog settles empty", async () => {
@@ -364,12 +364,16 @@ describe("ModelSelect", () => {
         />,
       );
 
-      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, null));
       expect(onChange).not.toHaveBeenCalled();
       expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("No models");
     });
 
-    it("reports resolved with a null value when the models fetch errors", async () => {
+    it("stays unresolved and reports the error when the models fetch errors, distinct from a genuinely empty catalog", async () => {
+      // F3: an errored fetch must not be treated like a settled-empty
+      // catalog — it keeps blocking submit (never reports resolved:true)
+      // and surfaces the failure message, the same way an unresolved
+      // workspace-mode default does at the caller.
       vi.stubGlobal(
         "fetch",
         vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch,
@@ -387,8 +391,58 @@ describe("ModelSelect", () => {
         />,
       );
 
-      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
+      // Stays this way — never flips to resolved on its own.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true, expect.anything());
       expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it("F2: a models fetch that never resolves on its own times out into the error state instead of disabling submit forever", async () => {
+      vi.useFakeTimers();
+      let capturedSignal: AbortSignal | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+          capturedSignal = init?.signal ?? undefined;
+          // Never resolves or rejects on its own — only reacts to abort,
+          // exactly like a real fetch racing AbortSignal.timeout.
+          return new Promise<Response>((_resolve, reject) => {
+            capturedSignal?.addEventListener("abort", () => {
+              reject(new DOMException("The operation was aborted", "TimeoutError"));
+            });
+          });
+        }) as unknown as typeof fetch,
+      );
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="claude"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={SETTLED_NO_DEFAULT}
+          value={null}
+        />,
+      );
+
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true, expect.anything());
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_000);
+      });
+
+      expect(onResolvedChange).toHaveBeenLastCalledWith(false, expect.any(String));
+      expect(
+        within(screen.getByRole("button", { name: "Model" })).queryByRole("status", {
+          name: "Resolving model",
+        }),
+      ).not.toBeInTheDocument();
+
+      vi.useRealTimers();
     });
 
     it("does not report resolved just because a caller-seeded value is already non-null, before any fetch settles", async () => {
@@ -411,10 +465,10 @@ describe("ModelSelect", () => {
         />,
       );
 
-      expect(onResolvedChange).toHaveBeenCalledWith(false);
-      expect(onResolvedChange).not.toHaveBeenCalledWith(true);
+      expect(onResolvedChange).toHaveBeenCalledWith(false, null);
+      expect(onResolvedChange).not.toHaveBeenCalledWith(true, null);
 
-      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true));
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, null));
     });
   });
 });
