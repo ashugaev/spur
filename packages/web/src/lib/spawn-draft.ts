@@ -3,10 +3,9 @@ import type { WorkspaceMode } from "@/lib/types";
 
 const SPAWN_DRAFT_VERSION = 2;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
-const SPAWN_DRAFT_STORAGE_PREFIX = "spur:spawn-draft";
+export const SPAWN_DRAFT_STORAGE_KEY = "spur:spawn-draft";
 
 export interface SpawnDraft {
-  projectId: string;
   prompt: string;
   agent: AgentName;
   model: string | null;
@@ -27,10 +26,6 @@ interface StoredSpawnDraft extends SpawnDraft {
   savedAt: number;
 }
 
-function storageKey(projectId: string): string {
-  return `${SPAWN_DRAFT_STORAGE_PREFIX}:${encodeURIComponent(projectId)}`;
-}
-
 function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
@@ -48,11 +43,7 @@ function isWorkspaceMode(value: unknown): value is WorkspaceMode {
   return value === "worktree" || value === "shared";
 }
 
-function isStoredSpawnDraft(
-  value: unknown,
-  projectId: string,
-  now: number,
-): value is StoredSpawnDraft {
+function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDraft {
   if (!value || typeof value !== "object") return false;
   const draft = value as Record<string, unknown>;
   return (
@@ -61,7 +52,6 @@ function isStoredSpawnDraft(
     Number.isFinite(draft.savedAt) &&
     draft.savedAt <= now &&
     now - draft.savedAt <= SPAWN_DRAFT_MAX_AGE_MS &&
-    draft.projectId === projectId &&
     typeof draft.prompt === "string" &&
     isAgentName(draft.agent) &&
     (draft.model === null || typeof draft.model === "string") &&
@@ -75,32 +65,28 @@ function isStoredSpawnDraft(
     Array.isArray(draft.steps) &&
     draft.steps.every((step) => typeof step === "string") &&
     (draft.trackerUrl === null || typeof draft.trackerUrl === "string") &&
-    (draft.sessionMode === undefined ||
-      draft.sessionMode === null ||
-      typeof draft.sessionMode === "string")
+    (draft.sessionMode === null || typeof draft.sessionMode === "string")
   );
 }
 
 export function readSpawnDraft(
-  projectId: string,
   storage: Storage | null = browserStorage(),
   now = Date.now(),
 ): SpawnDraft | null {
-  if (!projectId || !storage) return null;
-  const key = storageKey(projectId);
+  if (!storage) return null;
   try {
-    const raw = storage.getItem(key);
+    const raw = storage.getItem(SPAWN_DRAFT_STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    if (!isStoredSpawnDraft(parsed, projectId, now)) {
-      storage.removeItem(key);
+    if (!isStoredSpawnDraft(parsed, now)) {
+      storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
       return null;
     }
     const { version: _version, savedAt: _savedAt, ...draft } = parsed;
-    return { ...draft, sessionMode: draft.sessionMode ?? null };
+    return draft;
   } catch {
     try {
-      storage.removeItem(key);
+      storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
     } catch {
       // Storage can be unavailable even when window exists.
     }
@@ -113,10 +99,10 @@ export function writeSpawnDraft(
   storage: Storage | null = browserStorage(),
   now = Date.now(),
 ): void {
-  if (!draft.projectId || !storage) return;
+  if (!storage) return;
   try {
     storage.setItem(
-      storageKey(draft.projectId),
+      SPAWN_DRAFT_STORAGE_KEY,
       JSON.stringify({ ...draft, version: SPAWN_DRAFT_VERSION, savedAt: now }),
     );
   } catch {
@@ -124,18 +110,11 @@ export function writeSpawnDraft(
   }
 }
 
-export function clearSpawnDraft(
-  projectId: string,
-  storage: Storage | null = browserStorage(),
-): void {
-  if (!projectId || !storage) return;
+export function clearSpawnDraft(storage: Storage | null = browserStorage()): void {
+  if (!storage) return;
   try {
-    storage.removeItem(storageKey(projectId));
+    storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
   } catch {
     // Draft cleanup must not block a confirmed spawn.
   }
-}
-
-export function spawnDraftStorageKey(projectId: string): string {
-  return storageKey(projectId);
 }

@@ -23,6 +23,87 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test("failed update diagnosis reports Shepherd reuse and links the session", async ({ page }) => {
+  await page.clock.install();
+  await mockSessions(page, []);
+  await page.route("**/api/runtime/info", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "1.4.0" }),
+    });
+  });
+  await page.route("**/api/diagnose-update", (route) => {
+    void route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        disposition: "reused",
+        session: { id: "shp-e707", project: "spur-shepherd" },
+      }),
+    });
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem("spur.version-switch.target", "1.5.0");
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Switching to 1.5.0.", { exact: false })).toBeVisible();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await page.clock.fastForward(3_000);
+  }
+  await expect(page.getByText("Updating Spur failed")).toBeVisible();
+  await page.getByRole("button", { name: "Diagnose update" }).click();
+
+  await expect(page.getByText("Sent to")).toBeVisible();
+  await expect(page.getByRole("link", { name: "shp-e707" })).toHaveAttribute(
+    "href",
+    "/sessions/shp-e707?project=spur-shepherd",
+  );
+});
+
+test("version switch reports the active target from an overlapping request", async ({ page }) => {
+  await mockSessions(page, []);
+  await page.route("**/api/runtime/info", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "1.4.0" }),
+    });
+  });
+  await page.route("**/api/runtime/versions", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        current: "1.4.0",
+        available: [{ tag: "1.5.0", publishedAt: "2026-08-11T00:00:00.000Z" }],
+      }),
+    });
+  });
+  await page.route("**/api/runtime/versions/switch", (route) => {
+    void route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: "deploy switch already in progress for 1.4.9",
+        inProgress: true,
+        version: "1.4.9",
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Show Spur version information/ }).click();
+  await page.getByRole("button", { name: "Switch Spur to 1.5.0" }).click();
+  const dialog = page.getByRole("dialog", { name: "Switch Spur version" });
+  await dialog.getByRole("button", { name: "Switch", exact: true }).click();
+
+  await expect(dialog.getByTestId("switch-version-error")).toHaveText(
+    "Update to 1.4.9 is already in progress.",
+  );
+});
+
 // The Status lane cluster moved out of the header and into the Filters
 // modal — these helpers open it, act on a lane chip (which renders as
 // "{label}:{count}"), and close it again so the underlying list re-renders
