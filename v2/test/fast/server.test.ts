@@ -84,9 +84,14 @@ describe("startServer", () => {
       await server.stop();
     }
 
-    const events = readEventLog(dataDir).filter(
-      (entry) => entry.event !== "daemon.memory.unbounded",
-    );
+    // Host memory pressure fires these on a loaded runner and not on an idle
+    // box. This test pins the startup/shutdown sequence, not memory behavior.
+    const hostMemoryEvents = new Set([
+      "daemon.memory.unbounded",
+      "daemon.memory.shed",
+      "daemon.memory.shed.failed",
+    ]);
+    const events = readEventLog(dataDir).filter((entry) => !hostMemoryEvents.has(entry.event));
     expect(events[0]).toMatchObject({
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
