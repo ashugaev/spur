@@ -61,6 +61,7 @@ function makeFake(overrides: {
     pidAlive: () => false,
     unitActive: () => false,
     log: () => undefined,
+    acquireUpdateLock: () => () => undefined,
   };
   return { deps, state: () => state, installLog, counts };
 }

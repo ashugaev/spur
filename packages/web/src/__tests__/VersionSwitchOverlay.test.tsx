@@ -39,6 +39,7 @@ function renderOverlay(children?: ReactNode) {
 describe("VersionSwitchOverlay", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -88,7 +89,11 @@ describe("VersionSwitchOverlay", () => {
       await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
     });
 
-    expect(screen.getByTestId("version-switch-overlay")).toBeInTheDocument();
+    const overlay = screen.getByTestId("version-switch-overlay");
+    expect(overlay).toBeInTheDocument();
+    expect(overlay).toHaveTextContent(
+      /Switch to 1\.5\.0 not confirmed — check ~\/\.spur\/logs\/install-and-restart\.log\./,
+    );
     const dismissButton = screen.getByRole("button", { name: "Dismiss" });
     expect(screen.getByRole("button", { name: "Reload now" })).toBeInTheDocument();
 
@@ -97,12 +102,18 @@ describe("VersionSwitchOverlay", () => {
     expect(screen.queryByTestId("version-switch-overlay")).not.toBeInTheDocument();
   });
 
-  it("shows a Diagnose update button on failure that spawns an agent and disables once spawned", async () => {
+  it("reports a reused diagnostic session with navigation and disables once sent", async () => {
     const fetchMock = vi
       .spyOn(global, "fetch")
       .mockImplementation(async (input: RequestInfo | URL) => {
         if (String(input) === "/api/diagnose-update") {
-          return new Response(JSON.stringify({ id: "sess-1" }), { status: 201 });
+          return new Response(
+            JSON.stringify({
+              disposition: "reused",
+              session: { id: "sess-1", project: "spur-shepherd" },
+            }),
+            { status: 201 },
+          );
         }
         return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
       });
@@ -133,8 +144,13 @@ describe("VersionSwitchOverlay", () => {
       }),
     );
 
-    const spawnedButton = await screen.findByRole("button", { name: "Agent spawned" });
-    expect(spawnedButton).toBeDisabled();
+    const sentButton = await screen.findByRole("button", { name: "Diagnosis sent" });
+    expect(sentButton).toBeDisabled();
+    expect(screen.getByText("Sent to")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "sess-1" })).toHaveAttribute(
+      "href",
+      "/sessions/sess-1?project=spur-shepherd",
+    );
 
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reload now" })).toBeInTheDocument();
@@ -166,6 +182,7 @@ describe("VersionSwitchOverlay", () => {
 
     const retryButton = await screen.findByRole("button", { name: "Retry diagnose" });
     expect(retryButton).not.toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("boom");
   });
 
   it("resets the Diagnose button to idle on a fresh failure after a prior spawn", async () => {
@@ -173,7 +190,13 @@ describe("VersionSwitchOverlay", () => {
       .spyOn(global, "fetch")
       .mockImplementation(async (input: RequestInfo | URL) => {
         if (String(input) === "/api/diagnose-update") {
-          return new Response(JSON.stringify({ id: "sess-1" }), { status: 201 });
+          return new Response(
+            JSON.stringify({
+              disposition: "spawned",
+              session: { id: "sess-1", project: "spur-shepherd" },
+            }),
+            { status: 201 },
+          );
         }
         return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
       });
@@ -190,7 +213,7 @@ describe("VersionSwitchOverlay", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Diagnose update" }));
     });
-    expect(await screen.findByRole("button", { name: "Agent spawned" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Diagnosis sent" })).toBeDisabled();
 
     fetchMock.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));

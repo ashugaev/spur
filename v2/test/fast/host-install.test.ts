@@ -8,6 +8,7 @@ import type * as OsModule from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as PortProbe from "../../src/port-probe.js";
 import type * as UpdateHealth from "../../src/update-health.js";
+import type * as Workspace from "../../src/workspace.js";
 
 const {
   execFileSyncMock,
@@ -18,6 +19,7 @@ const {
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
+  resolveDoctorRepoRootMock,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
@@ -27,6 +29,7 @@ const {
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  resolveDoctorRepoRootMock: vi.fn(),
 }));
 
 vi.mock("node:child_process", async () => {
@@ -64,6 +67,16 @@ vi.mock("../../src/port-probe.js", async () => {
   return { ...actual, isHostPortFree: isHostPortFreeMock, findListenerPids: findListenerPidsMock };
 });
 
+// `spur doctor`'s CLI-wiring test below never wants a real `git
+// rev-parse --show-toplevel` against this checkout (whose root has its own
+// `spur.yaml`, which would pull the heavy `checkProjectWorkspace` path in) —
+// only `resolveDoctorRepoRoot` is overridden, everything else in the module
+// stays real.
+vi.mock("../../src/workspace.js", async () => {
+  const actual = await vi.importActual<typeof Workspace>("../../src/workspace.js");
+  return { ...actual, resolveDoctorRepoRoot: resolveDoctorRepoRootMock };
+});
+
 import {
   checkConfigRegistry,
   checkServiceHealth,
@@ -78,6 +91,7 @@ import {
 } from "../../src/host-install.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
+import { createProgram } from "../../src/cli.js";
 
 const version = getVersion();
 
@@ -395,6 +409,42 @@ describe("checkConfigRegistry", () => {
 
     expect(check.ok).toBe(true);
     expect(check.severity).toBe("warn");
+  });
+
+  it("carries a per-path alive/dead/worktree-internal classification alongside the aggregate detail", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-per-path-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    // Never written — both missing AND inside worktreeDir. The missing-file
+    // check runs first in `checkConfigRegistry`, so this must classify as
+    // "dead", not "worktree-internal".
+    const deadAndWorktreeInternalPath = join(worktreeDir, "proj", "sess", "missing-spur.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({
+        configPaths: [livePath, deadPath, worktreeInternalPath, deadAndWorktreeInternalPath],
+        unconfiguredProjects: [],
+      }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.configRegistryPaths).toEqual([
+      { path: livePath, state: "alive" },
+      { path: deadPath, state: "dead" },
+      { path: worktreeInternalPath, state: "worktree-internal" },
+      { path: deadAndWorktreeInternalPath, state: "dead" },
+    ]);
   });
 });
 
@@ -1547,6 +1597,75 @@ describe("hasErrorSeverity", () => {
         { id: "b", ok: false, severity: "error", detail: "" },
       ]),
     ).toBe(true);
+  });
+});
+
+describe("spur doctor --json: config-registry per-path listing", () => {
+  const originalHome = process.env["HOME"];
+  const originalExitCode = process.exitCode;
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    process.exitCode = originalExitCode;
+    resolveDoctorRepoRootMock.mockReset();
+  });
+
+  it("carries the config-registry per-path array through to the JSON doctor output", async () => {
+    // `collectHostInstallChecks()` is called with no argument from the real
+    // `doctor` action (it always inspects the live host, never a param), so
+    // this test steers it via `$HOME` (which `os.homedir()` honors, see the
+    // comment on `collectHostInstallChecks`) rather than injecting a home
+    // directly — the only lever the CLI wiring actually exposes.
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-registry-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [livePath, deadPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+
+    // Steers `resolveDoctorRepoRoot` away from this real checkout's own
+    // `spur.yaml` (which would otherwise pull the heavy project-config
+    // validation branch in) toward an empty directory, so the CLI action
+    // takes the plain `{ hostChecks, configRegistryPaths }` return path.
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as {
+      configRegistryPaths?: Array<{ path: string; state: string }>;
+    };
+    expect(parsed.configRegistryPaths).toEqual(
+      expect.arrayContaining([
+        { path: livePath, state: "alive" },
+        { path: deadPath, state: "dead" },
+      ]),
+    );
   });
 });
 
