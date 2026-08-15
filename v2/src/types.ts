@@ -1011,7 +1011,6 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  allowUnvalidatedFallbackBranch?: boolean;
   // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
@@ -1092,6 +1091,13 @@ export interface KillSessionRequest {
   force?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+}
+
+// `force`: bypass the P2 (env-rooted) duplicate-agent launch guard — see
+// assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
+// (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
+export interface RestoreSessionRequest {
+  force?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {

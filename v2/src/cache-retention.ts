@@ -8,8 +8,8 @@ import { listSessions } from "./metadata.js";
 import {
   canReadProcessTree,
   collectDescendants,
-  listProcesses,
-  type ProcessInfo,
+  snapshotProcesses,
+  type ProcessSnapshotEntry,
 } from "./process-tree.js";
 import { getTmuxPanePid, getTmuxSocketName, setTmuxSocketName } from "./runtime-tmux.js";
 import type { InstanceConfigReadResult } from "./config.js";
@@ -101,12 +101,10 @@ export interface LiveSessionCwd {
 
 export interface LivenessSnapshot {
   processTreeReadable: boolean;
-  // `listProcesses()` returned `null` (ps unavailable, or an empty table —
-  // see process-tree.ts) rather than a genuine process table. Kept distinct
-  // from `processTreeReadable` (which only probes /proc/self/stat and stays
-  // true even when the `ps` binary itself is missing or blocked).
+  // snapshotProcesses() returned status "unavailable" — ps could not run.
+  // Kept distinct from processTreeReadable (which only probes /proc/self/stat).
   processListReadable: boolean;
-  processes: readonly ProcessInfo[];
+  processes: readonly ProcessSnapshotEntry[];
   sessionCwds: readonly LiveSessionCwd[];
   pinnedDirNames: ReadonlySet<string>;
   pinSourceCount: number;
@@ -205,7 +203,7 @@ export function ageDaysFor(mtimeMs: number, ctimeMs: number, nowMs: number): num
 
 const PACKAGE_MANAGER_BIN = /(^|\/)(npm|pnpm|npx|yarn)(\s|$)/;
 
-function isPackageManagerProcess(proc: ProcessInfo): boolean {
+function isPackageManagerProcess(proc: ProcessSnapshotEntry): boolean {
   return PACKAGE_MANAGER_BIN.test(proc.args);
 }
 
@@ -485,9 +483,9 @@ async function listWorktreePaths(worktreeDir: string): Promise<string[]> {
   return paths;
 }
 
-// One `listProcesses()` call, one `canReadProcessTree` probe, and one
-// `readlink("/proc/<pid>/cwd")` per live-session descendant — no
-// `/proc/<pid>/fd`, no `/proc/<pid>/maps` scan. Rejected: that scan is
+// One snapshotProcesses() call, one canReadProcessTree probe, and one
+// readlink("/proc/<pid>/cwd") per live-session descendant — no
+// /proc/<pid>/fd, no /proc/<pid>/maps scan. Rejected: that scan is
 // O(1e5) racy readlinks across the whole host process table and still
 // cannot see a not-yet-launched browser, which is exactly what the pin
 // resolution above covers instead.
@@ -495,9 +493,9 @@ async function collectLiveness(
   home: string,
   instanceConfig: InstanceConfigReadResult,
 ): Promise<LivenessSnapshot> {
-  const rawProcesses = await listProcesses();
-  const processListReadable = rawProcesses !== null;
-  const processes = rawProcesses ?? [];
+  const snapshot = await snapshotProcesses();
+  const processListReadable = snapshot.status === "ok";
+  const processes = snapshot.status === "ok" ? snapshot.processes : [];
   const processTreeReadable = await canReadProcessTree(process.pid);
   const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(
     home,

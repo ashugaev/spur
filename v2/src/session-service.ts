@@ -32,6 +32,11 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  capturePaneAgentProcesses,
+  findForeignAgentProcessesForSession,
+  terminateAgentProcesses,
+} from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
   collectMcpBindings,
@@ -186,12 +191,7 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import {
-  PreflightBranchValidationError,
-  runSpawnPreflight,
-  type SpawnPreflightResult,
-} from "./preflight.js";
-import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
+import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -210,6 +210,7 @@ import {
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
+  lookupTmuxPanePid,
   isProcessRunningInTmux,
   killTmuxSession,
   killTmuxSessionTree,
@@ -222,6 +223,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
   PromptReadyTimeoutError,
+  type TmuxPanePidLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -361,6 +363,7 @@ import {
   type ProjectConfig,
   type HandoffSessionRequest,
   type RespawnSessionRequest,
+  type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type RuntimeInfo,
@@ -438,6 +441,9 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 import { getVersion } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+// Not a message prefix (the message starts with "Session <id> ...") — a
+// substring marker matched via .includes() in isForeignAgentProcessMessage.
+const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const RATE_LIMIT_REACTIVATION_PROMPT =
   "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
@@ -806,6 +812,19 @@ type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
+
+export class SpawnPreflightError extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly lastError: Error,
+  ) {
+    super(`Spawn preflight failed after ${attempts} attempts: ${lastError.message}`, {
+      cause: lastError,
+    });
+    this.name = "SpawnPreflightError";
+  }
+}
+
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -1413,6 +1432,14 @@ export function isKillConfirmationRequiredMessage(message: string): boolean {
   return message.startsWith(KILL_CONFIRMATION_REQUIRED_PREFIX);
 }
 
+export function buildForeignAgentProcessMessage(sessionId: string, pid: number): string {
+  return `Session ${sessionId} ${FOREIGN_AGENT_PROCESS_MARKER} (pid ${pid}) outside its pane; restore with force to override`;
+}
+
+export function isForeignAgentProcessMessage(message: string): boolean {
+  return message.includes(FOREIGN_AGENT_PROCESS_MARKER);
+}
+
 function buildSessionEnv(args: {
   agent: SessionRecord["agent"];
   projectId: string;
@@ -1807,36 +1834,9 @@ type SpawnPreflightSelection =
       attempts: number;
     }
   | {
-      outcome: "fallback-branch";
-      branch: string;
+      outcome: "no-project-branch-requirements";
       attempts: number;
-      deferReason?: string;
-    }
-  | {
-      outcome: "defer";
-      attempts: number;
-      deferReason?: string;
-      unvalidated?: true;
     };
-
-function spawnPreflightDeferLogMessage(
-  preflight: Extract<SpawnPreflightSelection, { outcome: "defer" }>,
-): string {
-  if (!preflight.deferReason) {
-    return "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming";
-  }
-  if (preflight.attempts < SPAWN_PREFLIGHT_MAX_ATTEMPTS) {
-    return `Spawn preflight failed; deferring to default naming: ${preflight.deferReason}`;
-  }
-  return `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`;
-}
-
-function isFeedbackRetryablePreflightError(message: string): boolean {
-  return (
-    message.startsWith("preflight branch ") ||
-    message.startsWith("Spawn preflight must return exactly one branch name")
-  );
-}
 
 interface PreparedSpawn {
   request: SpawnSessionRequest;
@@ -2031,7 +2031,6 @@ async function runSpawnPreflightForSpawn(args: {
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
-  let lastProposedBranch: string | undefined;
 
   const branchRule = args.project.branchNaming?.regex;
   const ruleHint = branchRule
@@ -2053,51 +2052,34 @@ async function runSpawnPreflightForSpawn(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
-      if (error instanceof PreflightBranchValidationError) {
-        lastProposedBranch = error.branch;
-      }
-      if (!isFeedbackRetryablePreflightError(message)) {
-        return {
-          outcome: "defer",
-          attempts: attempt,
-          deferReason: message,
-        };
-      }
-      feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
       continue;
     }
 
-    if (!preflight.branch) {
-      return { outcome: "defer", attempts: attempt, unvalidated: true };
+    if (preflight.noProjectBranchRequirements) {
+      return { outcome: "no-project-branch-requirements", attempts: attempt };
     }
 
-    const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
+    const branch = preflight.branch;
+    if (!branch) {
+      lastError = new Error("Spawn preflight returned no branch result");
+      feedback = `${lastError.message}.${ruleHint} Return a corrected preflight result.`;
+      continue;
+    }
+    const branchConflictPath = await findWorktreePathForBranch(args.project.path, branch);
     if (!branchConflictPath) {
-      return { outcome: "branch", branch: preflight.branch, attempts: attempt };
+      return { outcome: "branch", branch, attempts: attempt };
     }
 
-    lastProposedBranch = preflight.branch;
-    const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
+    const message = `preflight branch "${branch}" is already checked out in worktree ${branchConflictPath}`;
     lastError = new Error(message);
     feedback = `${message}.${ruleHint} Return a different branch name that is not checked out in another worktree.`;
   }
 
-  const deferReason = lastError instanceof Error ? lastError.message : String(lastError);
-  if (lastProposedBranch) {
-    return {
-      outcome: "fallback-branch",
-      branch: lastProposedBranch,
-      attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
-      deferReason,
-    };
-  }
-
-  return {
-    outcome: "defer",
-    attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
-    deferReason,
-    unvalidated: true,
-  };
+  throw new SpawnPreflightError(
+    SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+    lastError ?? new Error("Spawn preflight returned no result"),
+  );
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -2175,6 +2157,7 @@ export class SessionService {
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
   // cached 60s in-memory so a burst of spawns costs at most one `df`.
   private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
+  private hostDiskProbeInflight?: Promise<void>;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
   // Records the exact record object last handed to enrichDashboard for each
   // id. Since listSessions() now returns the SAME object for an unchanged
@@ -3906,10 +3889,17 @@ export class SessionService {
       !this.hostDiskProbe ||
       now - this.hostDiskProbe.checkedAtMs >= SessionService.HOST_DISK_PROBE_TTL_MS
     ) {
-      const freeKb = await readFreeKb(this.config.dataDir, DISK_PROBE_TIMEOUT_MS);
-      this.hostDiskProbe = { checkedAtMs: now, freeKb };
+      if (!this.hostDiskProbeInflight) {
+        this.hostDiskProbeInflight = readFreeKb(this.config.dataDir, DISK_PROBE_TIMEOUT_MS).then(
+          (freeKb) => {
+            this.hostDiskProbe = { checkedAtMs: Date.now(), freeKb };
+            delete this.hostDiskProbeInflight;
+          },
+        );
+      }
+      await this.hostDiskProbeInflight;
     }
-    const freeKb = this.hostDiskProbe.freeKb;
+    const freeKb = this.hostDiskProbe?.freeKb;
     if (freeKb === undefined) {
       return;
     }
@@ -6968,9 +6958,9 @@ export class SessionService {
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
-    let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
+    let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
     let preflightBranch: string | undefined;
-    let preflightUnvalidatedBranch = false;
+    let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     let reuseCtx: {
@@ -7022,34 +7012,8 @@ export class SessionService {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
-        } else if (preflight.outcome === "fallback-branch") {
-          preflightBranch = preflight.branch;
-          effectiveBranch = preflight.branch;
-          effectiveBranchSource = "preflight";
-          preflightUnvalidatedBranch = true;
-          this.logEvent("session.preflight.deferred", {
-            level: "warn",
-            projectId: request.project,
-            message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
-            details: {
-              attempts: preflight.attempts,
-              reason: preflight.deferReason,
-              branch: preflight.branch,
-              unvalidated: true,
-            },
-          });
         } else {
-          preflightUnvalidatedBranch = preflight.unvalidated === true;
-          this.logEvent("session.preflight.deferred", {
-            level: "warn",
-            projectId: request.project,
-            message: spawnPreflightDeferLogMessage(preflight),
-            details: {
-              attempts: preflight.attempts,
-              branch: null,
-              reason: preflight.deferReason ?? null,
-            },
-          });
+          preflightNoProjectBranchRequirements = true;
         }
       }
       // Preflight phase is done. Reserve/branch resolution below is the same
@@ -7069,9 +7033,9 @@ export class SessionService {
           sessionId,
           projectId: request.project,
           message:
-            preflightOutcome !== "defer"
+            preflightOutcome === "branch"
               ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
-              : `Spawn preflight deferred branch selection for ${sessionId}`,
+              : `Spawn preflight found no project branch requirements for ${sessionId}`,
           details: {
             outcome: preflightOutcome,
             branch: preflightBranch ?? null,
@@ -7081,8 +7045,7 @@ export class SessionService {
         });
       }
       if (!reuseCtx) {
-        const skipBranchNamingValidation =
-          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
+        const skipBranchNamingValidation = preflightNoProjectBranchRequirements;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -7115,6 +7078,7 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -7436,8 +7400,17 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
-      if (sessionId && project && placeholderWritten) {
-        await killTmuxSession(sessionId);
+      if (sessionId && project && placeholderWritten && agent) {
+        // This catch wraps every stage from tmux.create through record.write,
+        // so the pane can already hold a real launched agent by the time we
+        // get here (e.g. a waitForTmuxReady timeout or a sendAgentMessage
+        // failure after createTmuxSession succeeded). failOnSurvivors:false —
+        // spawn is already failing; a survivor throw here would bury the
+        // original error instead of surfacing it.
+        await this.killAgentPaneAndConfirmExit(
+          { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+          { failOnSurvivors: false },
+        );
         // Non-mcp project sidecars are desk-shared: a sibling can already be
         // attached to this still-spawning anchor (or, for a failing sibling,
         // the anchor/another sibling can still be live), so this session's
@@ -7485,9 +7458,7 @@ export class SessionService {
           id: sessionId,
           project: request.project,
           workspaceId: failedSpawnSession.workspaceId,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent,
           prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -7526,6 +7497,7 @@ export class SessionService {
           projectId: request.project,
           message: `Spawn preflight failed for ${request.project}: ${message}`,
           details: {
+            ...(error instanceof SpawnPreflightError ? { attempts: error.attempts } : {}),
             requestedAgent: request.agent ?? null,
           },
         });
@@ -7560,7 +7532,21 @@ export class SessionService {
     workspacePath: string,
     finalFailure: boolean,
   ): Promise<void> {
-    await killTmuxSession(prepared.sessionId);
+    // Called from the background-spawn retry catch, which wraps every stage
+    // from tmux.create through record.write — same rationale as the
+    // catch block in spawn() above: the pane can already hold a real
+    // launched agent, so this must go through the capture-then-confirm path,
+    // not a raw kill. failOnSurvivors:false: a retry (or the final failure
+    // path) must not throw a second error over the one already in flight.
+    await this.killAgentPaneAndConfirmExit(
+      {
+        id: prepared.sessionId,
+        tmuxSession: prepared.sessionId,
+        agent: prepared.agent,
+        launchCommand: prepared.placeholder.launchCommand,
+      },
+      { failOnSurvivors: false },
+    );
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
     const deskAlive = this.hasRunningWorkspaceMembers(prepared.placeholder);
@@ -8051,9 +8037,9 @@ export class SessionService {
     let initialPromptSent = false;
     try {
       let resolvedBranch = prepared.resolvedBranch;
-      let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
+      let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
-      let preflightUnvalidatedBranch = false;
+      let preflightNoProjectBranchRequirements = false;
       let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
@@ -8074,36 +8060,8 @@ export class SessionService {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
-          } else if (preflight.outcome === "fallback-branch") {
-            preflightBranch = preflight.branch;
-            effectiveBranch = preflight.branch;
-            effectiveBranchSource = "preflight";
-            preflightUnvalidatedBranch = true;
-            this.logEvent("session.preflight.deferred", {
-              level: "warn",
-              sessionId,
-              projectId: request.project,
-              message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
-              details: {
-                attempts: preflight.attempts,
-                reason: preflight.deferReason,
-                branch: preflight.branch,
-                unvalidated: true,
-              },
-            });
           } else {
-            preflightUnvalidatedBranch = preflight.unvalidated === true;
-            this.logEvent("session.preflight.deferred", {
-              level: "warn",
-              sessionId,
-              projectId: request.project,
-              message: spawnPreflightDeferLogMessage(preflight),
-              details: {
-                attempts: preflight.attempts,
-                branch: null,
-                reason: preflight.deferReason ?? null,
-              },
-            });
+            preflightNoProjectBranchRequirements = true;
           }
         }
         if (preflightOutcome) {
@@ -8112,9 +8070,9 @@ export class SessionService {
             sessionId,
             projectId: request.project,
             message:
-              preflightOutcome !== "defer"
+              preflightOutcome === "branch"
                 ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
-                : `Spawn preflight deferred branch selection for ${sessionId}`,
+                : `Spawn preflight found no project branch requirements for ${sessionId}`,
             details: {
               outcome: preflightOutcome,
               branch: preflightBranch ?? null,
@@ -8128,8 +8086,7 @@ export class SessionService {
         // resolveSpawnBranch failure is not mislabeled as a preflight failure.
         // Mirror: foreground spawn() ~3238.
         stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
-        const skipBranchNamingValidation =
-          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
+        const skipBranchNamingValidation = preflightNoProjectBranchRequirements;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -8163,6 +8120,7 @@ export class SessionService {
                 attempt,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -8406,8 +8364,22 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const finalFailure = attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      const terminalPreflightFailure = error instanceof SpawnPreflightError;
+      const finalFailure =
+        terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      if (terminalPreflightFailure) {
+        this.logEvent("session.preflight.failed", {
+          level: "error",
+          sessionId,
+          projectId: request.project,
+          message: `Spawn preflight failed for ${request.project}: ${message}`,
+          details: {
+            attempts: error.attempts,
+            requestedAgent: request.agent ?? null,
+          },
+        });
+      }
       if (!finalFailure) {
         writeSession(this.config.dataDir, {
           ...prepared.placeholder,
@@ -9897,6 +9869,127 @@ export class SessionService {
     deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
+  // The single path for killing an agent pane. relaunchSessionInPlace,
+  // restore(), the resume-fallback inside it, and switchAuth all reuse the
+  // SAME tmux session name and session id for the pane they create next, so
+  // a survivor of the kill below is indistinguishable from its own
+  // replacement to every existing probe (isProcessRunningInTmux keys on tty,
+  // confirmAgentExited keys on tmux session name — neither can tell them
+  // apart). Capturing the pane's own process tree BEFORE the kill, then
+  // polling those exact pids after it, is the only way to know the kill
+  // actually landed.
+  // Never throws: every caller sits on a teardown or relaunch path where a
+  // probe failure must not replace the error that actually matters (a spawn
+  // failure, for one). A thrown lookup reads as "unavailable", the same
+  // fail-safe answer a failed `list-panes` produces.
+  private async lookupPanePidQuietly(tmuxSession: string): Promise<TmuxPanePidLookup> {
+    try {
+      return await lookupTmuxPanePid(tmuxSession);
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+
+  private async killAgentPaneAndConfirmExit(
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    options: { failOnSurvivors: boolean },
+  ): Promise<void> {
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    if (paneLookup.status === "unavailable") {
+      // tmux could not be read, so P1 has nothing to verify against. Record
+      // it: the alternative is a silent pass that reads exactly like a clean
+      // teardown.
+      this.logEvent("session.agent_process.pane_pid_unreadable", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
+      });
+    }
+    const capture = await capturePaneAgentProcesses({
+      panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    if (capture.status === "unavailable") {
+      // The process table could not be read, so "no survivors" would be a
+      // guess. Refusing a relaunch is recoverable; launching a duplicate is
+      // not. A teardown that is not about to relaunch still proceeds.
+      this.logEvent("session.agent_process.capture_unavailable", {
+        level: options.failOnSurvivors ? "error" : "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: could not read the process table before killing the agent pane`,
+      });
+      if (options.failOnSurvivors) {
+        throw new Error(
+          `Session ${session.id}: could not read the process table to confirm the prior agent process exited; refusing to launch a replacement`,
+        );
+      }
+    }
+    await killTmuxSession(session.tmuxSession);
+    const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
+    if (outcome.status === "clear") {
+      return;
+    }
+    this.logEvent("session.agent_process.survivors", {
+      level: "error",
+      sessionId: session.id,
+      message: `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL`,
+      details: { pids: outcome.pids },
+    });
+    if (options.failOnSurvivors) {
+      throw new Error(
+        `Session ${session.id}: agent process(es) ${outcome.pids.join(", ")} survived SIGKILL; refusing to launch a replacement`,
+      );
+    }
+  }
+
+  // P2 launch guard: refuses to launch a replacement pane over a live
+  // foreign agent process still carrying this session's id (a prior
+  // instance whose pane P1 could not see, e.g. its tmux pane is already
+  // gone). Never blocks on a scan it could not perform — "unavailable" and
+  // "no findings" both proceed. `force` bypasses this guard only; it never
+  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
+  private async assertNoForeignAgentForSession(
+    session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
+    paneLookup: TmuxPanePidLookup,
+    force: boolean,
+  ): Promise<void> {
+    if (force) {
+      return;
+    }
+    // An unreadable tmux would leave the exclusion set empty, so the session's
+    // OWN live agent would read as foreign. That joins the "unavailable"
+    // branch: this guard must never block on a scan it could not perform.
+    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // exclude) and is safe to scan on.
+    if (paneLookup.status === "unavailable") {
+      this.logEvent("session.agent_process.scan_skipped", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux pane pid unreadable; skipping the foreign-agent scan`,
+      });
+      return;
+    }
+    const scan = await findForeignAgentProcessesForSession({
+      sessionId: session.id,
+      processMatchers: sessionProcessMatchers(session),
+      excludePanePid: paneLookup.panePid,
+    });
+    if (scan.status !== "ok") {
+      return;
+    }
+    const [firstForeign] = scan.pids;
+    if (firstForeign === undefined) {
+      return;
+    }
+    this.logEvent("session.agent_process.foreign", {
+      level: "warn",
+      sessionId: session.id,
+      message: `Session ${session.id} already has a live agent process outside its pane`,
+      details: { pids: scan.pids },
+    });
+    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
+  }
+
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
@@ -9969,7 +10062,7 @@ export class SessionService {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
       if (!request.skipRuntimeTeardown) {
-        await killTmuxSession(session.tmuxSession);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
@@ -10077,7 +10170,7 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       await this.pushTelegramNotice(
@@ -10375,7 +10468,12 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    await killTmuxSession(session.tmuxSession);
+    await this.assertNoForeignAgentForSession(
+      session,
+      await this.lookupPanePidQuietly(session.tmuxSession),
+      false,
+    );
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
@@ -10493,7 +10591,7 @@ export class SessionService {
           failure,
         },
       });
-      await killTmuxSession(session.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
       // Mint a fresh claude id for the fallback launch (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id) — the pinned id
       // may already own a transcript, and claude rejects --session-id on it.
@@ -10555,7 +10653,7 @@ export class SessionService {
     );
   }
 
-  async restore(sessionId: string): Promise<SessionView> {
+  async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10614,6 +10712,11 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
+    await this.assertNoForeignAgentForSession(
+      current,
+      await this.lookupPanePidQuietly(current.tmuxSession),
+      request.force === true,
+    );
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -10689,7 +10792,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
       const pinnedClaudeId =
@@ -10873,7 +10976,7 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await killTmuxSession(current.tmuxSession);
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
@@ -10939,7 +11042,7 @@ export class SessionService {
   // conversation without resending the original prompt), then delegate the
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
-  async reopen(sessionId: string): Promise<SessionView> {
+  async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -10949,13 +11052,16 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.reopenLocked(sessionId);
+      return await this.reopenLocked(sessionId, request);
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
   }
 
-  private async reopenLocked(sessionId: string): Promise<SessionView> {
+  private async reopenLocked(
+    sessionId: string,
+    request: RestoreSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -11047,7 +11153,7 @@ export class SessionService {
     await this.refreshDashboardCacheEntry(record);
 
     try {
-      return await this.restore(sessionId);
+      return await this.restore(sessionId, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The completed record's Telegram binding, artifacts, and work-item
@@ -11082,10 +11188,10 @@ export class SessionService {
       // restore() itself kills the tmux pane it created before rethrowing
       // for every failure inside its own try/catch (including the fresh
       // pane created by createTmuxSession). Tear down defensively here too —
-      // killTmuxSession/cleanupSessionServices are best-effort and safe to
-      // call on an already-dead pane — to cover a pane restore() created but
-      // didn't get to kill before this catch ran.
-      await killTmuxSession(latest.tmuxSession);
+      // killAgentPaneAndConfirmExit/cleanupSessionServices are best-effort and
+      // safe to call on an already-dead pane — to cover a pane restore()
+      // created but didn't get to kill before this catch ran.
+      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
       await this.cleanupSessionServices(latest);
       const rolledBack: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(latest),
@@ -11176,8 +11282,12 @@ export class SessionService {
     writeSession(this.config.dataDir, updated);
     touchAccountUsed(this.config.dataDir, accountId);
     // Session was launched against an account dir directly.
-    // Relaunch once to migrate onto the new account's session home.
-    await killTmuxSession(updated.tmuxSession);
+    // Relaunch once to migrate onto the new account's session home. This is
+    // the pane's real teardown — the kill below must carry the P1
+    // survivor guard itself: by the time ensureSessionReadyForSend below
+    // reaches relaunchSessionInPlace, the pane is already gone, so its own
+    // pane-pid capture would find nothing to check.
+    await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
     const relaunched = await this.ensureSessionReadyForSend(updated);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -11358,6 +11468,13 @@ export class SessionService {
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
+    // A completed record is never killed by the branch below (it's gated on
+    // status !== "completed"), so it can still legitimately own a live agent
+    // pane. Close that source out before spawning its replacement, or the
+    // fleet ends up with two live agents on the same original session id.
+    if (session.status === "completed") {
+      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    }
     // Unlike handoff, respawn needs no replacingSessionId exclusion: the
     // status guard above requires completed/killed/errored, none of which
     // countLiveSessions treats as live, and the kill() below (source cleanup
@@ -11442,7 +11559,7 @@ export class SessionService {
         };
         writeSession(this.config.dataDir, stopped);
         this.stateCache.delete(sessionId);
-        await killTmuxSession(session.tmuxSession);
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(stopped);
         sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
       }
@@ -11783,7 +11900,10 @@ export class SessionService {
           continue;
         }
 
-        if (session.pipeline?.awaitingStepIndex !== undefined) {
+        if (
+          session.pipeline?.status === "running" &&
+          session.pipeline.awaitingStepIndex !== undefined
+        ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
             return;
@@ -12071,11 +12191,12 @@ export class SessionService {
       return;
     }
 
+    const { awaitingStepIndex: _awaitingStepIndex, ...pipelineBase } = session.pipeline;
     writeSession(this.config.dataDir, {
       ...session,
       updatedAt: nowIso(),
       pipeline: {
-        ...session.pipeline,
+        ...pipelineBase,
         status: "errored",
         error: message,
       },

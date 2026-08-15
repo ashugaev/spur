@@ -3,11 +3,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { SidecarConfig } from "../types.js";
 import { shellEscape } from "../agents/shell-escape.js";
-import { killProcessTree, listProcesses, type ProcessInfo } from "../process-tree.js";
-
-// Re-exported for callers/tests that import the shared process-info shape
-// through this module.
-export type { ProcessInfo };
+import { killProcessTree, listProcesses, type ProcessSnapshotEntry } from "../process-tree.js";
 
 export const PLAYWRIGHT_SIDECAR_NAME = "playwright";
 export const SPUR_RESERVED_PORT_PLAYWRIGHT = "SPUR_RESERVED_PORT_PLAYWRIGHT";
@@ -157,7 +153,7 @@ function extractPlaywrightPort(args: string): number | undefined {
  *  (c) it has been reparented to init (ppid === 1) — an orphan.
  */
 export function isLeakedManagedPlaywright(
-  proc: ProcessInfo,
+  proc: Pick<ProcessSnapshotEntry, "ppid" | "args">,
   ownedPorts: ReadonlySet<number>,
 ): boolean {
   const bin = resolvePlaywrightMcpBin();
@@ -191,10 +187,10 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
-  // `null` (ps unavailable/unparseable) falls back to `[]` here — a missed
-  // teardown kill is safe (the reaper's next tick retries), unlike
-  // cache-retention.ts's use of the same signal as a deletion guard.
-  const processes = (await listProcesses()) ?? [];
+  // `[]` on ps unavailable — a missed teardown kill is safe (the reaper
+  // retries), unlike cache-retention.ts's use of the same signal as a
+  // deletion guard.
+  const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {
     await killProcessTree(proc.pid, { list: async () => processes });

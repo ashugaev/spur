@@ -37,7 +37,7 @@ const {
   planCachePrune,
   verdictFor,
 } = await import("../../src/cache-retention.js");
-const { listProcesses } = await import("../../src/process-tree.js");
+const { snapshotProcesses } = await import("../../src/process-tree.js");
 
 const DAY_MS = 86_400_000;
 
@@ -251,7 +251,15 @@ describe("verdictFor", () => {
       ageDays: 9999,
     });
     const busy = makeLiveness({
-      processes: [{ pid: 4242, ppid: 1, args: `node cli.js --profile ${entry.path}` }],
+      processes: [
+        {
+          pid: 4242,
+          ppid: 1,
+          rssKb: 0,
+          elapsedSeconds: 0,
+          args: `node cli.js --profile ${entry.path}`,
+        },
+      ],
     });
     expect(verdictFor(entry, makeOwnership(), busy, MY_UID)).toEqual({
       kind: "protected",
@@ -346,12 +354,16 @@ describe("verdictFor", () => {
       entryClass: { kind: "vendor-cache" },
       ageDays: 30,
     });
-    const busy = makeLiveness({ processes: [{ pid: 555, ppid: 1, args: "npm install left-pad" }] });
+    const busy = makeLiveness({
+      processes: [{ pid: 555, ppid: 1, rssKb: 0, elapsedSeconds: 0, args: "npm install left-pad" }],
+    });
     expect(verdictFor(entry, makeOwnership(), busy, MY_UID)).toEqual({
       kind: "protected",
       reason: { kind: "package-manager-active", pid: 555 },
     });
-    const idle = makeLiveness({ processes: [{ pid: 555, ppid: 1, args: "node server.js" }] });
+    const idle = makeLiveness({
+      processes: [{ pid: 555, ppid: 1, rssKb: 0, elapsedSeconds: 0, args: "node server.js" }],
+    });
     expect(verdictFor(entry, makeOwnership(), idle, MY_UID)).toEqual({ kind: "prunable" });
   });
 
@@ -403,25 +415,31 @@ describe("verdictFor", () => {
   });
 });
 
-describe("listProcesses (real implementation, mocked execFile)", () => {
+describe("snapshotProcesses (real implementation, mocked execFile)", () => {
   beforeEach(() => execFileMock.mockReset());
   afterEach(() => vi.restoreAllMocks());
 
-  it("parses pid/ppid/args and skips malformed lines", async () => {
+  it("parses pid/ppid/rss/etime/args and skips malformed lines", async () => {
     execFileMock.mockImplementation(
       (_file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
         const callback = (
           typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
         ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        callback(null, { stdout: "1 0 /sbin/init\n42 1 node server.js\nbogus-line\n", stderr: "" });
+        callback(null, {
+          stdout: "1 0 100 00:01 /sbin/init\n42 1 200 01:30 node server.js\nbogus-line\n",
+          stderr: "",
+        });
         return {} as ChildProcess.ChildProcess;
       },
     );
-    const processes = await listProcesses();
-    expect(processes).toEqual([
-      { pid: 1, ppid: 0, args: "/sbin/init" },
-      { pid: 42, ppid: 1, args: "node server.js" },
-    ]);
+    const result = await snapshotProcesses();
+    expect(result).toEqual({
+      status: "ok",
+      processes: [
+        { pid: 1, ppid: 0, rssKb: 100, elapsedSeconds: 1, args: "/sbin/init" },
+        { pid: 42, ppid: 1, rssKb: 200, elapsedSeconds: 90, args: "node server.js" },
+      ],
+    });
   });
 });
 
@@ -435,17 +453,15 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     execFileMock.mockReset();
     canReadProcessTreeMock.mockReset();
     canReadProcessTreeMock.mockResolvedValue(true);
-    // A single innocuous row by default — `listProcesses()` treats a
-    // genuinely empty table as "unavailable" (see process-tree.ts), and a
-    // real `ps -eo` always lists at least init, so an empty mock would be
-    // unrepresentative of a working `ps` here.
+    // A single innocuous row by default — snapshotProcesses returns "ok" with
+    // this row, keeping processListReadable: true for tests that don't override it.
     execFileMock.mockImplementation(
       (file: string, args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
         const callback = (
           typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
         ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
         if (file === "ps") {
-          callback(null, { stdout: "1 0 /sbin/init\n", stderr: "" });
+          callback(null, { stdout: "1 0 100 00:01 /sbin/init\n", stderr: "" });
           return {} as ChildProcess.ChildProcess;
         }
         if (file === "du") {
@@ -485,6 +501,45 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       expect(candidate.verdict).toEqual({
         kind: "protected",
         reason: { kind: "process-tree-unreadable" },
+      });
+    }
+  });
+
+  it("unavailable ps snapshot protects every planned candidate (fail-closed)", async () => {
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
+    const old = new Date(Date.now() - 9999 * DAY_MS);
+    await utimes(join(home, ".npm", "_cacache"), old, old);
+    execFileMock.mockImplementation(
+      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
+        const callback = (
+          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
+        if (file === "ps") {
+          callback(Object.assign(new Error("ps unavailable"), { code: "ENOENT" }));
+          return {} as ChildProcess.ChildProcess;
+        }
+        if (file === "du") {
+          const paths = (_args as string[]).slice(1);
+          const stdout = paths.map((p) => `100\t${p}`).join("\n");
+          callback(null, { stdout, stderr: "" });
+          return {} as ChildProcess.ChildProcess;
+        }
+        callback(new Error(`unexpected exec: ${file}`));
+        return {} as ChildProcess.ChildProcess;
+      },
+    );
+
+    const plan = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+    });
+
+    expect(plan.candidates.length).toBeGreaterThan(0);
+    for (const candidate of plan.candidates) {
+      expect(candidate.verdict).toEqual({
+        kind: "protected",
+        reason: { kind: "process-list-unavailable" },
       });
     }
   });

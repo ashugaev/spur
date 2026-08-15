@@ -22,6 +22,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NPM_INIT_SRC="$HERE/../scripts/npm-init.sh"
+VERIFY_PACKAGE_FILES_SRC="$HERE/../scripts/verify-package-files.sh"
+REQUIRED_FILES_LIST="$HERE/../required-package-files.txt"
 DEPLOY_WEB_UNIT="$HERE/../deploy/spur-web.npm.service"
 
 WORK_DIR="$(mktemp -d)"
@@ -44,7 +46,9 @@ setup_scenario() {
     "$pkg_root/web/dist-server"
 
   cp "$NPM_INIT_SRC" "$pkg_root/scripts/npm-init.sh"
-  chmod +x "$pkg_root/scripts/npm-init.sh"
+  cp "$VERIFY_PACKAGE_FILES_SRC" "$pkg_root/scripts/verify-package-files.sh"
+  cp "$REQUIRED_FILES_LIST" "$pkg_root/required-package-files.txt"
+  chmod +x "$pkg_root/scripts/npm-init.sh" "$pkg_root/scripts/verify-package-files.sh"
 
   : >"$pkg_root/deploy/spur-daemon.npm.service"
   cp "$DEPLOY_WEB_UNIT" "$pkg_root/deploy/spur-web.npm.service"
