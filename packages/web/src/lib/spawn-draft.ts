@@ -12,13 +12,17 @@ export interface SpawnDraft {
   branch: string;
   branchIsExplicit: boolean;
   workspaceMode: WorkspaceMode;
-  // Whether workspaceMode above was the user's own explicit confirmation
-  // (a manual pick or an error-banner "Use worktree/shared" click) versus a
-  // value auto-derived from a project's spawn-defaults. The draft is a
-  // single global key shared across every project, so a stored
-  // workspaceMode is usually the auto-derived default for whatever project
-  // it was last saved against — never inferred from "a draft exists".
-  workspaceModeAuto: boolean;
+  // The project id workspaceMode above was explicitly confirmed for (a
+  // manual pick or an error-banner "Use worktree/shared" click), or null if
+  // it has never been explicitly confirmed. A confirmation belongs to
+  // exactly one project — the draft is a single global key shared across
+  // every project, so a stored workspaceMode is usually just the
+  // auto-derived default for whatever project it was last saved against.
+  // Comparing this against the project the draft is restored onto (rather
+  // than inferring "confirmed" from "a draft exists", or storing a bare
+  // yes/no flag with no project attached) is what lets a restore correctly
+  // tell the two cases apart.
+  workspaceModeConfirmedFor: string | null;
   defaultBranch: string;
   planMode: boolean;
   selfDestruct: boolean;
@@ -65,7 +69,8 @@ function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDr
     typeof draft.branch === "string" &&
     typeof draft.branchIsExplicit === "boolean" &&
     isWorkspaceMode(draft.workspaceMode) &&
-    typeof draft.workspaceModeAuto === "boolean" &&
+    (draft.workspaceModeConfirmedFor === null ||
+      typeof draft.workspaceModeConfirmedFor === "string") &&
     typeof draft.defaultBranch === "string" &&
     typeof draft.planMode === "boolean" &&
     typeof draft.selfDestruct === "boolean" &&

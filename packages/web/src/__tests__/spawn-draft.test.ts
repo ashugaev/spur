@@ -16,7 +16,7 @@ const draft: SpawnDraft = {
   branch: "feature/spawn-draft",
   branchIsExplicit: true,
   workspaceMode: "worktree",
-  workspaceModeAuto: false,
+  workspaceModeConfirmedFor: "api",
   defaultBranch: "main",
   planMode: true,
   selfDestruct: true,
@@ -46,7 +46,7 @@ describe("spawn draft storage", () => {
       JSON.stringify({ ...draft, version: 1, savedAt: NOW }),
     ],
     [
-      "a pre-existing v2 draft (superseded by the workspaceModeAuto fix)",
+      "a pre-existing v2 draft (superseded by the workspaceModeConfirmedFor fix)",
       JSON.stringify({ ...draft, version: 2, savedAt: NOW }),
     ],
     ["stale", JSON.stringify({ ...draft, version: 3, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
@@ -55,8 +55,8 @@ describe("spawn draft storage", () => {
       JSON.stringify({ ...draft, workspaceMode: "default", version: 3, savedAt: NOW }),
     ],
     [
-      "a current-version draft with a non-boolean workspaceModeAuto",
-      JSON.stringify({ ...draft, workspaceModeAuto: "true", version: 3, savedAt: NOW }),
+      "a current-version draft with a non-string, non-null workspaceModeConfirmedFor",
+      JSON.stringify({ ...draft, workspaceModeConfirmedFor: 42, version: 3, savedAt: NOW }),
     ],
   ])("discards %s storage", (_label, value) => {
     window.localStorage.setItem(SPAWN_DRAFT_STORAGE_KEY, value);
@@ -84,6 +84,16 @@ describe("spawn draft storage", () => {
 
     expect(readSpawnDraft(window.localStorage, NOW)).toBeNull();
     expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("restores a draft with workspaceModeConfirmedFor: null", () => {
+    const unconfirmedDraft = { ...draft, workspaceModeConfirmedFor: null };
+    writeSpawnDraft(unconfirmedDraft, window.localStorage, NOW);
+
+    const restored = readSpawnDraft(window.localStorage, NOW);
+    expect(restored).not.toBeNull();
+    expect(restored?.workspaceModeConfirmedFor).toBeNull();
+    expect(restored?.prompt).toBe(draft.prompt);
   });
 
   it("restores a draft with sessionMode: null", () => {

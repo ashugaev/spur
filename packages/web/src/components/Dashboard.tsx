@@ -1084,13 +1084,17 @@ export function Dashboard() {
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("worktree");
-  // True while spawnWorkspaceMode still tracks the project-resolved default
-  // (nothing chosen by hand yet); the resolver effect below only writes to
-  // spawnWorkspaceMode while this holds, so it never clobbers a manual pick.
-  // Real state, not a ref: submitDisabled and the error banner both read it
-  // during render, so a flip must itself schedule the re-render that shows
-  // it — no separate force-render bump, and nothing to keep in sync by hand.
-  const [spawnWorkspaceModeAuto, setSpawnWorkspaceModeAuto] = useState(true);
+  // The project id spawnWorkspaceMode was last explicitly confirmed for (a
+  // manual select pick or an error-banner "Use worktree/shared" click), or
+  // null if it has never been explicitly confirmed. A confirmation belongs
+  // to exactly one project; it never carries over to a different one, so
+  // "auto" below is derived by comparing against the CURRENT project rather
+  // than stored as its own flag — a project switch re-derives it for free,
+  // with nothing to keep in sync by hand.
+  const [spawnWorkspaceModeConfirmedFor, setSpawnWorkspaceModeConfirmedFor] = useState<
+    string | null
+  >(null);
+  const spawnWorkspaceModeAuto = spawnWorkspaceModeConfirmedFor !== spawnProjectId;
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1556,10 +1560,10 @@ export function Dashboard() {
     // A draft is a single storage key shared by every project, so a stored
     // workspaceMode is usually the auto-derived default for whatever
     // project it was last saved against, not a confirmation for
-    // nextProjectId. Whether it was the user's own explicit pick is
-    // recorded on the draft itself (workspaceModeAuto) rather than inferred
-    // from "a draft exists".
-    setSpawnWorkspaceModeAuto(draft?.workspaceModeAuto ?? true);
+    // nextProjectId. Restoring the project the confirmation actually
+    // belongs to (rather than a bare yes/no flag) means the "auto" derived
+    // above naturally comes out false only when nextProjectId matches it.
+    setSpawnWorkspaceModeConfirmedFor(draft?.workspaceModeConfirmedFor ?? null);
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
@@ -1588,15 +1592,12 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
-    // Switching project inside the modal is not a confirmation of workspace
-    // mode for the newly selected project — any workspace mode shown so far
-    // (restored draft or a prior project's default) was never confirmed
-    // against this project, so re-enter auto mode and let the effect below
-    // fill in the new project's resolved default once it lands. This is
-    // independent of the persisted workspaceModeAuto flag: that flag only
-    // governs what a FRESH modal open restores, not a live in-modal switch
-    // during the same open, where the draft is never re-read.
-    setSpawnWorkspaceModeAuto(true);
+    // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
+    // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
+    // project alone re-derives it — a confirmation made for the previous
+    // project stops applying the instant the project changes, and one made
+    // for THIS project (from before an earlier switch away) re-applies for
+    // free once the project matches again.
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1629,7 +1630,7 @@ export function Dashboard() {
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
-      workspaceModeAuto: spawnWorkspaceModeAuto,
+      workspaceModeConfirmedFor: spawnWorkspaceModeConfirmedFor,
       defaultBranch: spawnDefaultBranch,
       planMode: spawnPlanMode,
       selfDestruct: spawnSelfDestruct,
@@ -1651,7 +1652,7 @@ export function Dashboard() {
     spawnSteps,
     spawnTrackerUrl,
     spawnWorkspaceMode,
-    spawnWorkspaceModeAuto,
+    spawnWorkspaceModeConfirmedFor,
   ]);
   const spawnDraftRef = useRef(spawnDraft);
   spawnDraftRef.current = spawnDraft;
@@ -1875,7 +1876,7 @@ export function Dashboard() {
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
-      setSpawnWorkspaceModeAuto(true);
+      setSpawnWorkspaceModeConfirmedFor(null);
       setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
@@ -2692,7 +2693,7 @@ export function Dashboard() {
                 workspaceMode: {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
-                    setSpawnWorkspaceModeAuto(false);
+                    setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                     setSpawnWorkspaceMode(next);
                   },
                 },
@@ -2747,7 +2748,7 @@ export function Dashboard() {
                           <button
                             className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
                             onClick={() => {
-                              setSpawnWorkspaceModeAuto(false);
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                               setSpawnWorkspaceMode("worktree");
                             }}
                             type="button"
@@ -2757,7 +2758,7 @@ export function Dashboard() {
                           <button
                             className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
                             onClick={() => {
-                              setSpawnWorkspaceModeAuto(false);
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                               setSpawnWorkspaceMode("shared");
                             }}
                             type="button"
