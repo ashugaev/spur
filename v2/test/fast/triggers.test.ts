@@ -1260,6 +1260,59 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not deliver or consume retry attempts for ci_failed with interrupt=true while needs_input, then delivers interrupt:false after window once waiting", async () => {
+    const needsInput = {
+      id: "api-1",
+      status: "running",
+      state: "needs_input",
+      workspaceExists: true,
+    };
+    const waiting = {
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(needsInput);
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      // needs_input: no delivery even across multiple flush ticks.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Switch to waiting before the 30s window expires. Still no delivery.
+      getMock.mockResolvedValue(waiting);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Window expires: delivers with interrupt:false (not interrupt:true).
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("CI is failing: test suite."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("stops ci_failed retries once the failure disappears from the latest source snapshot", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",

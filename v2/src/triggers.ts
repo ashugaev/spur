@@ -901,7 +901,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       }
 
     const deliverable = isDeliverableState(session);
-    if (!retry.interrupt && !deliverable) {
+    const isWorking = session.state === "working";
+    if (!deliverable && !(isWorking && retry.interrupt)) {
       return;
     }
 
@@ -910,7 +911,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    // Escalation (interrupt=true, !deliverable) bypasses the window gate.
+    // Escalation (interrupt=true, working) bypasses the window gate.
     if (deliverable && now < batch.notBeforeAt) {
       return;
     }
@@ -918,7 +919,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     retry.attempts += 1;
     retry.nextAttemptAt =
       retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
-    await deliverBatch(queueKey, batch, retry.interrupt && !deliverable, {
+    await deliverBatch(queueKey, batch, retry.interrupt && isWorking, {
       attempt: retry.attempts,
       clearAfter: false,
       keepRetryState: true,
