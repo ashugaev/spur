@@ -731,7 +731,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     batch: PendingBatch,
   ): Promise<SessionView | null> => {
     try {
-      return await deps.sessionService.get(batch.batch.sessionId);
+      return await deps.sessionService.getForTrigger(batch.batch.sessionId);
     } catch (error) {
       clearBatch(queueKey);
       const message = error instanceof Error ? error.message : String(error);

@@ -699,7 +699,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -767,7 +767,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -817,7 +817,7 @@ describe("startConfiguredTriggers", () => {
         config: config() as never,
         bus,
         sessionService: {
-          get: getMock,
+          get: getMock, getForTrigger: getMock,
           deliver: deliverMock,
         } as never,
         logger: { warn: vi.fn() },
@@ -856,7 +856,7 @@ describe("startConfiguredTriggers", () => {
       config: gitlabConfig() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -901,7 +901,7 @@ describe("startConfiguredTriggers", () => {
       }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -957,7 +957,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ prompt: "   " }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -989,7 +989,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1032,7 +1032,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1083,7 +1083,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1136,7 +1136,7 @@ describe("startConfiguredTriggers", () => {
       }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1186,7 +1186,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:merge_conflict" }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1230,7 +1230,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1289,7 +1289,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1342,7 +1342,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: false }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1397,7 +1397,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -1444,7 +1444,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: false }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1484,7 +1484,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1544,7 +1544,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -1953,7 +1953,7 @@ describe("startConfiguredTriggers", () => {
       config: serviceConfig() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2000,7 +2000,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2042,7 +2042,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2093,7 +2093,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2134,7 +2134,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2176,7 +2176,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2225,7 +2225,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2275,7 +2275,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2310,7 +2310,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2350,7 +2350,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:merge_conflict", interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2411,7 +2411,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -2454,7 +2454,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:merge_conflict", interrupt: true }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2606,7 +2606,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: {
@@ -2885,7 +2885,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
+      sessionService: { get: getMock, getForTrigger: getMock, spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2930,7 +2930,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
+      sessionService: { get: getMock, getForTrigger: getMock, spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -2970,7 +2970,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
+      sessionService: { get: getMock, getForTrigger: getMock, spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -3014,7 +3014,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, complete: completeMock } as never,
+      sessionService: { get: getMock, getForTrigger: getMock, complete: completeMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -3060,7 +3060,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: workItemSpawnConfig() as never,
       bus,
-      sessionService: { get: getMock, complete: completeMock } as never,
+      sessionService: { get: getMock, getForTrigger: getMock, complete: completeMock } as never,
       logger: { warn: vi.fn() },
     });
 
@@ -3127,7 +3127,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3170,7 +3170,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3283,7 +3283,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3327,7 +3327,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3362,7 +3362,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3406,7 +3406,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3472,7 +3472,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3526,7 +3526,7 @@ describe("startConfiguredTriggers", () => {
       config: config({ event: "github:ci_failed", interrupt: false }) as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
@@ -3650,7 +3650,7 @@ describe("startConfiguredTriggers", () => {
       config: config() as never,
       bus,
       sessionService: {
-        get: getMock,
+        get: getMock, getForTrigger: getMock,
         deliver: deliverMock,
       } as never,
       logger: { warn: vi.fn() },
