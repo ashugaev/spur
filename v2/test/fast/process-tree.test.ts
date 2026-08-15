@@ -219,6 +219,18 @@ describe("snapshotProcesses", () => {
     expect(await snapshotProcesses(failing)).toEqual({ status: "unavailable" });
     expect(await listProcesses(failing)).toEqual([]);
   });
+
+  it("bounds ps enumeration and degrades to unavailable on timeout", async () => {
+    const snapshot = await snapshotProcesses(async (file, args, options) => {
+      expect(file).toBe("ps");
+      expect(args).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
+      expect(options).toMatchObject({ encoding: "utf8", timeout: 2_000 });
+      expect(options.maxBuffer).toBeGreaterThan(0);
+      throw new Error("ps timed out");
+    });
+
+    expect(snapshot).toEqual({ status: "unavailable" });
+  });
 });
 
 describe("killProcessTree", () => {

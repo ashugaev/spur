@@ -3890,12 +3890,13 @@ export class SessionService {
       now - this.hostDiskProbe.checkedAtMs >= SessionService.HOST_DISK_PROBE_TTL_MS
     ) {
       if (!this.hostDiskProbeInflight) {
-        this.hostDiskProbeInflight = readFreeKb(this.config.dataDir, DISK_PROBE_TIMEOUT_MS).then(
-          (freeKb) => {
+        this.hostDiskProbeInflight = readFreeKb(this.config.dataDir, DISK_PROBE_TIMEOUT_MS)
+          .then((freeKb) => {
             this.hostDiskProbe = { checkedAtMs: Date.now(), freeKb };
+          })
+          .finally(() => {
             delete this.hostDiskProbeInflight;
-          },
-        );
+          });
       }
       await this.hostDiskProbeInflight;
     }

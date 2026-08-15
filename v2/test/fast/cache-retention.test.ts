@@ -544,6 +544,46 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     }
   });
 
+  it("ps exit 0 with unparsable stdout protects every planned candidate (fail-closed)", async () => {
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
+    const old = new Date(Date.now() - 9999 * DAY_MS);
+    await utimes(join(home, ".npm", "_cacache"), old, old);
+    execFileMock.mockImplementation(
+      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
+        const callback = (
+          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
+        if (file === "ps") {
+          // Exit 0 but every row is malformed — zero parseable entries.
+          callback(null, { stdout: "not-a-valid-row\nanother-invalid-line\n", stderr: "" });
+          return {} as ChildProcess.ChildProcess;
+        }
+        if (file === "du") {
+          const paths = (_args as string[]).slice(1);
+          const stdout = paths.map((p) => `100\t${p}`).join("\n");
+          callback(null, { stdout, stderr: "" });
+          return {} as ChildProcess.ChildProcess;
+        }
+        callback(new Error(`unexpected exec: ${file}`));
+        return {} as ChildProcess.ChildProcess;
+      },
+    );
+
+    const plan = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+    });
+
+    expect(plan.candidates.length).toBeGreaterThan(0);
+    for (const candidate of plan.candidates) {
+      expect(candidate.verdict).toEqual({
+        kind: "protected",
+        reason: { kind: "process-list-unavailable" },
+      });
+    }
+  });
+
   it("a du timeout skips the root without rejecting the plan", async () => {
     await mkdir(join(home, ".npm", "_npx", "somehash"), { recursive: true });
     const old = new Date(Date.now() - 60 * DAY_MS);

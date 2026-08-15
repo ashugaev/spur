@@ -101,8 +101,9 @@ export interface LiveSessionCwd {
 
 export interface LivenessSnapshot {
   processTreeReadable: boolean;
-  // snapshotProcesses() returned status "unavailable" — ps could not run.
-  // Kept distinct from processTreeReadable (which only probes /proc/self/stat).
+  // snapshotProcesses() returned status "unavailable" — ps could not run —
+  // or returned status "ok" with zero parseable rows (exit 0 but unparsable
+  // stdout; a real ps -eo always lists at least init). Fail-closed on both.
   processListReadable: boolean;
   processes: readonly ProcessSnapshotEntry[];
   sessionCwds: readonly LiveSessionCwd[];
@@ -494,7 +495,7 @@ async function collectLiveness(
   instanceConfig: InstanceConfigReadResult,
 ): Promise<LivenessSnapshot> {
   const snapshot = await snapshotProcesses();
-  const processListReadable = snapshot.status === "ok";
+  const processListReadable = snapshot.status === "ok" && snapshot.processes.length > 0;
   const processes = snapshot.status === "ok" ? snapshot.processes : [];
   const processTreeReadable = await canReadProcessTree(process.pid);
   const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(
