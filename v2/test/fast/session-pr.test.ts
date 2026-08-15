@@ -339,6 +339,69 @@ describe("session-pr", () => {
       "pr",
       "view",
       "42",
+      "--repo",
+      "acme/api",
+      "--json",
+      "number,state,title,url",
+    );
+  });
+
+  // A binding's repo can differ from the worktree's remote (workspace reuse, a
+  // handoff, a stale auto-detect). Without --repo gh resolves the number against
+  // the worktree remote and teardown fails with a permanent 409.
+  it("views the binding's repo, not the worktree remote", async () => {
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        number: 3938,
+        state: "MERGED",
+        title: "Unrelated",
+        url: "https://github.com/other/web/pull/3938",
+      }),
+    );
+
+    await viewSessionPrState("/repo/api", {
+      number: 3938,
+      repo: "other/web",
+      url: "https://github.com/other/web/pull/3938",
+    });
+
+    expect(ghMock).toHaveBeenCalledWith(
+      "/repo/api",
+      "pr",
+      "view",
+      "3938",
+      "--repo",
+      "other/web",
+      "--json",
+      "number,state,title,url",
+    );
+  });
+
+  // gh reads --repo as [HOST/]OWNER/REPO. A bare owner/repo sends an Enterprise
+  // binding to github.com, turning a working teardown into a failing one.
+  it("carries the binding host for a non-github.com pull request", async () => {
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        number: 7,
+        state: "OPEN",
+        title: "Enterprise",
+        url: "https://ghe.corp.example/acme/api/pull/7",
+      }),
+    );
+
+    await viewSessionPrState("/repo/api", {
+      number: 7,
+      repo: "acme/api",
+      url: "https://ghe.corp.example/acme/api/pull/7",
+    });
+
+    expect(ghMock).toHaveBeenCalledWith(
+      "/repo/api",
+      "pr",
+      "view",
+      "7",
+      "--repo",
+      "ghe.corp.example/acme/api",
       "--json",
       "number,state,title,url",
     );
@@ -351,7 +414,17 @@ describe("session-pr", () => {
       url: "https://github.com/acme/api/pull/42",
     });
 
-    expect(ghMock).toHaveBeenCalledWith("/repo/api", "pr", "close", "42");
+    expect(ghMock).toHaveBeenCalledWith("/repo/api", "pr", "close", "42", "--repo", "acme/api");
+  });
+
+  it("closes the binding's repo, not the worktree remote", async () => {
+    await closeSessionPr("/repo/api", {
+      number: 3938,
+      repo: "other/web",
+      url: "https://github.com/other/web/pull/3938",
+    });
+
+    expect(ghMock).toHaveBeenCalledWith("/repo/api", "pr", "close", "3938", "--repo", "other/web");
   });
 });
 

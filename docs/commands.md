@@ -8,9 +8,11 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
+`POST /deploy/switch` starts a detached install-and-restart helper and returns `202 { accepted: true, version }`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
+
 ## doctor
 
-Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything.
+Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything. The `config-registry` check also lists every registered path with its alive/dead/worktree-internal state, both in the human-readable output and in `--json` — see [Config registry](configuration.md#config-registry).
 
 When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
 
@@ -87,6 +89,8 @@ spur wake <sessionId> --cancel
 ```
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
+
+`POST /shepherd/spawn` reuses the newest running or spawning Shepherd. Pass `reportDisposition: true` to receive `{ disposition: "spawned" | "reused", session }`; omit it for the legacy session-only response.
 
 `wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. `--every <duration>` repeats at a fixed interval and also requires `--until`. `--cancel` drops any recurring (`--every` or `--daily-at`) wake for the session; it cannot combine with the scheduling options. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily or interval occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` / `session.wake.interval_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` / `session.wake.interval_sent` and the message retries through the queue drain (below) like any other queued message.
 

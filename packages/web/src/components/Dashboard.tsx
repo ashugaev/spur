@@ -20,6 +20,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FiltersModal } from "@/components/FiltersModal";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -63,6 +64,7 @@ import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
@@ -73,6 +75,7 @@ import {
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
@@ -1055,6 +1058,11 @@ export function Dashboard() {
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    session: DashboardSession;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
+  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -1065,7 +1073,6 @@ export function Dashboard() {
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const spawnBranchExplicitRef = useRef(false);
-  const spawnDraftDirtyRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
@@ -1083,7 +1090,6 @@ export function Dashboard() {
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) => {
-      spawnDraftDirtyRef.current = true;
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
     },
   });
@@ -1539,13 +1545,6 @@ export function Dashboard() {
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
-    spawnDraftDirtyRef.current = false;
-  };
-
-  const restoreSpawnDraft = (nextProjectId: string) => {
-    const draft = readSpawnDraft(nextProjectId);
-    applySpawnDraft(nextProjectId, draft);
-    return draft;
   };
 
   useEffect(() => {
@@ -1562,21 +1561,14 @@ export function Dashboard() {
 
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
-      const carriesUnscopedEdits = spawnDraftDirtyRef.current && !spawnProjectId;
-      if (spawnOpen && !carriesUnscopedEdits) {
-        restoreSpawnDraft(nextProjectId);
-      } else {
-        setSpawnProjectId(nextProjectId);
-      }
+      setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnOpen, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
-    if (normalizedProjectId !== spawnProjectId) {
-      restoreSpawnDraft(normalizedProjectId);
-    }
+    setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1585,10 +1577,8 @@ export function Dashboard() {
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
 
-  const spawnDraft = useMemo<SpawnDraft | null>(() => {
-    if (!spawnProjectId) return null;
+  const spawnDraft = useMemo<SpawnDraft>(() => {
     return {
-      projectId: spawnProjectId,
       prompt: spawnPrompt,
       agent: spawnAgent,
       model: spawnModel,
@@ -1608,9 +1598,7 @@ export function Dashboard() {
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
-    spawnOpen,
     spawnPlanMode,
-    spawnProjectId,
     spawnPrompt,
     spawnSelfDestruct,
     spawnSelfDestructConditions,
@@ -1623,13 +1611,13 @@ export function Dashboard() {
   spawnDraftRef.current = spawnDraft;
 
   useEffect(() => {
-    if (!spawnOpen || !spawnDraft) return;
+    if (!spawnOpen) return;
     const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
     return () => clearTimeout(timer);
   }, [spawnDraft, spawnOpen]);
 
   const closeSpawnModal = useCallback(() => {
-    if (spawnDraftRef.current) writeSpawnDraft(spawnDraftRef.current);
+    writeSpawnDraft(spawnDraftRef.current);
     setSpawnOpen(false);
   }, []);
 
@@ -1698,15 +1686,12 @@ export function Dashboard() {
   );
 
   const addStep = () => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
   const removeStep = (id: number) => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
   };
   const updateStep = (id: number, value: string) => {
-    spawnDraftDirtyRef.current = true;
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
   };
 
@@ -1818,7 +1803,7 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
-      clearSpawnDraft(nextProjectId);
+      clearSpawnDraft();
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -2102,18 +2087,23 @@ export function Dashboard() {
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
+  const handleCompleteSession = async (
+    session: DashboardSession,
+    options?: { prAction?: OpenPrAction; retry?: true; skipPrCheck?: true },
+  ): Promise<boolean> => {
+    const prAction = options?.prAction;
     const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
     ).length;
-    if (!prAction && activeSubagentCount > 0 && typeof window !== "undefined") {
+    // A dialog retry is the same Done click the user already confirmed.
+    if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
       const ok = window.confirm(
         `Complete this desk? ${activeSubagentCount} subagent${
           activeSubagentCount === 1 ? "" : "s"
         } on this checkout will be ended.`,
       );
-      if (!ok) return;
+      if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
@@ -2138,7 +2128,11 @@ export function Dashboard() {
     });
 
     try {
-      const body = { scope: "desk", ...(prAction ? { prAction } : {}) };
+      const body = {
+        scope: "desk",
+        ...(prAction ? { prAction } : {}),
+        ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
+      };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2150,8 +2144,20 @@ export function Dashboard() {
           if (previousResponse) {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
+          setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
-          return;
+          return false;
+        }
+        if (isGithubPrCheckUnavailablePayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          // The two PR dialogs are alternatives for one complete attempt. Leaving
+          // the sibling mounted stacks both, and the stale one survives a later
+          // success and re-fires /complete on a terminal session.
+          setOpenPrAction(null);
+          setPrCheckUnavailable({ session, payload });
+          return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
@@ -2176,6 +2182,7 @@ export function Dashboard() {
           };
         });
       }
+      return true;
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -2191,16 +2198,36 @@ export function Dashboard() {
     if (!openPrAction) return;
     setOpenPrActionBusy(true);
     try {
-      await handleCompleteSession(openPrAction.session, prAction);
-      setOpenPrAction(null);
+      // Clear only on a real completion: a second failure re-opens a dialog,
+      // and dismissing it here would drop the user back to a bare row.
+      if (await handleCompleteSession(openPrAction.session, { prAction, retry: true })) {
+        setOpenPrAction(null);
+      }
+    } catch {
+      // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
       setOpenPrActionBusy(false);
     }
   };
 
+  const handlePrCheckUnavailable = async (options: { skipPrCheck?: true }) => {
+    if (!prCheckUnavailable) return;
+    setPrCheckUnavailableBusy(true);
+    try {
+      if (await handleCompleteSession(prCheckUnavailable.session, { ...options, retry: true })) {
+        setPrCheckUnavailable(null);
+      }
+    } catch {
+      // handleCompleteSession already toasted. Keep the dialog open so Skip
+      // stays reachable instead of dropping the user back to a bare row.
+    } finally {
+      setPrCheckUnavailableBusy(false);
+    }
+  };
+
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    restoreSpawnDraft(resolvePreferredSpawnProjectId());
+    applySpawnDraft(resolvePreferredSpawnProjectId(), readSpawnDraft());
     setSpawnOpen(true);
   };
 
@@ -2212,7 +2239,7 @@ export function Dashboard() {
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    const draft = readSpawnDraft(item.projectId);
+    const draft = readSpawnDraft();
     if (draft?.trackerUrl === item.url) {
       applySpawnDraft(item.projectId, draft);
     } else {
@@ -2225,7 +2252,6 @@ export function Dashboard() {
 
   const addSpawnFiles = useCallback(
     (files: FileList | File[] | null) => {
-      spawnDraftDirtyRef.current = true;
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
@@ -2286,7 +2312,8 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
+        return;
 
       const target = event.target;
       if (
@@ -2307,7 +2334,7 @@ export function Dashboard() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
@@ -2561,7 +2588,6 @@ export function Dashboard() {
               history={{
                 entries: spawnHistory.entries,
                 onSelect: (next) => {
-                  spawnDraftDirtyRef.current = true;
                   setSpawnPrompt(next);
                 },
               }}
@@ -2578,7 +2604,6 @@ export function Dashboard() {
                 model: {
                   value: spawnModel,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnModel(next);
                   },
                 },
@@ -2587,7 +2612,6 @@ export function Dashboard() {
                       sessionMode: {
                         value: effectiveSessionMode ?? "",
                         onChange: (next: string) => {
-                          spawnDraftDirtyRef.current = true;
                           setSpawnSessionMode(next === "" ? null : next);
                         },
                         options: spawnModeOptions,
@@ -2597,7 +2621,6 @@ export function Dashboard() {
                 branch: {
                   value: spawnBranch,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     spawnBranchExplicitRef.current = next.trim().length > 0;
                     setSpawnBranch(next);
                   },
@@ -2610,21 +2633,18 @@ export function Dashboard() {
                 workspaceMode: {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnWorkspaceMode(next);
                   },
                 },
                 planMode: {
                   value: spawnPlanMode,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnPlanMode(next);
                   },
                 },
                 selfDestruct: {
                   value: spawnSelfDestruct,
                   onChange: (next) => {
-                    spawnDraftDirtyRef.current = true;
                     setSpawnSelfDestruct(next);
                   },
                 },
@@ -2664,7 +2684,6 @@ export function Dashboard() {
                     aria-label="Self-destruct conditions"
                     className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
                     onChange={(event) => {
-                      spawnDraftDirtyRef.current = true;
                       setSpawnSelfDestructConditions(event.target.value);
                     }}
                     placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
@@ -2676,7 +2695,6 @@ export function Dashboard() {
                     <input
                       className={`w-full ${INPUT_CLASS}`}
                       onChange={(event) => {
-                        spawnDraftDirtyRef.current = true;
                         setSpawnDefaultBranch(event.target.value);
                       }}
                       placeholder="Base branch"
@@ -2686,17 +2704,14 @@ export function Dashboard() {
               }}
               onAddFiles={addSpawnFiles}
               onAgentChange={(next) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnAgent(next);
                 setSpawnModel(null);
               }}
               onClose={closeSpawnModal}
               onPromptChange={(next) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnPrompt(next);
               }}
               onRemoveAttachment={(index) => {
-                spawnDraftDirtyRef.current = true;
                 setSpawnAttachments((current) =>
                   current.filter((_, currentIndex) => currentIndex !== index),
                 );
@@ -2775,6 +2790,15 @@ export function Dashboard() {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
+            />
+          ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={prCheckUnavailableBusy}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckUnavailable({})}
+              onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}
+              payload={prCheckUnavailable.payload}
             />
           ) : null}
         </main>

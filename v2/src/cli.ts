@@ -5,6 +5,7 @@ import {
   hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
+  type ConfigRegistryPathEntry,
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
@@ -856,6 +857,7 @@ interface HelpRow {
 
 interface DoctorResult {
   hostChecks: HostInstallCheck[];
+  configRegistryPaths: ConfigRegistryPathEntry[];
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -883,8 +885,23 @@ function displayPathFromCwd(path: string): string {
   return rendered.startsWith(".") ? rendered : `./${rendered}`;
 }
 
+function renderConfigRegistryPaths(paths: ConfigRegistryPathEntry[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    dimText("Registered config paths:"),
+    ...paths.map((entry) =>
+      dimText(`  ${entry.state.padEnd("worktree-internal".length)}  ${entry.path}`),
+    ),
+    "",
+  ];
+}
+
 function renderDoctorResult(result: DoctorResult): string {
-  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  const lines = [
+    renderHostInstallChecks(result.hostChecks),
+    "",
+    ...renderConfigRegistryPaths(result.configRegistryPaths),
+  ];
   if (result.existingProjectConfigPath) {
     lines.push(
       dimText(
@@ -2020,14 +2037,30 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = await collectHostInstallChecks();
+          const collectedChecks = await collectHostInstallChecks();
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
           const instanceConfig = loadInstanceConfigReadOnly();
           if (instanceConfig.status === "ok") {
-            hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+            collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }
+          // `configRegistryPaths` rides on the "config-registry" check purely
+          // as an internal carrier from `collectHostInstallChecks` to here
+          // (see the field's doc comment in host-install.ts). The documented
+          // public shape only has it at the top level of `DoctorResult`, so
+          // strip it off the check before `hostChecks` is JSON-serialized —
+          // otherwise `--json` emits the same array twice.
+          const configRegistryPaths =
+            collectedChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ??
+            [];
+          const hostChecks = collectedChecks.map((check) => {
+            if (check.id !== "config-registry" || check.configRegistryPaths === undefined) {
+              return check;
+            }
+            const { configRegistryPaths: _perPathEntries, ...checkWithoutPaths } = check;
+            return checkWithoutPaths;
+          });
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
@@ -2068,10 +2101,10 @@ export function createProgram(cliEntrypoint: string): Command {
                 fix: "Fix the reported error in spur.yaml",
               });
             }
-            return { hostChecks, existingProjectConfigPath };
+            return { hostChecks, configRegistryPaths, existingProjectConfigPath };
           }
           if (!options.scaffold) {
-            return { hostChecks };
+            return { hostChecks, configRegistryPaths };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -2080,6 +2113,7 @@ export function createProgram(cliEntrypoint: string): Command {
           writeProjectConfigScaffold(scaffold);
           return {
             hostChecks,
+            configRegistryPaths,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,

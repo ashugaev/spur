@@ -808,9 +808,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
   ): Promise<void> => {
     const result = await deliverBatch(queueKey, batch, interrupt);
-    if (result.status === "failed") {
-      recordDeliveryFailure(queueKey, batch, interrupt, result.error);
-    }
+    if (result.status !== "failed") return;
+    // A delivery decided against a live state can still land after a pause or
+    // restore has torn the pane down — the send then fails with "can't find
+    // session". That is the pane going away mid-flight, not the target
+    // rejecting the message, and the backoff it would open (10s, doubling)
+    // spans exactly the window the restore replay has to be delivered in.
+    // Re-read the state at failure time: a closed session leaves the batch
+    // queued for the flush loop instead.
+    const current = await loadSessionOrClear(queueKey, batch);
+    if (current && isClosedState(current.state)) return;
+    recordDeliveryFailure(queueKey, batch, interrupt, result.error);
   };
 
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
