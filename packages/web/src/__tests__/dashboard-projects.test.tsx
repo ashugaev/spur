@@ -1048,13 +1048,13 @@ describe("Dashboard project create/delete", () => {
     });
   });
 
-  it("re-derives the workspace mode from the newly selected project after a project switch, even with a stored draft", async () => {
-    // B1 regression: a stored draft's workspaceMode is a prior choice for
-    // whatever project it was confirmed against, not for every project. On
-    // reopen with a draft present, switching the "Spawn project" picker to a
-    // different project must not leave the old value (draft or previous
-    // project's default) on screen — it must re-resolve to the newly
-    // selected project's own configured default.
+  it("re-derives the workspace mode from the newly selected project after a project switch, even with an explicitly-confirmed stored draft", async () => {
+    // This targets the in-modal switch path specifically: even a draft
+    // that recorded a genuine explicit confirmation (workspaceModeAuto:
+    // false) was confirmed against whatever project it was saved for, not
+    // against every project. Switching the "Spawn project" picker to a
+    // different project must re-enter auto mode and re-resolve to the
+    // newly selected project's own configured default.
     writeSpawnDraft({
       prompt: "",
       agent: "claude",
@@ -1062,6 +1062,7 @@ describe("Dashboard project create/delete", () => {
       branch: "",
       branchIsExplicit: false,
       workspaceMode: "worktree",
+      workspaceModeAuto: false,
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
@@ -1177,5 +1178,193 @@ describe("Dashboard project create/delete", () => {
     });
     const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
     expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("re-derives the workspace mode from the dashboard-filter-resolved project on open, even with a stored draft", async () => {
+    // B1 regression, dashboard-filter entry point: resolvePreferredSpawnProjectId
+    // gives the project FILTER precedence over the last-spawn-project storage
+    // key, so the project resolved on open is not necessarily the one the
+    // draft's workspaceMode was last auto-derived for. Opening the modal
+    // (never touching the in-modal project picker) must still show and send
+    // the filter-resolved project's own configured default, not the stale
+    // draft value.
+    writeSpawnDraft({
+      prompt: "",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "worktree",
+      workspaceModeAuto: true,
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+    });
+    window.localStorage.setItem("spur:last-spawn-project", "api");
+    window.history.replaceState(null, "", "/?project=web");
+
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "web-a1",
+            project: "web",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "web-a1",
+            worktree: false,
+            tmuxSession: "web-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/web",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    expect(within(dialog).getByRole("combobox", { name: "Spawn project" })).toHaveValue("web");
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("keeps the user's explicitly confirmed workspace mode across a close and reopen of the same project", async () => {
+    // The whole point of persisting workspaceModeAuto is to distinguish a
+    // real user confirmation from an auto-derived value: an explicit pick
+    // must survive a close/reopen even when it disagrees with the
+    // project's own resolved default, whereas the tests above prove an
+    // auto-derived value never survives a project change.
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    let dialog = screen.getByRole("dialog");
+    const workspaceModeSelect = () =>
+      within(dialog).getByRole("combobox", { name: "workspace mode" });
+    await waitFor(() => {
+      expect(workspaceModeSelect()).toHaveValue("worktree");
+    });
+
+    // The user explicitly overrides the project's real ("worktree") default.
+    fireEvent.change(workspaceModeSelect(), { target: { value: "shared" } });
+    expect(workspaceModeSelect()).toHaveValue("shared");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    dialog = screen.getByRole("dialog");
+
+    // The explicit choice survives — it is not overwritten back to the
+    // project's auto-derived "worktree" default once spawn-defaults settles.
+    expect(workspaceModeSelect()).toHaveValue("shared");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+    });
+    expect(workspaceModeSelect()).toHaveValue("shared");
   });
 });

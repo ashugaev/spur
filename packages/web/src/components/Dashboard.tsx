@@ -1553,12 +1553,13 @@ export function Dashboard() {
     setSpawnSelfDestruct(draft?.selfDestruct ?? false);
     setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
     setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
-    // A restored draft's workspace mode is a real prior choice, not the
-    // resolver's fill-in; a fresh project pick (no draft) re-enters auto mode
-    // so the project-resolved default applies once it lands. workspaceMode
-    // is a required, validated field of SpawnDraft, so this is exactly
-    // "no draft was found" — not a per-field undefined check.
-    setSpawnWorkspaceModeAuto(draft === null);
+    // A draft is a single storage key shared by every project, so a stored
+    // workspaceMode is usually the auto-derived default for whatever
+    // project it was last saved against, not a confirmation for
+    // nextProjectId. Whether it was the user's own explicit pick is
+    // recorded on the draft itself (workspaceModeAuto) rather than inferred
+    // from "a draft exists".
+    setSpawnWorkspaceModeAuto(draft?.workspaceModeAuto ?? true);
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
@@ -1591,7 +1592,10 @@ export function Dashboard() {
     // mode for the newly selected project — any workspace mode shown so far
     // (restored draft or a prior project's default) was never confirmed
     // against this project, so re-enter auto mode and let the effect below
-    // fill in the new project's resolved default once it lands.
+    // fill in the new project's resolved default once it lands. This is
+    // independent of the persisted workspaceModeAuto flag: that flag only
+    // governs what a FRESH modal open restores, not a live in-modal switch
+    // during the same open, where the draft is never re-read.
     setSpawnWorkspaceModeAuto(true);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -1625,6 +1629,7 @@ export function Dashboard() {
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
+      workspaceModeAuto: spawnWorkspaceModeAuto,
       defaultBranch: spawnDefaultBranch,
       planMode: spawnPlanMode,
       selfDestruct: spawnSelfDestruct,
@@ -1646,6 +1651,7 @@ export function Dashboard() {
     spawnSteps,
     spawnTrackerUrl,
     spawnWorkspaceMode,
+    spawnWorkspaceModeAuto,
   ]);
   const spawnDraftRef = useRef(spawnDraft);
   spawnDraftRef.current = spawnDraft;

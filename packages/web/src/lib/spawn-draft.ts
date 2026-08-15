@@ -1,7 +1,7 @@
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { WorkspaceMode } from "@/lib/types";
 
-const SPAWN_DRAFT_VERSION = 2;
+const SPAWN_DRAFT_VERSION = 3;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SPAWN_DRAFT_STORAGE_KEY = "spur:spawn-draft";
 
@@ -12,6 +12,13 @@ export interface SpawnDraft {
   branch: string;
   branchIsExplicit: boolean;
   workspaceMode: WorkspaceMode;
+  // Whether workspaceMode above was the user's own explicit confirmation
+  // (a manual pick or an error-banner "Use worktree/shared" click) versus a
+  // value auto-derived from a project's spawn-defaults. The draft is a
+  // single global key shared across every project, so a stored
+  // workspaceMode is usually the auto-derived default for whatever project
+  // it was last saved against — never inferred from "a draft exists".
+  workspaceModeAuto: boolean;
   defaultBranch: string;
   planMode: boolean;
   selfDestruct: boolean;
@@ -58,6 +65,7 @@ function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDr
     typeof draft.branch === "string" &&
     typeof draft.branchIsExplicit === "boolean" &&
     isWorkspaceMode(draft.workspaceMode) &&
+    typeof draft.workspaceModeAuto === "boolean" &&
     typeof draft.defaultBranch === "string" &&
     typeof draft.planMode === "boolean" &&
     typeof draft.selfDestruct === "boolean" &&
