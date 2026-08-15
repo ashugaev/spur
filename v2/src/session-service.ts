@@ -3245,7 +3245,7 @@ export class SessionService {
               projectId: session.project,
               message: `Cancelled recurring wake for ${session.id}: session is ${current.status}`,
               details: {
-                reason: "session_terminal",
+                reason: "session_killed",
                 status: current.status,
               },
             });

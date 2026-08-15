@@ -28086,7 +28086,7 @@ describe("SessionService", () => {
         ([, entry]) => entry.event === "session.wake.interval_cancelled",
       );
       expect(cancelledCall?.[1].details).toEqual({
-        reason: "session_terminal",
+        reason: "session_killed",
         status: "killed",
       });
       expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
