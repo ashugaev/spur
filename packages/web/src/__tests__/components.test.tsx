@@ -2366,9 +2366,7 @@ describe("Dashboard", () => {
       "Typed while loading",
     );
     await waitFor(() => {
-      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
-        "Typed while loading",
-      );
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Typed while loading");
     });
   });
 
@@ -2706,9 +2704,7 @@ describe("Dashboard", () => {
       expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
       expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
       expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
-      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
-        "Keep this prompt",
-      );
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Keep this prompt");
     });
   });
 
