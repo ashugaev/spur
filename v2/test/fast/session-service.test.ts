@@ -32203,18 +32203,24 @@ describe("SessionService", () => {
       it("releases the lifecycle lock after failure and runs the next waiter", async () => {
         const service = await createDisposedSessionService();
         const internals = staleInternals(service);
-
-        await expect(
-          internals.withSessionLifecycleLock("api-1", async () => {
-            throw new Error("failed lifecycle mutation");
-          }),
-        ).rejects.toThrow("failed lifecycle mutation");
-        let ran = false;
-        await internals.withSessionLifecycleLock("api-1", async () => {
-          ran = true;
+        let rejectFirst!: (error: Error) => void;
+        const firstBarrier = new Promise<void>((_resolve, reject) => {
+          rejectFirst = reject;
         });
+        let secondRan = false;
 
-        expect(ran).toBe(true);
+        const first = internals.withSessionLifecycleLock("api-1", async () => {
+          await firstBarrier;
+        });
+        const second = internals.withSessionLifecycleLock("api-1", async () => {
+          secondRan = true;
+        });
+        rejectFirst(new Error("failed lifecycle mutation"));
+
+        await expect(first).rejects.toThrow("failed lifecycle mutation");
+        await second;
+
+        expect(secondRan).toBe(true);
         expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
       });
 

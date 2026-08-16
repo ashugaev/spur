@@ -4139,7 +4139,7 @@ export class SessionService {
       release = resolve;
     });
     this.sessionLifecycleLocks.set(sessionId, current);
-    await previous;
+    await previous.catch(() => {});
     try {
       return await task();
     } finally {
