@@ -5844,20 +5844,15 @@ describe("SessionService", () => {
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
 
-    await service.send("api-1", { message: "second" });
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first", "second"]);
+    const send = service.send("api-1", { message: "second" });
+    await Promise.resolve();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
 
     releaseAck();
-    expect(await drain).toBe(true);
-
+    const [drained] = await Promise.all([drain, send]);
+    expect(drained).toBe(true);
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual(["second"]);
-    const order = sendMessageToTmuxMock.mock.calls
-      .filter(([id]) => id === "api-1")
-      .map(([, message]) => message);
-    expect(order).toEqual(["first"]);
-
-    const drainSecond = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-    expect(drainSecond).toBe(true);
+    expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
     const finalOrder = sendMessageToTmuxMock.mock.calls
       .filter(([id]) => id === "api-1")
@@ -5897,11 +5892,8 @@ describe("SessionService", () => {
     createAgentSubmitAckBindingMock.mockResolvedValue(null);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
 
-    // send()'s own ensureSessionReadyForSend is the FIRST call to
-    // tmuxSessionExists (its synchronous prelude runs before this test code
-    // resumes); park exactly that one call. The drain's own
-    // ensureSessionReadyForSend/classifySessionRecord calls come later and
-    // resolve immediately, so the drain can run to completion first.
+    // Park send() inside readiness. The queued drain must chain behind the
+    // same lifecycle lock instead of overtaking it with a stale record.
     let tmuxCall = 0;
     let releaseFirstTmuxCheck: () => void = () => {};
     const firstTmuxGate = new Promise<void>((resolve) => {
@@ -5919,16 +5911,15 @@ describe("SessionService", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-    expect(delivered).toBe(true);
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b"]);
+    const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+    await Promise.resolve();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
 
     releaseFirstTmuxCheck();
-    await sendPromise;
+    const [, delivered] = await Promise.all([sendPromise, drain]);
+    expect(delivered).toBe(true);
 
-    // "a" must stay delivered (not resurrected) and "c" must land on top of
-    // the drain's post-commit queue, not on the stale pre-drain snapshot
-    // send() read before it parked.
+    // "a" stays delivered; "c" appends once and never resurrects it.
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b", "c"]);
     const order = sendMessageToTmuxMock.mock.calls
       .filter(([id]) => id === "api-1")
@@ -6315,7 +6306,7 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["c"]);
   });
 
-  it("a concurrent send during the flush's own send window is preserved, and only the flushed entry is removed (AC11b)", async () => {
+  it("a send queued behind a flush is preserved and drains the prior head after the flush commits (AC11b)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
     const sessions = createSessionStore();
@@ -6355,13 +6346,19 @@ describe("SessionService", () => {
     const flush = service.flushQueuedMessage("api-1", "b");
     await vi.advanceTimersByTimeAsync(0);
 
-    await service.send("api-1", { message: "d" });
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "b", "c", "d"]);
+    const send = service.send("api-1", { message: "d" });
+    await Promise.resolve();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "b", "c"]);
 
     releaseAck();
-    await flush;
+    await Promise.all([flush, send]);
 
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "c", "d"]);
+    expect(
+      sendMessageToTmuxMock.mock.calls
+        .filter(([id]) => id === "api-1")
+        .map(([, message]) => message),
+    ).toEqual(["b", "a"]);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["c", "d"]);
   });
 
   it("a deliver() landing while a drain is mid-send does not resurrect the drained head (AC12)", async () => {
@@ -30942,10 +30939,12 @@ describe("SessionService", () => {
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
       queueDeliveryInFlight: Set<string>;
-      staleParkInFlight: Map<string, Promise<void>>;
+      sessionLifecycleLocks: Map<string, Promise<void>>;
       paneWriteLocks: Map<string, Promise<void>>;
       deliveryRuns: Map<string, Promise<void>>;
+      withSessionLifecycleLock<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
       pollAttentionStates(baseline: boolean): Promise<void>;
+      parkStaleSession(view: SessionView): Promise<void>;
       teardownSessionSidecars(session: SessionRecord): Promise<void>;
       tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
     };
@@ -31784,7 +31783,7 @@ describe("SessionService", () => {
       }
 
       it("waits for a park in flight instead of relaunching over it, then recovers off the post-park record (send)", async () => {
-        // parkStaleSession claims staleParkInFlight before its destructive
+        // parkStaleSession claims sessionLifecycleLocks before its destructive
         // kill+teardown; send()'s own recovery step must see that claim and
         // wait for it instead of relaunching the pane park is destroying —
         // rejecting here would drop a scheduled/interval wake outright (its
@@ -31796,7 +31795,7 @@ describe("SessionService", () => {
         const service = await createDisposedSessionService();
         const internals = staleInternals(service);
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -31858,7 +31857,7 @@ describe("SessionService", () => {
         const service = await createDisposedSessionService();
         const internals = staleInternals(service);
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -31913,7 +31912,7 @@ describe("SessionService", () => {
         // Queue the message AFTER construction/dispose, not at seed time —
         // seeding it before construction can race a boot-time delivery-loop
         // arm that claims queueDeliveryInFlight before this test's own
-        // staleParkInFlight probe runs, which is not what this test targets.
+        // lifecycle lock probe runs, which is not what this test targets.
         const seeded = sessions.get("api-1");
         if (seeded) {
           sessions.set("api-1", {
@@ -31922,7 +31921,7 @@ describe("SessionService", () => {
           });
         }
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -31962,7 +31961,7 @@ describe("SessionService", () => {
         const service = await createDisposedSessionService();
         const internals = staleInternals(service);
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -31978,7 +31977,7 @@ describe("SessionService", () => {
         // force: true skips the classifySessionState busy-check ahead of the
         // credential-swap write — that check is exercised on its own by the
         // "refuses to switch while working without force" test above; this
-        // test is only about the staleParkInFlight wait further down.
+        // test is only about the lifecycle-lock wait further down.
         const pending = service.switchAuth("api-1", "backup", { reason: "manual", force: true });
         await vi.advanceTimersByTimeAsync(0);
         await Promise.resolve();
@@ -32017,7 +32016,7 @@ describe("SessionService", () => {
         // Queue the message AFTER construction/dispose, not at seed time —
         // seeding it before construction can race a boot-time delivery-loop
         // arm that claims queueDeliveryInFlight before this test's own
-        // staleParkInFlight probe runs, same trap as flushQueuedMessage's
+        // lifecycle lock probe runs, same trap as flushQueuedMessage's
         // sibling test above.
         const seeded = sessions.get("api-1");
         if (seeded) {
@@ -32027,7 +32026,7 @@ describe("SessionService", () => {
           });
         }
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -32052,7 +32051,7 @@ describe("SessionService", () => {
         expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
       });
 
-      it("releases staleParkInFlight once the park finishes, letting the next send() through", async () => {
+      it("releases the lifecycle lock once the park finishes, letting the next send() through", async () => {
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
         mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
         const sessions = createSessionStore();
@@ -32071,9 +32070,200 @@ describe("SessionService", () => {
         await drainTicks(internals);
 
         expect(sessions.get("api-1")?.status).toBe("stopped");
-        expect(internals.staleParkInFlight.has("api-1")).toBe(false);
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
         service.dispose();
       });
+
+      it("serializes wake-first delivery through commit before a stale park re-check", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        listSessionsMock.mockReturnValue([]);
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        const staleView = await service.get("api-1");
+        let releaseWrite!: () => void;
+        const writeBarrier = new Promise<void>((resolve) => {
+          releaseWrite = resolve;
+        });
+        let writeStarted!: () => void;
+        const writeStartedBarrier = new Promise<void>((resolve) => {
+          writeStarted = resolve;
+        });
+        sendMessageToTmuxMock.mockImplementationOnce(async () => {
+          writeStarted();
+          await writeBarrier;
+        });
+
+        const wake = service.send("api-1", { message: "wake first", queue: false });
+        await writeStartedBarrier;
+        const park = internals.parkStaleSession(staleView);
+        await Promise.resolve();
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:05:00.000Z") });
+        releaseWrite();
+        await Promise.all([wake, park]);
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+      });
+
+      it("serializes park-first teardown before wake recovery and delivery", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        listSessionsMock.mockReturnValue([]);
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        const staleView = await service.get("api-1");
+        const order: string[] = [];
+        let releaseKill!: () => void;
+        const killBarrier = new Promise<void>((resolve) => {
+          releaseKill = resolve;
+        });
+        let killStarted!: () => void;
+        const killStartedBarrier = new Promise<void>((resolve) => {
+          killStarted = resolve;
+        });
+        let paneAlive = true;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name !== "api-1") return;
+          order.push("kill");
+          killStarted();
+          await killBarrier;
+          paneAlive = false;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+        isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+        createTmuxSessionMock.mockImplementation(async () => {
+          order.push("relaunch");
+          paneAlive = true;
+        });
+        sendMessageToTmuxMock.mockImplementation(async () => {
+          order.push("deliver");
+        });
+
+        const park = internals.parkStaleSession(staleView);
+        await killStartedBarrier;
+        const wake = service.send("api-1", { message: "after park", queue: false });
+        await Promise.resolve();
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        releaseKill();
+        await Promise.all([park, wake]);
+
+        expect(order).toEqual(["kill", "kill", "relaunch", "deliver"]);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+      });
+
+      it("serializes two stale wakes behind one relaunch, context recovery, and sidecar replay", async () => {
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...staleParkableSession(),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+          agentSessionId: "native-session",
+        });
+        listSessionsMock.mockReturnValue([]);
+        let paneAlive = false;
+        tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+        isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+        createTmuxSessionMock.mockImplementation(async () => {
+          paneAlive = true;
+        });
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        const delivered: string[] = [];
+        sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) => {
+          delivered.push(message);
+        });
+        const service = await createDisposedSessionService();
+
+        await Promise.all([
+          service.deliver("api-1", "first wake"),
+          service.deliver("api-1", "second wake"),
+        ]);
+
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+        expect(delivered).toEqual(["first wake", "second wake"]);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
+        expect(sessions.get("api-1")).not.toHaveProperty("staleSidecars");
+      });
+
+      it("releases the lifecycle lock after failure and runs the next waiter", async () => {
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+
+        await expect(
+          internals.withSessionLifecycleLock("api-1", async () => {
+            throw new Error("failed lifecycle mutation");
+          }),
+        ).rejects.toThrow("failed lifecycle mutation");
+        let ran = false;
+        await internals.withSessionLifecycleLock("api-1", async () => {
+          ran = true;
+        });
+
+        expect(ran).toBe(true);
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+      });
+
+      it.each(["start", "stop"] as const)(
+        "makes sidecar %s wait for a park and re-read the parked record",
+        async (operation) => {
+          armParkableApiProject();
+          const sessions = createSessionStore();
+          sessions.set("api-1", staleParkableSession({ sidecarNames: ["proxy"] }));
+          listSessionsMock.mockReturnValue([]);
+          sidecarTmuxAliveMock.mockResolvedValue(true);
+          const service = await createDisposedSessionService();
+          const internals = staleInternals(service);
+          let releasePark!: () => void;
+          internals.sessionLifecycleLocks.set(
+            "api-1",
+            new Promise<void>((resolve) => {
+              releasePark = resolve;
+            }),
+          );
+
+          const mutation =
+            operation === "start"
+              ? service.startSidecar("api-1", "proxy")
+              : service.stopSidecar("api-1", "proxy");
+          let settled = false;
+          void mutation.finally(() => {
+            settled = true;
+          });
+          await Promise.resolve();
+          expect(settled).toBe(false);
+          expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+          const current = sessions.get("api-1");
+          if (current) {
+            sessions.set("api-1", {
+              ...current,
+              status: "stopped",
+              stopReason: "stale_timeout",
+              staleSidecars: ["proxy"],
+            });
+          }
+          releasePark();
+
+          const view = await mutation;
+          expect(view.state).toBe("stale");
+          expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        },
+      );
     });
 
     describe("GAP 1c: scheduled/interval wakes claimed while a park is mid-flight", () => {
@@ -32096,7 +32286,7 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
         const internals = staleInternals(service);
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;
@@ -32162,7 +32352,7 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
         const internals = staleInternals(service);
         let releasePark: () => void = () => {};
-        internals.staleParkInFlight.set(
+        internals.sessionLifecycleLocks.set(
           "api-1",
           new Promise<void>((resolve) => {
             releasePark = resolve;

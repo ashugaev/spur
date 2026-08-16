@@ -2273,22 +2273,11 @@ export class SessionService {
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
   private readonly reopensInFlight = new Set<string>();
-  // Session ids parkStaleSession currently owns (from just before its
-  // destructive kill+teardown through its final write/abandon), mapped to a
-  // promise that settles (never rejects) once that ownership ends —
-  // success, abandon, or an unexpected throw all settle it in park's
-  // `finally`. Deliberately NOT the same flag as queueDeliveryInFlight: that
-  // flag is legitimately held by an ordinary queued-message drain/flush
-  // while a concurrent deliver()/send() is expected to proceed anyway
-  // (serialized behind the pane write lock, never rejected — see AC12). A
-  // park in flight is different: it is actively destroying the pane, so
-  // every wake entry point (send, deliverPrepared, switchAuth, flush, the
-  // queued-message drain) must wait for the park to finish rather than
-  // reject — a park is bounded and short, so waiting only delays a wake, it
-  // never drops one — and then re-read the session record before touching
-  // the pane, since the park may have just changed status/stopReason/
-  // staleSidecars underneath it.
-  private readonly staleParkInFlight = new Map<string, Promise<void>>();
+  // Serializes lifecycle mutations that can kill, relaunch, write to, or
+  // snapshot one session's agent and sidecar panes. Distinct from the pane
+  // write lock: callers acquire lifecycle first, then pane-write. Helpers
+  // suffixed Locked run only under this lock and never acquire it again.
+  private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
@@ -4140,6 +4129,27 @@ export class SessionService {
     }
   }
 
+  private async withSessionLifecycleLock<T>(
+    sessionId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sessionLifecycleLocks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.sessionLifecycleLocks.set(sessionId, current);
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.sessionLifecycleLocks.get(sessionId) === current) {
+        this.sessionLifecycleLocks.delete(sessionId);
+      }
+    }
+  }
+
   private scheduleDeliveryRunner(sessionId: string): void {
     this.ensureDeliveryRunner(sessionId);
   }
@@ -4188,8 +4198,33 @@ export class SessionService {
   // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
   // re-asserted "running" before anything is torn down.
   private async parkStaleSession(view: SessionView): Promise<void> {
-    const latest = readSession(this.config.dataDir, view.id);
-    if (!latest || latest.status !== "running") {
+    return this.withSessionLifecycleLock(view.id, () => this.parkStaleSessionLocked(view));
+  }
+
+  private async parkStaleSessionLocked(view: SessionView): Promise<void> {
+    const candidate = readSession(this.config.dataDir, view.id);
+    if (!candidate) {
+      return;
+    }
+    const classified = await this.classifySessionRecord(candidate);
+    const latest = classified.session;
+    const parkActivityAt = resolveParkActivityAt(classified);
+    const deliveryPending: boolean = this.shouldRunDelivery(latest);
+    if (
+      latest.project === SHEPHERD_PROJECT_ID ||
+      this.spawnsInFlight.has(latest.id) ||
+      this.isInRestoreWarmup(latest.id) ||
+      deliveryPending ||
+      parkActivityAt === null ||
+      !shouldParkForStale(
+        {
+          status: latest.status,
+          state: classified.state,
+          lastActivityAt: parkActivityAt.toISOString(),
+        },
+        this.resolveStaleAfterMs(latest),
+      )
+    ) {
       return;
     }
     // A delivery already touching this session's pane (a queued-message
@@ -4209,19 +4244,7 @@ export class SessionService {
       });
       return;
     }
-    // Claim a dedicated flag (not queueDeliveryInFlight — that one is
-    // legitimately held by an ordinary drain/flush while a concurrent
-    // deliver() is expected to proceed, see the field comment) for our own
-    // destructive section: every wake entry point (send, deliverPrepared,
-    // switchAuth, flush, the queued-message drain) checks it before touching
-    // the pane and awaits it instead of racing the kill/teardown below.
-    // Settled on every exit — success, abandon, or an unexpected throw.
-    let settleParkInFlight!: () => void;
-    const parkInFlight = new Promise<void>((resolve) => {
-      settleParkInFlight = resolve;
-    });
-    this.staleParkInFlight.set(latest.id, parkInFlight);
-    try {
+    {
       const project = this.resolveProjectForSession(latest);
       // Promise.all, matching the sidecar-liveness scan pattern elsewhere in
       // this file (see the runningSidecarNames lookup): probing each pane's
@@ -4258,7 +4281,7 @@ export class SessionService {
           message: `Sidecar teardown failed while parking ${latest.id}: ${message}`,
         });
       }
-      const idleMs = Date.now() - Date.parse(view.lastActivityAt);
+      const idleMs = Date.now() - parkActivityAt.getTime();
       const staleAfterMs = this.resolveStaleAfterMs(latest);
       // killAgentPaneAndConfirmExit/teardownSessionSidecars each take
       // multi-second REAP_CONFIRM_INTERVAL_MS/REAP_GRACE_MS waits and
@@ -4292,21 +4315,10 @@ export class SessionService {
         // if a loop is already running (deliveryRuns dedupe), and the loop's
         // own tryDeliverQueuedMessage claims queueDeliveryInFlight before its
         // first await, so this can never start a second concurrent recovery
-        // attempt against the same pane. Settle and release staleParkInFlight
-        // first (the destructive part of this park is already done, nothing
-        // after this point touches the pane) — this is park's OWN remedial
-        // recovery, not a competing wake, and calling scheduleDeliveryRunner
-        // while still holding the flag would deadlock a waiter that is itself
-        // waiting on this exact promise before it can run (send,
-        // deliverPrepared, switchAuth, flush, tryDeliverQueuedMessage all
-        // await this promise then re-read, never the other way around — none
-        // of them is on parkStaleSession's own call stack, so settling before
-        // this synchronous kick-off is what keeps it that way).
+        // attempt against the same pane. Queue the runner after this locked
+        // method returns; its promise starts on a later microtask and chains
+        // behind the lifecycle lock held here.
         if (cleaned && cleaned.status === "running" && deliveryPending) {
-          settleParkInFlight();
-          if (this.staleParkInFlight.get(latest.id) === parkInFlight) {
-            this.staleParkInFlight.delete(latest.id);
-          }
           this.scheduleDeliveryRunner(cleaned.id);
         }
         return;
@@ -4333,15 +4345,6 @@ export class SessionService {
         message: `Parked ${latest.id} after ${Math.round(idleMs / 60_000)}m idle`,
         details: { idleMs, staleAfterMs, staleSidecars },
       });
-    } finally {
-      // Settling is idempotent (a no-op if the early-release branch above
-      // already resolved this promise) and must never throw or reject —
-      // every waiter treats settlement as "the park is over", not "the park
-      // succeeded".
-      settleParkInFlight();
-      if (this.staleParkInFlight.get(latest.id) === parkInFlight) {
-        this.staleParkInFlight.delete(latest.id);
-      }
     }
   }
 
@@ -9144,6 +9147,13 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () => this.sendLocked(sessionId, request));
+  }
+
+  private async sendLocked(
+    sessionId: string,
+    request: SendMessageRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9156,34 +9166,14 @@ export class SessionService {
     }
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
-      return this.deliverPrepared(sessionId, finalMessage, {
+      return this.deliverPreparedLocked(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
     }
 
-    // A park in flight owns this pane's kill+teardown right now — the
-    // recovery step below can relaunch it, which would race that
-    // destruction. staleParkInFlight is the dedicated flag for exactly this
-    // (not queueDeliveryInFlight: that one is legitimately held by an
-    // ordinary drain/flush that a concurrent send() must still proceed
-    // behind, not reject — see AC12). A park is bounded and short, and this
-    // send is a scheduled/interval wake's already-claimed occurrence
-    // (processScheduledWakes clears the due occurrence before calling
-    // send()), so rejecting here would lose it outright with nothing left to
-    // re-arm it — wait for the park to finish instead, then re-read: the
-    // park may have just changed status/stopReason/staleSidecars, and
-    // ensureSessionReadyForSend below must see that post-park record, not
-    // this pre-park snapshot.
-    const parkInFlight = this.staleParkInFlight.get(sessionId);
-    if (parkInFlight) {
-      await parkInFlight;
-    }
-    const sessionForRecovery = parkInFlight
-      ? (readSession(this.config.dataDir, sessionId) ?? session)
-      : session;
-    const readySession = await this.ensureSessionReadyForSend(sessionForRecovery);
+    const readySession = await this.ensureSessionReadyForSend(session);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
@@ -9235,7 +9225,7 @@ export class SessionService {
       });
     }
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
-      await this.tryDeliverQueuedMessage(sessionId);
+      await this.tryDeliverQueuedMessageLocked(sessionId);
     }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
@@ -9344,7 +9334,20 @@ export class SessionService {
   // so there is exactly one immediate-delivery path, not a second one forked
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
-    let session = this.readSessionWithQueuedMessage(sessionId, message);
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
+    if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.flushQueuedMessageLocked(sessionId, message),
+    );
+  }
+
+  private async flushQueuedMessageLocked(
+    sessionId: string,
+    message: string,
+  ): Promise<SessionView> {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
     // Both probes are synchronous, before any await. The pane-lock probe
     // catches a drain already past its own queueDeliveryInFlight registration
     // and into the pane write; the marker probe catches a drain (or another
@@ -9353,22 +9356,9 @@ export class SessionService {
     if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
     }
-    // staleParkInFlight: a park in flight owns this pane's kill+teardown
-    // right now (see send()'s identical check for why this is a separate
-    // flag from queueDeliveryInFlight, and why waiting rather than rejecting
-    // is correct here too). Re-read the queued-message target afterward: the
-    // message this flush was asked for may no longer be queued, or may no
-    // longer be the head, once the park has finished — readSessionWithQueuedMessage
-    // throws SessionResourceNotFoundError in either case, which is the
-    // correct outcome for a flush whose target moved out from under it.
-    const parkInFlight = this.staleParkInFlight.get(sessionId);
-    if (parkInFlight) {
-      await parkInFlight;
-      session = this.readSessionWithQueuedMessage(sessionId, message);
-    }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverPrepared(sessionId, message, {
+      await this.deliverPreparedLocked(sessionId, message, {
         entryPoint: "flush",
         recoverOnLiveAckTimeout: true,
       });
@@ -9432,6 +9422,21 @@ export class SessionService {
       recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.deliverPreparedLocked(sessionId, message, options),
+    );
+  }
+
+  private async deliverPreparedLocked(
+    sessionId: string,
+    message: string,
+    options: {
+      interrupt?: boolean;
+      entryPoint: "send" | "deliver" | "flush";
+      hasAttachments?: boolean;
+      recoverOnLiveAckTimeout?: boolean;
+    },
+  ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
@@ -9452,24 +9457,7 @@ export class SessionService {
         });
         throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
       }
-      // A park in flight owns this pane's kill+teardown right now — see
-      // send()'s identical check for why this is staleParkInFlight, not
-      // queueDeliveryInFlight (that flag is legitimately held by an ordinary
-      // drain/flush that a concurrent deliverPrepared() must still proceed
-      // behind, not reject — see AC12), and why waiting for the park rather
-      // than rejecting is correct: this is deliver()'s own path (a triggers.ts
-      // event already claimed), and flush()'s, neither of which gets another
-      // attempt if rejected here. Re-read afterward: the park may have just
-      // changed status/stopReason/staleSidecars, and ensureSessionReadyForSend
-      // below must see that post-park record, not this pre-park snapshot.
-      const parkInFlight = this.staleParkInFlight.get(sessionId);
-      if (parkInFlight) {
-        await parkInFlight;
-      }
-      const sessionForReady = parkInFlight
-        ? (readSession(this.config.dataDir, sessionId) ?? initialSession)
-        : initialSession;
-      const readySession = await this.ensureSessionReadyForSend(sessionForReady);
+      const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
@@ -10042,6 +10030,16 @@ export class SessionService {
     sidecarName: string,
     request: StartSidecarRequest = {},
   ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.startSidecarLocked(sessionId, sidecarName, request),
+    );
+  }
+
+  private async startSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest,
+  ): Promise<SessionView> {
     const caller = sidecarCallerContextFromRequest(request);
     const sidecarDepth = nextSidecarDepth(caller);
     if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
@@ -10219,6 +10217,15 @@ export class SessionService {
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.stopSidecarLocked(sessionId, sidecarName),
+    );
+  }
+
+  private async stopSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11307,6 +11314,13 @@ export class SessionService {
   }
 
   async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () => this.restoreLocked(sessionId, request));
+  }
+
+  private async restoreLocked(
+    sessionId: string,
+    request: RestoreSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11743,7 +11757,9 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.reopenLocked(sessionId, request);
+      return await this.withSessionLifecycleLock(sessionId, () =>
+        this.reopenLocked(sessionId, request),
+      );
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
@@ -11844,7 +11860,7 @@ export class SessionService {
     await this.refreshDashboardCacheEntry(record);
 
     try {
-      return await this.restore(sessionId, request);
+      return await this.restoreLocked(sessionId, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The completed record's Telegram binding, artifacts, and work-item
@@ -11904,6 +11920,16 @@ export class SessionService {
   }
 
   async switchAuth(
+    sessionId: string,
+    accountId: string,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+  ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.switchAuthLocked(sessionId, accountId, opts),
+    );
+  }
+
+  private async switchAuthLocked(
     sessionId: string,
     accountId: string,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
@@ -11979,22 +12005,7 @@ export class SessionService {
     // reaches relaunchSessionInPlace, the pane is already gone, so its own
     // pane-pid capture would find nothing to check.
     //
-    // A park in flight owns this pane's kill+teardown right now — the kill
-    // below would race it. staleParkInFlight, not queueDeliveryInFlight (see
-    // send()'s identical check), and waiting rather than rejecting is
-    // correct here too: this is a caller-initiated account switch, not a
-    // retryable poll, so rejecting would just surface a spurious failure for
-    // what is really only a short delay. Re-read afterward: the park may
-    // have just changed status/stopReason/staleSidecars, and both the kill
-    // confirmation and the recovery below must target that post-park record,
-    // not this pre-park snapshot.
-    const parkInFlight = this.staleParkInFlight.get(sessionId);
-    if (parkInFlight) {
-      await parkInFlight;
-    }
-    const recoveryTarget = parkInFlight
-      ? (readSession(this.config.dataDir, sessionId) ?? updated)
-      : updated;
+    const recoveryTarget = readSession(this.config.dataDir, sessionId) ?? updated;
     await this.killAgentPaneAndConfirmExit(recoveryTarget, { failOnSurvivors: true });
     const relaunched = await this.ensureSessionReadyForSend(recoveryTarget);
     this.logEvent("session.auth.switched", {
@@ -12397,24 +12408,18 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.tryDeliverQueuedMessageLocked(sessionId),
+    );
+  }
+
+  private async tryDeliverQueuedMessageLocked(sessionId: string): Promise<boolean> {
     // Synchronous, before any await: a flush already registered for this
     // session owns the next attempt. Stand down instead of queuing behind
     // the pane lock — the loop's own sleep-and-continue retry covers it, and
     // this is not an error path (G2).
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
-    }
-    // A park in flight is actively destroying the pane this attempt would
-    // otherwise relaunch into — wait for it to finish rather than standing
-    // down: send()'s own call into this function (queued-message delivery
-    // right after a queue append) has nowhere else to retry from within the
-    // same request, so standing down here would sit the message until
-    // whatever poll happens to notice it is still queued. Waiting is bounded
-    // (a park is short) and the readSession right below already re-reads
-    // fresh once this settles.
-    const parkInFlight = this.staleParkInFlight.get(sessionId);
-    if (parkInFlight) {
-      await parkInFlight;
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
