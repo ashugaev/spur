@@ -46,6 +46,8 @@ import type {
   SessionView,
   StateSource,
 } from "../../src/types.js";
+// Type-only, so it never bypasses the mocked module registry below.
+import type { AgentSendOutcome } from "../../src/session-service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -73,8 +75,8 @@ const agentQueuedSendPromptGraceMsMock = vi.fn();
 const agentSessionConfigMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
-const agentSubmitAckWindowMsMock = vi.fn();
-const agentSubmitAckMaxResendsMock = vi.fn();
+const agentSubmitAckPacingMock = vi.fn();
+const agentHasLaunchSubmitAckMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
@@ -401,8 +403,8 @@ vi.mock("../../src/agents/index.js", () => ({
   agentSessionConfig: agentSessionConfigMock,
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
-  agentSubmitAckWindowMs: agentSubmitAckWindowMsMock,
-  agentSubmitAckMaxResends: agentSubmitAckMaxResendsMock,
+  agentSubmitAckPacing: agentSubmitAckPacingMock,
+  agentHasLaunchSubmitAck: agentHasLaunchSubmitAckMock,
   createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
@@ -997,10 +999,11 @@ type SessionServiceInternals = {
       agent: "claude" | "codex" | "cursor";
       launchCommand: string;
       worktreePath: string;
+      agentSessionId?: string;
     },
     message: string,
-    options?: { interrupt?: boolean },
-  ): Promise<void>;
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
+  ): Promise<AgentSendOutcome>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -1018,6 +1021,11 @@ type SessionServiceInternals = {
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
   return service as SessionServiceInternals;
 }
+
+// Typed, because vitest's `toBe` accepts any expected value: renaming an outcome
+// in the source has to fail this file's typecheck, not only its next run.
+const SUBMITTED: AgentSendOutcome = "submitted";
+const SUBMIT_UNCONFIRMED: AgentSendOutcome = "submit_unconfirmed";
 
 async function createDisposedSessionService() {
   const { SessionService } = await loadSessionServiceModule();
@@ -1140,12 +1148,19 @@ describe("SessionService", () => {
       .mockImplementation(
         (agent: string) => agent === "codex" || agent === "claude" || agent === "cursor",
       );
-    agentSubmitAckWindowMsMock
+    agentHasLaunchSubmitAckMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 300_000));
-    agentSubmitAckMaxResendsMock
+      .mockImplementation((agent: string) => agent === "claude");
+    agentSubmitAckPacingMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 12 : 2));
+      .mockImplementation((agent: string, options?: { freshLaunch?: boolean }) => {
+        if (agent === "claude" && options?.freshLaunch === true) {
+          return { windowMs: 5_000, maxResends: 2 };
+        }
+        return agent === "cursor"
+          ? { windowMs: 5_000, maxResends: 12 }
+          : { windowMs: 300_000, maxResends: 2 };
+      });
     captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
     scanCodexRolloutForMessageMock
       .mockReset()
@@ -1604,6 +1619,10 @@ describe("SessionService", () => {
       {
         agent: "claude",
       },
+    );
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({ agentSessionId: PINNED_CLAUDE_SESSION_ID, freshLaunch: true }),
     );
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], undefined, {
       agent: "claude",
@@ -2154,6 +2173,36 @@ describe("SessionService", () => {
           session.worktreePath === "/tmp/spur-worktrees/api/api-1",
       ),
     ).toBe(true);
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({ freshLaunch: true }),
+    );
+  });
+
+  it("logs the step 1 event from a background pipelined spawn", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({
+      project: "api",
+      prompt: "ship the task",
+      steps: ["research", "test"],
+    });
+
+    await vi.waitFor(() => {
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.pipeline.step_sent",
+          sessionId: "api-1",
+          message: "Sent pipeline step 1/2 to api-1",
+          details: { stepIndex: 1, totalSteps: 2 },
+        }),
+      );
+    });
   });
 
   it("passes project reasoning effort through a background launch", async () => {
@@ -2585,6 +2634,12 @@ describe("SessionService", () => {
     expect(restored.id).toBe("api-1");
     expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).toContain(
       "Mode: council. Load the `council` skill",
+    );
+    // A resumed agent already owns a transcript, so its send keeps the
+    // mid-session pacing and its own submit-ack timeout handling.
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({ freshLaunch: false }),
     );
   });
 
@@ -3866,6 +3921,53 @@ describe("SessionService", () => {
       nextStepIndex: 1,
       awaitingStepIndex: 0,
     });
+    // Step 1 rides the launch message, so the spawn is the only place that can
+    // report it; the delivery loop starts at step 2 and keeps its numbering.
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.pipeline.step_sent",
+        sessionId: "api-1",
+        message: "Sent pipeline step 1/2 to api-1",
+        details: { stepIndex: 1, totalSteps: 2 },
+      }),
+    );
+  });
+
+  it("withholds the step 1 event when the launch send is never acknowledged", async () => {
+    // Same bar as steps 2..N: the event means submitted. An unacked launch send
+    // keeps the session (the pane is live) and reports the ambiguity through
+    // session.submit.timeout instead.
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/home/test/.claude/pinned.jsonl",
+    });
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+      steps: ["research", "test"],
+    });
+
+    expect(result.id).toBe("api-1");
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.pipeline.step_sent" }),
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        details: expect.objectContaining({ freshLaunch: true, processAlive: true }),
+      }),
+    );
   });
 
   it("uses project default spawn steps when the request does not provide them", async () => {
@@ -3959,6 +4061,10 @@ describe("SessionService", () => {
       "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
     );
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.pipeline.step_sent" }),
+    );
   });
 
   it("disables project default spawn steps in plan mode", async () => {
@@ -4630,7 +4736,9 @@ describe("SessionService", () => {
         },
         "follow up",
       ),
-    ).resolves.toBeUndefined();
+      // Cursor's live-process recovery counts as submitted, same as it does for
+      // the pipeline delivery loop, which treats a non-throwing send as sent.
+    ).resolves.toBe(SUBMITTED);
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
     expect(logSpurEventMock).toHaveBeenCalledWith(
@@ -4725,6 +4833,9 @@ describe("SessionService", () => {
     );
   });
 
+  // Mid-session only: a claude with no pinned id and no transcript still has
+  // nothing to scan. A launch send passes freshLaunch, which makes the claude
+  // adapter build a baseline at the pinned id's path, so it never lands here.
   it("fires-and-forgets a claude send when no JSONL baseline is captured", async () => {
     createAgentSubmitAckBindingMock.mockResolvedValue(null);
 
@@ -4745,6 +4856,125 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
     expect(waitForAckSpy).not.toHaveBeenCalled();
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("resends Enter on the launch send window and keeps a live session on exhaustion", async () => {
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/home/test/.claude/pinned.jsonl" });
+
+    // Never throws while the pane process is live: the foreground spawn kills the
+    // tmux session in its catch and the background spawn retries from scratch, so
+    // a false-negative ack would destroy a working session.
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "claude",
+          launchCommand: "claude --dangerously-skip-permissions",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          agentSessionId: "pinned",
+        },
+        "[Spur step 1/2: research]",
+        { freshLaunch: true },
+      ),
+      // Resolves, but reports the message as unconfirmed so the caller withholds
+      // the step_sent event.
+    ).resolves.toBe(SUBMIT_UNCONFIRMED);
+
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({ agentSessionId: "pinned", freshLaunch: true }),
+    );
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
+    expect(waitForAckMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "[Spur step 1/2: research]",
+      5_000,
+    );
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    // Uncached probe: the TTL-cached fleet/ps snapshots would report an agent
+    // that just died as alive, and this value decides whether the send throws.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
+      fresh: true,
+    });
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "claude",
+          freshLaunch: true,
+          processAlive: true,
+        }),
+      }),
+    );
+  });
+
+  it("still throws on an exhausted codex launch send so the spawn retries", async () => {
+    // Only claude has launch-send pacing, so only claude's launch send may keep a
+    // live pane on exhaustion. Codex would otherwise report a spawn as completed
+    // with its prompt unsubmitted and no retry.
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/rollout.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "ship the task",
+        { freshLaunch: true },
+      ),
+    ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
+    expect(waitForAckMock).toHaveBeenCalledWith(expect.anything(), "ship the task", 300_000);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws on an exhausted launch send when the agent process is gone", async () => {
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: null,
+    });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "claude",
+          launchCommand: "claude --dangerously-skip-permissions",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          agentSessionId: "pinned",
+        },
+        "[Spur step 1/2: research]",
+        { freshLaunch: true },
+      ),
+    ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
   });
 
   describe("pane write lock", () => {
@@ -4847,7 +5077,7 @@ describe("SessionService", () => {
 
       // A different pane is not blocked behind api-1's in-flight ack wait.
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-2", "second", { agent: "codex" });
-      await expect(secondSend).resolves.toBeUndefined();
+      await expect(secondSend).resolves.toBe(SUBMITTED);
 
       releaseFirstAck();
       await firstSend;
@@ -20621,6 +20851,73 @@ describe("SessionService", () => {
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
     expect(writeSessionMock.mock.calls.at(-1)?.[1].agentSessionId).toBe(PINNED_CLAUDE_SESSION_ID);
+    // The relaunched claude has no transcript, exactly like a spawn's launch
+    // send, so the restore send must arm the ack the same way.
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({
+        agentSessionId: PINNED_CLAUDE_SESSION_ID,
+        freshLaunch: true,
+      }),
+    );
+  });
+
+  it("reports a degraded restore when the fresh-launch send stays unconfirmed", async () => {
+    findAgentSessionIdMock.mockResolvedValue(null);
+    buildAgentRestorePlanMock.mockResolvedValue(null);
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(true);
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/home/test/.claude/pinned.jsonl",
+    });
+    mockTimerPromisesSleepWithFakeTimers();
+    const restored = await service.restore("api-1");
+
+    // Alive but unproven: restore keeps the session and names what is unconfirmed
+    // instead of reporting a clean restore.
+    expect(restored.id).toBe("api-1");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.restore.recovered",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          reason: "submit_unconfirmed",
+          agent: "claude",
+          processAlive: true,
+        }),
+      }),
+    );
+    // Full success path, not the catch: sidecars and the warmup window still run.
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.restore.completed", sessionId: "api-1" }),
+    );
   });
 
   it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {

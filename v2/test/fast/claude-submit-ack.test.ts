@@ -3,12 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { findLatestSessionFileMock } = vi.hoisted(() => ({
-  findLatestSessionFileMock: vi.fn<(worktreePath: string) => Promise<string | null>>(),
-}));
+const { findLatestSessionFileMock, sessionFileForIdMock, sessionFilePathForIdMock } = vi.hoisted(
+  () => ({
+    findLatestSessionFileMock: vi.fn<(worktreePath: string) => Promise<string | null>>(),
+    sessionFileForIdMock: vi.fn<(worktreePath: string, id: string) => Promise<string | null>>(),
+    sessionFilePathForIdMock: vi.fn<(worktreePath: string, id: string) => string>(),
+  }),
+);
 
 vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestSessionFileMock,
+  sessionFileForId: sessionFileForIdMock,
+  sessionFilePathForId: sessionFilePathForIdMock,
 }));
 
 import {
@@ -20,6 +26,10 @@ const tempDirs: string[] = [];
 
 beforeEach(() => {
   findLatestSessionFileMock.mockReset();
+  sessionFileForIdMock.mockReset().mockResolvedValue(null);
+  sessionFilePathForIdMock
+    .mockReset()
+    .mockImplementation((worktreePath, id) => join(worktreePath, `${id}.jsonl`));
 });
 
 afterEach(async () => {
@@ -66,6 +76,34 @@ describe("captureClaudeSubmitBaseline", () => {
     findLatestSessionFileMock.mockResolvedValue("/no/such/file.jsonl");
     const result = await captureClaudeSubmitBaseline("/tmp/worktree");
     expect(result).toBeNull();
+  });
+
+  it("returns null for a pinned id without a transcript when the launch is not fresh", async () => {
+    const result = await captureClaudeSubmitBaseline("/tmp/worktree", "pinned-id");
+    expect(result).toBeNull();
+    expect(sessionFilePathForIdMock).not.toHaveBeenCalled();
+  });
+
+  it("builds a zero-size baseline at the pinned id path on a fresh launch", async () => {
+    // A freshly launched claude creates `<uuid>.jsonl` only when it persists the
+    // first submitted message, so the launch send must arm against the path the
+    // pinned id will create instead of skipping the ack.
+    const result = await captureClaudeSubmitBaseline("/tmp/worktree", "pinned-id", {
+      freshLaunch: true,
+    });
+    expect(result).toEqual({ file: "/tmp/worktree/pinned-id.jsonl", size: 0 });
+  });
+
+  it("prefers an existing transcript over the constructed path on a fresh launch", async () => {
+    const filePath = await makeJsonl("existing.jsonl", [
+      { type: "user", message: { role: "user", content: "hi" } },
+    ]);
+    sessionFileForIdMock.mockResolvedValue(filePath);
+    const result = await captureClaudeSubmitBaseline("/tmp/worktree", "pinned-id", {
+      freshLaunch: true,
+    });
+    expect(result?.file).toBe(filePath);
+    expect(result?.size).toBeGreaterThan(0);
   });
 });
 
@@ -185,6 +223,21 @@ describe("scanClaudeJsonlForMessage", () => {
     findLatestSessionFileMock.mockResolvedValue(rotatedFile);
 
     const found = await scanClaudeJsonlForMessage(baseline, "new", "/tmp/worktree");
+    expect(found).toBe(true);
+  });
+
+  it("resolves the pinned id when the constructed baseline file never appears", async () => {
+    const realFile = await makeJsonl("pinned.jsonl", [
+      { type: "user", message: { role: "user", content: "step one" } },
+    ]);
+    sessionFileForIdMock.mockResolvedValue(realFile);
+
+    const found = await scanClaudeJsonlForMessage(
+      { file: "/no/such/dir/pinned-id.jsonl", size: 0 },
+      "step one",
+      "/tmp/worktree",
+      "pinned-id",
+    );
     expect(found).toBe(true);
   });
 
