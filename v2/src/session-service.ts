@@ -3240,7 +3240,7 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          await this.withSessionLifecycleLock(session.id, async () => {
+          await this.withWorkspaceLifecycleLocks(session.id, async () => {
           // Claim the due occurrence BEFORE sending: clear scheduledWake and
           // persist it first. A slow or failing send must not leave the wake
           // due, or the `<= now` guard stays true and it re-fires every tick
@@ -3310,7 +3310,7 @@ export class SessionService {
 
         const intervalWake = session.intervalWake;
         if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
-          await this.withSessionLifecycleLock(session.id, async () => {
+          await this.withWorkspaceLifecycleLocks(session.id, async () => {
           // Claim the due tick BEFORE sending: advance nextDueAt to the next
           // future interval (catching up past any missed intervals) and persist
           // it first. A slow or failing send must not leave the wake due, or the
@@ -3552,7 +3552,7 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
-        await this.withSessionLifecycleLock(session.id, async () => {
+        await this.withWorkspaceLifecycleLocks(session.id, async () => {
         // Claim the due occurrence BEFORE sending: advance nextDueAt to the
         // next future scheduled time and persist it first. A slow or failing
         // send must not leave the wake due, or the `<= now` guard stays true
@@ -9202,7 +9202,9 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () => this.sendLocked(sessionId, request));
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.sendLocked(sessionId, request),
+    );
   }
 
   private async sendLocked(
@@ -9393,7 +9395,7 @@ export class SessionService {
     if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
     }
-    return this.withSessionLifecycleLock(sessionId, () =>
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.flushQueuedMessageLocked(sessionId, message),
     );
   }
@@ -9477,7 +9479,7 @@ export class SessionService {
       recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () =>
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.deliverPreparedLocked(sessionId, message, options),
     );
   }
@@ -10283,6 +10285,26 @@ export class SessionService {
     return outcome;
   }
 
+  private clearWorkspaceStaleSidecarReplay(
+    session: SessionRecord,
+    sidecarName: string,
+  ): void {
+    const workspaceId = workspaceIdOf(session);
+    for (const candidate of listSessions(this.config.dataDir)) {
+      if (workspaceIdOf(candidate) !== workspaceId) continue;
+      const current = readSession(this.config.dataDir, candidate.id);
+      if (!current?.staleSidecars?.includes(sidecarName)) continue;
+      const remaining = current.staleSidecars.filter((name) => name !== sidecarName);
+      const updated: SessionRecord = { ...current };
+      if (remaining.length > 0) {
+        updated.staleSidecars = remaining;
+      } else {
+        delete updated.staleSidecars;
+      }
+      writeSession(this.config.dataDir, updated);
+    }
+  }
+
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.stopSidecarLocked(sessionId, sidecarName),
@@ -10306,16 +10328,24 @@ export class SessionService {
       throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
     }
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
+    const sidecar = project?.sidecars[sidecarName];
+    const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
 
     // A dead pane or an absent tmux session with no recorded identity means
     // there is genuinely nothing left to reap.
     const owner = readSession(this.config.dataDir, ownerId);
     const alive = await sidecarTmuxAlive(ownerId, sidecarName);
     if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+      if (clearsWorkspaceReplay) {
+        this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+      }
       return this.enrich(session);
     }
 
     await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+    if (clearsWorkspaceReplay) {
+      this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+    }
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -11388,7 +11418,9 @@ export class SessionService {
   }
 
   async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () => this.restoreLocked(sessionId, request));
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.restoreLocked(sessionId, request),
+    );
   }
 
   private async restoreLocked(
@@ -11831,7 +11863,7 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.withSessionLifecycleLock(sessionId, () =>
+      return await this.withWorkspaceLifecycleLocks(sessionId, () =>
         this.reopenLocked(sessionId, request),
       );
     } finally {
@@ -11998,7 +12030,7 @@ export class SessionService {
     accountId: string,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () =>
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.switchAuthLocked(sessionId, accountId, opts),
     );
   }
@@ -12482,7 +12514,7 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
-    return this.withSessionLifecycleLock(sessionId, () =>
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.tryDeliverQueuedMessageLocked(sessionId),
     );
   }

@@ -30943,6 +30943,7 @@ describe("SessionService", () => {
       paneWriteLocks: Map<string, Promise<void>>;
       deliveryRuns: Map<string, Promise<void>>;
       withSessionLifecycleLock<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+      withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
       pollAttentionStates(baseline: boolean): Promise<void>;
       parkStaleSession(view: SessionView): Promise<void>;
       teardownSessionSidecars(session: SessionRecord): Promise<void>;
@@ -32403,6 +32404,161 @@ describe("SessionService", () => {
         await stopped;
 
         expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+        expect(internals.sessionLifecycleLocks.has("api-2")).toBe(false);
+      });
+
+      it("holds an anchor sidecar stop behind a member stale wake through replay and commit", async () => {
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession({ sidecarNames: ["proxy"] }));
+        sessions.set(
+          "api-2",
+          staleParkableSession({
+            id: "api-2",
+            tmuxSession: "api-2",
+            deskId: "api-1",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            sidecarNames: ["proxy"],
+            status: "stopped",
+            stopReason: "stale_timeout",
+            staleSidecars: ["proxy"],
+          }),
+        );
+        let sidecarAlive = false;
+        sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
+        createTmuxSidecarSessionMock.mockImplementation(async () => {
+          sidecarAlive = true;
+        });
+        let memberPaneAlive = false;
+        tmuxSessionExistsMock.mockImplementation(async (name: string) =>
+          name === "api-2" ? memberPaneAlive : true,
+        );
+        isProcessRunningInTmuxMock.mockImplementation(async (name: string) =>
+          name === "api-2" ? memberPaneAlive : true,
+        );
+        createTmuxSessionMock.mockImplementation(async () => {
+          memberPaneAlive = true;
+        });
+        let releaseDelivery!: () => void;
+        const deliveryBarrier = new Promise<void>((resolve) => {
+          releaseDelivery = resolve;
+        });
+        let deliveryStarted!: () => void;
+        const deliveryStartedBarrier = new Promise<void>((resolve) => {
+          deliveryStarted = resolve;
+        });
+        sendMessageToTmuxMock.mockImplementation(async () => {
+          deliveryStarted();
+          await deliveryBarrier;
+        });
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+
+        const wake = service.send("api-2", { message: "wake member", queue: false });
+        await deliveryStartedBarrier;
+        const stop = service.stopSidecar("api-1", "proxy");
+        await Promise.resolve();
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
+
+        releaseDelivery();
+        await wake;
+        await stop;
+
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+        expect(sessions.get("api-2")?.status).toBe("running");
+        expect(sessions.get("api-2")).not.toHaveProperty("staleSidecars");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+        expect(internals.sessionLifecycleLocks.has("api-2")).toBe(false);
+      });
+
+      it("makes a member stale wake honor an anchor sidecar stop that won the lock", async () => {
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession({ sidecarNames: ["proxy"] }));
+        sessions.set(
+          "api-2",
+          staleParkableSession({
+            id: "api-2",
+            tmuxSession: "api-2",
+            deskId: "api-1",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            sidecarNames: ["proxy"],
+            status: "stopped",
+            stopReason: "stale_timeout",
+            staleSidecars: ["proxy"],
+          }),
+        );
+        let sidecarAlive = true;
+        sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
+        let releaseStop!: () => void;
+        const stopBarrier = new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+        let stopStarted!: () => void;
+        const stopStartedBarrier = new Promise<void>((resolve) => {
+          stopStarted = resolve;
+        });
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1--proxy") {
+            stopStarted();
+            await stopBarrier;
+            sidecarAlive = false;
+          }
+        });
+        let memberPaneAlive = false;
+        tmuxSessionExistsMock.mockImplementation(async (name: string) =>
+          name === "api-2" ? memberPaneAlive : true,
+        );
+        isProcessRunningInTmuxMock.mockImplementation(async (name: string) =>
+          name === "api-2" ? memberPaneAlive : true,
+        );
+        createTmuxSessionMock.mockImplementation(async () => {
+          memberPaneAlive = true;
+        });
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+
+        const stop = service.stopSidecar("api-1", "proxy");
+        await stopStartedBarrier;
+        const wake = service.send("api-2", { message: "wake after stop", queue: false });
+        await Promise.resolve();
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+        releaseStop();
+        await stop;
+        await wake;
+
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-2")?.status).toBe("running");
+        expect(sessions.get("api-2")).not.toHaveProperty("staleSidecars");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+        expect(internals.sessionLifecycleLocks.has("api-2")).toBe(false);
+      });
+
+      it("releases both workspace lifecycle keys after a failed member task", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        sessions.set(
+          "api-2",
+          staleParkableSession({ id: "api-2", tmuxSession: "api-2", deskId: "api-1" }),
+        );
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+
+        await expect(
+          internals.withWorkspaceLifecycleLocks("api-2", async () => {
+            throw new Error("workspace mutation failed");
+          }),
+        ).rejects.toThrow("workspace mutation failed");
+
         expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
         expect(internals.sessionLifecycleLocks.has("api-2")).toBe(false);
       });
