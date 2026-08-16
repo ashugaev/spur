@@ -190,6 +190,10 @@ else
   # one (Spur passes this on every launch); mirror that so sessionFileForId
   # can find it by the pinned id instead of falling through to a fresh launch.
   # pinned_session_id is parsed once above, before the resume/launch branch.
+  # Divergence to know about: this fake writes the file at launch, while real
+  # claude creates it only when it persists the first submitted message. That
+  # is why runtime tests never saw the launch send's missing submit ack, which
+  # loses pipeline step 1 whenever the claude TUI swallows the submit Enter.
   if [[ -n "$pinned_session_id" ]]; then
     session_uuid="$pinned_session_id"
   else

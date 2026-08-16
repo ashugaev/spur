@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
+import { writeSpawnDraft } from "@/lib/spawn-draft";
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -562,5 +563,1188 @@ describe("Dashboard project create/delete", () => {
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     expect(within(spawnProjectSelect).queryByRole("option", { name: "ghost-id" })).toBeNull();
+  });
+
+  it("spawns with the project-resolved model and workspace mode when the user touches neither control", async () => {
+    let spawnInit: RequestInit | undefined;
+    let spawnDefaultsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) spawnDefaultsRequests += 1;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "sonnet", label: "Sonnet" },
+              { id: "opus", label: "Opus" },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: "sonnet", worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as {
+      model?: string;
+      overrides?: { worktree: boolean };
+    };
+    expect(body.model).toBe("sonnet");
+    expect(body.overrides).toEqual({ worktree: false });
+    // Dashboard fetches this once and passes it into ModelSelect; ModelSelect
+    // must not also fetch its own copy for the same project+agent.
+    expect(spawnDefaultsRequests).toBe(1);
+  });
+
+  it("does not fetch spawn-defaults while the Spawn modal stays closed", async () => {
+    let spawnDefaultsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) spawnDefaultsRequests += 1;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "sonnet", label: "Sonnet" },
+              { id: "opus", label: "Opus" },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: "sonnet", worktree: false }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    // Force-resolve the project list (which also drives spawnProjectId via
+    // the sync effect, independent of the Spawn modal) before asserting no
+    // spawn-defaults request fired: the Spawn modal itself is still closed.
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+    openProjectMenu();
+    await waitFor(() => {
+      expect(screen.getByRole("menuitemradio", { name: "API" })).toBeInTheDocument();
+    });
+    fireEvent.click(projectFilterButton());
+    expect(spawnDefaultsRequests).toBe(0);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    await waitFor(() => {
+      expect(spawnDefaultsRequests).toBe(1);
+    });
+  });
+
+  it("blocks submit and surfaces an error instead of silently guessing worktree when spawn-defaults fails", async () => {
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+
+    // The model resolves fine; the workspace default request fails. Submit
+    // must stay disabled — never fall through to sending the "worktree"
+    // fallback state as if it were the project's real configured default.
+    await waitFor(() => {
+      expect(within(dialog).getByRole("button", { name: "Spawn model" })).toHaveTextContent(
+        "Sonnet",
+      );
+    });
+    expect(submitButton()).toBeDisabled();
+    expect(within(dialog).getByText(/daemon unreachable/)).toBeInTheDocument();
+
+    // Only a manual pick unblocks it, and only the user's own explicit
+    // choice is what gets sent — never a guess.
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "workspace mode" }), {
+      target: { value: "shared" },
+    });
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("does not fire preflight against the unresolved 'worktree' fallback mode while spawn-defaults is still pending", async () => {
+    let resolveSpawnDefaults: ((response: Response) => void) | undefined;
+    const pendingSpawnDefaults = new Promise<Response>((resolve) => {
+      resolveSpawnDefaults = resolve;
+    });
+    const preflightRequests: Array<{
+      projectId?: string;
+      prompt?: string;
+      agent?: string;
+      overrides?: { worktree: boolean };
+    }> = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      // The project's real default is "shared" (worktree: false), but this
+      // never settles until the test resolves it below, holding
+      // spawnWorkspaceMode on its hardcoded "worktree" initial value.
+      if (url.startsWith("/api/projects/api/spawn-defaults")) return pendingSpawnDefaults;
+      if (url === "/api/preflight") {
+        const body = JSON.parse(init?.body as string) as {
+          projectId?: string;
+          prompt?: string;
+          agent?: string;
+          overrides?: { worktree: boolean };
+        };
+        preflightRequests.push(body);
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    // Wait past the 500ms preflight debounce while spawn-defaults is still
+    // pending: no preflight request should fire against the unresolved,
+    // still-"worktree" fallback mode.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(preflightRequests).toEqual([]);
+
+    // Once spawn-defaults settles to the real "shared" default, preflight
+    // fires with the now-correct, resolved mode — never with the stale
+    // worktree:true fallback.
+    resolveSpawnDefaults?.(new Response(JSON.stringify({ model: "sonnet", worktree: false })));
+    await waitFor(() => {
+      expect(preflightRequests).toEqual([
+        {
+          projectId: "api",
+          prompt: "Do the thing",
+          agent: "claude",
+          overrides: { worktree: false },
+        },
+      ]);
+    });
+  });
+
+  it("unblocks submit when the user confirms the already-selected workspace mode after a spawn-defaults failure", async () => {
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: true,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole("button", { name: "Spawn model" })).toHaveTextContent(
+        "Sonnet",
+      );
+    });
+    expect(submitButton()).toBeDisabled();
+
+    // The select already shows "Worktree" (the initial state), so re-picking
+    // it from the select itself fires no native change event — a real
+    // <select> does not notify on a same-value re-selection, in any
+    // browser. The error banner's explicit "Use worktree" action is a real
+    // <button>, so it always fires a click regardless of input modality and
+    // regardless of whether the confirmed value matches what's shown.
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    expect(workspaceModeSelect).toHaveValue("worktree");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Use worktree" }));
+
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: true });
+  });
+
+  it("still applies the project's real workspace default after a mousedown-then-dismiss that picks nothing", async () => {
+    // B1 regression: opening the workspace-mode select and dismissing it
+    // without picking anything is a look-only interaction. It must not be
+    // mistaken for a manual override — the project's real (slow-to-arrive)
+    // default must still land once the spawn-defaults request settles.
+    let resolveSpawnDefaults: ((response: Response) => void) | undefined;
+    const pendingSpawnDefaults = new Promise<Response>((resolve) => {
+      resolveSpawnDefaults = resolve;
+    });
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) return pendingSpawnDefaults;
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    // Open the native select (mousedown) and dismiss it without choosing an
+    // option — a look-only pass, no confirmation. (Not simulated via an
+    // Escape keydown: that bubbles to the modal's own window-level Escape
+    // handler in jsdom, closing the whole modal — a real native <select>
+    // popup's dismissal is opaque to the page and never does that.)
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    expect(workspaceModeSelect).toHaveValue("worktree");
+    fireEvent.mouseDown(workspaceModeSelect);
+    fireEvent.blur(workspaceModeSelect);
+
+    resolveSpawnDefaults?.(
+      new Response(JSON.stringify({ model: null, worktree: false }), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("confirms the workspace mode via the banner's 'Use shared' action", async () => {
+    // jsdom does not synthesize a click from a keydown, so this only
+    // exercises a real click (as the case above does for "Use worktree");
+    // it is not keyboard-modality coverage.
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(within(dialog).getByText(/daemon unreachable/)).toBeInTheDocument();
+    });
+    expect(submitButton()).toBeDisabled();
+
+    const useSharedButton = within(dialog).getByRole("button", { name: "Use shared" });
+    fireEvent.click(useSharedButton);
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole("combobox", { name: "workspace mode" })).toHaveValue(
+        "shared",
+      );
+      expect(submitButton()).not.toBeDisabled();
+    });
+  });
+
+  it("re-derives the workspace mode from the newly selected project after a project switch, even with an explicitly-confirmed stored draft", async () => {
+    // This targets the in-modal switch path specifically: even a draft
+    // that recorded a genuine explicit confirmation (workspaceModeConfirmedFor:
+    // "api") was confirmed against whatever project it was saved for, not
+    // against every project. Switching the "Spawn project" picker to a
+    // different project must re-enter auto mode and re-resolve to the
+    // newly selected project's own configured default.
+    writeSpawnDraft({
+      prompt: "",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "worktree",
+      workspaceModeConfirmedFor: "api",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+    });
+    window.localStorage.setItem("spur:last-spawn-project", "api");
+
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "web-a1",
+            project: "web",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "web-a1",
+            worktree: false,
+            tmuxSession: "web-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/web",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    // The restored draft (workspaceMode: "worktree") agrees with the
+    // initial project's ("api") own resolved default, so this alone doesn't
+    // distinguish the bug.
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("worktree");
+    });
+
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "web" },
+    });
+
+    // "web" is configured shared. The shown mode must follow it, not the
+    // stale draft/previous-project value.
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("re-derives the workspace mode from the dashboard-filter-resolved project on open, even with a stored draft", async () => {
+    // B1 regression, dashboard-filter entry point: resolvePreferredSpawnProjectId
+    // gives the project FILTER precedence over the last-spawn-project storage
+    // key, so the project resolved on open is not necessarily the one the
+    // draft's workspaceMode was last auto-derived for. Opening the modal
+    // (never touching the in-modal project picker) must still show and send
+    // the filter-resolved project's own configured default, not the stale
+    // draft value.
+    writeSpawnDraft({
+      prompt: "",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "worktree",
+      workspaceModeConfirmedFor: null,
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+    });
+    window.localStorage.setItem("spur:last-spawn-project", "api");
+    window.history.replaceState(null, "", "/?project=web");
+
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "web-a1",
+            project: "web",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "web-a1",
+            worktree: false,
+            tmuxSession: "web-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/web",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    expect(within(dialog).getByRole("combobox", { name: "Spawn project" })).toHaveValue("web");
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("keeps the user's explicitly confirmed workspace mode across a close and reopen of the same project", async () => {
+    // The whole point of persisting workspaceModeConfirmedFor is to
+    // distinguish a real user confirmation from an auto-derived value: an
+    // explicit pick must survive a close/reopen of the SAME project even
+    // when it disagrees with that project's own resolved default, whereas
+    // the tests above prove it does not survive a project change.
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    let dialog = screen.getByRole("dialog");
+    const workspaceModeSelect = () =>
+      within(dialog).getByRole("combobox", { name: "workspace mode" });
+    await waitFor(() => {
+      expect(workspaceModeSelect()).toHaveValue("worktree");
+    });
+
+    // The user explicitly overrides the project's real ("worktree") default.
+    fireEvent.change(workspaceModeSelect(), { target: { value: "shared" } });
+    expect(workspaceModeSelect()).toHaveValue("shared");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    dialog = screen.getByRole("dialog");
+
+    // The explicit choice survives — it is not overwritten back to the
+    // project's auto-derived "worktree" default once spawn-defaults settles.
+    expect(workspaceModeSelect()).toHaveValue("shared");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+    });
+    expect(workspaceModeSelect()).toHaveValue("shared");
+  });
+
+  it("does not carry a project's explicit confirmation onto a different project resolved by the dashboard filter", async () => {
+    // Reviewer repro: a real prior pick (e.g. an error-banner "Use worktree"
+    // click) made against "api" must not leak onto "web" just because the
+    // draft still says workspaceModeConfirmedFor: "api" — a confirmation
+    // belongs to exactly one project, never to whichever project happens
+    // to be resolved on the next open.
+    writeSpawnDraft({
+      prompt: "",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "worktree",
+      workspaceModeConfirmedFor: "api",
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+    });
+    window.localStorage.setItem("spur:last-spawn-project", "api");
+    window.history.replaceState(null, "", "/?project=web");
+
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "web-a1",
+            project: "web",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "web-a1",
+            worktree: false,
+            tmuxSession: "web-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/web",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    expect(within(dialog).getByRole("combobox", { name: "Spawn project" })).toHaveValue("web");
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
+  });
+
+  it("restores a project's own explicit confirmation after switching away and back to it", async () => {
+    // Round-trip: pick "shared" against api's real ("worktree") default,
+    // switch to web, then switch back to api. The confirmation was made
+    // for api specifically, so it must still apply once api is resolved
+    // again — it must not have been silently dropped by the intervening
+    // switch to a different project.
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url.startsWith("/api/projects/web/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "api-a1",
+            project: "api",
+            agent: "claude",
+            model: "sonnet",
+            prompt: "Do the thing",
+            branch: "api-a1",
+            worktree: false,
+            tmuxSession: "api-a1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/repo/api",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Spawn Session" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Do the thing" },
+    });
+
+    const workspaceModeSelect = within(dialog).getByRole("combobox", { name: "workspace mode" });
+    const projectSelect = within(dialog).getByRole("combobox", { name: "Spawn project" });
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("worktree");
+    });
+
+    // Explicitly override api's own ("worktree") default.
+    fireEvent.change(workspaceModeSelect, { target: { value: "shared" } });
+    expect(workspaceModeSelect).toHaveValue("shared");
+
+    fireEvent.change(projectSelect, { target: { value: "web" } });
+    await waitFor(() => {
+      expect(workspaceModeSelect).toHaveValue("shared");
+    });
+
+    fireEvent.change(projectSelect, { target: { value: "api" } });
+
+    // The confirmation belongs to api, so it must still hold once api is
+    // resolved again — not silently dropped by the trip through web.
+    expect(workspaceModeSelect).toHaveValue("shared");
+
+    const submitButton = () => {
+      const button = dialog.querySelector('button[class*="min-w-32"]');
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("spawn submit button not found");
+      }
+      return button;
+    };
+    await waitFor(() => {
+      expect(submitButton()).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    const body = JSON.parse(spawnInit?.body as string) as { overrides?: { worktree: boolean } };
+    expect(body.overrides).toEqual({ worktree: false });
   });
 });

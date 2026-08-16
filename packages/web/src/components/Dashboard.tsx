@@ -56,6 +56,7 @@ import {
   writeSpawnDraft,
   type SpawnDraft,
 } from "@/lib/spawn-draft";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
@@ -532,16 +533,12 @@ function readLocationSearch(): string {
   return window.location.search;
 }
 
-function buildSpawnOverrides(
-  workspaceMode: WorkspaceMode,
-  defaultBranch: string,
-): SpawnOverrides | undefined {
+function buildSpawnOverrides(workspaceMode: WorkspaceMode, defaultBranch: string): SpawnOverrides {
   if (workspaceMode === "worktree") {
     const trimmed = defaultBranch.trim();
     return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
   }
-  if (workspaceMode === "shared") return { worktree: false };
-  return undefined;
+  return { worktree: false };
 }
 
 function projectOptionLabel(project: ProjectInfo): string {
@@ -1070,6 +1067,14 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself. Submit
+  // gates on this, not on `spawnModel === null` — a settled-empty catalog
+  // also has a null model but is a valid, submittable state.
+  const [spawnModelResolved, setSpawnModelResolved] = useState(false);
+  // The model catalog's own fetch error (distinct from spawnDefaults.error
+  // below); ModelSelect keeps `resolved` false while this is set, same as an
+  // unresolved workspace-mode default, and this surfaces in the same banner.
+  const [spawnModelError, setSpawnModelError] = useState<string | null>(null);
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnExtraMembers, setSpawnExtraMembers] = useState<{ id: number; agent: AgentName }[]>(
     [],
@@ -1081,7 +1086,18 @@ export function Dashboard() {
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("default");
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("worktree");
+  // The project id spawnWorkspaceMode was last explicitly confirmed for (a
+  // manual select pick or an error-banner "Use worktree/shared" click), or
+  // null if it has never been explicitly confirmed. A confirmation belongs
+  // to exactly one project; it never carries over to a different one, so
+  // "auto" below is derived by comparing against the CURRENT project rather
+  // than stored as its own flag — a project switch re-derives it for free,
+  // with nothing to keep in sync by hand.
+  const [spawnWorkspaceModeConfirmedFor, setSpawnWorkspaceModeConfirmedFor] = useState<
+    string | null
+  >(null);
+  const spawnWorkspaceModeAuto = spawnWorkspaceModeConfirmedFor !== spawnProjectId;
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1544,7 +1560,14 @@ export function Dashboard() {
     setSpawnSelfDestruct(draft?.selfDestruct ?? false);
     setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
     setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
-    setSpawnWorkspaceMode(draft?.workspaceMode ?? "default");
+    // A draft is a single storage key shared by every project, so a stored
+    // workspaceMode is usually the auto-derived default for whatever
+    // project it was last saved against, not a confirmation for
+    // nextProjectId. Restoring the project the confirmation actually
+    // belongs to (rather than a bare yes/no flag) means the "auto" derived
+    // above naturally comes out false only when nextProjectId matches it.
+    setSpawnWorkspaceModeConfirmedFor(draft?.workspaceModeConfirmedFor ?? null);
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     setSpawnAttachments([]);
@@ -1572,6 +1595,12 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
+    // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
+    // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
+    // project alone re-derives it — a confirmation made for the previous
+    // project stops applying the instant the project changes, and one made
+    // for THIS project (from before an earlier switch away) re-applies for
+    // free once the project matches again.
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1579,6 +1608,23 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  // Fetched once here and passed down into ModelSelect (mode.model.spawnDefaults)
+  // instead of letting it fetch its own copy — one request per project+agent,
+  // and the workspace-mode default below and the model rung 3 default both
+  // read the same settle. projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const spawnDefaults = useResolvedSpawnDefaults(spawnOpen ? spawnProjectId : "", spawnAgent);
+  useEffect(() => {
+    if (!spawnWorkspaceModeAuto || spawnDefaults.worktree === null) return;
+    setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
+  }, [spawnWorkspaceModeAuto, spawnDefaults.worktree]);
+  // While still on the auto-derived workspace mode, an in-flight or failed
+  // spawn-defaults request means the true project default is unknown; block
+  // submit rather than silently spawning against the "worktree" fallback
+  // state. A manual pick (auto false) always overrides this.
+  const spawnWorkspaceModeUnresolved =
+    spawnWorkspaceModeAuto && (spawnDefaults.loading || spawnDefaults.error !== null);
 
   const spawnDraft = useMemo<SpawnDraft>(() => {
     return {
@@ -1588,6 +1634,7 @@ export function Dashboard() {
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
+      workspaceModeConfirmedFor: spawnWorkspaceModeConfirmedFor,
       defaultBranch: spawnDefaultBranch,
       planMode: spawnPlanMode,
       selfDestruct: spawnSelfDestruct,
@@ -1609,6 +1656,7 @@ export function Dashboard() {
     spawnSteps,
     spawnTrackerUrl,
     spawnWorkspaceMode,
+    spawnWorkspaceModeConfirmedFor,
   ]);
   const spawnDraftRef = useRef(spawnDraft);
   spawnDraftRef.current = spawnDraft;
@@ -1716,12 +1764,22 @@ export function Dashboard() {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
     if (!project || !prompt || spawnExtraMembers.length > 0) return;
+    // Same gate as submit: while still on the auto-derived workspace mode,
+    // an in-flight or failed spawn-defaults request means spawnWorkspaceMode
+    // is still the hardcoded "worktree" fallback, not the project's real
+    // default. Firing preflight against it would compute a branch suggestion
+    // for the wrong mode. Re-runs (and re-debounces) once the defaults settle.
+    if (spawnWorkspaceModeUnresolved) return;
 
     let cancelled = false;
     const timer = setTimeout(() => {
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-      const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
-      if (overrides) payload.overrides = overrides;
+      const payload: Record<string, unknown> = {
+        projectId: project,
+        prompt,
+        agent: spawnAgent,
+        overrides,
+      };
 
       fetch("/api/preflight", {
         method: "POST",
@@ -1748,6 +1806,7 @@ export function Dashboard() {
     spawnAgent,
     spawnWorkspaceMode,
     spawnDefaultBranch,
+    spawnWorkspaceModeUnresolved,
   ]);
 
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
@@ -1795,6 +1854,10 @@ export function Dashboard() {
         projectId: nextProjectId,
         prompt: nextPrompt,
       };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
+      if (spawnModel !== null) payload.model = spawnModel;
+      payload.overrides = overrides;
       if (effectiveSessionMode) payload.mode = effectiveSessionMode;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
@@ -1806,7 +1869,6 @@ export function Dashboard() {
         ];
       } else {
         payload.agent = spawnAgent;
-        if (spawnModel !== null) payload.model = spawnModel;
         const normalizedBranch = normalizeBranchName(spawnBranch);
         if (normalizedBranch) payload.branch = normalizedBranch;
       }
@@ -1819,7 +1881,6 @@ export function Dashboard() {
         };
       }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
       if (spawnTrackerUrl) {
         payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
       }
@@ -1859,7 +1920,8 @@ export function Dashboard() {
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
-      setSpawnWorkspaceMode("default");
+      setSpawnWorkspaceModeConfirmedFor(null);
+      setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
       setSpawnPinnedProjectId(null);
@@ -2643,6 +2705,12 @@ export function Dashboard() {
                   onChange: (next) => {
                     setSpawnModel(next);
                   },
+                  spawnDefaults,
+                  carry: null,
+                  onResolvedChange: (resolved, error) => {
+                    setSpawnModelResolved(resolved);
+                    setSpawnModelError(error);
+                  },
                 },
                 ...(spawnModeOptions.length > 0
                   ? {
@@ -2676,6 +2744,7 @@ export function Dashboard() {
                 workspaceMode: {
                   value: spawnWorkspaceMode,
                   onChange: (next) => {
+                    setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                     setSpawnWorkspaceMode(next);
                   },
                 },
@@ -2719,6 +2788,41 @@ export function Dashboard() {
                       <p className="text-xs text-[var(--color-text-tertiary)]">
                         exists on origin — will track it
                       </p>
+                    ) : null}
+                    {spawnWorkspaceModeAuto && spawnDefaults.error ? (
+                      <div className="flex flex-wrap items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        <span>
+                          couldn&apos;t resolve this project&apos;s workspace default:{" "}
+                          {spawnDefaults.error}
+                        </span>
+                        <span className="flex gap-2">
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
+                              setSpawnWorkspaceMode("worktree");
+                            }}
+                            type="button"
+                          >
+                            Use worktree
+                          </button>
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
+                              setSpawnWorkspaceMode("shared");
+                            }}
+                            type="button"
+                          >
+                            Use shared
+                          </button>
+                        </span>
+                      </div>
+                    ) : null}
+                    {spawnModelError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        couldn&apos;t load the model catalog: {spawnModelError}
+                      </div>
                     ) : null}
                   </>
                 ),
@@ -2772,7 +2876,12 @@ export function Dashboard() {
                   : null
               }
               submitBusyAriaLabel="Spawning session"
-              submitDisabled={spawning || !spawnProjectId.trim()}
+              submitDisabled={
+                spawning ||
+                !spawnProjectId.trim() ||
+                !spawnModelResolved ||
+                spawnWorkspaceModeUnresolved
+              }
               submitLabel="Spawn"
               submitting={spawning}
               title="Spawn Session"

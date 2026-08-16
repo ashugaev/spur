@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -83,14 +83,18 @@ New worktree branches fetch `origin`, fast-forward the base branch when only beh
 spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --every 30m --until "done condition" [message...]
 spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
+spur wake <sessionId> --cancel
 ```
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
 `POST /shepherd/spawn` reuses the newest running or spawning Shepherd. Pass `reportDisposition: true` to receive `{ disposition: "spawned" | "reused", session }`; omit it for the legacy session-only response.
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` and the message retries through the queue drain (below) like any other queued message.
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. `--every <duration>` repeats at a fixed interval and also requires `--until`. `--cancel` drops any recurring (`--every` or `--daily-at`) wake for the session; it cannot combine with the scheduling options. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily or interval occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` / `session.wake.interval_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` / `session.wake.interval_sent` and the message retries through the queue drain (below) like any other queued message.
+
+A recurring wake (`--every` or `--daily-at`) only fires while the session's status is restorable (`running`, `stopped`, `paused`) — `send` resumes a `stopped`/`paused` session automatically, so its wake fires normally. Once the session goes `killed`, the daemon drops the schedule on its next tick and logs `session.wake.interval_cancelled` (or `session.wake.daily_cancelled` for a daily-only wake) instead of repeatedly failing to send. `errored` and `completed` sessions keep the recurring wake armed but silent instead: it stays due without firing or advancing until the session comes back through `restore` or `reopen`, at which point the first tick after that fires one immediate catch-up wake.
 
 ## list
 
@@ -203,6 +207,8 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 `autoStart` applies when the main session spawns, restores, or recovers a dead agent — a session whose pane comes back gets its `autoStart` sidecars back too. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
+
+That env reaches the sidecar process only: the agent pane's env freezes before the port is reserved, so no session variable carries it. Read it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>` for one sidecar, `--json` for JSON). Use the explicit `$SPUR_SESSION_TOOL_DIR/` path — a login shell rebuilds `PATH` and drops the tool dir, so bare `spur-sidecar` resolves to nothing or to the wrong install. Prints one tab-separated line per reserved port, `<sidecar>` `<portId>` `<env>` `<port>` `alive|dead`, sorted by sidecar then port id; with no port reserved it prints nothing and exits 0. Any desk member can read it — ports resolve against the sidecar's owner session.
 
 A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk group](configuration.md#desk-groups), started and stopped from any member.
 

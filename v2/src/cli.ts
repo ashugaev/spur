@@ -933,6 +933,42 @@ function renderDoctorResult(result: DoctorResult): string {
   return lines.join("\n");
 }
 
+interface SidecarPortRow {
+  sidecar: string;
+  id: string;
+  env: string;
+  port: number;
+  alive: boolean;
+}
+
+// Flattens a session's per-sidecar reserved ports into rows for the `sidecar
+// ports` command. Read-through: no state of its own, just a reshape of the
+// SessionView the daemon already owner-resolves per sidecar.
+function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
+  if (name !== undefined && !view.sidecars.some((sidecar) => sidecar.name === name)) {
+    throw new Error(`Session ${view.id} has no sidecar "${name}"`);
+  }
+  const sidecars =
+    name === undefined ? view.sidecars : view.sidecars.filter((sidecar) => sidecar.name === name);
+  const rows = sidecars.flatMap((sidecar) =>
+    sidecar.ports.map((port) => ({
+      sidecar: sidecar.name,
+      id: port.id,
+      env: port.env,
+      port: port.port,
+      alive: sidecar.alive,
+    })),
+  );
+  // Plain string comparison, not localeCompare: this output is machine-read
+  // and must not reorder under a non-C locale.
+  rows.sort((a, b) => {
+    if (a.sidecar !== b.sidecar) return a.sidecar < b.sidecar ? -1 : 1;
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    return 0;
+  });
+  return rows;
+}
+
 function renderSidecarSweepResult(result: SidecarSweepResult): string {
   if (!result.supported) {
     return dimText("Process table or procfs unreadable on this host — sweep skipped.");
@@ -3358,6 +3394,44 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  sidecar
+    .command("ports")
+    .description("Print this session's reserved sidecar ports.")
+    .requiredOption("--session <id>", "Session id")
+    .option("--name <name>", "Only this sidecar")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      const session = options.session as string;
+      const name = options.name as string | undefined;
+      if (options.json) {
+        await outputResult({
+          json: true,
+          label: "loading sidecar ports",
+          action: async () =>
+            sidecarPortRows(
+              await getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+              name,
+            ),
+          render: () => "",
+        });
+        return;
+      }
+      const rows = sidecarPortRows(
+        await withSpinner("loading sidecar ports", () =>
+          getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+        ),
+        name,
+      );
+      for (const row of rows) {
+        writeStdout(
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+        );
+      }
     });
 
   sidecar

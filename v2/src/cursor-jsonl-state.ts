@@ -115,6 +115,12 @@ export function parseCursorJsonlRecord(
     return null;
   }
   if (parsed["type"] === "turn_ended") {
+    // Cursor writes `status: "aborted"` with an error-looking message when the
+    // user interrupts the foreground turn. Background subagents may still be
+    // running, so only Cursor's explicit error status is terminal evidence.
+    if (parsed["status"] !== "error") {
+      return null;
+    }
     const error = typeof parsed["error"] === "string" ? parsed["error"].trim() : "";
     if (!error) {
       return null;

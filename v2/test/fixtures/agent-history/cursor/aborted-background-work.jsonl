@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"Run the checks and keep the background worker active."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Starting the review."},{"type":"tool_use","name":"Shell","input":{"command":"pnpm test"}},{"type":"tool_use","name":"Shell","input":{"command":"git status --short"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"The worker is still running."},{"type":"tool_use","name":"Shell","input":{"command":"pnpm build"}},{"type":"tool_use","name":"Shell","input":{"command":"git diff --check"}}]}}
+{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}

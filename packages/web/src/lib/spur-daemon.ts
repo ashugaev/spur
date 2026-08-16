@@ -64,18 +64,27 @@ export function isSpurDaemonError(error: unknown): error is SpurDaemonError {
   return error instanceof SpurDaemonError;
 }
 
-export async function spurRequest(path: string, init?: RequestInit): Promise<Response> {
+// timeoutMs is opt-in per call: most spurRequest callers proxy an operation
+// the daemon itself already bounds (spawn, kill, restore, ...), so a blanket
+// timeout here would risk cutting those off mid-flight. Callers whose daemon
+// route can hang on an unbounded external call (e.g. spawn-defaults shelling
+// out to `cursor models`) pass one explicitly instead.
+export type SpurRequestInit = RequestInit & { timeoutMs?: number };
+
+export async function spurRequest(path: string, init?: SpurRequestInit): Promise<Response> {
+  const { timeoutMs, signal, ...requestInit } = init ?? {};
   return fetch(`${daemonBaseUrl()}${path}`, {
-    ...init,
+    ...requestInit,
     headers: {
-      ...(init?.headers ?? {}),
+      ...(requestInit.headers ?? {}),
       "x-spur-origin": "ui",
     },
     cache: "no-store",
+    signal: timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : signal,
   });
 }
 
-export async function spurRequestJson<T>(path: string, init?: RequestInit): Promise<T> {
+export async function spurRequestJson<T>(path: string, init?: SpurRequestInit): Promise<T> {
   const response = await spurRequest(path, init);
   const text = await response.text();
   let payload: unknown = {};

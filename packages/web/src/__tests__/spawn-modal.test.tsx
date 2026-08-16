@@ -32,9 +32,15 @@ function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
 const spawnMode: SpawnModalMode = {
   kind: "spawn",
   project: { value: "", onChange: vi.fn(), options: [{ id: "p1", label: "Project One" }] },
-  model: { value: null, onChange: vi.fn() },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
   branch: { value: "", onChange: vi.fn() },
-  workspaceMode: { value: "default", onChange: vi.fn() },
+  workspaceMode: { value: "worktree", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
   selfDestruct: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
@@ -43,7 +49,13 @@ const spawnMode: SpawnModalMode = {
 
 const respawnMode: SpawnModalMode = {
   kind: "respawn",
-  model: { value: null, onChange: vi.fn() },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
 };
 
 const deskMode: SpawnModalMode = {
@@ -98,6 +110,29 @@ describe("SpawnModal", () => {
     expect(screen.getByLabelText("Plan")).toBeInTheDocument();
     expect(screen.getByLabelText("Self-destruct")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
+  });
+
+  it("explains the disabled project select instead of showing a blank box when no projects are configured", () => {
+    renderModal({
+      ...spawnMode,
+      project: { value: "", onChange: vi.fn(), options: [] },
+    });
+    expect(screen.getByLabelText("Spawn project")).toBeDisabled();
+    expect(screen.getByText("No projects configured yet.")).toBeInTheDocument();
+  });
+
+  it("spawn mode selects expose only concrete options, never a Default/Select placeholder", () => {
+    renderModal(spawnMode);
+    const projectOptions = screen.getByLabelText("Spawn project").querySelectorAll("option");
+    expect(projectOptions).toHaveLength(
+      spawnMode.kind === "spawn" ? spawnMode.project.options.length : 0,
+    );
+    expect([...projectOptions].map((option) => option.textContent)).toEqual(["Project One"]);
+
+    const workspaceOptions = [
+      ...screen.getByLabelText("workspace mode").querySelectorAll("option"),
+    ].map((option) => option.textContent);
+    expect(workspaceOptions).toEqual(["Worktree", "Shared"]);
   });
 
   it("spawn mode renders no session mode combobox when sessionMode is undefined", () => {
