@@ -11409,9 +11409,9 @@ describe("SessionService", () => {
       ) as unknown as MemoryShedService;
       vi.spyOn(
         service as unknown as {
-          applyManualStatus(...args: unknown[]): Promise<unknown>;
+          applyManualStatusLocked(...args: unknown[]): Promise<unknown>;
         },
-        "applyManualStatus",
+        "applyManualStatusLocked",
       ).mockRejectedValue(new Error("session stop failed"));
 
       await expect(service.runMemoryShed()).rejects.toThrow("session stop failed");
@@ -32224,6 +32224,105 @@ describe("SessionService", () => {
         expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
       });
 
+      it.each(["pause", "kill"] as const)(
+        "serializes a %s-first terminal transition before a concurrent wake",
+        async (operation) => {
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            runningSession({ worktree: false, worktreePath: "/repo/api" }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          let releaseKill!: () => void;
+          const killBarrier = new Promise<void>((resolve) => {
+            releaseKill = resolve;
+          });
+          let killStarted!: () => void;
+          const killStartedBarrier = new Promise<void>((resolve) => {
+            killStarted = resolve;
+          });
+          let paneAlive = true;
+          killTmuxSessionMock.mockImplementation(async (name: string) => {
+            if (name === "api-1") {
+              killStarted();
+              await killBarrier;
+              paneAlive = false;
+            }
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+          isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+          const service = await createDisposedSessionService();
+
+          const terminal =
+            operation === "pause"
+              ? service.pause("api-1")
+              : service.kill("api-1", { force: true, skipPrCheck: true });
+          await killStartedBarrier;
+          const wake = service
+            .send("api-1", { message: "late wake", queue: false })
+            .catch((error: unknown) => error);
+          await Promise.resolve();
+
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          releaseKill();
+          await terminal;
+          const wakeError = await wake;
+
+          expect(wakeError).toBeInstanceOf(Error);
+          expect(sessions.get("api-1")?.status).toBe(operation === "pause" ? "stopped" : "killed");
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(["pause", "kill"] as const)(
+        "lets a wake commit before a queued %s transition",
+        async (operation) => {
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            runningSession({ worktree: false, worktreePath: "/repo/api" }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          let releaseWrite!: () => void;
+          const writeBarrier = new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          });
+          let writeStarted!: () => void;
+          const writeStartedBarrier = new Promise<void>((resolve) => {
+            writeStarted = resolve;
+          });
+          sendMessageToTmuxMock.mockImplementation(async () => {
+            writeStarted();
+            await writeBarrier;
+          });
+          let paneAlive = true;
+          killTmuxSessionMock.mockImplementation(async (name: string) => {
+            if (name === "api-1") paneAlive = false;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+          isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+          const service = await createDisposedSessionService();
+
+          const wake = service.send("api-1", { message: "first wake", queue: false });
+          await writeStartedBarrier;
+          const terminal =
+            operation === "pause"
+              ? service.pause("api-1")
+              : service.kill("api-1", { force: true, skipPrCheck: true });
+          await Promise.resolve();
+
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          releaseWrite();
+          await wake;
+          await terminal;
+
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get("api-1")?.status).toBe(operation === "pause" ? "stopped" : "killed");
+        },
+      );
+
       it.each(["start", "stop"] as const)(
         "makes sidecar %s wait for a park and re-read the parked record",
         async (operation) => {
@@ -32270,6 +32369,43 @@ describe("SessionService", () => {
           expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
         },
       );
+
+      it("locks the desk anchor before a member mutates its shared sidecar", async () => {
+        armParkableApiProject();
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession({ sidecarNames: ["proxy"] }));
+        sessions.set(
+          "api-2",
+          staleParkableSession({
+            id: "api-2",
+            tmuxSession: "api-2",
+            deskId: "api-1",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        let releaseAnchor!: () => void;
+        internals.sessionLifecycleLocks.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releaseAnchor = resolve;
+          }),
+        );
+
+        const stopped = service.stopSidecar("api-2", "proxy");
+        await Promise.resolve();
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
+
+        releaseAnchor();
+        await stopped;
+
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+        expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
+        expect(internals.sessionLifecycleLocks.has("api-2")).toBe(false);
+      });
     });
 
     describe("GAP 1c: scheduled/interval wakes claimed while a park is mid-flight", () => {
@@ -32299,11 +32435,14 @@ describe("SessionService", () => {
           }),
         );
 
-        // The monitor's first poll tick claims the due occurrence and calls
-        // send(), which then blocks on the park in flight.
+        // The monitor's first poll tick waits for the lifecycle owner before
+        // claiming, so the due occurrence remains durable while park runs.
         await vi.advanceTimersByTimeAsync(1_000);
 
-        expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+        expect(sessions.get("api-1")?.scheduledWake).toEqual({
+          dueAt: "2026-03-18T10:05:00.000Z",
+          message: "reminder",
+        });
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
 
         // Simulate the park finishing: the record on disk moves to
@@ -32367,8 +32506,8 @@ describe("SessionService", () => {
 
         await vi.advanceTimersByTimeAsync(1_000);
 
-        // Claimed (advanced past `now`) before the blocked send() resolves.
-        expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+        // The occurrence stays due until the lifecycle owner releases.
+        expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:00.000Z");
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
 
         const current = sessions.get("api-1");
@@ -32386,6 +32525,98 @@ describe("SessionService", () => {
           expect.stringContaining("interval reminder"),
           expect.objectContaining({}),
         );
+        service.dispose();
+      });
+
+      it("keeps a replacement wake queued behind an admission-denied claim", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, maxLiveSessions: 1 },
+        });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("occupier", runningSession({ id: "occupier", tmuxSession: "occupier" }));
+        sessions.set(
+          "api-1",
+          runningSession({
+            status: "stopped",
+            stopReason: "stale_timeout",
+            scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "denied wake" },
+          }),
+        );
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "occupier");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        let releaseOwner!: () => void;
+        internals.sessionLifecycleLocks.set(
+          "api-1",
+          new Promise<void>((resolve) => {
+            releaseOwner = resolve;
+          }),
+        );
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        const replacement = service.scheduleWake("api-1", {
+          delayMs: 60_000,
+          message: "replacement wake",
+        });
+        releaseOwner();
+        await replacement;
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+        expect(sessions.get("api-1")?.scheduledWake?.message).toBe("replacement wake");
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.deferred"),
+        ).toHaveLength(1);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("finishes a claimed wake delivery before a concurrent direct delivery", async () => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "scheduled first" },
+          }),
+        );
+        listSessionsMock.mockReturnValue([...sessions.values()]);
+        const delivered: string[] = [];
+        let releaseScheduled!: () => void;
+        const scheduledBarrier = new Promise<void>((resolve) => {
+          releaseScheduled = resolve;
+        });
+        let scheduledStarted!: () => void;
+        const scheduledStartedBarrier = new Promise<void>((resolve) => {
+          scheduledStarted = resolve;
+        });
+        sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) => {
+          delivered.push(message);
+          if (message === "scheduled first") {
+            scheduledStarted();
+            await scheduledBarrier;
+          }
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        await scheduledStartedBarrier;
+        expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+        const direct = service.send("api-1", { message: "direct second", queue: false });
+        await Promise.resolve();
+        expect(delivered).toEqual(["scheduled first"]);
+
+        releaseScheduled();
+        await direct;
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+        expect(delivered).toEqual(["scheduled first", "direct second"]);
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.sent"),
+        ).toHaveLength(1);
         service.dispose();
       });
     });

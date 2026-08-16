@@ -2695,20 +2695,25 @@ export class SessionService {
         const project = this.resolveProjectForSession(candidate);
         for (const name of sessionSidecarNames(candidate, project)) {
           if (Boolean(BUILTIN_SIDECARS[name]?.config.mcp) !== mcp) continue;
-          const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
-          if (!tmuxName || !liveTmux.has(tmuxName)) continue;
-          const stopped = await killTmuxSessionTree(tmuxName);
-          // Drop the owner's sidecarProcs entry the same way every other
-          // sidecar kill site does — otherwise its dead pane's pgid stays
-          // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
-          // sidecar restarts, masking the orphan from the sweep and doctor.
-          const ownerId = this.sidecarOwnerIdForName(candidate, project, name);
-          this.clearSidecarProcEntry(ownerId, name);
-          return {
-            attempted: true,
-            stoppedTmux: stopped ? tmuxName : null,
-            tier: mcp ? "mcp_sidecar" : "user_sidecar",
-          };
+          const result = await this.withWorkspaceLifecycleLocks(candidate.id, async () => {
+            const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
+            if (!tmuxName || !liveTmux.has(tmuxName)) return null;
+            const stopped = await killTmuxSessionTree(tmuxName);
+            // Drop the owner's sidecarProcs entry the same way every other
+            // sidecar kill site does — otherwise its dead pane's pgid stays
+            // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
+            // sidecar restarts, masking the orphan from the sweep and doctor.
+            const latest = readSession(this.config.dataDir, candidate.id) ?? candidate;
+            const latestProject = this.resolveProjectForSession(latest);
+            const ownerId = this.sidecarOwnerIdForName(latest, latestProject, name);
+            this.clearSidecarProcEntry(ownerId, name);
+            return {
+              attempted: true,
+              stoppedTmux: stopped ? tmuxName : null,
+              tier: mcp ? ("mcp_sidecar" as const) : ("user_sidecar" as const),
+            };
+          });
+          if (result) return result;
         }
       }
     }
@@ -2782,7 +2787,11 @@ export class SessionService {
           for (const candidate of candidates) {
             if (!(await this.memoryShedEligibleRecord(candidate.id))) continue;
             sessionAttempted = true;
-            await this.applyManualStatus(candidate.id, "stopped", {}, { skipEnrichment: true });
+            await this.withWorkspaceLifecycleLocks(candidate.id, () =>
+              this.applyManualStatusLocked(candidate.id, "stopped", {}, {
+                skipEnrichment: true,
+              }),
+            );
             stoppedSessions.push(candidate.id);
             afterPressure = this.readMemoryPressure(Date.now());
             break;
@@ -3231,6 +3240,7 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+          await this.withSessionLifecycleLock(session.id, async () => {
           // Claim the due occurrence BEFORE sending: clear scheduledWake and
           // persist it first. A slow or failing send must not leave the wake
           // due, or the `<= now` guard stays true and it re-fires every tick
@@ -3245,7 +3255,7 @@ export class SessionService {
             const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
             writeSession(this.config.dataDir, cleared);
             try {
-              await this.send(session.id, { message: scheduledWake.message });
+              await this.sendLocked(session.id, { message: scheduledWake.message });
               this.logEvent("session.wake.sent", {
                 level: "info",
                 sessionId: session.id,
@@ -3295,10 +3305,12 @@ export class SessionService {
               }
             }
           }
+          });
         }
 
         const intervalWake = session.intervalWake;
         if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
+          await this.withSessionLifecycleLock(session.id, async () => {
           // Claim the due tick BEFORE sending: advance nextDueAt to the next
           // future interval (catching up past any missed intervals) and persist
           // it first. A slow or failing send must not leave the wake due, or the
@@ -3326,7 +3338,7 @@ export class SessionService {
             };
             writeSession(this.config.dataDir, updated);
             try {
-              await this.send(session.id, {
+              await this.sendLocked(session.id, {
                 message: this.formatIntervalWakeMessage(
                   session.id,
                   intervalWake.message,
@@ -3387,6 +3399,7 @@ export class SessionService {
               }
             }
           }
+          });
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
@@ -3539,6 +3552,7 @@ export class SessionService {
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
+        await this.withSessionLifecycleLock(session.id, async () => {
         // Claim the due occurrence BEFORE sending: advance nextDueAt to the
         // next future scheduled time and persist it first. A slow or failing
         // send must not leave the wake due, or the `<= now` guard stays true
@@ -3587,7 +3601,7 @@ export class SessionService {
                 dailyAt: dailyWake.dailyAt,
               },
             });
-            continue;
+            return;
           }
           const updated: SessionRecord = {
             ...currentDailyWakeSession,
@@ -3599,7 +3613,7 @@ export class SessionService {
           };
           writeSession(this.config.dataDir, updated);
           try {
-            await this.send(session.id, {
+            await this.sendLocked(session.id, {
               message: this.formatDailyWakeMessage(
                 session.id,
                 dailyWake.message,
@@ -3657,6 +3671,7 @@ export class SessionService {
             }
           }
         }
+        });
       }
     } finally {
       this.scheduledWakeMonitorRunning = false;
@@ -4150,6 +4165,33 @@ export class SessionService {
     }
   }
 
+  // Multi-record mutations always acquire ids in lexical order. Terminal
+  // transitions and project-sidecar operations touch both a desk member and
+  // its workspace owner, so sharing this order avoids anchor/member deadlocks.
+  private async withSessionLifecycleLocks<T>(
+    sessionIds: readonly string[],
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const [sessionId, ...remaining] = [...new Set(sessionIds)].sort();
+    if (!sessionId) {
+      return task();
+    }
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.withSessionLifecycleLocks(remaining, task),
+    );
+  }
+
+  private withWorkspaceLifecycleLocks<T>(
+    sessionId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const session = readSession(this.config.dataDir, sessionId);
+    return this.withSessionLifecycleLocks(
+      session ? [session.id, workspaceIdOf(session)] : [sessionId],
+      task,
+    );
+  }
+
   private scheduleDeliveryRunner(sessionId: string): void {
     this.ensureDeliveryRunner(sessionId);
   }
@@ -4198,7 +4240,7 @@ export class SessionService {
   // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
   // re-asserted "running" before anything is torn down.
   private async parkStaleSession(view: SessionView): Promise<void> {
-    return this.withSessionLifecycleLock(view.id, () => this.parkStaleSessionLocked(view));
+    return this.withWorkspaceLifecycleLocks(view.id, () => this.parkStaleSessionLocked(view));
   }
 
   private async parkStaleSessionLocked(view: SessionView): Promise<void> {
@@ -8946,6 +8988,15 @@ export class SessionService {
   }
 
   async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.scheduleWakeLocked(sessionId, request),
+    );
+  }
+
+  private async scheduleWakeLocked(
+    sessionId: string,
+    request: ScheduleSessionWakeRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9050,6 +9101,10 @@ export class SessionService {
   }
 
   async cancelWake(sessionId: string): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () => this.cancelWakeLocked(sessionId));
+  }
+
+  private async cancelWakeLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9705,7 +9760,9 @@ export class SessionService {
   }
 
   async pause(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "stopped");
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.applyManualStatusLocked(sessionId, "stopped"),
+    );
   }
 
   private async sendAgentMessage(
@@ -9908,15 +9965,21 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", request, options);
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.applyManualStatusLocked(sessionId, "completed", request, options),
+    );
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
-    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
+    return this.withWorkspaceLifecycleLocks(sessionId, () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      return this.applyManualStatusLocked(sessionId, "completed", {
+        prAction: "leave_open",
+      });
+    });
   }
 
   async completeDesk(
@@ -9934,7 +9997,9 @@ export class SessionService {
       if (candidate.status === "completed") {
         continue;
       }
-      await this.applyManualStatus(candidate.id, "completed", request);
+      await this.withWorkspaceLifecycleLocks(candidate.id, () =>
+        this.applyManualStatusLocked(candidate.id, "completed", request),
+      );
       completedIds.push(candidate.id);
     }
 
@@ -10030,16 +10095,6 @@ export class SessionService {
     sidecarName: string,
     request: StartSidecarRequest = {},
   ): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () =>
-      this.startSidecarLocked(sessionId, sidecarName, request),
-    );
-  }
-
-  private async startSidecarLocked(
-    sessionId: string,
-    sidecarName: string,
-    request: StartSidecarRequest,
-  ): Promise<SessionView> {
     const caller = sidecarCallerContextFromRequest(request);
     const sidecarDepth = nextSidecarDepth(caller);
     if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
@@ -10058,6 +10113,18 @@ export class SessionService {
       });
       throw new Error(message);
     }
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.startSidecarLocked(sessionId, sidecarName, request),
+    );
+  }
+
+  private async startSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest,
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10217,7 +10284,7 @@ export class SessionService {
   }
 
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () =>
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.stopSidecarLocked(sessionId, sidecarName),
     );
   }
@@ -10531,19 +10598,19 @@ export class SessionService {
     throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
     options: { retainInList?: boolean; skipEnrichment: true },
   ): Promise<void>;
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
     options?: { retainInList?: boolean; skipEnrichment?: false },
   ): Promise<SessionView>;
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
@@ -10687,6 +10754,13 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () => this.killLocked(sessionId, request));
+  }
+
+  private async killLocked(
+    sessionId: string,
+    request: KillSessionRequest,
+  ): Promise<SessionView> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
