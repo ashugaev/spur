@@ -29189,7 +29189,7 @@ describe("SessionService", () => {
     });
 
     it("fires an interval wake exactly once for a shepherd session with a dead process and missing workspace", async () => {
-      const sessions = seedShepherdSession({
+      seedShepherdSession({
         status: "stopped",
         intervalWake: pastDueIntervalWake(),
       });
@@ -29203,7 +29203,6 @@ describe("SessionService", () => {
       await advanceSeconds(2);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      void sessions;
       service.dispose();
     });
 
@@ -29262,8 +29261,7 @@ describe("SessionService", () => {
     });
 
     it("emits session.wake.suppressed only once when both an interval and a daily wake are due and suppressed in the same tick", async () => {
-      const sessions = createSessionStore();
-      sessions.set(
+      createSessionStore().set(
         "api-1",
         sessionRecord({
           id: "api-1",
@@ -29284,13 +29282,11 @@ describe("SessionService", () => {
         logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.suppressed")
           .length,
       ).toBe(1);
-      void sessions;
       service.dispose();
     });
 
     it("does not resurrect a session via writeSession when the fresh read is null during an interval wake claim", async () => {
-      const sessions = createSessionStore();
-      sessions.set(
+      createSessionStore().set(
         "api-1",
         sessionRecord({ id: "api-1", status: "stopped", intervalWake: pastDueIntervalWake() }),
       );
@@ -29310,13 +29306,11 @@ describe("SessionService", () => {
           ([, entry]) => entry.event === "session.wake.interval_failed",
         ).length,
       ).toBe(0);
-      void sessions;
       service.dispose();
     });
 
     it("does not resurrect a session via writeSession when the fresh read is null during a daily wake claim", async () => {
-      const sessions = createSessionStore();
-      sessions.set(
+      createSessionStore().set(
         "api-1",
         sessionRecord({ id: "api-1", status: "stopped", dailyWake: pastDueDailyWake() }),
       );
@@ -29336,13 +29330,11 @@ describe("SessionService", () => {
           ([, entry]) => entry.event === "session.wake.daily_failed",
         ).length,
       ).toBe(0);
-      void sessions;
       service.dispose();
     });
 
     it("mirror-exactness: a running session with a live pane still delivers an interval wake when the workspace is missing", async () => {
-      const sessions = createSessionStore();
-      sessions.set(
+      createSessionStore().set(
         "api-1",
         sessionRecord({ id: "api-1", status: "running", intervalWake: pastDueIntervalWake() }),
       );
@@ -29355,13 +29347,11 @@ describe("SessionService", () => {
       await advanceSeconds(1);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      void sessions;
       service.dispose();
     });
 
     it("mirror-exactness: a paused session with a live pane still delivers an interval wake when the workspace is missing", async () => {
-      const sessions = createSessionStore();
-      sessions.set(
+      createSessionStore().set(
         "api-1",
         sessionRecord({ id: "api-1", status: "paused", intervalWake: pastDueIntervalWake() }),
       );
@@ -29374,7 +29364,6 @@ describe("SessionService", () => {
       await advanceSeconds(1);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      void sessions;
       service.dispose();
     });
   });
@@ -30936,6 +30925,7 @@ describe("SessionService", () => {
       prCheckTrackers: Map<string, unknown>;
       usageMenuConfirmedAt: Map<string, number>;
       claudeRotationEpisode: Map<string, unknown>;
+      wakeSuppressionNotified: Set<string>;
       attentionStates: Map<string, string>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
@@ -31075,6 +31065,7 @@ describe("SessionService", () => {
         });
         internals.usageMenuConfirmedAt.set(id, Date.now());
         internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
+        internals.wakeSuppressionNotified.add(id);
       }
 
       // api-1 stays running (non-terminal). api-2 completes. api-3 was
@@ -31146,6 +31137,13 @@ describe("SessionService", () => {
       // lastEntry and reopen the oscillation covered by the two tests below).
       expect(internals.stateHistory.get("api-2")).toHaveLength(1);
       expect(internals.stateHistory.get("api-3")).toHaveLength(1);
+
+      // wakeSuppressionNotified follows the same non-terminal liveIds sweep
+      // as the flat Map prunes above: it drops both terminal ids and keeps
+      // the still-running one.
+      expect(internals.wakeSuppressionNotified.has("api-2")).toBe(false);
+      expect(internals.wakeSuppressionNotified.has("api-3")).toBe(false);
+      expect(internals.wakeSuppressionNotified.has("api-1")).toBe(true);
 
       service.dispose();
     });

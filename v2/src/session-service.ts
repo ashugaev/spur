@@ -873,13 +873,13 @@ function isRestorableStatus(status: SessionStatus): boolean {
 
 type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
 
-// Mirrors ensureSessionReadyForSend's throw condition (session-service.ts:10537-10584)
+// Mirrors ensureSessionReadyForSend's throw condition (session-service.ts:10617-10699)
 // exactly, without performing the recovery side effects: shepherd re-materializes its
-// workspace rather than ever being unrecoverable (10578-10583); a live pane returns
-// before the workspace check (10546); only a dead runtime plus a missing workspace
-// throws. Used to decide whether a recurring wake can be delivered at all before
-// attempting send(), so a session whose workspace is gone stays silently suppressed
-// instead of emitting *_failed every tick.
+// workspace rather than ever being unrecoverable (10663); a live pane returns before
+// the workspace check (10626); only a dead runtime plus a missing workspace throws.
+// Used to decide whether a recurring wake can be delivered at all before attempting
+// send(), so a session whose workspace is gone stays silently suppressed instead of
+// emitting *_failed every tick.
 async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverability> {
   if (!isRestorableStatus(session.status)) return "status_not_restorable";
   if (session.project === SHEPHERD_PROJECT_ID) return "deliverable";
@@ -3223,7 +3223,7 @@ export class SessionService {
           details: {
             reason: "workspace_missing",
             status: session.status,
-            worktreePath: session.worktreePath ?? null,
+            worktreePath: session.worktreePath,
             wakeType,
             nextDueAt,
           },
@@ -3285,7 +3285,7 @@ export class SessionService {
         }
 
         // A killed session is never revived (reopenLocked() only accepts
-        // "completed", session-service.ts:11321-11332), so its schedule is
+        // "completed", session-service.ts:11333-11336), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
         // for a send() that can only throw "Session is not running". Every
