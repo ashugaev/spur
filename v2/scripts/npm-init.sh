@@ -164,7 +164,10 @@ web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 
 # later crash).
 active_daemon=0
 active_web=0
-for _ in $(seq 1 10); do
+# A registry with many configs and sources can take over 20 seconds to become
+# reachable after systemd reports the unit active. Keep the install alive long
+# enough for that normal boot path before update treats it as a failed deploy.
+for _ in $(seq 1 60); do
   active_daemon=0
   active_web=0
   systemctl --user is-active --quiet spur-daemon.service && active_daemon=1
