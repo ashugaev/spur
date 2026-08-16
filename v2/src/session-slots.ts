@@ -520,7 +520,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     `#!/usr/bin/env bash
 set -euo pipefail
 action="start"
-if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
+if [[ "\${1-}" == "start" || "\${1-}" == "stop" || "\${1-}" == "ports" ]]; then
   action="$1"
   shift
 fi
