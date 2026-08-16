@@ -2910,6 +2910,7 @@ describe("SessionService", () => {
     expect(sent).toContain(
       '`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>` to stop one.',
     );
+    expect(sent).toContain('`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`');
     expect(sent).toContain("Do not start app, dev server, or test helper processes directly");
     expect(sent).toContain(
       "Auto-start applies when the main session spawns, restores, or recovers.",
