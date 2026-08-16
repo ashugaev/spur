@@ -348,6 +348,33 @@ describe("gh usage accounting", () => {
     expect(cycleEvents()[2]).not.toHaveProperty("suppressedZeroCycles");
   });
 
+  it("ages out a zero-cycle run whose source stopped polling", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      // The source goes quiet for longer than the idle ceiling, then returns.
+      vi.setSystemTime(T0 + HOUR + MINUTE);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(2);
+      expect(cycleEvents()[1]).not.toHaveProperty("suppressedZeroCycles");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("tracks zero-cycle runs per kind and per source", async () => {
     await runGhPollCycle({ kind: "attention" }, async () => {});
     await runGhPollCycle({ kind: "attention" }, async () => {});

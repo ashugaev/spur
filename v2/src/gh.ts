@@ -168,9 +168,20 @@ let budget: GraphqlBudgetLedger = {
 };
 let lastPausedEventKey: string | null = null;
 // Poll-cycle keys currently inside a run of zero-cost cycles, and how many of
-// those the run has swallowed since its one emitted event.
-const zeroCycleRunOpen = new Set<string>();
-const suppressedZeroCycles = new Map<string, number>();
+// those each run has swallowed since its one emitted event. A key whose source
+// is removed from the config stops polling and would otherwise sit here for the
+// daemon's lifetime, so an entry untouched for this long is dropped; the next
+// cycle on that key simply opens a fresh run.
+const ZERO_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
+const zeroCycleRuns = new Map<string, { suppressed: number; touchedAtMs: number }>();
+
+function pruneZeroCycleRuns(nowMs: number): void {
+  for (const [key, run] of zeroCycleRuns) {
+    if (nowMs - run.touchedAtMs > ZERO_CYCLE_RUN_MAX_IDLE_MS) {
+      zeroCycleRuns.delete(key);
+    }
+  }
+}
 const ghPollCycleStorage = new AsyncLocalStorage<GhPollCycleContext>();
 let ghPollAdmissionTail: Promise<void> = Promise.resolve();
 
@@ -190,8 +201,7 @@ export function _resetGhUsageForTests(): void {
     blockedUntilMs: null,
   };
   lastPausedEventKey = null;
-  zeroCycleRunOpen.clear();
-  suppressedZeroCycles.clear();
+  zeroCycleRuns.clear();
   ghEventSinkDataDir = null;
   ghPollAdmissionTail = Promise.resolve();
 }
@@ -334,18 +344,21 @@ export async function runGhPollCycle<T>(
     return await ghPollCycleStorage.run(cycle, task);
   } finally {
     const dataDir = ghEventSinkDataDir;
+    const endedAtMs = Date.now();
     const key = pollCycleKey(cycle);
     const spentNothing = cycle.calls === 0 && cycle.graphqlCost === 0;
-    const suppressed = suppressedZeroCycles.get(key) ?? 0;
-    if (spentNothing && zeroCycleRunOpen.has(key)) {
-      suppressedZeroCycles.set(key, suppressed + 1);
+    pruneZeroCycleRuns(endedAtMs);
+    const openRun = zeroCycleRuns.get(key);
+    const suppressed = openRun?.suppressed ?? 0;
+    if (spentNothing && openRun) {
+      openRun.suppressed = suppressed + 1;
+      openRun.touchedAtMs = endedAtMs;
     } else if (dataDir) {
       if (spentNothing) {
-        zeroCycleRunOpen.add(key);
+        zeroCycleRuns.set(key, { suppressed: 0, touchedAtMs: endedAtMs });
       } else {
-        zeroCycleRunOpen.delete(key);
+        zeroCycleRuns.delete(key);
       }
-      suppressedZeroCycles.delete(key);
       logSpurEvent(dataDir, {
         event: "gh.poll_cycle",
         level: "info",
@@ -354,7 +367,7 @@ export async function runGhPollCycle<T>(
         message: `gh invoked ${cycle.calls} times in ${cycle.kind} poll cycle`,
         details: {
           cycle: cycle.kind,
-          durationMs: Date.now() - cycle.startedAt,
+          durationMs: endedAtMs - cycle.startedAt,
           calls: cycle.calls,
           graphqlCost: cycle.graphqlCost,
           bySubcommand: Object.fromEntries(cycle.bySubcommand),
