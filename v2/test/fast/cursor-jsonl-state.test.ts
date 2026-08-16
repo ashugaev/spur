@@ -62,6 +62,14 @@ describe("classifyCursorJsonlState", () => {
     expect(record).toBeNull();
   });
 
+  it("keeps fresh background work active after the foreground turn is aborted", async () => {
+    const records = parseFixture(
+      await readFile(join(CURSOR_FIXTURES_DIR, "aborted-background-work.jsonl"), "utf8"),
+    );
+    expect(records.length).toBe(3);
+    expect(classifyCursorJsonlState(records, NOW, NOW)).toBe("working");
+  });
+
   it("returns waiting for stale assistant tool_use past the tool_use grace window", () => {
     expect(
       classifyCursorJsonlState(

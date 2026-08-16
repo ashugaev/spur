@@ -25,6 +25,12 @@ interface CursorCacheEntry {
 }
 
 const cursorCache = new Map<string, CursorCacheEntry>();
+// Dedupes concurrent calls (e.g. /api/models and /api/projects/:id/spawn-
+// defaults firing near-simultaneously on a cold cache) onto a single
+// in-flight `cursor models` exec instead of running it twice in parallel.
+// Keyed the same as cursorCache; evicted on both success and failure so a
+// rejected call never poisons later callers.
+const cursorInFlight = new Map<string, Promise<AgentModel[]>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -135,15 +141,19 @@ function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
   }));
 }
 
-async function listCursorModels(): Promise<AgentModel[]> {
-  const cacheKey = cursorCommand();
-  const cached = cursorCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.models;
-  }
+async function execCursorModels(cacheKey: string): Promise<AgentModel[]> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], { encoding: "utf8" }));
+    // Bounded so a hung `cursor` binary can't leave this (and the HTTP
+    // request that awaits it, e.g. /models or /projects/:id/spawn-defaults)
+    // unresolved indefinitely. Under the client-facing 8s spurRequest
+    // timeout (packages/web/src/lib/spur-daemon.ts) so a stall still
+    // resolves here first, into the same graceful fallback as "no cursor
+    // CLI", rather than the caller timing out on a still-running process.
+    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }));
   } catch {
     return CURSOR_FALLBACK_MODELS;
   }
@@ -151,6 +161,23 @@ async function listCursorModels(): Promise<AgentModel[]> {
   const resolved = models.length > 0 ? normalizeCursorDefaultModel(models) : CURSOR_FALLBACK_MODELS;
   cursorCache.set(cacheKey, { models: resolved, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
   return resolved;
+}
+
+async function listCursorModels(): Promise<AgentModel[]> {
+  const cacheKey = cursorCommand();
+  const cached = cursorCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.models;
+  }
+  const inFlight = cursorInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = execCursorModels(cacheKey).finally(() => {
+    cursorInFlight.delete(cacheKey);
+  });
+  cursorInFlight.set(cacheKey, request);
+  return request;
 }
 
 export async function listAgentModels(

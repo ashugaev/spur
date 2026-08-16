@@ -2,7 +2,9 @@ import { test, expect, type Page } from "playwright/test";
 import {
   makeCompletedSession,
   makeWorkingSession,
+  mockAgentModels,
   mockSessions,
+  mockSpawnDefaults,
   type ProjectInfo,
 } from "./fixtures.js";
 
@@ -22,15 +24,7 @@ const MODELS_BY_AGENT: Record<string, { id: string; label: string; isDefault?: b
 };
 
 async function mockModels(page: Page): Promise<void> {
-  await page.route(/\/api\/models\?agent=.*/, (route) => {
-    const url = new URL(route.request().url());
-    const agent = url.searchParams.get("agent") ?? "claude";
-    void route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ models: MODELS_BY_AGENT[agent] ?? [] }),
-    });
-  });
+  await mockAgentModels(page, MODELS_BY_AGENT);
 }
 
 async function openSpawnModal(page: Page): Promise<void> {
@@ -40,6 +34,9 @@ async function openSpawnModal(page: Page): Promise<void> {
     DEFAULT_PROJECTS,
   );
   await mockModels(page);
+  // No project.defaultModels configured — rung 3 falls through, so the
+  // control preselects the catalog's first entry (rung 4).
+  await mockSpawnDefaults(page);
   await page.goto("/");
   await page.getByRole("button", { name: /spawn session/i }).click();
   await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -47,7 +44,7 @@ async function openSpawnModal(page: Page): Promise<void> {
 
 // D7c: Spawn modal model picker
 test.describe("D7c: Spawn modal model picker", () => {
-  test("model picker renders next to the agent select and defaults to Default", async ({
+  test("model picker renders next to the agent select and preselects the catalog's first entry", async ({
     page,
   }) => {
     await openSpawnModal(page);
@@ -55,7 +52,7 @@ test.describe("D7c: Spawn modal model picker", () => {
     await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
     const modelButton = page.getByRole("button", { name: "Spawn model" });
     await expect(modelButton).toBeVisible();
-    await expect(modelButton).toHaveText(/Default/);
+    await expect(modelButton).toHaveText(/Claude Opus/);
   });
 
   test("switching agent changes the model list", async ({ page }) => {
@@ -99,25 +96,28 @@ test.describe("D7c: Spawn modal model picker", () => {
     await page.getByRole("button", { name: "Spawn model" }).click();
     await page.getByRole("button", { name: "Add favorite Claude Haiku" }).click();
 
-    // Favorite jumps to the first model row (after the Default entry).
+    // Favorite jumps to the first model row.
     const firstModel = page
       .getByRole("menu", { name: "Model options" })
       .getByRole("menuitem")
-      .nth(1);
+      .nth(0);
     await expect(firstModel).toContainText("Claude Haiku");
 
     // Persisted to local storage under the shared favorites key.
     const stored = await page.evaluate(() => window.localStorage.getItem("spur:model-favorites"));
     expect(stored ?? "").toContain("claude:claude-haiku");
 
-    // Reload and reopen — the favorite stays pinned to the top.
+    // Reload and reopen — the favorite stays pinned to the top, and is now
+    // also what the control preselects (rung 2, ahead of the catalog's own
+    // default).
     await page.reload();
     await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
     await page.getByRole("button", { name: "Spawn model" }).click();
     const firstModelAfterReload = page
       .getByRole("menu", { name: "Model options" })
       .getByRole("menuitem")
-      .nth(1);
+      .nth(0);
     await expect(firstModelAfterReload).toContainText("Claude Haiku");
   });
 
@@ -135,12 +135,13 @@ test.describe("D7c: Spawn modal model picker", () => {
       });
     });
     await mockModels(page);
+    await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
     await expect(page.getByRole("combobox", { name: "Respawn agent" })).toBeVisible();
     const modelButton = page.getByRole("button", { name: "Respawn model" });
     await expect(modelButton).toBeVisible();
-    await expect(modelButton).toHaveText(/Default/);
+    await expect(modelButton).toHaveText(/Claude Opus/);
   });
 });
