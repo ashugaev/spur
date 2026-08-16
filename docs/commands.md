@@ -4,13 +4,15 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
+`POST /deploy/switch` starts a detached install-and-restart helper and returns `202 { accepted: true, version }`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
+
 ## doctor
 
-Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything.
+Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything. The `config-registry` check also lists every registered path with its alive/dead/worktree-internal state, both in the human-readable output and in `--json` — see [Config registry](configuration.md#config-registry).
 
 When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
 
@@ -108,12 +110,18 @@ New worktree branches fetch `origin`, fast-forward the base branch when only beh
 spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --every 30m --until "done condition" [message...]
 spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
+spur wake <sessionId> --cancel
 ```
 
 `shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude in shared workspace, orchestration-only prompt (inspect state, use `$manager`, coordinate agents, no product code unless the operator asks for a config edit). Its workspace is re-created if missing, on `send` or `restore`.
 
-`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` and the message retries through the queue drain (below) like any other queued message.
+`POST /shepherd/spawn` reuses the newest running or spawning Shepherd. Pass `reportDisposition: true` to receive `{ disposition: "spawned" | "reused", session }`; omit it for the legacy session-only response.
+
+`wake` stores a delayed or recurring message; the daemon delivers when due, so a session can schedule its own next check. Daily wakes use daemon-local `HH:MM` and require `--until`. `--every <duration>` repeats at a fixed interval and also requires `--until`. `--cancel` drops any recurring (`--every` or `--daily-at`) wake for the session; it cannot combine with the scheduling options. Each due occurrence is attempted once: a one-shot wake is consumed either way, and a failed daily or interval occurrence skips straight to its next scheduled time instead of retrying. Delivery goes through the normal queued `send` path, so a synchronous failure (session gone, not running) logs `session.wake.failed` / `session.wake.daily_failed` / `session.wake.interval_failed` as before, but a pane-write failure after the message is queued no longer counts as that wake failing — it logs `session.wake.sent` / `session.wake.daily_sent` / `session.wake.interval_sent` and the message retries through the queue drain (below) like any other queued message.
+
+A recurring wake (`--every` or `--daily-at`) only fires while the session's status is restorable (`running`, `stopped`, `paused`) — `send` resumes a `stopped`/`paused` session automatically, so its wake fires normally. Once the session goes `killed`, the daemon drops the schedule on its next tick and logs `session.wake.interval_cancelled` (or `session.wake.daily_cancelled` for a daily-only wake) instead of repeatedly failing to send. `errored` and `completed` sessions keep the recurring wake armed but silent instead: it stays due without firing or advancing until the session comes back through `restore` or `reopen`, at which point the first tick after that fires one immediate catch-up wake.
 
 ## list
 
@@ -226,6 +234,8 @@ For repo testing prefer `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` ov
 `autoStart` applies when the main session spawns, restores, or recovers a dead agent — a session whose pane comes back gets its `autoStart` sidecars back too. Starting a sidecar from inside a sidecar is always manual, and nesting stops after one level (`session -> sidecar -> nested sidecar`). Nested sidecars never auto-start.
 
 Sidecar `ports` are reserved and probed on the host at start and injected into the sidecar env, so siblings and unrelated processes cannot race the range.
+
+That env reaches the sidecar process only: the agent pane's env freezes before the port is reserved, so no session variable carries it. Read it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>` for one sidecar, `--json` for JSON). Use the explicit `$SPUR_SESSION_TOOL_DIR/` path — a login shell rebuilds `PATH` and drops the tool dir, so bare `spur-sidecar` resolves to nothing or to the wrong install. Prints one tab-separated line per reserved port, `<sidecar>` `<portId>` `<env>` `<port>` `alive|dead`, sorted by sidecar then port id; with no port reserved it prints nothing and exits 0. Any desk member can read it — ports resolve against the sidecar's owner session.
 
 A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk group](configuration.md#desk-groups), started and stopped from any member.
 

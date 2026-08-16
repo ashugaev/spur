@@ -97,6 +97,7 @@ import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/proje
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -516,7 +517,10 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "spur-shepherd" }));
+    mockedSpurRequestJson.mockResolvedValue({
+      disposition: "reused",
+      session: sessionFixture({ project: "spur-shepherd" }),
+    });
 
     const response = await diagnoseUpdate(
       new NextRequest("http://localhost:3000/api/diagnose-update", {
@@ -537,6 +541,22 @@ describe("Spur web API routes", () => {
     expect(body.agent).toBeUndefined();
     expect(body.prompt).toContain("1.5.0");
     expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
+    expect(body.reportDisposition).toBe(true);
+  });
+
+  it("POST /api/diagnose-update rejects an invalid daemon success body", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ id: "legacy-session-shape" });
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toContain("invalid diagnostic-session response");
   });
 
   it("POST /api/diagnose-update preserves daemon error status", async () => {
@@ -3356,6 +3376,48 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(502);
       expect(payload.error).toBe("daemon down");
+    });
+
+    // ── GET /api/projects/:id/spawn-defaults ──────────────────────────────
+
+    it("GET /api/projects/:id/spawn-defaults forwards the agent to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ model: "sonnet", worktree: false });
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { model: string | null; worktree: boolean };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/projects/api/spawn-defaults?agent=claude",
+        { timeoutMs: 8_000 },
+      );
+      expect(payload).toEqual({ model: "sonnet", worktree: false });
+    });
+
+    it("GET /api/projects/:id/spawn-defaults rejects an unsupported agent without calling the daemon", async () => {
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=nope"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/projects/:id/spawn-defaults surfaces the daemon's error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
     });
   });
 });

@@ -1160,6 +1160,15 @@ export interface ProjectListEntry {
   modes?: Record<string, SessionModeConfig>;
 }
 
+// What a spawn would resolve to for this project+agent if the request named
+// neither field. Lets a client preselect a concrete option instead of a
+// "server decides" sentinel; `model` is null when the agent has no configured
+// or built-in default.
+export interface SpawnDefaultsResponse {
+  model: string | null;
+  worktree: boolean;
+}
+
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;

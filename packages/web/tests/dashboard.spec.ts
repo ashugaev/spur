@@ -23,6 +23,87 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test("failed update diagnosis reports Shepherd reuse and links the session", async ({ page }) => {
+  await page.clock.install();
+  await mockSessions(page, []);
+  await page.route("**/api/runtime/info", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "1.4.0" }),
+    });
+  });
+  await page.route("**/api/diagnose-update", (route) => {
+    void route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        disposition: "reused",
+        session: { id: "shp-e707", project: "spur-shepherd" },
+      }),
+    });
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem("spur.version-switch.target", "1.5.0");
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Switching to 1.5.0.", { exact: false })).toBeVisible();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await page.clock.fastForward(3_000);
+  }
+  await expect(page.getByText("Updating Spur failed")).toBeVisible();
+  await page.getByRole("button", { name: "Diagnose update" }).click();
+
+  await expect(page.getByText("Sent to")).toBeVisible();
+  await expect(page.getByRole("link", { name: "shp-e707" })).toHaveAttribute(
+    "href",
+    "/sessions/shp-e707?project=spur-shepherd",
+  );
+});
+
+test("version switch reports the active target from an overlapping request", async ({ page }) => {
+  await mockSessions(page, []);
+  await page.route("**/api/runtime/info", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "1.4.0" }),
+    });
+  });
+  await page.route("**/api/runtime/versions", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        current: "1.4.0",
+        available: [{ tag: "1.5.0", publishedAt: "2026-08-11T00:00:00.000Z" }],
+      }),
+    });
+  });
+  await page.route("**/api/runtime/versions/switch", (route) => {
+    void route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: "deploy switch already in progress for 1.4.9",
+        inProgress: true,
+        version: "1.4.9",
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Show Spur version information/ }).click();
+  await page.getByRole("button", { name: "Switch Spur to 1.5.0" }).click();
+  const dialog = page.getByRole("dialog", { name: "Switch Spur version" });
+  await dialog.getByRole("button", { name: "Switch", exact: true }).click();
+
+  await expect(dialog.getByTestId("switch-version-error")).toHaveText(
+    "Update to 1.4.9 is already in progress.",
+  );
+});
+
 // The Status lane cluster moved out of the header and into the Filters
 // modal — these helpers open it, act on a lane chip (which renders as
 // "{label}:{count}"), and close it again so the underlying list re-renders
@@ -80,7 +161,7 @@ async function fillSpawnForm(
     project?: string;
     prompt?: string;
     branch?: string;
-    workspaceMode?: "default" | "worktree" | "shared";
+    workspaceMode?: "worktree" | "shared";
     baseBranch?: string;
     planMode?: boolean;
     selfDestruct?: boolean;
@@ -2250,8 +2331,9 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
 
-    // Project select (contains "Select project" option)
-    await expect(page.getByRole("option", { name: /select project/i })).toBeAttached();
+    // Project select exposes only the configured project, never a placeholder.
+    await expect(page.getByRole("option", { name: /select project/i })).toHaveCount(0);
+    await expect(page.getByRole("option", { name: "my-project" })).toBeAttached();
     // Agent select
     await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
@@ -2941,6 +3023,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         projectId: "other-project",
         prompt: placeholder.prompt,
         agent: "claude",
+        model: "opus",
         branch: "feature/spawn-payload",
         planMode: true,
         steps: ["Audit the repository", "Implement the retry flow"],
@@ -2958,7 +3041,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
-    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
     await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
     await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
@@ -3013,6 +3096,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
         projectId: "my-project",
         prompt: placeholder.prompt,
         agent: "claude",
+        model: "opus",
+        overrides: { worktree: true },
         selfDestruct: { enabled: true },
       },
     ]);

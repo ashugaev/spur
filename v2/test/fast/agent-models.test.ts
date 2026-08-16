@@ -83,6 +83,29 @@ describe("parseCursorModelsOutput", () => {
 });
 
 describe("listAgentModels cursor", () => {
+  it("bounds the `cursor models` shell-out with a timeout, so a hung CLI can't stall the request indefinitely", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-timeout";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: { timeout?: number },
+        cb: (err: Error | null) => void,
+      ) => {
+        cb(new Error("ETIMEDOUT"));
+      },
+    );
+    const models = await listAgentModels("cursor");
+    // Same graceful degrade as any other exec failure (e.g. cursor missing).
+    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    // Asserted after the call, not inside the mock implementation: a thrown
+    // expectation there would be swallowed by listCursorModels' catch-all
+    // and silently pass as just another "exec failed" case.
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [, , opts] = execFileMock.mock.calls[0] as [string, string[], { timeout?: number }];
+    expect(opts.timeout).toBe(5_000);
+  });
+
   it("returns a fallback list when the exec fails", async () => {
     process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-missing";
     execFileMock.mockImplementation(
@@ -92,6 +115,55 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+  });
+
+  it("dedupes concurrent calls onto a single exec instead of running `cursor models` twice", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-concurrent";
+    let resolveExec!: (result: { stdout: string }) => void;
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => {
+        resolveExec = (result) => cb(null, result);
+      },
+    );
+    const first = listAgentModels("cursor");
+    const second = listAgentModels("cursor");
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    resolveExec({ stdout: ["auto - Auto"].join("\n") });
+    const [firstModels, secondModels] = await Promise.all([first, second]);
+    expect(firstModels).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(secondModels).toEqual(firstModels);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("evicts a rejected in-flight entry so a later call retries instead of being poisoned", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test-poison";
+    execFileMock.mockImplementationOnce(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
+        cb(new Error("ENOENT"));
+      },
+    );
+    const failed = await listAgentModels("cursor");
+    expect(failed).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+
+    execFileMock.mockImplementationOnce(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => {
+        cb(null, { stdout: "composer-2.5 - Composer 2.5 (current)" });
+      },
+    );
+    const succeeded = await listAgentModels("cursor");
+    expect(succeeded).toEqual([{ id: "composer-2.5", label: "Composer 2.5", isCurrent: true }]);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 
   it("marks auto as Spur's Cursor default over CLI fast default", async () => {

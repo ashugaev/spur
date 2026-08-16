@@ -208,7 +208,7 @@ interface SessionRowProps {
   deskMemberCount?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 

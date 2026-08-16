@@ -17,7 +17,7 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
-import { spawnDraftStorageKey, writeSpawnDraft } from "@/lib/spawn-draft";
+import { SPAWN_DRAFT_STORAGE_KEY, writeSpawnDraft } from "@/lib/spawn-draft";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type * as versionSwitchContextModule from "@/lib/version-switch-context";
 import type { VersionSwitchPhase } from "@/lib/version-switch-context";
@@ -297,16 +297,20 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(
-          JSON.stringify({
-            projectId: "api",
-            prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
-            agent: "claude",
-            slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
-          }),
-        );
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+          agent: "claude",
+          model: "opus",
+          overrides: { worktree: true },
+          slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
+        });
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-backlog-1" }),
           { status: 201 },
@@ -397,7 +401,7 @@ describe("Dashboard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain(
         "Edited checkout instructions",
       );
     });
@@ -417,7 +421,7 @@ describe("Dashboard", () => {
       "Work on WEB-18: Fix billing\n\nhttps://jira.example.com/browse/WEB-18",
     );
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
@@ -1293,19 +1297,20 @@ describe("Dashboard", () => {
 
   it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
     writeSpawnDraft({
-      projectId: "spur-shepherd",
       prompt: "Stale Shepherd prompt",
       agent: "codex",
       model: "gpt-5.6-codex",
       branch: "feature/stale-shepherd",
       branchIsExplicit: true,
       workspaceMode: "worktree",
+      workspaceModeConfirmedFor: "api",
       defaultBranch: "main",
       planMode: true,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: ["Stale step"],
       trackerUrl: null,
+      sessionMode: null,
     });
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1348,7 +1353,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
@@ -1364,9 +1369,31 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        // A real cursor catalog never surfaces only "auto" as an option
+        // (that id is the pre-rewrite placeholder DEFAULT_CURSOR_MODEL
+        // launches actually resolve away from, see spawnDefaults); a
+        // concrete second entry keeps this test from re-encoding that
+        // sentinel as if it were a normal model choice.
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "composer-1.5", label: "Composer 1.5" },
+              { id: "auto", label: "Auto" },
+            ],
+          }),
+        );
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }));
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "",
+          agent: "cursor",
+          model: "composer-1.5",
+          overrides: { worktree: true },
+        });
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-cursor-1", agent: "cursor" }),
           { status: 201 },
@@ -1389,6 +1416,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1397,9 +1427,16 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "",
+      agent: "cursor",
+      model: "composer-1.5",
+      overrides: { worktree: true },
     });
   });
 
@@ -1414,9 +1451,19 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }));
+        expect(JSON.parse(String(init?.body))).toEqual({
+          projectId: "api",
+          prompt: "",
+          agent: "claude",
+          model: "opus",
+          overrides: { worktree: true },
+        });
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -1434,7 +1481,9 @@ describe("Dashboard", () => {
     });
 
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
-    expect(spawnButton).toBeEnabled();
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
     expect(screen.getByText("⌘ + ⏎")).toBeInTheDocument();
     expect(screen.queryByText("⌘/Ctrl+Enter")).not.toBeInTheDocument();
@@ -1447,9 +1496,16 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
     });
   });
 
@@ -1464,6 +1520,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
@@ -1487,7 +1547,11 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
       target: { value: "  tests pass  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
+    fireEvent.click(spawnButton);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -1495,17 +1559,20 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "Ship it",
-            agent: "claude",
-            selfDestruct: {
-              enabled: true,
-              conditions: "tests pass",
-            },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "Ship it",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -1524,6 +1591,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
@@ -1552,7 +1623,11 @@ describe("Dashboard", () => {
     );
     expect(conditionsField).toHaveValue("");
 
-    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).toBeEnabled();
+    });
+    fireEvent.click(spawnButton);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -1560,14 +1635,17 @@ describe("Dashboard", () => {
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            projectId: "api",
-            prompt: "Ship it",
-            agent: "claude",
-            selfDestruct: { enabled: true },
-          }),
         }),
       );
+    });
+    const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+    expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+      projectId: "api",
+      prompt: "Ship it",
+      agent: "claude",
+      model: "opus",
+      overrides: { worktree: true },
+      selfDestruct: { enabled: true },
     });
   });
 
@@ -1582,6 +1660,10 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -1618,6 +1700,9 @@ describe("Dashboard", () => {
       expect(screen.getByAltText("spawn.png")).toBeInTheDocument();
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1838,6 +1923,10 @@ describe("Dashboard", () => {
           return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
         if (url === "/api/sessions")
           return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+        if (url.startsWith("/api/models"))
+          return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+        if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
         if (url === "/api/spawn")
           return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
         throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1855,6 +1944,9 @@ describe("Dashboard", () => {
       });
       const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
       fireEvent.change(prompt, { target: { value } });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+      });
       fireEvent.keyDown(prompt, keydown);
 
       await waitFor(() => {
@@ -1863,13 +1955,141 @@ describe("Dashboard", () => {
           expect.objectContaining({
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
           }),
         );
         expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
       });
+      const spawnCall = fetchMock.mock.calls.find(([url]) => url === "/api/spawn");
+      expect(JSON.parse(String(spawnCall?.[1]?.body))).toEqual({
+        projectId: "api",
+        prompt: value,
+        agent: "claude",
+        model: "opus",
+        overrides: { worktree: true },
+      });
     },
   );
+
+  it("keeps Spawn disabled while the model resolves, enables once settled with a concrete model", async () => {
+    let resolveModels: ((response: Response) => void) | undefined;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models")) return pendingModels;
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
+
+    resolveModels?.(
+      new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Spawn enabled and omits model from the payload when the catalog settles empty", async () => {
+    let spawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/spawn") {
+        spawnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("No models");
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(spawnBody).not.toBeNull();
+    });
+    expect(spawnBody).not.toHaveProperty("model");
+  });
+
+  it("keeps Spawn disabled and shows an error banner when the models fetch errors, distinct from a genuinely empty catalog", async () => {
+    // F3: a model-fetch error is not the same as a settled-empty catalog —
+    // it must keep blocking submit and surface what failed, the same way an
+    // unresolved workspace-mode default does, instead of silently spawning
+    // with model omitted as if nothing were wrong.
+    let spawnCalled = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ error: "network down" }), { status: 502 });
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/spawn") {
+        spawnCalled = true;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't load the model catalog: network down/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
+
+    // Stays disabled — an errored catalog fetch has no manual escape hatch
+    // the way workspace mode does (there is no model to hand-pick when the
+    // list itself never loaded).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("button", { name: "Spawn" })).toBeDisabled();
+    expect(spawnCalled).toBe(false);
+  });
 
   it("toggles voice recording from the spawn prompt with Cmd+.", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -2090,6 +2310,8 @@ describe("Dashboard", () => {
           { status: 200 },
         );
       }
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2124,7 +2346,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("step 1"), { target: { value: "Run tests" } });
 
     await waitFor(() => {
-      const stored = window.localStorage.getItem(spawnDraftStorageKey("api"));
+      const stored = window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY);
       expect(stored).toContain("Keep this draft");
       expect(stored).not.toContain("attachments");
     });
@@ -2144,12 +2366,13 @@ describe("Dashboard", () => {
     render(<Dashboard />);
     await screen.findByRole("button", { name: "Spawn Session" });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
     resolveHeldSessions?.(new Response(JSON.stringify(sessionsPayload()), { status: 200 }));
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
+      expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("api");
     });
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this draft");
     expect(screen.getByLabelText("branch name")).toHaveValue("feature/keep-draft");
     expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
@@ -2184,22 +2407,22 @@ describe("Dashboard", () => {
     const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
     fireEvent.change(prompt, { target: { value: "First edit" } });
     fireEvent.change(prompt, { target: { value: "Latest edit" } });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(499);
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toBeNull();
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Latest edit");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Latest edit");
 
     fireEvent.change(prompt, { target: { value: "Close now" } });
     const removeCallCount = windowRemoveListenerSpy.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Close now");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Close now");
     const preEditEscapeHandlers = windowRemoveListenerSpy.mock.calls
       .slice(removeCallCount)
       .filter(([type]) => type === "keydown")
@@ -2214,7 +2437,7 @@ describe("Dashboard", () => {
         handler(new KeyboardEvent("keydown", { key: "Escape" }));
       }
     });
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("Escape now");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Escape now");
     expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -2232,25 +2455,28 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       if (url === "/api/models?agent=claude")
         return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight") {
         return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
     writeSpawnDraft({
-      projectId: "api",
       prompt: "Keep the chosen branch",
       agent: "claude",
       model: null,
       branch: "feature/explicit-branch",
       branchIsExplicit: true,
-      workspaceMode: "default",
+      workspaceMode: "worktree",
+      workspaceModeConfirmedFor: "api",
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2291,6 +2517,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       if (url === "/api/models?agent=claude")
         return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/preflight") {
         return new Response(JSON.stringify({ branch: "feature/auto-branch" }), { status: 200 });
       }
@@ -2336,19 +2564,20 @@ describe("Dashboard", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
     writeSpawnDraft({
-      projectId: "api",
       prompt: "Stored prompt",
       agent: "claude",
       model: null,
       branch: "",
       branchIsExplicit: false,
-      workspaceMode: "default",
+      workspaceMode: "worktree",
+      workspaceModeConfirmedFor: "api",
       defaultBranch: "",
       planMode: false,
       selfDestruct: false,
       selfDestructConditions: "",
       steps: [],
       trackerUrl: null,
+      sessionMode: null,
     });
 
     render(<Dashboard />);
@@ -2365,13 +2594,11 @@ describe("Dashboard", () => {
       "Typed while loading",
     );
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
-        "Typed while loading",
-      );
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Typed while loading");
     });
   });
 
-  it("does not carry a removed project's dirty draft into the fallback project", async () => {
+  it("draft persists when project is removed and fallback is selected", async () => {
     let projects = [
       { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
       { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
@@ -2391,21 +2618,6 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       throw new Error(`Unexpected fetch: ${url}`);
     });
-    writeSpawnDraft({
-      projectId: "sp",
-      prompt: "Saved Spur draft",
-      agent: "claude",
-      model: null,
-      branch: "feature/sp-draft",
-      branchIsExplicit: true,
-      workspaceMode: "default",
-      defaultBranch: "",
-      planMode: false,
-      selfDestruct: false,
-      selfDestructConditions: "",
-      steps: [],
-      trackerUrl: null,
-    });
     const client = createTestQueryClient();
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -2419,7 +2631,7 @@ describe("Dashboard", () => {
       target: { value: "API-only edits" },
     });
     await waitFor(() => {
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("API-only edits");
     });
 
     projects = [{ id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" }];
@@ -2430,10 +2642,53 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
     });
-    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Saved Spur draft");
-    expect(screen.getByLabelText("branch name")).toHaveValue("feature/sp-draft");
-    expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).not.toContain("API-only edits");
-    expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain("API-only edits");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("API-only edits");
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("API-only edits");
+  });
+
+  it("project switch preserves current form fields", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(
+          JSON.stringify({
+            ...sessionsPayload(),
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "sp", name: "Spur", configured: true, prefix: "sp", path: "/repo/sp" },
+            ],
+          }),
+          { status: 200 },
+        );
+      if (url === "/api/models?agent=claude")
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await screen.findByRole("button", { name: "Spawn Session" });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "My draft text" },
+    });
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/my-branch" },
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "sp" },
+    });
+
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("My draft text");
+    expect(screen.getByLabelText("branch name")).toHaveValue("feature/my-branch");
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
   });
 
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
@@ -2465,6 +2720,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn")
         return new Response(JSON.stringify(spawnedSession), { status: 201 });
       if (url === "/api/sessions")
@@ -2496,11 +2755,14 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Ship it" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
-      expect(window.localStorage.getItem(spawnDraftStorageKey("sp"))).toBeNull();
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
@@ -2545,6 +2807,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
@@ -2564,6 +2830,9 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Spawn in matching filter" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
@@ -2606,6 +2875,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
@@ -2631,6 +2904,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Spawn in another project" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -2655,6 +2931,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn")
         return new Response(JSON.stringify({ error: "Daemon down" }), { status: 502 });
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -2671,15 +2951,16 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Keep this prompt" },
     });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
       expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
       expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
-      expect(window.localStorage.getItem(spawnDraftStorageKey("api"))).toContain(
-        "Keep this prompt",
-      );
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("Keep this prompt");
     });
   });
 
@@ -2709,6 +2990,10 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         spawnCalls += 1;
         return pendingSpawn;
@@ -2729,6 +3014,9 @@ describe("Dashboard", () => {
     });
 
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    await waitFor(() => {
+      expect(spawnButton).not.toBeDisabled();
+    });
     fireEvent.click(spawnButton);
     fireEvent.click(spawnButton);
 
@@ -3036,6 +3324,10 @@ describe("Dashboard", () => {
         if (url === "/api/runtime/voice")
           return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
         if (url === "/api/sessions") return new Response(JSON.stringify(payloadWithModes()));
+        if (url.startsWith("/api/models"))
+          return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+        if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
         if (url === "/api/spawn") {
           return onSpawn(init?.body ? JSON.parse(String(init.body)) : null);
         }
@@ -3074,6 +3366,9 @@ describe("Dashboard", () => {
       const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
       fireEvent.change(modeSelect, { target: { value: "council" } });
 
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
       await waitFor(() => {
@@ -3100,6 +3395,9 @@ describe("Dashboard", () => {
         screen.queryByRole("combobox", { name: "Spawn session mode" }),
       ).not.toBeInTheDocument();
 
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
       await waitFor(() => {
@@ -3116,13 +3414,13 @@ describe("Dashboard", () => {
       });
       window.localStorage.setItem("spur:last-spawn-project", "moded");
       writeSpawnDraft({
-        projectId: "moded",
         prompt: "Stale mode draft",
         agent: "claude",
         model: null,
         branch: "",
         branchIsExplicit: false,
-        workspaceMode: "default",
+        workspaceMode: "worktree",
+        workspaceModeConfirmedFor: "moded",
         defaultBranch: "",
         planMode: false,
         selfDestruct: false,
@@ -3139,6 +3437,9 @@ describe("Dashboard", () => {
       const modeSelect = await screen.findByRole("combobox", { name: "Spawn session mode" });
       expect(modeSelect).toHaveValue("manager");
 
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
       await waitFor(() => {
@@ -3169,6 +3470,9 @@ describe("Dashboard", () => {
         screen.queryByRole("combobox", { name: "Spawn session mode" }),
       ).not.toBeInTheDocument();
 
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn" })).not.toBeDisabled();
+      });
       fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
       await waitFor(() => {

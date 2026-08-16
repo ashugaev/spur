@@ -7,6 +7,12 @@ import { listAgentModels } from "./agents/models.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import {
+  deploySwitchStatePath,
+  readProcessStartTime,
+  reconcileDeploySwitchState,
+  writeDeploySwitchState,
+} from "./deploy-switch-state.js";
+import {
   DEFAULT_EVENT_LOG_CONFIG,
   flushEventLogCollapse,
   logSpurEvent,
@@ -463,6 +469,7 @@ export async function startServer(
   assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
+  const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
@@ -680,11 +687,25 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/switch/status") {
+        sendJson(response, 200, reconcileDeploySwitchState(switchStatePath) ?? { phase: "idle" });
+        return;
+      }
+
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
         if (!isReleaseVersion(requestedVersion)) {
           sendError(response, 400, "invalid version");
+          return;
+        }
+        const activeSwitch = reconcileDeploySwitchState(switchStatePath);
+        if (activeSwitch?.phase === "running") {
+          sendJson(response, 409, {
+            error: `deploy switch already in progress for ${activeSwitch.version}`,
+            inProgress: true,
+            version: activeSwitch.version,
+          });
           return;
         }
         // Guard: refuse to run when the daemon is executing from a source
@@ -711,7 +732,41 @@ export async function startServer(
         const child = spawn("bash", [helperPath, requestedVersion], {
           detached: true,
           stdio: "ignore",
+          env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
         });
+        if (child.pid === undefined) {
+          sendError(response, 500, "failed to start deploy switch");
+          return;
+        }
+        const startedAt = new Date().toISOString();
+        const processStartTime = readProcessStartTime(child.pid);
+        if (!processStartTime) {
+          sendError(response, 500, "failed to identify deploy switch process");
+          return;
+        }
+        writeDeploySwitchState(switchStatePath, {
+          phase: "running",
+          version: requestedVersion,
+          pid: child.pid,
+          processStartTime,
+          startedAt,
+        });
+        // The helper writes its own terminal status, but only after it arms the
+        // trap: this covers a spawn error and the exits before that (bad
+        // version, lock timeout). Losing the race to the helper is harmless —
+        // both writes carry the same outcome.
+        const finishSwitch = (exitCode: number): void => {
+          writeDeploySwitchState(switchStatePath, {
+            phase: exitCode === 0 ? "succeeded" : "failed",
+            version: requestedVersion,
+            pid: child.pid ?? process.pid,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            exitCode,
+          });
+        };
+        child.once("error", () => finishSwitch(-1));
+        child.once("exit", (code) => finishSwitch(code ?? -1));
         child.unref();
         sendJson(response, 202, { accepted: true, version: requestedVersion });
         return;
@@ -954,6 +1009,20 @@ export async function startServer(
             url.searchParams.get("agent")?.trim() || undefined,
           ),
         );
+        return;
+      }
+
+      const spawnDefaultsProjectId = path.match(/^\/projects\/([^/]+)\/spawn-defaults$/)?.[1];
+      if (method === "GET" && spawnDefaultsProjectId) {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, await service.spawnDefaults(spawnDefaultsProjectId, agent));
         return;
       }
 
@@ -1229,8 +1298,15 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/shepherd/spawn") {
-        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnShepherd(body));
+        const body = await readJsonBody<{ prompt?: unknown; reportDisposition?: unknown }>(
+          request,
+          15_000_000,
+        );
+        const shepherd = await service.spawnShepherd(
+          typeof body.prompt === "string" ? { prompt: body.prompt } : {},
+        );
+        // Legacy callers (web /api/shepherd) still expect the session alone.
+        sendJson(response, 201, body.reportDisposition === true ? shepherd : shepherd.session);
         return;
       }
 
