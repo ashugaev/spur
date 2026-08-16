@@ -626,7 +626,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       if (current.controllerSessionName) {
         await killTmuxSession(current.controllerSessionName);
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });
@@ -5762,7 +5762,7 @@ describe.skipIf(!tmuxOk || platform() !== "linux")("duplicate-agent guard (runti
       if (current.controllerSessionName) {
         await killTmuxSession(current.controllerSessionName);
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });

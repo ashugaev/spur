@@ -8,6 +8,7 @@ import type { AgentName } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
+  killTmuxServer,
   killTmuxSession,
   killTmuxSessionsByPrefix,
   readTmuxStatus,
@@ -31,6 +32,7 @@ interface AuthStatus {
 interface CleanupItem {
   rootDir: string;
   sessionPrefix: string;
+  socketName: string;
   branch?: string;
   worktreePath?: string;
 }
@@ -291,7 +293,8 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
-  await killTmuxSessionsByPrefix(item.sessionPrefix);
+  await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
+  killTmuxServer(item.socketName);
   if (item.worktreePath) {
     try {
       await git(SMOKE_REPO_DIR, "worktree", "remove", "--force", item.worktreePath);
@@ -327,7 +330,7 @@ async function runSmoke(
   const expectedPreflightBranch = options?.expectedPreflightBranch
     ? `${options.expectedPreflightBranch}-${port}`
     : undefined;
-  const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
+  const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
 
   setActiveTmuxSocketName(tmuxSocketName);
@@ -437,6 +440,7 @@ afterEach(async () => {
       console.warn(`cleanupSmokeItem failed for ${item.rootDir}: ${String(error)}`);
     }
   }
+  setActiveTmuxSocketName(null);
 });
 
 describe("cursor auth status parsing", () => {

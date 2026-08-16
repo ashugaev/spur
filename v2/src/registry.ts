@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { expandHome, loadConfig, loadProjectConfig } from "./config.js";
+import { expandHome, loadConfig, loadInstanceConfigReadOnly, loadProjectConfig } from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
@@ -214,6 +214,33 @@ export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
       ? normalizeUnconfiguredProjects(rawUnconfigured)
       : [],
   };
+}
+
+// Resolves the set of "other instance" dataDirs a doctor scan should treat
+// as foreign — used to reclassify a live agent whose session record is not
+// in the scanned dataDir but IS in another registered instance's dataDir
+// (isolated-daemon/sidecar case) as `foreign_instance` rather than a leak.
+//
+// Read-only: `loadInstanceConfigReadOnly` never bootstrap-writes. Any
+// resolution failure for one path (path gone, unparsable config) is skipped,
+// never thrown — a doctor check must degrade to "cannot confirm", not crash.
+//
+// Note on registered PROJECT configs: `loadInstanceConfigReadOnly` always
+// parses in "instance" mode (config.ts:2214), so a registered project-shaped
+// spur.yaml with no `dataDir` key resolves to the default dataDir per
+// config.ts's instance-mode dataDir rule, and then self-excludes here if
+// that equals the caller's own dataDir. Deliberate, not an oversight — see
+// spec spur-3fbd Revision 2, R2-10.
+export function resolveRegisteredDataDirs(dataDir: string): string[] {
+  const { configPaths } = readConfigRegistryFile(dataDir);
+  const foreign = new Set<string>();
+  for (const path of configPaths) {
+    const result = loadInstanceConfigReadOnly(path);
+    if (result.status !== "ok") continue;
+    foreign.add(result.config.dataDir);
+  }
+  foreign.delete(dataDir);
+  return [...foreign];
 }
 
 export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFile): void {

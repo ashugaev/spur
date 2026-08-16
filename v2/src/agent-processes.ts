@@ -13,6 +13,7 @@ import {
   canReadProcessEnv,
   collectDescendants,
   listProcesses,
+  readProcessCwd,
   readProcessEnvValue,
   readProcessIdentity,
   signalPid,
@@ -21,6 +22,7 @@ import {
   type ProcessIdentityReader,
   type ProcessSnapshotEntry,
 } from "./process-tree.js";
+import { resolveRegisteredDataDirs } from "./registry.js";
 import type { AgentName } from "./types.js";
 // Type-only: checkAgentProcessOwnership adapts a scan into the doctor
 // registry's shared check shape.
@@ -59,12 +61,34 @@ async function isStillSameProcess(
 // applied to the whole process table instead of a tty-filtered slice — this
 // module deliberately never touches tmux (see the module header of the
 // caller-supplies-panePid contract below).
+function compileSingleMatcher(matcher: string): RegExp {
+  return new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`);
+}
+
 function compileMatchers(matchers: readonly string[]): RegExp[] {
-  return matchers
-    .filter((matcher) => matcher.trim().length > 0)
-    .map(
-      (matcher) => new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
-    );
+  return matchers.filter((matcher) => matcher.trim().length > 0).map(compileSingleMatcher);
+}
+
+interface CompiledAgentMatcher {
+  regex: RegExp;
+  agents: ReadonlySet<AgentName>;
+}
+
+// A record-less process' args may match more than one agent's matchers —
+// cursor injects the bare literal "agent" (agents/index.ts:419-421), which a
+// claude/codex launchCommand's defaultProcessMatchers can also produce. An
+// ambiguous match degrades to null; never a guess (I7).
+function resolveAgentForArgs(
+  args: string,
+  compiled: readonly CompiledAgentMatcher[],
+): AgentName | null {
+  const matched = new Set<AgentName>();
+  for (const entry of compiled) {
+    if (entry.regex.test(args)) {
+      for (const agent of entry.agents) matched.add(agent);
+    }
+  }
+  return matched.size === 1 ? ([...matched][0] ?? null) : null;
 }
 
 // Collapses a set of candidate pids to the shallowest members of their own
@@ -291,7 +315,11 @@ export async function findForeignAgentProcessesForSession(input: {
   };
 }
 
-export type UnownedAgentReason = "duplicate_for_session" | "terminal_record" | "unknown_session";
+export type UnownedAgentReason =
+  | "duplicate_for_session"
+  | "terminal_record"
+  | "unknown_session"
+  | "foreign_instance";
 
 export interface UnownedAgentProcess {
   pid: number;
@@ -337,22 +365,35 @@ function toFinding(
 //    "duplicate_for_session".
 //  - record is live and exactly one process (post-collapse) carries its
 //    session id: not a finding — I3.
-export async function scanUnownedAgentProcesses(dataDir: string): Promise<UnownedAgentScan> {
+export async function scanUnownedAgentProcesses(
+  dataDir: string,
+  options?: { resolveForeignDataDirs?: () => readonly string[] },
+): Promise<UnownedAgentScan> {
   if (!(await canReadProcessEnv())) {
     return { status: "unavailable" };
   }
   const sessions = listSessions(dataDir);
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const matcherSet = new Set<string>();
+  const matcherToAgents = new Map<string, Set<AgentName>>();
   for (const session of sessions) {
     for (const matcher of agentProcessMatchers(session.agent, session.launchCommand)) {
       matcherSet.add(matcher);
+      const agents = matcherToAgents.get(matcher) ?? new Set<AgentName>();
+      agents.add(session.agent);
+      matcherToAgents.set(matcher, agents);
     }
   }
   if (matcherSet.size === 0) {
     return { status: "ok", processes: [] };
   }
-  const matchers = compileMatchers([...matcherSet]);
+  const compiledMatchers: CompiledAgentMatcher[] = [...matcherSet]
+    .filter((matcher) => matcher.trim().length > 0)
+    .map((matcher) => ({
+      regex: compileSingleMatcher(matcher),
+      agents: matcherToAgents.get(matcher) ?? new Set<AgentName>(),
+    }));
+  const matchers = compiledMatchers.map((entry) => entry.regex);
   const processes = await listProcesses();
   const candidates = processes.filter((proc) =>
     matchers.some((matcher) => matcher.test(proc.args)),
@@ -368,6 +409,7 @@ export async function scanUnownedAgentProcesses(dataDir: string): Promise<Unowne
   }
 
   const findings: UnownedAgentProcess[] = [];
+  const recordless: Array<{ sessionId: string; roots: ProcessSnapshotEntry[] }> = [];
   for (const [sessionId, group] of bySessionId) {
     const byPid = new Map(group.map((proc) => [proc.pid, proc]));
     const roots = collapseToShallowest(
@@ -379,9 +421,7 @@ export async function scanUnownedAgentProcesses(dataDir: string): Promise<Unowne
 
     const session = sessionById.get(sessionId);
     if (!session) {
-      for (const proc of roots) {
-        findings.push(toFinding(proc, sessionId, null, "", "unknown_session"));
-      }
+      recordless.push({ sessionId, roots });
       continue;
     }
     const terminal = session.status === "completed" || session.status === "killed";
@@ -401,6 +441,68 @@ export async function scanUnownedAgentProcesses(dataDir: string): Promise<Unowne
       }
     }
   }
+
+  if (recordless.length > 0) {
+    // Lazy foreign lookup: a clean host with every process record-owned pays
+    // zero extra config parses. Any resolution failure (unreadable foreign
+    // dataDir) degrades to unknown_session below — never to silence (I3).
+    const foreignSessionIndex = new Map<
+      string,
+      { agent: AgentName; worktreePath: string; terminal: boolean }
+    >();
+    for (const foreignDir of options?.resolveForeignDataDirs?.() ?? []) {
+      let foreignSessions: ReturnType<typeof listSessions>;
+      try {
+        foreignSessions = listSessions(foreignDir);
+      } catch {
+        continue;
+      }
+      for (const foreignSession of foreignSessions) {
+        const candidate = {
+          agent: foreignSession.agent,
+          worktreePath: foreignSession.worktreePath,
+          terminal: foreignSession.status === "completed" || foreignSession.status === "killed",
+        };
+        const existing = foreignSessionIndex.get(foreignSession.id);
+        // Deterministic terminal-wins precedence: the same sessionId can
+        // exist in more than one resolved foreign dataDir with different
+        // statuses, and iteration order must never decide the outcome. A
+        // terminal record always wins over a non-terminal one regardless of
+        // which was seen first — fail-safe direction, consistent with I3
+        // (any ambiguity degrades toward unknown_session/warn, never toward
+        // silence). Among records of equal terminality, first-seen wins.
+        if (!existing || (candidate.terminal && !existing.terminal)) {
+          foreignSessionIndex.set(foreignSession.id, candidate);
+        }
+      }
+    }
+
+    for (const { sessionId, roots } of recordless) {
+      const foreignRecord = foreignSessionIndex.get(sessionId);
+      // A terminal foreign record (completed/killed) proves the process it
+      // once belonged to should be gone — a survivor is still a leak, never
+      // downgraded to foreign_instance just because its record lives in
+      // another instance's dataDir.
+      for (const proc of roots) {
+        if (foreignRecord && !foreignRecord.terminal) {
+          findings.push(
+            toFinding(
+              proc,
+              sessionId,
+              foreignRecord.agent,
+              foreignRecord.worktreePath,
+              "foreign_instance",
+            ),
+          );
+          continue;
+        }
+        const cwd = await readProcessCwd(proc.pid);
+        const agent = resolveAgentForArgs(proc.args, compiledMatchers);
+        findings.push(toFinding(proc, sessionId, agent, cwd ?? "", "unknown_session"));
+      }
+    }
+  }
+
   return { status: "ok", processes: findings };
 }
 
@@ -417,7 +519,13 @@ function formatAge(elapsedSeconds: number): string {
 // clean up, not a broken install — severity stays "warn" and never flips the
 // doctor exit code.
 export async function checkAgentProcessOwnership(dataDir: string): Promise<HostInstallCheck> {
-  const scan = await scanUnownedAgentProcesses(dataDir);
+  // Lazy: resolveRegisteredDataDirs parses every registered config file
+  // (measured 55.4ms across 13 paths on a live host). scanUnownedAgentProcesses
+  // only calls this thunk when at least one process is actually record-less,
+  // so a clean host pays zero extra config parses.
+  const scan = await scanUnownedAgentProcesses(dataDir, {
+    resolveForeignDataDirs: () => resolveRegisteredDataDirs(dataDir),
+  });
   if (scan.status === "unavailable") {
     return {
       id: "agent-process-ownership",
@@ -434,7 +542,16 @@ export async function checkAgentProcessOwnership(dataDir: string): Promise<HostI
       detail: "no unowned agent processes found",
     };
   }
-  const lines = scan.processes.map(
+  const nonForeign = scan.processes.filter((proc) => proc.reason !== "foreign_instance");
+  if (nonForeign.length === 0) {
+    return {
+      id: "agent-process-ownership",
+      ok: true,
+      severity: "info",
+      detail: `${scan.processes.length} live agent process(es) belong to another registered instance (foreign_instance)`,
+    };
+  }
+  const lines = nonForeign.map(
     (proc) =>
       `pid ${proc.pid} agent ${proc.agent ?? "unknown"} session ${proc.sessionId} reason ${proc.reason} rss ${(proc.rssKb / 1024).toFixed(1)}MB age ${formatAge(proc.elapsedSeconds)} worktree ${proc.worktreePath || "unknown"}`,
   );
@@ -442,6 +559,6 @@ export async function checkAgentProcessOwnership(dataDir: string): Promise<HostI
     id: "agent-process-ownership",
     ok: false,
     severity: "warn",
-    detail: `${scan.processes.length} unowned agent process(es) found:\n${lines.join("\n")}`,
+    detail: `${nonForeign.length} unowned agent process(es) found:\n${lines.join("\n")}`,
   };
 }

@@ -126,7 +126,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           // Already gone.
         }
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });

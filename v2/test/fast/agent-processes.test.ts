@@ -44,6 +44,12 @@ const snapshotProcessesMock = vi.fn(async () =>
     : ({ status: "ok", processes: toEntries() } as const),
 );
 const readProcessIdentityMock = vi.fn(async (pid: number) => identities.get(pid) ?? null);
+// Real /proc reads on the fake pids used below (10/11/20/21/70/etc.) would hit
+// live kernel-thread pids on this host — the vi.mock spread only passes an
+// UNNAMED export through to the real implementation, so this must be named
+// explicitly. Default resolves null (unreadable cwd), overridden per test.
+let cwdByPid = new Map<number, string>();
+const readProcessCwdMock = vi.fn(async (pid: number) => cwdByPid.get(pid) ?? null);
 const readProcessEnvValueMock = vi.fn(async (pid: number, key: string) => {
   if (!envReadable) return { status: "unreadable" as const };
   const proc = fakeTable.find((entry) => entry.pid === pid);
@@ -72,13 +78,14 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => {
     snapshotProcesses: snapshotProcessesMock,
     readProcessEnvValue: readProcessEnvValueMock,
     readProcessIdentity: readProcessIdentityMock,
+    readProcessCwd: readProcessCwdMock,
     canReadProcessEnv: canReadProcessEnvMock,
     snapshotProcessLiveness: snapshotProcessLivenessMock,
     signalPid: signalPidMock,
   };
 });
 
-const listSessionsMock = vi.fn<() => SessionRecord[]>(() => []);
+const listSessionsMock = vi.fn<(dataDir: string) => SessionRecord[]>(() => []);
 vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
 }));
@@ -89,6 +96,12 @@ const agentProcessMatchersMock = vi.fn((agent: AgentName) => {
 });
 vi.mock("../../src/agents/index.js", () => ({
   agentProcessMatchers: agentProcessMatchersMock,
+}));
+
+let resolveRegisteredDataDirsResult: string[] = [];
+const resolveRegisteredDataDirsMock = vi.fn(() => resolveRegisteredDataDirsResult);
+vi.mock("../../src/registry.js", () => ({
+  resolveRegisteredDataDirs: resolveRegisteredDataDirsMock,
 }));
 
 const {
@@ -125,13 +138,17 @@ beforeEach(() => {
   snapshotUnavailable = false;
   processSnapshotUnavailable = false;
   identities = new Map();
+  cwdByPid = new Map();
+  resolveRegisteredDataDirsResult = [];
   listProcessesMock.mockClear();
   snapshotProcessesMock.mockClear();
   readProcessIdentityMock.mockClear();
+  readProcessCwdMock.mockClear();
   readProcessEnvValueMock.mockClear();
   canReadProcessEnvMock.mockClear();
   snapshotProcessLivenessMock.mockClear();
   signalPidMock.mockClear();
+  resolveRegisteredDataDirsMock.mockClear();
   listSessionsMock.mockReset().mockReturnValue([]);
 });
 
@@ -556,5 +573,324 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
     expect(check.detail).toContain("agent claude");
     expect(check.detail).toContain("rss 200.0MB");
     expect(check.detail).toContain("age 2m");
+  });
+
+  it("unknown_session carries the inferred agent and the mocked cwd as worktreePath", async () => {
+    listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
+    cwdByPid = new Map([[80, "/tmp/spur-runtime-abc/v2"]]);
+    fakeTable = [
+      {
+        pid: 80,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "gone-session" },
+      },
+    ];
+    const scan = await scanUnownedAgentProcesses("/data");
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes).toEqual([
+      {
+        pid: 80,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        sessionId: "gone-session",
+        agent: "claude",
+        worktreePath: "/tmp/spur-runtime-abc/v2",
+        reason: "unknown_session",
+      },
+    ]);
+    expect(readProcessCwdMock).toHaveBeenCalledWith(80);
+  });
+
+  it("an unresolvable cwd yields worktreePath '' and stays unknown_session", async () => {
+    listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
+    fakeTable = [
+      {
+        pid: 81,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "gone-session-2" },
+      },
+    ];
+    const scan = await scanUnownedAgentProcesses("/data");
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes).toEqual([
+      {
+        pid: 81,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        sessionId: "gone-session-2",
+        agent: "claude",
+        worktreePath: "",
+        reason: "unknown_session",
+      },
+    ]);
+  });
+
+  it("an ambiguous matcher (two agents match the same args) yields agent: null", async () => {
+    listSessionsMock.mockReturnValue([
+      session({ id: "claude-sess", status: "running", agent: "claude" }),
+      session({ id: "cursor-sess", status: "running", agent: "cursor" }),
+    ]);
+    fakeTable = [
+      {
+        pid: 82,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        // Bare "agent" matches cursor's matcher AND claude's matcher (both
+        // resolve to the literal "agent" set below).
+        args: "agent",
+        env: { SPUR_SESSION: "gone-session-3" },
+      },
+    ];
+    agentProcessMatchersMock.mockImplementationOnce((agent: AgentName) =>
+      agent === "cursor" ? ["cursor-agent", "agent"] : ["agent"],
+    );
+    const scan = await scanUnownedAgentProcesses("/data");
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes[0]?.agent).toBeNull();
+    expect(scan.processes[0]?.reason).toBe("unknown_session");
+  });
+
+  it("emits foreign_instance when the record-less session id resolves in a foreign dataDir", async () => {
+    listSessionsMock.mockImplementation((dir: string) => {
+      if (dir === "/data") return [];
+      if (dir === "/foreign-data") {
+        return [
+          session({
+            id: "foreign-session",
+            status: "running",
+            agent: "codex",
+            worktreePath: "/tmp/foreign-worktree",
+          }),
+        ];
+      }
+      return [];
+    });
+    fakeTable = [
+      {
+        pid: 90,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "codex",
+        env: { SPUR_SESSION: "foreign-session" },
+      },
+    ];
+    // scanUnownedAgentProcesses needs a non-empty matcherSet of its own —
+    // seed it via a dummy own-dataDir session so the codex matcher compiles.
+    listSessionsMock.mockImplementationOnce((dir: string) => {
+      if (dir === "/data") return [session({ id: "other", status: "running", agent: "codex" })];
+      return [];
+    });
+    const scan = await scanUnownedAgentProcesses("/data", {
+      resolveForeignDataDirs: () => ["/foreign-data"],
+    });
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes).toEqual([
+      {
+        pid: 90,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        sessionId: "foreign-session",
+        agent: "codex",
+        worktreePath: "/tmp/foreign-worktree",
+        reason: "foreign_instance",
+      },
+    ]);
+  });
+
+  it("a TERMINAL foreign record (completed/killed) stays unknown_session at warn, never foreign_instance", async () => {
+    listSessionsMock.mockImplementationOnce((dir: string) => {
+      if (dir === "/data") return [session({ id: "other", status: "running", agent: "codex" })];
+      return [];
+    });
+    listSessionsMock.mockImplementation((dir: string) => {
+      if (dir === "/data") return [];
+      if (dir === "/foreign-data") {
+        return [
+          session({
+            id: "foreign-session-terminal",
+            status: "completed",
+            agent: "codex",
+            worktreePath: "/tmp/foreign-worktree",
+          }),
+        ];
+      }
+      return [];
+    });
+    fakeTable = [
+      {
+        pid: 93,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "codex",
+        env: { SPUR_SESSION: "foreign-session-terminal" },
+      },
+    ];
+    const scan = await scanUnownedAgentProcesses("/data", {
+      resolveForeignDataDirs: () => ["/foreign-data"],
+    });
+    expect(scan.status).toBe("ok");
+    if (scan.status !== "ok") throw new Error("unreachable");
+    expect(scan.processes).toHaveLength(1);
+    expect(scan.processes[0]?.reason).toBe("unknown_session");
+  });
+
+  it.each([
+    ["non-terminal-first", ["/foreign-nonterminal", "/foreign-terminal"]],
+    ["terminal-first", ["/foreign-terminal", "/foreign-nonterminal"]],
+  ] as const)(
+    "a terminal foreign record wins over a non-terminal one for the same sessionId, regardless of iteration order (%s)",
+    async (_label, foreignDirOrder) => {
+      listSessionsMock.mockImplementationOnce((dir: string) => {
+        if (dir === "/data") return [session({ id: "other", status: "running", agent: "codex" })];
+        return [];
+      });
+      listSessionsMock.mockImplementation((dir: string) => {
+        if (dir === "/data") return [];
+        if (dir === "/foreign-nonterminal") {
+          return [
+            session({
+              id: "foreign-session-collision",
+              status: "running",
+              agent: "cursor",
+              worktreePath: "/tmp/foreign-worktree-nonterminal",
+            }),
+          ];
+        }
+        if (dir === "/foreign-terminal") {
+          return [
+            session({
+              id: "foreign-session-collision",
+              status: "killed",
+              agent: "codex",
+              worktreePath: "/tmp/foreign-worktree-terminal",
+            }),
+          ];
+        }
+        return [];
+      });
+      fakeTable = [
+        {
+          pid: 96,
+          ppid: 1,
+          rssKb: 1,
+          elapsedSeconds: 1,
+          args: "codex",
+          env: { SPUR_SESSION: "foreign-session-collision" },
+        },
+      ];
+      const scan = await scanUnownedAgentProcesses("/data", {
+        resolveForeignDataDirs: () => foreignDirOrder,
+      });
+      expect(scan.status).toBe("ok");
+      if (scan.status !== "ok") throw new Error("unreachable");
+      expect(scan.processes).toHaveLength(1);
+      expect(scan.processes[0]?.reason).toBe("unknown_session");
+    },
+  );
+
+  it("a foreign-only scan renders ok:true, severity:info via checkAgentProcessOwnership", async () => {
+    resolveRegisteredDataDirsResult = ["/foreign-data"];
+    listSessionsMock.mockImplementation((dir: string) => {
+      if (dir === "/data") return [session({ id: "other", status: "running", agent: "codex" })];
+      if (dir === "/foreign-data") {
+        return [
+          session({
+            id: "foreign-session",
+            status: "running",
+            agent: "codex",
+            worktreePath: "/tmp/foreign-worktree",
+          }),
+        ];
+      }
+      return [];
+    });
+    fakeTable = [
+      {
+        pid: 91,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "codex",
+        env: { SPUR_SESSION: "foreign-session" },
+      },
+    ];
+    const check = await checkAgentProcessOwnership("/data");
+    expect(check).toEqual({
+      id: "agent-process-ownership",
+      ok: true,
+      severity: "info",
+      detail: "1 live agent process(es) belong to another registered instance (foreign_instance)",
+    });
+  });
+
+  it("falls back to unknown_session at warn when the foreign dataDir cannot resolve the session id", async () => {
+    resolveRegisteredDataDirsResult = ["/foreign-data"];
+    listSessionsMock.mockImplementation((dir: string) => {
+      if (dir === "/data") return [session({ id: "other", status: "running", agent: "codex" })];
+      if (dir === "/foreign-data") return [];
+      return [];
+    });
+    fakeTable = [
+      {
+        pid: 92,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "codex",
+        env: { SPUR_SESSION: "unresolvable-session" },
+      },
+    ];
+    const check = await checkAgentProcessOwnership("/data");
+    expect(check.ok).toBe(false);
+    expect(check.severity).toBe("warn");
+    expect(check.detail).toContain("unresolvable-session");
+    expect(check.detail).toContain("unknown_session");
+  });
+
+  it("never resolves foreign dataDirs when every process is record-owned (lazy gate)", async () => {
+    listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
+    fakeTable = [
+      {
+        pid: 94,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1" },
+      },
+    ];
+    const check = await checkAgentProcessOwnership("/data");
+    expect(check.ok).toBe(true);
+    expect(resolveRegisteredDataDirsMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("resolves foreign dataDirs at most once when a record-less process exists", async () => {
+    listSessionsMock.mockReturnValue([session({ id: "api-1", status: "running" })]);
+    fakeTable = [
+      {
+        pid: 95,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "gone-session-lazy" },
+      },
+    ];
+    const check = await checkAgentProcessOwnership("/data");
+    expect(check.ok).toBe(false);
+    expect(resolveRegisteredDataDirsMock.mock.calls.length).toBeLessThanOrEqual(1);
   });
 });
