@@ -3217,8 +3217,59 @@ export class SessionService {
           }
         }
 
+        // A killed session is never revived (reopen() only accepts
+        // "completed", session-service.ts:11069-11074), so its schedule is
+        // dead weight: clear intervalWake/dailyWake here so this loop stops
+        // re-visiting it every tick and spamming interval_failed/daily_failed
+        // for a send() that can only throw "Session is not running". Every
+        // other status — stopped, paused, errored, and completed itself — can
+        // still come back (restore() or reopen()), so its schedule stays
+        // armed-but-suppressed via the isRestorableStatus guards below rather
+        // than being dropped here. Deliberately does NOT `continue`: the
+        // reactivation blocks below (auto-rotate, rate-limit, server-error)
+        // still need to run for every status.
+        if (session.status === "killed" && (session.intervalWake || session.dailyWake)) {
+          // A null read means the session GC sweep (executeSessionGc) archived
+          // the record between this tick's listSessions snapshot and here.
+          // Falling back to the stale snapshot would resurrect an archived
+          // record via writeSession; skip the clear entirely instead.
+          const current = readSession(this.config.dataDir, session.id);
+          const claimed =
+            current !== null &&
+            current.status === "killed" &&
+            JSON.stringify(current.intervalWake) === JSON.stringify(session.intervalWake) &&
+            JSON.stringify(current.dailyWake) === JSON.stringify(session.dailyWake);
+          if (claimed) {
+            // Preserve updatedAt: this write only drops dead schedule fields
+            // on a session GC already treats as terminal, it is bookkeeping
+            // not session activity, and bumping it would reset the killed
+            // session's GC clock (ageInDays(newestUpdatedAt) in
+            // session-gc.ts classifyGroup), delaying its archival.
+            const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...cleared } = current;
+            writeSession(this.config.dataDir, cleared);
+            const event =
+              current.dailyWake && !current.intervalWake
+                ? "session.wake.daily_cancelled"
+                : "session.wake.interval_cancelled";
+            this.logEvent(event, {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Cancelled recurring wake for ${session.id}: session is ${current.status}`,
+              details: {
+                reason: "session_killed",
+                status: current.status,
+              },
+            });
+          }
+        }
+
         const intervalWake = session.intervalWake;
-        if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
+        if (
+          isRestorableStatus(session.status) &&
+          intervalWake &&
+          Date.parse(intervalWake.nextDueAt) <= now
+        ) {
           // Claim the due tick BEFORE sending: advance nextDueAt to the next
           // future interval (catching up past any missed intervals) and persist
           // it first. A slow or failing send must not leave the wake due, or the
@@ -3426,7 +3477,11 @@ export class SessionService {
         }
 
         const dailyWake = session.dailyWake;
-        if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
+        if (
+          !isRestorableStatus(session.status) ||
+          !dailyWake ||
+          Date.parse(dailyWake.nextDueAt) > now
+        ) {
           continue;
         }
         // Claim the due occurrence BEFORE sending: advance nextDueAt to the
