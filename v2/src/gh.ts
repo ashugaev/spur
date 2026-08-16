@@ -167,6 +167,10 @@ let budget: GraphqlBudgetLedger = {
   blockedUntilMs: null,
 };
 let lastPausedEventKey: string | null = null;
+// Poll-cycle keys currently inside a run of zero-cost cycles, and how many of
+// those the run has swallowed since its one emitted event.
+const zeroCycleRunOpen = new Set<string>();
+const suppressedZeroCycles = new Map<string, number>();
 const ghPollCycleStorage = new AsyncLocalStorage<GhPollCycleContext>();
 let ghPollAdmissionTail: Promise<void> = Promise.resolve();
 
@@ -186,6 +190,8 @@ export function _resetGhUsageForTests(): void {
     blockedUntilMs: null,
   };
   lastPausedEventKey = null;
+  zeroCycleRunOpen.clear();
+  suppressedZeroCycles.clear();
   ghEventSinkDataDir = null;
   ghPollAdmissionTail = Promise.resolve();
 }
@@ -298,7 +304,19 @@ function closeUsageWindow(window: GhUsageWindow, label: "minute" | "hour", nowMs
   drainClosedUsageWindows(label, nowMs);
 }
 
-/** Runs one daemon poll boundary and emits its exact gh cost, including zero. */
+function pollCycleKey(cycle: GhPollCycleContext): string {
+  return `${cycle.kind} ${cycle.projectId ?? ""} ${cycle.sourceId ?? ""}`;
+}
+
+/**
+ * Runs one daemon poll boundary and emits its exact gh cost.
+ *
+ * A cycle that spent nothing carries no cost information, and the attention
+ * monitor runs one every 5s whether or not a session needs GitHub — emitting
+ * each of those buried the event log. So a zero-cost cycle emits only when it
+ * is the first of its run for that key; the rest are counted and reported as
+ * `suppressedZeroCycles` on the next emission, so no cycle is lost silently.
+ */
 export async function runGhPollCycle<T>(
   input: { kind: GhPollCycleKind; projectId?: string; sourceId?: string },
   task: () => Promise<T>,
@@ -316,7 +334,18 @@ export async function runGhPollCycle<T>(
     return await ghPollCycleStorage.run(cycle, task);
   } finally {
     const dataDir = ghEventSinkDataDir;
-    if (dataDir) {
+    const key = pollCycleKey(cycle);
+    const spentNothing = cycle.calls === 0 && cycle.graphqlCost === 0;
+    const suppressed = suppressedZeroCycles.get(key) ?? 0;
+    if (spentNothing && zeroCycleRunOpen.has(key)) {
+      suppressedZeroCycles.set(key, suppressed + 1);
+    } else if (dataDir) {
+      if (spentNothing) {
+        zeroCycleRunOpen.add(key);
+      } else {
+        zeroCycleRunOpen.delete(key);
+      }
+      suppressedZeroCycles.delete(key);
       logSpurEvent(dataDir, {
         event: "gh.poll_cycle",
         level: "info",
@@ -329,6 +358,7 @@ export async function runGhPollCycle<T>(
           calls: cycle.calls,
           graphqlCost: cycle.graphqlCost,
           bySubcommand: Object.fromEntries(cycle.bySubcommand),
+          ...(suppressed > 0 ? { suppressedZeroCycles: suppressed } : {}),
         },
       });
     }

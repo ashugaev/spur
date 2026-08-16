@@ -313,6 +313,56 @@ describe("gh usage accounting", () => {
     ]);
   });
 
+  it("collapses a run of zero-cost cycles into one event", async () => {
+    for (let index = 0; index < 5; index += 1) {
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+    }
+
+    expect(cycleEvents()).toEqual([
+      {
+        cycle: "attention",
+        durationMs: expect.any(Number),
+        calls: 0,
+        graphqlCost: 0,
+        bySubcommand: {},
+      },
+    ]);
+  });
+
+  it("reports the swallowed zero cycles on the next paying cycle and reopens the run", async () => {
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "attention" }, async () => {
+      noteGhInvocation(["pr", "view", "42"], T0);
+    });
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+
+    expect(cycleEvents()).toEqual([
+      expect.objectContaining({ calls: 0, bySubcommand: {} }),
+      expect.objectContaining({ calls: 1, suppressedZeroCycles: 2 }),
+      expect.objectContaining({ calls: 0, bySubcommand: {} }),
+    ]);
+    expect(cycleEvents()[0]).not.toHaveProperty("suppressedZeroCycles");
+    expect(cycleEvents()[2]).not.toHaveProperty("suppressedZeroCycles");
+  });
+
+  it("tracks zero-cycle runs per kind and per source", async () => {
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "attention" }, async () => {});
+    await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {});
+    await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {});
+    await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "b" }, async () => {});
+
+    const emitted = logSpurEventMock.mock.calls
+      .map((call) => call[1] as { event: string; sourceId?: string; details?: { cycle?: string } })
+      .filter((entry) => entry.event === "gh.poll_cycle")
+      .map((entry) => `${entry.details?.cycle}:${entry.sourceId ?? ""}`);
+
+    expect(emitted).toEqual(["attention:", "github_source:a", "github_source:b"]);
+  });
+
   it("keeps concurrent cycle counters isolated and emits on failure", async () => {
     const first = runGhPollCycle({ kind: "attention" }, async () => {
       await Promise.resolve();
