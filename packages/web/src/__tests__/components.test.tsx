@@ -1520,12 +1520,18 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(init?.body).toBe(
           JSON.stringify({
             projectId: "api",
             prompt: "",
+            model: "opus",
+            overrides: { worktree: true },
             members: [{ agent: "claude" }, { agent: "codex" }],
           }),
         );
@@ -1560,6 +1566,10 @@ describe("Dashboard", () => {
     expect(screen.getByRole("option", { name: "Shared" })).toBeDisabled();
     expect(screen.getByText("grouped sessions use auto branches")).toBeInTheDocument();
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+    });
+
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1571,6 +1581,8 @@ describe("Dashboard", () => {
           body: JSON.stringify({
             projectId: "api",
             prompt: "",
+            model: "opus",
+            overrides: { worktree: true },
             members: [{ agent: "claude" }, { agent: "codex" }],
           }),
         }),
