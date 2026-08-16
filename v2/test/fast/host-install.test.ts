@@ -6,6 +6,7 @@ import type * as ChildProcess from "node:child_process";
 import type * as FsModule from "node:fs";
 import type * as OsModule from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CacheRetentionModule from "../../src/cache-retention.js";
 import type * as PortProbe from "../../src/port-probe.js";
 import type * as UpdateHealth from "../../src/update-health.js";
 import type * as Workspace from "../../src/workspace.js";
@@ -19,6 +20,7 @@ const {
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
+  planCachePruneMock,
   resolveDoctorRepoRootMock,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
@@ -29,8 +31,18 @@ const {
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  planCachePruneMock: vi.fn(),
   resolveDoctorRepoRootMock: vi.fn(),
 }));
+
+// `reclaimable-caches` is the one check that calls `planCachePrune` (a `du`
+// sweep) — replaced with a controlled fixture everywhere except its own
+// describe block below, so the other 60+ pre-existing checks in this file
+// never pay for (or depend on) a real measurement.
+vi.mock("../../src/cache-retention.js", async () => {
+  const actual = await vi.importActual<typeof CacheRetentionModule>("../../src/cache-retention.js");
+  return { ...actual, planCachePrune: planCachePruneMock };
+});
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
@@ -266,6 +278,15 @@ beforeEach(() => {
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
   findListenerPidsMock.mockResolvedValue([]);
+  planCachePruneMock.mockReset();
+  planCachePruneMock.mockResolvedValue({
+    generatedAt: new Date(0).toISOString(),
+    roots: [],
+    candidates: [],
+    reclaimableKb: 0,
+    processTreeReadable: true,
+    pinSourceCount: 1,
+  });
 });
 
 afterEach(() => {
@@ -1424,6 +1445,165 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: home-disk-headroom", () => {
+  it("is ok:false, severity:warn below the default 10GB threshold, and never trips hasErrorSeverity", async () => {
+    execState.dfKbLine = "/dev/sda1 100000000 99999000 100 99% /";
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-low");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: false,
+      severity: "warn",
+      fix: "spur cache",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is ok:true above the threshold", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-high");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is present even when unitsInstalled is false (ungated, unlike data-dir-disk-space)", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-ungated");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toBeDefined();
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+  });
+
+  it("degrades to ok:true, severity:info when df is unavailable", async () => {
+    execState.dfAvailable = false;
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-nodf");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+});
+
+describe("collectHostInstallChecks: reclaimable-caches", () => {
+  function root(
+    rootId: CacheRetentionModule.CacheRootId,
+    status: CacheRetentionModule.CacheRootMeasurement["status"],
+    totalKb: number,
+    entryCount: number,
+    path: string,
+  ): CacheRetentionModule.CacheRootMeasurement {
+    return { rootId, path: `/home/user/${path}`, status, totalKb, entryCount };
+  }
+
+  it("is present, ok:true, severity:info, ranked by size descending, includes per-root rows", async () => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots: [
+        root("npm-cacache", "measured", 20_000_000, 1, ".npm/_cacache"),
+        root("npm-npx", "measured", 1_000_000, 1, ".npm/_npx"),
+        root("playwright-browsers", "absent", 0, 0, ".cache/ms-playwright"),
+      ],
+      candidates: [
+        {
+          entry: {
+            path: "/home/user/.npm/_npx/small",
+            rootId: "npm-npx",
+            entryClass: { kind: "npx-package", hash: "small" },
+            sizeKb: 1_000_000,
+            ageDays: 40,
+          },
+          verdict: { kind: "prunable" },
+        },
+        {
+          entry: {
+            path: "/home/user/.npm/_cacache",
+            rootId: "npm-cacache",
+            entryClass: { kind: "vendor-cache" },
+            sizeKb: 20_000_000,
+            ageDays: 40,
+          },
+          verdict: { kind: "prunable" },
+        },
+        {
+          entry: {
+            path: "/home/user/.cache/ms-playwright/chromium-1208",
+            rootId: "playwright-browsers",
+            entryClass: {
+              kind: "browser-revision",
+              browser: "chromium",
+              revision: "1208",
+              dirName: "chromium-1208",
+            },
+            sizeKb: 5_000_000,
+            ageDays: 400,
+          },
+          verdict: {
+            kind: "protected",
+            reason: { kind: "pinned-revision", dirName: "chromium-1208" },
+          },
+        },
+      ],
+      reclaimableKb: 21_000_000,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-reclaimable-caches");
+    const check = checks.find((c) => c.id === "reclaimable-caches");
+    expect(check).toMatchObject({ ok: true, severity: "info" });
+    expect(hasErrorSeverity(checks)).toBe(false);
+    expect(check?.detail).toBe(
+      "20.03GB reclaimable across 2 entries (top 2: 19.07GB age 40d /home/user/.npm/_cacache; 0.95GB age 40d /home/user/.npm/_npx/small) — see `spur cache` for the full report; npm-cacache measured 19.07GB 1 /home/user/.npm/_cacache; npm-npx measured 0.95GB 1 /home/user/.npm/_npx; playwright-browsers absent 0.00GB 0 /home/user/.cache/ms-playwright",
+    );
+  });
+
+  it.each([
+    {
+      name: "keeps zero-size root rows when no entry is prunable (S13/S15)",
+      roots: [
+        root("npm-cacache", "measured", 0, 0, ".npm/_cacache"),
+        root("npm-npx", "absent", 0, 0, ".npm/_npx"),
+      ],
+      detail:
+        "no reclaimable caches found; npm-cacache measured 0.00GB 0 /home/user/.npm/_cacache; npm-npx absent 0.00GB 0 /home/user/.npm/_npx",
+    },
+    {
+      name: "renders roots: none when the plan has no roots (S15)",
+      roots: [],
+      detail: "no reclaimable caches found; roots: none",
+    },
+  ])("$name", async ({ roots, detail }) => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots,
+      candidates: [],
+      reclaimableKb: 0,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-reclaimable-caches");
+    expect(checks.find((check) => check.id === "reclaimable-caches")?.detail).toBe(detail);
+  });
+
+  it("is present even when unitsInstalled is false (ungated)", async () => {
+    const checks = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-ungated",
+    );
+    expect(checks.find((c) => c.id === "reclaimable-caches")).toBeDefined();
+  });
+
+  it("degrades to ok:true, severity:info, 'skipped' detail when planCachePrune exceeds its measurement budget", async () => {
+    planCachePruneMock.mockRejectedValue(new Error("ETIMEDOUT"));
+    const checks = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-timeout",
+    );
+    const check = checks.find((c) => c.id === "reclaimable-caches");
+    expect(check).toMatchObject({
+      ok: true,
+      severity: "info",
+      detail: "skipped — measurement budget exceeded",
+    });
     expect(hasErrorSeverity(checks)).toBe(false);
   });
 });

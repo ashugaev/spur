@@ -2636,69 +2636,12 @@ projects:
     });
   });
 
-  it("parses the root CodeReview work-item trigger", async () => {
+  it("keeps the root sp project free of a review fleet", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
-    const trigger = config.projects["sp"]?.triggers["gh-pr-review-spawn"];
 
-    if (!trigger || !("spawn" in trigger)) {
-      throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
-    }
-
-    const [claudeBlock, cursorBlock, uiBlock, docsBlock] = trigger.spawn.blocks;
-
-    expect([
-      trigger.source,
-      trigger.event,
-      trigger.spawnDeskGroup,
-      trigger.spawn.blocks.length,
-      claudeBlock?.agent,
-      claudeBlock?.model,
-      claudeBlock?.overrides?.worktree,
-      claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 4, "claude", "sonnet", true, true]);
-    expect([
-      cursorBlock?.agent,
-      cursorBlock?.model,
-      cursorBlock?.overrides?.worktree,
-      cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "auto", true, true]);
-    expect([
-      uiBlock?.agent,
-      uiBlock?.model,
-      uiBlock?.overrides?.worktree,
-      uiBlock?.selfDestruct?.enabled,
-    ]).toEqual(["claude", "sonnet", true, true]);
-    expect([
-      docsBlock?.agent,
-      docsBlock?.model,
-      docsBlock?.overrides?.worktree,
-      docsBlock?.selfDestruct?.enabled,
-    ]).toEqual(["claude", "sonnet", true, true]);
-    expect(docsBlock?.selfDestruct?.conditions).toBe(
-      "docs review posted, or PR changes no docs and no user-facing surface.",
-    );
-    expect([
-      trigger.spawn.restrictWrites,
-      trigger.spawn.autoComplete,
-      trigger.spawn.allowedTriggers,
-    ]).toEqual([
-      true,
-      undefined,
-      ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"],
-    ]);
-    expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
-    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
-    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
-    expect(claudeBlock?.prompt).toBe(
-      [
-        "Run /code-review {{url}} --comment.",
-        "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."',
-      ].join("\n"),
-    );
-    expect(claudeBlock?.selfDestruct?.conditions).toBe(
-      "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
-    );
+    expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
+    expect(config.projects["sp"]?.triggers["gh-pr-review-spawn"]).toBeUndefined();
+    expect(config.projects["sp"]?.sources["gh-pr-review"]).toBeUndefined();
   });
 
   it("parses the root PR-merged send trigger", async () => {
@@ -2719,6 +2662,8 @@ projects:
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
+    expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
+    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
   });
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
@@ -3983,6 +3928,60 @@ projects:
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     });
+  });
+
+  it("parses diskRetention.warnFreeGb in instance mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 25 });
+  });
+
+  it("defaults diskRetention.warnFreeGb to 10 when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("ignores diskRetention in project mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("rejects a negative diskRetention.warnFreeGb", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "diskRetention.warnFreeGb must be a non-negative number",
+    );
   });
 
   it("parses admission.maxLiveSessions and memoryGuard in instance mode", async () => {

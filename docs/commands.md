@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -15,6 +15,8 @@ Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 Read-only. Checks host install, config validity, and daemon/web health; exits non-zero on a broken (not merely un-initialized) host. Writes no config or state. `--scaffold` writes a minimal local `spur.yaml` at the repo root when none exists — it still does not start the daemon or create `~/.spur/config.yaml`. The global config and local project auto-connect on the first normal command. A `sidecar-orphans` check (`warn`) reports the same leaked trees as `spur sidecar sweep` — see [Sidecars](#sidecars) — without killing anything. The `config-registry` check also lists every registered path with its alive/dead/worktree-internal state, both in the human-readable output and in `--json` — see [Config registry](configuration.md#config-registry).
 
 When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports one `session-headroom` check: live session count vs. the [resolved admission cap](configuration.md#admission-control), followed by every live session id and its measured RSS. The `fix` names candidate session ids to stop once the cap is reached or the memory guard has crossed a threshold. This check is `warn` severity always — never `error` — so a full host never flips `doctor`'s exit code; it stays a surfaced fact, not a failure. Nothing is pushed when the daemon is unreachable (the daemon-reachable check already owns that fact).
+
+Two checks are `warn`/`info` only, so a low-disk host never flips the exit code: `home-disk-headroom` (`df` on `$HOME`, `warn` below [`diskRetention.warnFreeGb`](configuration.md), default 10GB) and `reclaimable-caches` (an info-only `spur cache` measurement; detail shows the reclaimable summary, top 5 prunable entries by size, and one row per cache root with its `rootId`, status, size, entry count, and path; degrades to "skipped" if it exceeds its own measurement budget).
 
 ## gc
 
@@ -40,13 +42,38 @@ Freed bytes come from `du -s --block-size=1` measured before removal. A file har
 
 Defaults come from `sessionGc.*` ([configuration.md](configuration.md#field-reference)); `--limit` defaults to `100`. The daemon runs the same policy on a timer when `sessionGc.enabled` is `true`.
 
+## cache
+
+```bash
+spur cache [--json] [--prune] [--yes]
+```
+
+Reports host caches outside `~/.spur` — size, path, and age (days since `max(mtime,ctime)`, never atime) per entry, ranked by size descending, plus each protected entry's reason. Dry-run by default: no flags, or `--prune` alone, only report and print a re-run hint — neither ever calls `rm`. `--prune --yes` attempts deletion of entries verdicted `prunable`; it requires a resolved instance config and aborts non-zero before planning if the config is absent or invalid. Never starts or calls the daemon; works with the daemon stopped.
+
+Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, the rest of `~/.cache`, and `/tmp` — never `~/.spur` (`dataDir`/`worktreeDir`), which a sibling retention path owns.
+
+Prunable classes (definitionally regenerable; all other classes are report-only, measured but never deleted):
+
+- `vendor-cache` (`~/.npm/_cacache`, one unit) — 7d; protected while any package-manager process (npm/pnpm/npx/yarn) is running.
+- `npx-package` (`~/.npm/_npx/<hash>`) — 30d; protected if the hash supplied a parsed `browsers.json` pin source (`pin-source` reason) or if its path appears in a live process's argv.
+- `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d; protected if pinned by any resolved `browsers.json` (worktrees, projects, `_npx`, `@playwright/mcp`), and protected (fail closed) when either zero `browsers.json` sources resolve at all, or the instance config itself does not resolve.
+
+Report-only classes (never deleted, always reported):
+
+- `browser-profile` (`mcp-*` dirs under either playwright cache root) — measured and reported; never pruned (carries cookies and logged-in sessions).
+- `browser-registry` (`~/.cache/ms-playwright/b` and similar) — measured and reported; never pruned (browser revision provenance).
+- `generic` (every other `~/.cache` entry, including `whisper.cpp`) — measured and reported; never pruned.
+- `tmp-entry` (`/tmp`) — measured and reported; never pruned.
+
+Every prunable class also protects a symlink, an entry not owned by the invoking uid, an entry resolving inside `dataDir`/`worktreeDir` (`spur-owned`), and any entry when the process tree is not readable (the whole plan degrades to report-only in that case). `executePrune` takes a fresh liveness snapshot and re-derives each verdict from a fresh `lstat` before deleting.
+
 ## daemon
 
 `daemon start|stop|restart --config <path>` each refuse instead of bootstrapping when `<path>` (or `SPUR_CONFIG`) does not exist and is not the default `~/.spur/config.yaml`; only the default path bootstraps a fresh config on first boot. All three verbs also refuse a non-default `<path>` that already exists but claims the production slot (`server.port` `4310`, or `dataDir` `~/.spur`, either explicit or inherited by omitting the field) — this check is read-only and never writes the rejected config. A default-path config is always exempt, whether it exists yet or not, so first boot and restart of the real daemon are unaffected. Use `scripts/spur-isolated-daemon.sh` for a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`.
 
 Spur keeps a durable config registry in `dataDir`: any normal CLI command syncs its `--config` into the daemon, and daemon boot reloads every registered path, rehydrates session state, resumes pipelines, and restarts sources/triggers. Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`; their project ids and `sessionPrefix` values stay globally unique per daemon.
 
-The `agent-process-ownership` check reports live agent processes their session record does not own. Ownership keys on the `SPUR_SESSION` id each process carries, never on cwd — the worktree in a finding is evidence, not the key. Reasons: `duplicate_for_session` (live record, more than one process), `terminal_record` (record `completed` or `killed`), `unknown_session` (no record). Each finding prints pid, agent, session id, reason, rss, age, worktree. Severity `warn`, so findings never flip the exit code. Linux only (reads `/proc/<pid>/environ`); elsewhere the check reports `cannot determine agent process ownership on this platform` at `info`. Skipped when `~/.spur/config.yaml` is absent or unparsable.
+The `agent-process-ownership` check reports live agent processes their session record does not own. Ownership keys on the `SPUR_SESSION` id each process carries, never on cwd. Reasons: `duplicate_for_session` (live record, more than one process), `terminal_record` (record `completed` or `killed`), `unknown_session` (no record, or the record's dataDir could not be resolved), `foreign_instance` (a NON-terminal session record with the same id exists in another registered instance's `dataDir` — a live isolated-daemon/sidecar agent; a terminal foreign record stays `unknown_session`). `foreign_instance` reports at `info` and never counts toward the warn total. `unknown_session`'s `agent` is inferred from the matched process binary (`null` when ambiguous) and `worktreePath` is read from `/proc/<pid>/cwd` (empty when unreadable). Each finding prints pid, agent, session id, reason, rss, age, worktree. Severity `warn` for non-foreign findings, never flips the exit code. Linux only (reads `/proc/<pid>/environ`); elsewhere reports `cannot determine agent process ownership on this platform` at `info`. Skipped when `~/.spur/config.yaml` is absent or unparsable.
 
 ## spawn
 
@@ -124,7 +151,7 @@ Both act through `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue
 
 Queued-message delivery events: `session.message.sent` (delivered), `session.message.delivery_recovered` (the agent's submit acknowledgment timed out but the process was still alive, so the pane write is treated as delivered), `session.message.delivery_failed` (retained, retried on the next poll), `session.message.queue_removed` (a `remove` call). A landed delivery logs exactly one of `sent` / `delivery_recovered` / `delivery_failed`; a `delivery_failed` whose message is unchanged from the last logged failure on that session is suppressed (zero events) rather than repeated once per poll, so a permanently broken session doesn't flood the log.
 
-Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery). GitHub poll-cost events:
+Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery, and a pre-spawn `host.disk.low` warning when free space on `dataDir` is under [`diskRetention.warnFreeGb`](configuration.md) — report-only, never blocks or fails the spawn). GitHub poll-cost events:
 
 - `gh.poll_cycle`: one completed poll cycle; includes `calls` and `graphqlCost`.
 - `gh.usage`: minute/hour `gh` invocation and GraphQL-cost windows.

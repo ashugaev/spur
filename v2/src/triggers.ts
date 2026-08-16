@@ -52,6 +52,7 @@ interface PendingBatch {
   customPrompt: string | undefined;
   customPromptRecorded: boolean;
   batch: SendBatch;
+  notBeforeAt: number;
 }
 
 interface RetryState {
@@ -63,6 +64,7 @@ interface RetryState {
 interface DeliveryFailure {
   attempts: number;
   nextAttemptAt: number;
+  recordedAt: number;
 }
 
 // Rate-limit suppression is deliberately excluded from the failure/backoff
@@ -584,6 +586,7 @@ function mergeIntoBatch(
     customPrompt,
     customPromptRecorded: false,
     batch: incoming,
+    notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
   };
 }
 
@@ -802,13 +805,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       );
       return;
     }
+    const now = Date.now();
     const backoff = DELIVERY_RETRY_BASE_MS * 2 ** (attempts - 1);
-    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: Date.now() + backoff });
+    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: now + backoff, recordedAt: now });
   };
 
   const isInDeliveryBackoff = (queueKey: string): boolean => {
     const failure = deliveryFailures.get(queueKey);
     return failure !== undefined && Date.now() < failure.nextAttemptAt;
+  };
+
+  // Clears a stale delivery-failure entry when the session has restarted since
+  // the failure was recorded. A restart invalidates the prior failure context,
+  // so backoff should not block the fresh session.
+  const clearBackoffIfRestarted = (queueKey: string, session: SessionView): void => {
+    const failure = deliveryFailures.get(queueKey);
+    if (failure && sessionRestartedSince(session, failure.recordedAt)) {
+      deliveryFailures.delete(queueKey);
+    }
   };
 
   // Delivers outside the CI-failed retry path and, on a thrown error, feeds
@@ -899,6 +913,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    const deliverable = isDeliverableState(session);
     const retry = retryStates.get(queueKey);
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
@@ -918,7 +933,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
-      if (!retry.interrupt && !isDeliverableState(session)) {
+      const interrupt = retry.interrupt && session.state === "working";
+      if (!deliverable && !interrupt) {
         return;
       }
 
@@ -927,10 +943,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
+      // Escalation (interrupt=true, working) bypasses the window gate.
+      if (!interrupt && now < batch.notBeforeAt) {
+        return;
+      }
+
       retry.attempts += 1;
       retry.nextAttemptAt =
         retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
-      await deliverBatch(queueKey, batch, retry.interrupt && !isDeliverableState(session), {
+      await deliverBatch(queueKey, batch, interrupt, {
         attempt: retry.attempts,
         clearAfter: false,
         keepRetryState: true,
@@ -938,9 +959,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
+    if (deliverable) {
+      if (!isStaleParked(session) && Date.now() < batch.notBeforeAt) return;
       interruptedKeys.delete(queueKey);
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
@@ -1051,9 +1074,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     // A delivery already failing its backoff window stays queued for the flush
     // loop; a fresh event must not bypass the backoff and re-spam the target.
+    // If the session restarted since the failure, the stale backoff is cleared.
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
+    if (isStaleParked(session)) {
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
     }
@@ -1112,6 +1137,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         customPrompt: sendTrigger.send.prompt,
         customPromptRecorded: false,
         batch,
+        notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
       });
       // Without this, a restored ci_failed batch would skip the retry/backoff
       // branch entirely (no retryStates entry) and deliver once immediately

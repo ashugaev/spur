@@ -219,19 +219,24 @@ describe("snapshotProcesses", () => {
     expect(await snapshotProcesses(failing)).toEqual({ status: "unavailable" });
     expect(await listProcesses(failing)).toEqual([]);
   });
-});
 
-describe("listProcesses", () => {
-  it("bounds ps enumeration and fails closed on timeout", async () => {
-    const processes = await listProcesses(async (file, args, options) => {
-      expect(file).toBe("ps");
-      expect(args).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
-      expect(options).toMatchObject({ encoding: "utf8", timeout: 2_000 });
-      expect(options.maxBuffer).toBeGreaterThan(0);
+  it("bounds ps enumeration and degrades to unavailable on timeout", async () => {
+    let capturedFile: string | undefined;
+    let capturedArgs: string[] | undefined;
+    let capturedOptions: { encoding: string; timeout: number; maxBuffer: number } | undefined;
+
+    const snapshot = await snapshotProcesses(async (file, args, options) => {
+      capturedFile = file;
+      capturedArgs = args;
+      capturedOptions = options;
       throw new Error("ps timed out");
     });
 
-    expect(processes).toEqual([]);
+    expect(snapshot).toEqual({ status: "unavailable" });
+    expect(capturedFile).toBe("ps");
+    expect(capturedArgs).toEqual(["-eo", "pid=,ppid=,rss=,etime=,args="]);
+    expect(capturedOptions).toMatchObject({ encoding: "utf8", timeout: 2_000 });
+    expect(capturedOptions?.maxBuffer).toBeGreaterThan(0);
   });
 });
 

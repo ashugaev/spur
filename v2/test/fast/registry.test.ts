@@ -1,5 +1,6 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { mkdirSync, realpathSync, statSync, symlinkSync, utimesSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -12,6 +13,7 @@ import {
   readConfigRegistryFile,
   removeConfigRegistryPath,
   removeUnconfiguredProject,
+  resolveRegisteredDataDirs,
   writeConfigRegistry,
   writeConfigRegistryFile,
   type RegistryDiagnostic,
@@ -786,5 +788,113 @@ describe("registry unconfiguredProjects", () => {
       configPaths: ["/tmp/a.yaml", "/tmp/b.yaml"],
       unconfiguredProjects: [],
     });
+  });
+});
+
+describe("registry.resolveRegisteredDataDirs", () => {
+  it("returns both foreign dataDirs and excludes its own", async () => {
+    const rootDir = await createTempDir("spur-registry-foreign-dirs-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const foreignDataDirA = join(rootDir, "foreign-a-data");
+    const foreignDataDirB = join(rootDir, "foreign-b-data");
+    const worktreeDir = join(rootDir, "worktrees");
+
+    const foreignPathA = await writeConfig(
+      rootDir,
+      "foreign-a.yaml",
+      configYaml({
+        port: 4311,
+        dataDir: foreignDataDirA,
+        worktreeDir,
+        projectId: "a",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "a",
+      }),
+    );
+    const foreignPathB = await writeConfig(
+      rootDir,
+      "foreign-b.yaml",
+      configYaml({
+        port: 4312,
+        dataDir: foreignDataDirB,
+        worktreeDir,
+        projectId: "b",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "b",
+      }),
+    );
+    const ownPath = await writeConfig(
+      rootDir,
+      "own.yaml",
+      configYaml({
+        port: 4310,
+        dataDir: ownDataDir,
+        worktreeDir,
+        projectId: "own",
+        projectPath: join(rootDir, "repo-own"),
+        sessionPrefix: "own",
+      }),
+    );
+
+    writeConfigRegistry(ownDataDir, [foreignPathA, foreignPathB, ownPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir).sort()).toEqual(
+      [foreignDataDirA, foreignDataDirB].sort(),
+    );
+  });
+
+  it("skips a registered path that no longer exists, without throwing", async () => {
+    const rootDir = await createTempDir("spur-registry-dead-path-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const missingPath = join(rootDir, "gone.yaml");
+
+    writeConfigRegistry(ownDataDir, [missingPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("skips an unparsable registered config, without throwing", async () => {
+    const rootDir = await createTempDir("spur-registry-unparsable-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const brokenPath = await writeConfig(rootDir, "broken.yaml", "not: [valid\n");
+
+    writeConfigRegistry(ownDataDir, [brokenPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("returns [] when no registry file exists", async () => {
+    const rootDir = await createTempDir("spur-registry-no-file-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("resolves a registered project-shaped config with no dataDir key to the default dataDir", async () => {
+    const rootDir = await createTempDir("spur-registry-project-shape-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const projectPath = await writeConfig(
+      rootDir,
+      "project.yaml",
+      `server:
+  host: 127.0.0.1
+  port: 4313
+worktreeDir: ${join(rootDir, "worktrees")}
+projects:
+  proj:
+    path: ${join(rootDir, "repo-proj")}
+    defaultBranch: main
+    sessionPrefix: proj
+`,
+    );
+
+    writeConfigRegistry(ownDataDir, [projectPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([join(homedir(), ".spur")]);
   });
 });

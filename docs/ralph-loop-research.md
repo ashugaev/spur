@@ -104,8 +104,7 @@ wiring the _loop_, not the per-invocation flags.
 ### Recipe A: cron + spawn — the native Spur fit
 
 `spawn` triggers are agent-agnostic today (`spawn.agent: claude|codex|cursor`,
-see `v2/README.md`'s `weekday-review-spawn` example and the live
-`gh-pr-review-spawn` trigger in this repo's `spur.yaml`). A `cron` source
+see `v2/README.md`'s `weekday-review-spawn` example). A `cron` source
 firing a `spawn` trigger on a schedule is the fresh-context Ralph loop:
 every tick is a brand-new session in a brand-new worktree, with no
 conversation carried over — exactly the property the original bash loop
@@ -153,8 +152,8 @@ this on:
   events, not `cron:tick` — setting it on a cron-triggered spawn trigger fails
   config load. It also isn't a "which sessions are already live" concept, it's
   one-work-item-per-PR dedup (README's `pr-review-queue-spawn` example is the
-  only place it's actually used; the live `gh-pr-review-spawn` trigger in this
-  repo uses `spawnDeskGroup` instead, which explicitly rejects `autoComplete`).
+  only place it's actually used; a desk-group PR-review trigger uses
+  `spawnDeskGroup` instead, which explicitly rejects `autoComplete`).
   A cron-spawned Ralph iteration needs no equivalent: each tick's session just
   runs to `waiting` and sits idle in its own worktree; the next tick spawns
   another one regardless, so nothing needs to be marked "complete" to unblock

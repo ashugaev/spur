@@ -187,6 +187,9 @@ export async function sweepLeakedPlaywright(ownedPorts: ReadonlySet<number>): Pr
   } catch {
     return 0;
   }
+  // `[]` on ps unavailable — a missed teardown kill is safe (the reaper
+  // retries), unlike cache-retention.ts's use of the same signal as a
+  // deletion guard.
   const processes = await listProcesses();
   const leaked = processes.filter((proc) => isLeakedManagedPlaywright(proc, ownedPorts));
   for (const proc of leaked) {

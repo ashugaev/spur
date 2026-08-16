@@ -85,7 +85,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           // already gone
         }
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });
