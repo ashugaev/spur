@@ -54,6 +54,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     },
+    diskRetention: { warnFreeGb: 10 },
     sessionGc: {
       enabled: false,
       olderThanDays: 30,

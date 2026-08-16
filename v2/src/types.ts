@@ -700,6 +700,9 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  diskRetention: {
+    warnFreeGb: number;
+  };
   sessionGc: {
     enabled: boolean;
     olderThanDays: number;

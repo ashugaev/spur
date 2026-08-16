@@ -409,7 +409,12 @@ export async function killProcessTree(
     wait?: () => Promise<void>;
   } = {},
 ): Promise<void> {
-  const tree = collectDescendants(pid, await (options.list ?? listProcesses)()).reverse();
+  // Same fail-open-is-safe reasoning as listProcesses' own doc comment: a
+  // teardown kill missing its target list is a missed cleanup, not a
+  // deletion guard, so an unavailable ps yields [] here rather than
+  // propagating the fail-closed signal cache-retention.ts needs.
+  const listTargets = options.list ?? listProcesses;
+  const tree = collectDescendants(pid, await listTargets()).reverse();
   const identityReader = options.readIdentity ?? readProcessIdentity;
   const signaler = options.signal ?? signalProcess;
   const identities = new Map<number, string>();

@@ -11,10 +11,22 @@ import {
 } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import {
+  formatCacheSizeGb,
+  planCachePrune,
+  prunableCandidates,
+  type CachePlan,
+} from "./cache-retention.js";
 import { dimText } from "./cli-view.js";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import {
+  DEFAULT_DISK_RETENTION,
+  loadInstanceConfigReadOnly,
+  type InstanceConfigReadResult,
+} from "./config.js";
+import { parseDfField } from "./disk-space.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
+import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
 import {
   assembleSidecarSweepClaims,
@@ -533,21 +545,6 @@ function checkDirWritable(id: string, dir: string): HostInstallCheck {
   }
 }
 
-// `df -Pk`/`df -Pi` second line, 4th field (Available / IFree respectively,
-// POSIX `-P` format). Any parse failure (missing `df`, a filesystem that
-// reports `-` for inodes, etc.) is not itself an error — it just means this
-// particular signal is unavailable on this host, not that the directory is
-// unhealthy.
-function parseDfField(output: string | undefined, fieldIndex: number): number | undefined {
-  if (!output) return undefined;
-  const dataLine = output.trim().split("\n")[1];
-  if (!dataLine) return undefined;
-  const raw = dataLine.trim().split(/\s+/)[fieldIndex];
-  if (raw === undefined) return undefined;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function checkDiskSpace(id: string, dir: string): HostInstallCheck {
   const kbOutput = tryExec("df", ["-Pk", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
   const iOutput = tryExec("df", ["-Pi", dir], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
@@ -580,6 +577,108 @@ function checkDiskSpace(id: string, dir: string): HostInstallCheck {
     };
   }
   return { id, ok: true, severity: "error", detail: `${dir} has sufficient free space and inodes` };
+}
+
+// Ungated (unlike checkDiskSpace, which needs a live unitsInstalled host):
+// `home` is always readable, so this can report on a bare, un-initialized
+// host too. `warn`, not `error` — a low-headroom host is a nudge toward
+// `spur cache`, not a broken install, so this can never move doctor's exit
+// code (hasErrorSeverity only counts severity:"error").
+function checkHomeDiskHeadroom(home: string, warnFreeGb: number): HostInstallCheck {
+  const id = "home-disk-headroom";
+  const kbOutput = tryExec("df", ["-Pk", home], { timeoutMs: DISK_SPACE_PROBE_TIMEOUT_MS });
+  const availKb = parseDfField(kbOutput, 3);
+  if (availKb === undefined) {
+    return {
+      id,
+      ok: true,
+      severity: "info",
+      detail: "skipped — df unavailable or non-numeric on this filesystem",
+    };
+  }
+  const warnFreeKb = warnFreeGb * 1024 * 1024;
+  const availGb = (availKb / (1024 * 1024)).toFixed(1);
+  const ok = availKb >= warnFreeKb;
+  return {
+    id,
+    ok,
+    severity: "warn",
+    detail: ok
+      ? `${home} has ${availGb}GB free (>= ${warnFreeGb}GB floor)`
+      : `${home} has only ${availGb}GB free (below the ${warnFreeGb}GB floor)`,
+    ...(ok ? {} : { fix: "spur cache" }),
+  };
+}
+
+// Bounds the whole `planCachePrune` measurement, independent of any single
+// `du` chunk's own CACHE_MEASURE_TIMEOUT_MS (30s) — a host with several
+// large, unresponsive roots could otherwise chain multiple per-root
+// timeouts into a much longer `spur doctor` hang. Above a cold-cache full
+// sweep on a heavily-used host (measured ~24s), with headroom: the budget
+// also drives an AbortController that actually kills the in-flight `du`
+// child on expiry (see `signal` below), so raising it doesn't risk `spur
+// doctor` hanging past it — it only gives a cold run enough room to finish
+// and report a real number instead of "skipped" every time.
+const RECLAIMABLE_CACHES_BUDGET_MS = 45_000;
+const RECLAIMABLE_CACHES_TOP_N = 5;
+
+function renderReclaimableDetail(plan: CachePlan): string {
+  const prunable = prunableCandidates(plan);
+  let summary: string;
+  if (prunable.length === 0) {
+    summary = "no reclaimable caches found";
+  } else {
+    const top = prunable
+      .slice(0, RECLAIMABLE_CACHES_TOP_N)
+      .map(
+        (candidate) =>
+          `${formatCacheSizeGb(candidate.entry.sizeKb)} age ${candidate.entry.ageDays}d ${candidate.entry.path}`,
+      )
+      .join("; ");
+    summary = `${formatCacheSizeGb(plan.reclaimableKb)} reclaimable across ${prunable.length} entries (top ${Math.min(RECLAIMABLE_CACHES_TOP_N, prunable.length)}: ${top}) — see \`spur cache\` for the full report`;
+  }
+  const rootRows =
+    plan.roots.length === 0
+      ? "roots: none"
+      : plan.roots
+          .map(
+            (r) =>
+              `${r.rootId} ${r.status} ${formatCacheSizeGb(r.totalKb)} ${r.entryCount} ${r.path}`,
+          )
+          .join("; ");
+  return `${summary}; ${rootRows}`;
+}
+
+// Ungated, like `home-disk-headroom` — always `ok:true, severity:"info"`, so
+// it can never move `hasErrorSeverity`/doctor's exit code. `du` writes
+// nothing, so this stays compliant with doctor's read-only contract; it
+// mirrors the `df`-unavailable degrade path (`checkHomeDiskHeadroom` above)
+// on any measurement error/timeout instead of throwing.
+async function checkReclaimableCaches(
+  home: string,
+  instanceConfig: InstanceConfigReadResult,
+): Promise<HostInstallCheck> {
+  const id = "reclaimable-caches";
+  // The abort actually kills the in-flight `du` child on budget expiry
+  // (planCachePrune threads `signal` down to `execFile`) so a wedged/slow
+  // measurement can never keep `spur doctor`'s process alive past the
+  // budget — `withTimeout` alone only abandons the await, it does not stop
+  // the underlying work.
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), RECLAIMABLE_CACHES_BUDGET_MS);
+  abortTimer.unref();
+  try {
+    const plan = await withTimeout(
+      planCachePrune({ home, instanceConfig, signal: controller.signal }),
+      RECLAIMABLE_CACHES_BUDGET_MS,
+      "measurement budget exceeded",
+    );
+    return { id, ok: true, severity: "info", detail: renderReclaimableDetail(plan) };
+  } catch {
+    return { id, ok: true, severity: "info", detail: "skipped — measurement budget exceeded" };
+  } finally {
+    clearTimeout(abortTimer);
+  }
 }
 
 // A healthy host registers one instance config plus one per real repo
@@ -1151,6 +1250,13 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkTmuxInstalled());
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
+
+  const warnFreeGb =
+    instanceConfig.status === "ok"
+      ? instanceConfig.config.diskRetention.warnFreeGb
+      : DEFAULT_DISK_RETENTION.warnFreeGb;
+  checks.push(checkHomeDiskHeadroom(home, warnFreeGb));
+  checks.push(await checkReclaimableCaches(home, instanceConfig));
 
   // C1/C2/E2 additionally require `unitsInstalled` (not just a readable
   // instance config) — an instance config can legitimately exist (e.g. a

@@ -526,6 +526,14 @@ function ciFailedEvent() {
   };
 }
 
+function mergeConflictSignal(): ReviewSignal {
+  return {
+    key: "merge_conflict",
+    kind: "merge_conflict",
+    text: "Merge conflicts are blocking this PR.",
+  };
+}
+
 function mergeConflictEvent() {
   return {
     name: "github:merge_conflict",
@@ -536,13 +544,7 @@ function mergeConflictEvent() {
       repo: "acme/api",
       prNumber: 42,
       prTitle: "Tighten coverage",
-      signals: [
-        {
-          key: "merge_conflict",
-          kind: "merge_conflict",
-          text: "Merge conflicts are blocking this PR.",
-        },
-      ],
+      signals: [mergeConflictSignal()],
     },
   };
 }
@@ -555,6 +557,10 @@ function ciSnapshot(): ReviewSnapshot {
       text: "CI is failing: test suite.",
     },
   ]);
+}
+
+function mergeConflictSnapshot(): ReviewSnapshot {
+  return storedSnapshot([mergeConflictSignal()]);
 }
 
 function cronEvent() {
@@ -654,6 +660,10 @@ async function loadTriggersModule() {
   return import("../../src/triggers.js");
 }
 
+async function advanceSendWindow(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(35_000);
+}
+
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -673,7 +683,7 @@ describe("startConfiguredTriggers", () => {
     vi.restoreAllMocks();
   });
 
-  it("delivers GitHub updates immediately when the target session is waiting", async () => {
+  it("delivers GitHub updates via flush loop when the target session is waiting", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -682,6 +692,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -698,13 +709,12 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledWith(
-          "api-1",
-          expect.stringContaining('GitHub updates on PR #42 "Tighten coverage":'),
-          { interrupt: false },
-        );
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining('GitHub updates on PR #42 "Tighten coverage":'),
+        { interrupt: false },
+      );
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining(
@@ -724,7 +734,19 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("delivers GitLab updates immediately when the target session is waiting", async () => {
+  it("retains the first-arrival deadline when a second event merges into the same queue key", async () => {
+    const secondEvent = {
+      name: "github:comment",
+      projectId: "api",
+      sourceId: "pr-watch",
+      data: {
+        sessionId: "api-1",
+        repo: "acme/api",
+        prNumber: 42,
+        prTitle: "Tighten coverage",
+        signals: [{ key: "comment:2", kind: "comment", text: "A follow-up comment." }],
+      },
+    };
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -733,6 +755,101 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      storedSnapshot([
+        { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+        { key: "comment:2", kind: "comment", text: "A follow-up comment." },
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent("comment:1"));
+      // Advance to ~25s; second event arrives before the 30s window expires.
+      await vi.advanceTimersByTimeAsync(25_000);
+      bus.emit(secondEvent);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // The original deadline is ~30s from t0 (not extended by the merge).
+      // Advance 5s more (total 30s from first event) — window expires, delivery fires.
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A follow-up comment."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers on first flush tick when SPUR_IDLE_WAIT_BEFORE_FLUSH_MS is 0", async () => {
+    process.env["SPUR_IDLE_WAIT_BEFORE_FLUSH_MS"] = "0";
+    try {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("A new comment arrived."),
+          { interrupt: false },
+        );
+      } finally {
+        await controller.stop();
+      }
+    } finally {
+      delete process.env["SPUR_IDLE_WAIT_BEFORE_FLUSH_MS"];
+    }
+  });
+
+  it("delivers GitLab updates via flush loop when the target session is waiting", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readReviewSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -749,13 +866,12 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(gitlabEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledWith(
-          "api-1",
-          expect.stringContaining('GitLab updates on merge request #42 "Tighten coverage":'),
-          { interrupt: false },
-        );
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining('GitLab updates on merge request #42 "Tighten coverage":'),
+        { interrupt: false },
+      );
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("Review the latest GitLab updates on the active merge request"),
@@ -775,6 +891,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -794,9 +911,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       const delivered = deliverMock.mock.calls[0]?.[1];
       expect(typeof delivered).toBe("string");
       expect(delivered).toContain(
@@ -834,6 +950,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -850,9 +967,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
@@ -982,7 +1098,7 @@ describe("startConfiguredTriggers", () => {
         expect(getMock).toHaveBeenCalledTimes(2);
       });
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(inputLogEntries("api-1")).toEqual([
@@ -1063,6 +1179,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1079,9 +1196,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(mergeConflictEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("Merge conflicts are blocking this PR."),
@@ -1239,7 +1355,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
@@ -1251,6 +1367,59 @@ describe("startConfiguredTriggers", () => {
         expect.stringContaining(
           "Review the latest GitHub updates on the active PR and act on them.",
         ),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not deliver or consume retry attempts for ci_failed with interrupt=true while needs_input, then delivers interrupt:false after window once waiting", async () => {
+    const needsInput = {
+      id: "api-1",
+      status: "running",
+      state: "needs_input",
+      workspaceExists: true,
+    };
+    const waiting = {
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(needsInput);
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      // needs_input: no delivery even across multiple flush ticks.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Switch to waiting before the 30s window expires. Still no delivery.
+      getMock.mockResolvedValue(waiting);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Window expires: delivers with interrupt:false (not interrupt:true).
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("CI is failing: test suite."),
         { interrupt: false },
       );
     } finally {
@@ -1285,9 +1454,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(ciFailedEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
 
       snapshot = storedSnapshot([]);
       await vi.advanceTimersByTimeAsync(10 * 60_000);
@@ -1332,6 +1500,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_000);
       await vi.waitFor(() => {
         expect(deliverMock).toHaveBeenCalledTimes(1);
       });
@@ -1372,9 +1541,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
 
       // Flush ticks inside the first backoff window (10s) must not re-attempt.
       await vi.advanceTimersByTimeAsync(5_000);
@@ -1433,9 +1601,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(10_000);
       expect(deliverMock).toHaveBeenCalledTimes(2);
@@ -1446,6 +1613,167 @@ describe("startConfiguredTriggers", () => {
       // Successful delivery clears the batch; the flush loop stops.
       await vi.advanceTimersByTimeAsync(60 * 60_000);
       expect(deliverMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("clears delivery-failure backoff when the session restarted after the failure", async () => {
+    const session = {
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(session);
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("session torn down"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      // t=30000: window opens, flush delivers and fails.
+      // recordedAt≈30000, nextAttemptAt≈40000 (10s backoff window).
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // Session restarted: stopped entry after the failure at t≈30000.
+      getMock.mockResolvedValue({
+        ...session,
+        stateHistory: [
+          { state: "stopped", at: new Date(Date.now()).toISOString(), source: "status" as const },
+        ],
+      });
+
+      // t=35000: strictly inside 10s backoff window (nextAttemptAt=40000).
+      // clearBackoffIfRestarted detects the stopped transition → clears → delivers.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not clear delivery-failure backoff without a session restart", async () => {
+    const session = {
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(session);
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient error"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      // t=30000: first delivery fails; recordedAt≈30000, nextAttemptAt≈40000.
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // t=35000: no restart in stateHistory → backoff holds.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // t=40000: backoff expires naturally → retry proceeds.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("clears delivery-failure backoff at handleSendEvent when interrupt session restarted, delivering immediately", async () => {
+    const session = {
+      id: "api-1",
+      status: "running" as const,
+      state: "working" as const,
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(session);
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("pane write failed"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => mergeConflictSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      // First event: handleSendEvent fires interrupt delivery immediately (working).
+      // Delivery throws → recordedAt≈0, nextAttemptAt≈10000.
+      bus.emit(mergeConflictEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock.mock.calls[0]).toEqual([
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      ]);
+
+      // t=5000: flush fires; session has no restart history → clearBackoffIfRestarted
+      // is a no-op → backoff holds → skip. (Also validates flushPending call-site
+      // does NOT clear without restart evidence.)
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // Session restarted: stopped entry after the failure at t≈0.
+      getMock.mockResolvedValue({
+        ...session,
+        stateHistory: [
+          { state: "stopped", at: new Date(Date.now()).toISOString(), source: "status" as const },
+        ],
+      });
+
+      // Second event before natural backoff expiry (t<10000).
+      // handleSendEvent: clearBackoffIfRestarted detects stopped → clears →
+      // proceeds past isInDeliveryBackoff → delivers with interrupt:true.
+      bus.emit(mergeConflictEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(deliverMock.mock.calls[1]).toEqual([
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      ]);
     } finally {
       await controller.stop();
     }
@@ -1843,9 +2171,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(serviceEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       const delivered = deliverMock.mock.calls[0]?.[1];
       expect(typeof delivered).toBe("string");
       expect(delivered).toContain('The bound service "web" has a problem.');
@@ -1865,7 +2192,7 @@ describe("startConfiguredTriggers", () => {
         state: "working",
         workspaceExists: true,
       })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         id: "api-1",
         status: "running",
         state: "waiting",
@@ -1894,7 +2221,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -1959,7 +2286,7 @@ describe("startConfiguredTriggers", () => {
         state: "rate_limited",
         workspaceExists: true,
       })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         id: "api-1",
         status: "running",
         state: "waiting",
@@ -1987,7 +2314,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -2091,7 +2418,7 @@ describe("startConfiguredTriggers", () => {
         state: "error",
         workspaceExists: true,
       })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         id: "api-1",
         status: "running",
         state: "waiting",
@@ -2119,7 +2446,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
 
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock).toHaveBeenCalledWith(
@@ -2276,6 +2603,47 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("delivers interrupt:true trigger with interrupt:false after window when session is waiting", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      // No early delivery — window must expire first.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      // Window expires; delivers with interrupt:false (session is not working).
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("retries delivery via flush loop when deliver throws", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -2287,15 +2655,7 @@ describe("startConfiguredTriggers", () => {
       .fn()
       .mockRejectedValueOnce(new Error("agent busy"))
       .mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      storedSnapshot([
-        {
-          key: "merge_conflict",
-          kind: "merge_conflict",
-          text: "Merge conflicts are blocking this PR.",
-        },
-      ]),
-    );
+    readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2489,6 +2849,7 @@ describe("startConfiguredTriggers", () => {
       allowedTriggers: ["send"],
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -2505,6 +2866,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
+      await advanceSendWindow();
       await vi.waitFor(() => {
         expect(deliverMock).toHaveBeenCalled();
       });
@@ -2994,7 +3356,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("holds delivery in handleSendEvent fast path while the agent was active in the last 30s", async () => {
+  it("holds delivery while the session was active in the last 30s", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -3063,7 +3425,7 @@ describe("startConfiguredTriggers", () => {
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
@@ -3202,6 +3564,7 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -3216,9 +3579,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, "api:send:api-1");
     } finally {
       await controller.stop();
@@ -3233,6 +3595,7 @@ describe("startConfiguredTriggers", () => {
       lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();
     // Import after loadTriggersModule()'s vi.resetModules() so this resolves to the same
     // session-service.js module instance triggers.ts uses internally for the instanceof check.
@@ -3251,9 +3614,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.suppressed_rate_limited",
@@ -3296,9 +3658,8 @@ describe("startConfiguredTriggers", () => {
 
     try {
       bus.emit(githubEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
 
       // Advance through the same total window as the 8-attempt exponential
       // backoff cap used for ordinary delivery failures (10s..640s). Rate-limit
@@ -3365,7 +3726,7 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.restored",
       );
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("A new comment arrived."),
@@ -3416,13 +3777,11 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
+      // Window (fresh on restore) holds delivery for 30 s.
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledTimes(0);
 
-      // Without a restored retry state this batch would already be cleared
-      // (delivered once, then dropped) instead of waiting for the next
-      // 10-minute retry window like a live ci_failed batch would.
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(30_001);
       expect(deliverMock).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);

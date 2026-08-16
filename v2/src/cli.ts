@@ -8,6 +8,16 @@ import {
   type ConfigRegistryPathEntry,
   type HostInstallCheck,
 } from "./host-install.js";
+import {
+  byEntrySizeDesc,
+  executePrune,
+  formatCacheSizeGb,
+  planCachePrune,
+  prunableCandidates,
+  type CachePlan,
+  type CacheCandidate,
+  type PruneOutcome,
+} from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
@@ -931,6 +941,134 @@ function renderDoctorResult(result: DoctorResult): string {
   return lines.join("\n");
 }
 
+const MAX_LISTED_CANDIDATES = 20;
+
+function formatProtectedReason(candidate: CacheCandidate): string {
+  if (candidate.verdict.kind !== "protected") return "";
+  const reason = candidate.verdict.reason;
+  switch (reason.kind) {
+    case "too-recent":
+      return `too recent (${reason.ageDays}d < ${reason.floorDays}d floor)`;
+    case "in-use":
+      return `in use by pid ${reason.pid} (${reason.evidence})`;
+    case "package-manager-active":
+      return `package manager active (pid ${reason.pid})`;
+    case "pinned-revision":
+      return `pinned browser revision (${reason.dirName})`;
+    case "pin-unresolved":
+      return "no browsers.json pin sources resolved";
+    case "pin-source":
+      return "npx-package is a browsers.json pin source";
+    case "spur-owned":
+      return "resolves inside Spur data directory";
+    case "class-never-pruned":
+      return "never pruned (this class is report-only)";
+    case "process-tree-unreadable":
+      return "process tree unreadable";
+    case "process-list-unavailable":
+      return "process listing unavailable";
+    case "not-owned":
+      return `not owned by this user (uid ${reason.uid})`;
+    case "symlink":
+      return "symlink";
+  }
+}
+
+function renderCachePlan(plan: CachePlan): string {
+  const lines: string[] = [boldText("Cache roots")];
+  for (const root of plan.roots) {
+    lines.push(
+      `  ${accent(root.rootId.padEnd(20))}  ${root.status.padEnd(9)}  ${formatCacheSizeGb(root.totalKb).padStart(9)}  ${String(root.entryCount).padStart(5)} entries  ${dimText(root.path)}`,
+    );
+  }
+
+  const prunable = prunableCandidates(plan);
+  const protectedCandidates = plan.candidates
+    .filter(
+      (candidate): candidate is CacheCandidate & { verdict: { kind: "protected" } } =>
+        candidate.verdict.kind === "protected",
+    )
+    .sort(byEntrySizeDesc);
+
+  lines.push(
+    "",
+    boldText(
+      `Prunable: ${prunable.length} entries, ${formatCacheSizeGb(plan.reclaimableKb)} reclaimable`,
+    ),
+  );
+  for (const candidate of prunable.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}`,
+    );
+  }
+  if (prunable.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${prunable.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  lines.push("", boldText(`Protected: ${protectedCandidates.length} entries`));
+  for (const candidate of protectedCandidates.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      dimText(
+        `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}  — ${formatProtectedReason(candidate)}`,
+      ),
+    );
+  }
+  if (protectedCandidates.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${protectedCandidates.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  if (!plan.processTreeReadable) {
+    lines.push("", dimText("Process tree unreadable — every candidate is protected."));
+  }
+  if (plan.pinSourceCount === 0) {
+    lines.push(
+      dimText(
+        "No playwright browsers.json pin sources resolved — every browser revision is protected.",
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderPruneOutcome(outcome: PruneOutcome): string {
+  const lines = [
+    boldText(
+      `Removed ${outcome.removed.length} entries, freed ${formatCacheSizeGb(outcome.freedKb)}`,
+    ),
+  ];
+  if (outcome.failures.length > 0) {
+    lines.push(dimText(`${outcome.failures.length} failures:`));
+    for (const failure of outcome.failures.slice(0, MAX_LISTED_CANDIDATES)) {
+      lines.push(dimText(`  ${failure.path}: ${failure.message}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+interface CacheActionResult {
+  plan: CachePlan;
+  outcome?: PruneOutcome;
+  wouldPrune: boolean;
+}
+
+function renderCacheActionResult(result: CacheActionResult): string {
+  const lines = [renderCachePlan(result.plan)];
+  if (result.outcome) {
+    lines.push("", renderPruneOutcome(result.outcome));
+  } else if (result.wouldPrune) {
+    const prunableCount = result.plan.candidates.filter(
+      (c) => c.verdict.kind === "prunable",
+    ).length;
+    lines.push(
+      "",
+      dimText(
+        `Would remove ${prunableCount} entries, ${formatCacheSizeGb(result.plan.reclaimableKb)} — re-run with --prune --yes to actually delete.`,
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
 interface SidecarPortRow {
   sidecar: string;
   id: string;
@@ -1214,7 +1352,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `cache`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -1222,6 +1360,14 @@ function helpNotes(command: Command): string[] {
     return [
       "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
       "`npm install` alone does not register or start services.",
+    ];
+  }
+  if (command.name() === "cache") {
+    return [
+      "Dry-run by default: no flags, or `--prune` alone, only report — never deletes. `--prune --yes` deletes prunable entries.",
+      "Prunable classes: vendor-cache (~/.npm/_cacache), npx-package (~/.npm/_npx), browser-revision (~/.cache/ms-playwright(-mcp)). All other classes are report-only.",
+      "`--prune --yes` requires a resolved instance config; aborts non-zero if the config is absent or invalid.",
+      "Never deletes ~/.spur (dataDir/worktreeDir) or an npx-package hash that supplies a browsers.json pin source.",
     ];
   }
   if (command.name() === "doctor") {
@@ -2068,7 +2214,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
     .option("--scaffold", "Write spur.yaml when no project config is found")
-    .action(async (options) => {
+    .action(async (options, command) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
@@ -2077,7 +2223,9 @@ export function createProgram(cliEntrypoint: string): Command {
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
-          const instanceConfig = loadInstanceConfigReadOnly();
+          const instanceConfig = loadInstanceConfigReadOnly(
+            getConfigPath(command.parent as Command),
+          );
           if (instanceConfig.status === "ok") {
             collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }
@@ -2164,6 +2312,36 @@ export function createProgram(cliEntrypoint: string): Command {
               : "Host and project checks complete.",
         render: renderDoctorResult,
         exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("cache")
+    .description(
+      "Report host caches outside ~/.spur (npm, browser MCP, ~/.cache, /tmp) and optionally prune them. Dry-run by default.",
+    )
+    .option("--json", "Print raw JSON")
+    .option("--prune", "Preview or execute deletion of prunable entries (dry-run without --yes)")
+    .option("--yes", "Confirm --prune non-interactively; required to actually delete anything")
+    .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }, command) => {
+      const instanceConfig = loadInstanceConfigReadOnly(getConfigPath(command.parent as Command));
+      if (options.prune && options.yes && instanceConfig.status !== "ok") {
+        throw new Error(
+          `--prune --yes requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,
+        );
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "measuring host caches",
+        action: async (): Promise<CacheActionResult> => {
+          const plan = await planCachePrune({ instanceConfig });
+          if (options.prune && options.yes && instanceConfig.status === "ok") {
+            const outcome = await executePrune(plan.candidates, instanceConfig);
+            return { plan, outcome, wouldPrune: false };
+          }
+          return { plan, wouldPrune: Boolean(options.prune) };
+        },
+        render: renderCacheActionResult,
       });
     });
 

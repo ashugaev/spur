@@ -3930,6 +3930,60 @@ projects:
     });
   });
 
+  it("parses diskRetention.warnFreeGb in instance mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 25 });
+  });
+
+  it("defaults diskRetention.warnFreeGb to 10 when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("ignores diskRetention in project mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("rejects a negative diskRetention.warnFreeGb", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "diskRetention.warnFreeGb must be a non-negative number",
+    );
+  });
+
   it("parses admission.maxLiveSessions and memoryGuard in instance mode", async () => {
     const configPath = await writeConfig(`
 admission:
