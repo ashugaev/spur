@@ -9,6 +9,10 @@ export interface TerminalLink {
 }
 
 const TERMINAL_URL_PATTERN = /https?:\/\/\S+/giu;
+const URL_CHAR_CLASS = "A-Za-z0-9\\-._~:/?#[\\]@!$&'()*+,;=%";
+const UNTERMINATED_URL_TAIL = new RegExp(`https?://[${URL_CHAR_CLASS}]*$`, "iu");
+const URL_CHAR_LEADING = new RegExp(`^[${URL_CHAR_CLASS}]`, "u");
+const URL_SCHEME_LEADING = /^https?:\/\//iu;
 const SENTENCE_SUFFIX = new Set([".", ",", ":", ";", "!", "?"]);
 const QUOTE_SUFFIX = new Set(["'", '"', "`", ">"]);
 const DELIMITER_PAIRS = {
@@ -17,14 +21,36 @@ const DELIMITER_PAIRS = {
   "}": "{",
 } as const;
 
-export function groupTerminalRows(rows: Array<TerminalBufferRow | undefined>): string[] {
+const LEADING_WHITESPACE = /^\s+/u;
+const INTERIOR_WHITESPACE = /\s/u;
+
+// A row reaches the wrap boundary once its trimmed content fills the row, with
+// one column of slack: a TUI (e.g. an agent CLI) wraps its own output one
+// column before the terminal's hard-wrap column.
+function isWrapBoundary(text: string, cols: number): boolean {
+  return text.trimEnd().length >= cols - 1;
+}
+
+// A genuine hard-wrapped URL continuation is one unbroken token once its
+// leading TUI gutter (hanging indent) and trailing pad are stripped. Anything
+// with interior whitespace is prose, not a URL continuation.
+function isUnbrokenToken(text: string): boolean {
+  return !INTERIOR_WHITESPACE.test(text.trim());
+}
+
+export function groupTerminalRows(
+  rows: Array<TerminalBufferRow | undefined>,
+  cols: number,
+): string[] {
   const lines: string[] = [];
   let current: string | null = null;
+  let atWrapBoundary = false;
 
   const finishCurrent = () => {
     if (current === null) return;
     lines.push(current.trimEnd());
     current = null;
+    atWrapBoundary = false;
   };
 
   for (const row of rows) {
@@ -33,15 +59,32 @@ export function groupTerminalRows(rows: Array<TerminalBufferRow | undefined>): s
       continue;
     }
 
-    if (!row.isWrapped) {
-      finishCurrent();
-      current = row.text;
+    if (row.isWrapped) {
+      if (current !== null) {
+        current += row.text;
+      }
+      atWrapBoundary = isWrapBoundary(row.text, cols);
       continue;
     }
 
-    if (current !== null) {
-      current += row.text;
+    const continuation = row.text.replace(LEADING_WHITESPACE, "");
+
+    if (
+      current !== null &&
+      atWrapBoundary &&
+      UNTERMINATED_URL_TAIL.test(current.trimEnd()) &&
+      URL_CHAR_LEADING.test(continuation) &&
+      !URL_SCHEME_LEADING.test(continuation) &&
+      isUnbrokenToken(continuation)
+    ) {
+      current = current.trimEnd() + continuation;
+      atWrapBoundary = isWrapBoundary(row.text, cols);
+      continue;
     }
+
+    finishCurrent();
+    current = row.text;
+    atWrapBoundary = isWrapBoundary(row.text, cols);
   }
 
   finishCurrent();
@@ -83,10 +126,13 @@ function trimTerminalUrlCandidate(candidate: string): string {
   return trimmed;
 }
 
-export function extractTerminalLinks(rows: Array<TerminalBufferRow | undefined>): TerminalLink[] {
+export function extractTerminalLinks(
+  rows: Array<TerminalBufferRow | undefined>,
+  cols: number,
+): TerminalLink[] {
   const occurrences: TerminalLink[] = [];
 
-  for (const line of groupTerminalRows(rows)) {
+  for (const line of groupTerminalRows(rows, cols)) {
     for (const match of line.matchAll(TERMINAL_URL_PATTERN)) {
       const url = trimTerminalUrlCandidate(match[0]);
       try {

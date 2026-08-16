@@ -5,6 +5,7 @@ import {
   hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
+  type ConfigRegistryPathEntry,
   type HostInstallCheck,
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
@@ -856,6 +857,7 @@ interface HelpRow {
 
 interface DoctorResult {
   hostChecks: HostInstallCheck[];
+  configRegistryPaths: ConfigRegistryPathEntry[];
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -883,8 +885,23 @@ function displayPathFromCwd(path: string): string {
   return rendered.startsWith(".") ? rendered : `./${rendered}`;
 }
 
+function renderConfigRegistryPaths(paths: ConfigRegistryPathEntry[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    dimText("Registered config paths:"),
+    ...paths.map((entry) =>
+      dimText(`  ${entry.state.padEnd("worktree-internal".length)}  ${entry.path}`),
+    ),
+    "",
+  ];
+}
+
 function renderDoctorResult(result: DoctorResult): string {
-  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  const lines = [
+    renderHostInstallChecks(result.hostChecks),
+    "",
+    ...renderConfigRegistryPaths(result.configRegistryPaths),
+  ];
   if (result.existingProjectConfigPath) {
     lines.push(
       dimText(
@@ -912,6 +929,42 @@ function renderDoctorResult(result: DoctorResult): string {
     lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
   }
   return lines.join("\n");
+}
+
+interface SidecarPortRow {
+  sidecar: string;
+  id: string;
+  env: string;
+  port: number;
+  alive: boolean;
+}
+
+// Flattens a session's per-sidecar reserved ports into rows for the `sidecar
+// ports` command. Read-through: no state of its own, just a reshape of the
+// SessionView the daemon already owner-resolves per sidecar.
+function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
+  if (name !== undefined && !view.sidecars.some((sidecar) => sidecar.name === name)) {
+    throw new Error(`Session ${view.id} has no sidecar "${name}"`);
+  }
+  const sidecars =
+    name === undefined ? view.sidecars : view.sidecars.filter((sidecar) => sidecar.name === name);
+  const rows = sidecars.flatMap((sidecar) =>
+    sidecar.ports.map((port) => ({
+      sidecar: sidecar.name,
+      id: port.id,
+      env: port.env,
+      port: port.port,
+      alive: sidecar.alive,
+    })),
+  );
+  // Plain string comparison, not localeCompare: this output is machine-read
+  // and must not reorder under a non-C locale.
+  rows.sort((a, b) => {
+    if (a.sidecar !== b.sidecar) return a.sidecar < b.sidecar ? -1 : 1;
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    return 0;
+  });
+  return rows;
 }
 
 function renderSidecarSweepResult(result: SidecarSweepResult): string {
@@ -2020,14 +2073,30 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = await collectHostInstallChecks();
+          const collectedChecks = await collectHostInstallChecks();
           // Read-only: never bootstrap-writes the instance config. "absent"
           // (never initialized) and "invalid" (unparsable) both skip the
           // check entirely — there is no dataDir to scan sessions under.
           const instanceConfig = loadInstanceConfigReadOnly();
           if (instanceConfig.status === "ok") {
-            hostChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+            collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
           }
+          // `configRegistryPaths` rides on the "config-registry" check purely
+          // as an internal carrier from `collectHostInstallChecks` to here
+          // (see the field's doc comment in host-install.ts). The documented
+          // public shape only has it at the top level of `DoctorResult`, so
+          // strip it off the check before `hostChecks` is JSON-serialized —
+          // otherwise `--json` emits the same array twice.
+          const configRegistryPaths =
+            collectedChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ??
+            [];
+          const hostChecks = collectedChecks.map((check) => {
+            if (check.id !== "config-registry" || check.configRegistryPaths === undefined) {
+              return check;
+            }
+            const { configRegistryPaths: _perPathEntries, ...checkWithoutPaths } = check;
+            return checkWithoutPaths;
+          });
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
@@ -2068,10 +2137,10 @@ export function createProgram(cliEntrypoint: string): Command {
                 fix: "Fix the reported error in spur.yaml",
               });
             }
-            return { hostChecks, existingProjectConfigPath };
+            return { hostChecks, configRegistryPaths, existingProjectConfigPath };
           }
           if (!options.scaffold) {
-            return { hostChecks };
+            return { hostChecks, configRegistryPaths };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -2080,6 +2149,7 @@ export function createProgram(cliEntrypoint: string): Command {
           writeProjectConfigScaffold(scaffold);
           return {
             hostChecks,
+            configRegistryPaths,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
@@ -3304,6 +3374,44 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  sidecar
+    .command("ports")
+    .description("Print this session's reserved sidecar ports.")
+    .requiredOption("--session <id>", "Session id")
+    .option("--name <name>", "Only this sidecar")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      const session = options.session as string;
+      const name = options.name as string | undefined;
+      if (options.json) {
+        await outputResult({
+          json: true,
+          label: "loading sidecar ports",
+          action: async () =>
+            sidecarPortRows(
+              await getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+              name,
+            ),
+          render: () => "",
+        });
+        return;
+      }
+      const rows = sidecarPortRows(
+        await withSpinner("loading sidecar ports", () =>
+          getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+        ),
+        name,
+      );
+      for (const row of rows) {
+        writeStdout(
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+        );
+      }
     });
 
   sidecar

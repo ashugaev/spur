@@ -25,7 +25,7 @@ Dead-entry removal (a path that is not an existing file — deleted, or now a di
 
 Completing or killing a session also runs a narrow unregister step for its worktree's config path. In the common case that path is already excluded by the worktree-internal filter above (it sits inside the current `worktreeDir`), so the step is a no-op; it only removes a registry entry that outlived the filter because it was registered under a `worktreeDir` the host has since reconfigured away from.
 
-`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`.
+`spur doctor` check `config-registry` flags dead entries, worktree-internal entries, and more than 24 registered paths. Severity `warn` — never affects the exit code. It runs only once the systemd units are installed, and reads the instance config from `SPUR_CONFIG` or the default path, ignoring `--config`. `spur doctor --json` additionally carries a `configRegistryPaths` array — every registered path with its `alive`/`dead`/`worktree-internal` state; the human-readable output renders it as one line per path once non-empty.
 
 Daemon boot logs one `daemon.registry.count` event to `events.jsonl`: how many registry paths it read, and how many the worktree-internal filter dropped. Read-only — it never prunes or rewrites the registry file. Pair it with the `config-registry` doctor check above to tell whether a warn came from a growing registry or a one-off spike.
 
@@ -173,6 +173,8 @@ When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an 
 
 With `steps`, Spur sends "step 1/N: research" plus the original prompt. Without `steps`, it sends the prompt directly unless `--plan` appends the planning-only instruction. Empty prompt opens the session with no message — unless a mode resolved (see Modes below), in which case the mode instruction becomes the session's initial message on its own.
 
+`session.pipeline.step_sent` marks a step whose submission Spur confirmed, with 1-based `details.stepIndex` and `details.totalSteps`. The spawn logs step 1, which rides the launch message; the delivery loop logs 2..N. A launch send left unconfirmed logs `session.submit.timeout` with `details.freshLaunch` and no `step_sent`.
+
 ## Desk groups
 
 ```yaml
@@ -250,6 +252,10 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.staleAfterMinutes`: optional non-negative number. Overrides the instance `staleAfterMinutes` for this project only. See [Stale mode](#stale-mode).
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (currently only `playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
 - `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. See [Sidecar reaping](#sidecar-reaping).
+- `projects.<id>.sidecars.<name>.ports.<id>`: optional map, `<id>` matches `[a-zA-Z0-9_-]+`. One entry reserves one host port.
+- `projects.<id>.sidecars.<name>.ports.<id>.env`: required string. Variable name the reserved port is published under inside the sidecar process, never exported into the agent session — read it with the `ports` command, see [Sidecars](commands.md#sidecars). Not validated as a shell identifier and not unique across sidecars — two sidecars can declare the same `env` name.
+- `projects.<id>.sidecars.<name>.ports.<id>.start` / `.end`: both required integers, 1-65535, `end >= start`. Spur scans the range for a free host port at sidecar start.
+- `projects.<id>.sidecars.<name>.ports.<id>.url`: optional absolute URL, at most one per sidecar. Carries no explicit port, path, query, or fragment, and the sidecar `<name>` must match `[a-z0-9][a-z0-9_-]{0,15}`. `{port}` is substituted with the reserved port to build the dashboard link.
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex. Validates explicit, trigger, and preflight branches; sessions expose `spur-branch create|rename <name>` and block `git push` on a non-matching branch.
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.

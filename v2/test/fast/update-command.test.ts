@@ -65,6 +65,7 @@ interface RunFake {
   deps: UpdateDeps;
   events: string[];
   installLog: string[];
+  lockCounts: { acquired: number; released: number };
   state: () => RollbackState;
 }
 
@@ -77,6 +78,7 @@ function buildRunFake(opts: {
   let state = opts.initialState;
   const events: string[] = [];
   const installLog: string[] = [];
+  const lockCounts = { acquired: 0, released: 0 };
   const current = opts.currentVersion ?? "0.1.5";
   const deps: UpdateDeps = {
     now: () => 1_700_000_000_000,
@@ -109,8 +111,14 @@ function buildRunFake(opts: {
     pidAlive: () => opts.pidAlive ?? false,
     unitActive: () => false,
     log: () => undefined,
+    acquireUpdateLock: () => {
+      lockCounts.acquired += 1;
+      return () => {
+        lockCounts.released += 1;
+      };
+    },
   };
-  return { deps, events, installLog, state: () => state };
+  return { deps, events, installLog, lockCounts, state: () => state };
 }
 
 function monitoringState(pid: number): RollbackState {
@@ -155,6 +163,7 @@ describe("runUpdate", () => {
     await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toThrow("preflight");
     expect(fake.events).toEqual([]);
     expect(fake.installLog).toEqual([]);
+    expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
   });
 
   it("proceeds under --force on an unhealthy host but does not overwrite lastKnownGood", async () => {
@@ -192,12 +201,14 @@ describe("runUpdate", () => {
       healthyAt: expect.any(String),
     });
     expect(fake.state().inProgress?.monitor).toEqual({ kind: "process", pid: 7 });
+    expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
   });
 
   it("refuses when a live in-progress monitor exists", async () => {
     const fake = buildRunFake({ initialState: monitoringState(9), pidAlive: true });
     await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toThrow("already running");
     expect(fake.installLog).toEqual([]);
+    expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
   });
 
   it("supersedes a dead in-progress monitor without --force", async () => {
@@ -272,6 +283,14 @@ describe("createRealUpdateDeps installVersion", () => {
     deps.installVersion("0.2.0");
     const call = execFileSyncCalls.find((entry) => entry.file === "npm");
     expect(call?.args).toEqual(["install", "-g", "@shugaev/spur@0.2.0"]);
+  });
+
+  it("acquires the same filesystem lock used by install-and-restart", () => {
+    const deps = createRealUpdateDeps("/home/alek/spur/v2/dist/cli.js", "/tmp/state.json");
+    const release = deps.acquireUpdateLock();
+    const call = execFileSyncCalls.find((entry) => entry.file === "flock");
+    expect(call?.args).toEqual(["--nonblock", "3"]);
+    release();
   });
 });
 

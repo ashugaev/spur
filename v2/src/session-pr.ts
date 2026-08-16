@@ -287,6 +287,28 @@ export function prLookupBindingOf(pr: PrLookupPr): SessionPrBinding | null {
   return { ...binding, number: pr.number };
 }
 
+/**
+ * The `--repo` argument for a session's bound PR.
+ *
+ * The binding carries its own repo, which can differ from the worktree's remote
+ * (workspace reuse, a handoff, a stale auto-detect). Without --repo gh resolves
+ * the number against the worktree remote and fails with "Could not resolve to a
+ * PullRequest", which teardown reports as a permanent "PR check unavailable" 409.
+ *
+ * A bare `owner/repo` would drop the host and send an Enterprise binding to
+ * github.com, so the host from the binding URL is carried the same way
+ * `boundRepoSlug` carries it in review-providers/github.ts.
+ */
+function prRepoArg(pr: SessionPrBinding): string {
+  let host: string;
+  try {
+    host = new URL(pr.url).hostname.toLowerCase();
+  } catch {
+    return pr.repo;
+  }
+  return host === "github.com" ? pr.repo : `${host}/${pr.repo}`;
+}
+
 export async function viewSessionPrState(
   worktreePath: string,
   pr: SessionPrBinding,
@@ -296,6 +318,8 @@ export async function viewSessionPrState(
     "pr",
     "view",
     String(pr.number),
+    "--repo",
+    prRepoArg(pr),
     "--json",
     "number,state,title,url",
   );
@@ -309,7 +333,7 @@ export async function viewSessionPrState(
 }
 
 export async function closeSessionPr(worktreePath: string, pr: SessionPrBinding): Promise<void> {
-  await gh(worktreePath, "pr", "close", String(pr.number));
+  await gh(worktreePath, "pr", "close", String(pr.number), "--repo", prRepoArg(pr));
 }
 
 export interface OpenPullRequestSummary {

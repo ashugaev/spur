@@ -13,12 +13,12 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
+  agentHasLaunchSubmitAck,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
-  agentSubmitAckMaxResends,
-  agentSubmitAckWindowMs,
+  agentSubmitAckPacing,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -811,6 +811,14 @@ const RESTRICT_WRITES_PROMPT_SUFFIX =
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
+/**
+ * `submit_unconfirmed` marks the one send path that resolves without knowing the
+ * message reached the agent: a launch send whose ack window ran out while the
+ * pane process was still alive. Every other resolution is `submitted` — either
+ * the ack matched, or the agent has no ack to match, which is the same evidence
+ * the pipeline delivery loop acts on for steps 2..N.
+ */
+export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
 export class SpawnPreflightError extends Error {
@@ -1274,7 +1282,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -7275,6 +7283,25 @@ export class SessionService {
     return { project, ...rest, ...(mode !== undefined ? { mode } : {}) };
   }
 
+  /**
+   * Pipeline step 1 rides the launch message, so the delivery loop starts at
+   * step 2 and never reports it. Both spawn paths log it here instead, with the
+   * loop's own event shape, and only once submission is confirmed — the same bar
+   * steps 2..N clear.
+   */
+  private logFirstPipelineStepSent(sessionId: string, projectId: string, totalSteps: number): void {
+    this.logEvent("session.pipeline.step_sent", {
+      level: "info",
+      sessionId,
+      projectId,
+      message: `Sent pipeline step 1/${totalSteps} to ${sessionId}`,
+      details: {
+        stepIndex: 1,
+        totalSteps,
+      },
+    });
+  }
+
   private resolveSpawnTarget(
     request: SpawnSessionRequest,
     modeResolution: "strict" | "carried" = "strict",
@@ -7751,9 +7778,13 @@ export class SessionService {
         message: `Agent prompt is ready for ${sessionId}`,
       });
 
+      let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
+        const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+          freshLaunch: true,
+        });
+        firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7764,6 +7795,7 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
+        firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -7776,6 +7808,9 @@ export class SessionService {
           },
         });
       }
+      if (pipeline && firstStepSubmitted) {
+        this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
+      }
 
       stage = "record.write";
       let updatedRecord = await this.captureAgentSessionId(
@@ -7783,6 +7818,11 @@ export class SessionService {
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
+
+      const latestPlaceholder = readSession(this.config.dataDir, updatedRecord.id);
+      if (latestPlaceholder && hasQueuedMessages(latestPlaceholder)) {
+        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestPlaceholder), true);
+      }
 
       writeSession(this.config.dataDir, updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
@@ -8710,10 +8750,14 @@ export class SessionService {
         details: { attempt },
       });
 
+      let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
-        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
+        const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+          freshLaunch: true,
+        });
         initialPromptSent = true;
+        firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -8726,6 +8770,7 @@ export class SessionService {
         });
       } else if (promptDeliveredOnLaunch) {
         initialPromptSent = true;
+        firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -8738,6 +8783,9 @@ export class SessionService {
             messageLength: spawnInitialMessage.length,
           },
         });
+      }
+      if (pipeline && firstStepSubmitted) {
+        this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
@@ -8858,7 +8906,9 @@ export class SessionService {
     return placeholder;
   }
 
-  async spawnShepherd(request: { prompt?: string } = {}): Promise<SessionView> {
+  async spawnShepherd(
+    request: { prompt?: string } = {},
+  ): Promise<{ disposition: "spawned" | "reused"; session: SessionView }> {
     const prompt = request.prompt?.trim() ?? "";
     const reusable = listSessions(this.config.dataDir)
       .filter(
@@ -8868,17 +8918,28 @@ export class SessionService {
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {
-      if (prompt && reusable.status !== "spawning") {
-        return this.send(reusable.id, { message: prompt });
+      let session: SessionView;
+      if (prompt && reusable.status === "spawning") {
+        const queued = queuedMessages(reusable);
+        const updated = queued.includes(prompt)
+          ? reusable
+          : withQueuedMessages({ ...reusable, updatedAt: nowIso() }, [...queued, prompt], true);
+        if (updated !== reusable) writeSession(this.config.dataDir, updated);
+        session = await this.enrich(updated);
+      } else if (prompt) {
+        session = await this.send(reusable.id, { message: prompt });
+      } else {
+        session = await this.enrich(reusable);
       }
-      return this.enrich(reusable);
+      return { disposition: "reused", session };
     }
-    return this.spawnInBackground({
+    const session = await this.spawnInBackground({
       project: SHEPHERD_PROJECT_ID,
       prompt,
       agent: "claude",
       overrides: { worktree: false },
     });
+    return { disposition: "spawned", session };
   }
 
   async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {
@@ -9665,8 +9726,8 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean },
-  ): Promise<void> {
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
+  ): Promise<AgentSendOutcome> {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
@@ -9678,8 +9739,9 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean },
-  ): Promise<void> {
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
+  ): Promise<AgentSendOutcome> {
+    const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
@@ -9688,6 +9750,7 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          freshLaunch,
         })
       : null;
     const startedAt = Date.now();
@@ -9696,23 +9759,28 @@ export class SessionService {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
     if (!binding) {
-      return;
+      return "submitted";
     }
-    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
-    const maxResends = agentSubmitAckMaxResends(session.agent);
+    const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
+      freshLaunch,
+    });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
-        return;
+        return "submitted";
       }
       if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
+    // fresh:true — this value decides whether an unacked send throws, and the
+    // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
+    // agent that just died as alive.
     const processAlive = await isProcessRunningInTmux(
       session.tmuxSession,
       sessionProcessMatchers(session),
+      { fresh: true },
     );
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
@@ -9728,7 +9796,7 @@ export class SessionService {
           processAlive,
         },
       });
-      return;
+      return "submitted";
     }
     this.logEvent("session.submit.timeout", {
       level: "warn",
@@ -9739,9 +9807,20 @@ export class SessionService {
         lastScannedFile: lastResult.lastScannedFile,
         messageLength: message.length,
         elapsedMs,
+        ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
       },
     });
+    if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
+      // Scoped to agents with launch-send pacing (claude): their short window
+      // plus Enter resends are the launch send's whole recovery, so throwing
+      // afterwards would only tear a healthy session down — the foreground
+      // spawn kills the pane in its catch and the background spawn retries from
+      // scratch. Agents without that pacing keep throwing, which is what drives
+      // their launch retry. The caller learns submission was never confirmed
+      // from the outcome below.
+      return "submit_unconfirmed";
+    }
     throw new SubmitAckTimeoutError({
       sessionId: session.id,
       agent: session.agent,
@@ -11371,7 +11450,9 @@ export class SessionService {
       // Fresh-launch fallback fires when the transcript is gone: either no resume
       // id was discovered, or a pinned claude keeps its `--session-id` launch
       // because its transcript is missing (both skip the resume plan below).
-      if (!launchPlan && (!restoredAgentSessionId || pinnedClaudeId)) {
+      const freshLaunchFallback =
+        !launchPlan && (!restoredAgentSessionId || Boolean(pinnedClaudeId));
+      if (freshLaunchFallback) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
@@ -11469,7 +11550,30 @@ export class SessionService {
             agent: current.agent,
           });
         } else {
-          await this.sendAgentMessage(current, restoreInitialMessage);
+          // The fallback relaunched the agent instead of resuming it, so this is a
+          // launch send with no transcript behind it, same as a spawn's. A resume
+          // send keeps the mid-session pacing and its own timeout handling below.
+          const restoreSendOutcome = await this.sendAgentMessage(current, restoreInitialMessage, {
+            freshLaunch: freshLaunchFallback,
+          });
+          if (restoreSendOutcome === "submit_unconfirmed") {
+            // Same degraded state the catch below reports for a resume send that
+            // timed out on a live pane: the agent is up, its prompt is not
+            // confirmed. `processAlive` is true by the outcome's contract, and the
+            // send already spent its Enter resends, so restore continues and the
+            // reason names what is unproven.
+            this.logEvent("session.restore.recovered", {
+              level: "warn",
+              sessionId,
+              projectId: current.project,
+              message: `Restored ${sessionId} with an unconfirmed restore prompt`,
+              details: {
+                reason: "submit_unconfirmed",
+                agent: current.agent,
+                processAlive: true,
+              },
+            });
+          }
         }
       }
     } catch (error) {

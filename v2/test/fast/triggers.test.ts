@@ -1338,6 +1338,52 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("opens no backoff when the delivery raced a teardown, so the batch flushes as soon as the session is back", async () => {
+    let state: "waiting" | "stopped" = "waiting";
+    const getMock = vi.fn().mockImplementation(async () => ({
+      id: "api-1",
+      status: state === "stopped" ? "stopped" : "running",
+      state,
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    }));
+    // The pane dies mid-flight: the send fails and the session reads stopped
+    // right after, exactly as a pause/restore teardown leaves it.
+    const deliverMock = vi.fn().mockImplementation(async () => {
+      state = "stopped";
+      throw new Error("can't find session: api-1");
+    });
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      // Restored before the next flush tick. A backoff would hold the batch
+      // for 10s; without one the very next tick delivers.
+      state = "waiting";
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("backs off and drops a delivery that keeps failing instead of retrying forever", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
