@@ -1756,7 +1756,7 @@ export function Dashboard() {
 
   useEffect(() => {
     if (spawnExtraMembers.length > 0 && spawnWorkspaceMode === "shared") {
-      setSpawnWorkspaceMode("default");
+      setSpawnWorkspaceMode("worktree");
     }
   }, [spawnExtraMembers.length, spawnWorkspaceMode]);
 
