@@ -48,6 +48,7 @@ Capabilities loaded by description match. Source: .agents/skills/
   pr-comments-fix     .agents/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .agents/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
   clean-install-test  .agents/skills/clean-install-test/SKILL.md  Clean-room test the npm server install on a throwaway cloud VM before release
+  spur-update         .agents/skills/spur-update/SKILL.md         Roll a Spur host onto a published npm version by hand when the automatic update fails
 
 
 MODES
