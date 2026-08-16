@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { realpath, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
+import { readProcessCwd } from "../process-tree.js";
 import {
   isTerminalSessionStatus,
   type SessionRecord,
@@ -493,14 +494,6 @@ export async function readProcessStarttime(pid: number): Promise<number | null> 
   return probe.kind === "ok" ? probe.starttime : null;
 }
 
-async function readProcCwdRealpath(pid: number): Promise<string | null> {
-  try {
-    return await realpath(`/proc/${pid}/cwd`);
-  } catch {
-    return null;
-  }
-}
-
 // An empty or root parent is never a valid containment bound — without this
 // guard `${parent}/` normalizes to "/" and every absolute path passes. This
 // is the sole containment proof before a negative-pid signal in
@@ -534,7 +527,7 @@ async function reapLeaderlessGroup(
   const proven: number[] = [];
   let allContained = true;
   for (const member of members) {
-    const cwd = await readProcCwdRealpath(member.pid);
+    const cwd = await readProcessCwd(member.pid);
     if (cwd && isPathInside(cwd, worktreePath)) {
       proven.push(member.pid);
     } else {
@@ -710,13 +703,7 @@ export interface FindLeakedSidecarTreesInput {
 export async function findLeakedSidecarTrees(
   input: FindLeakedSidecarTreesInput,
 ): Promise<{ supported: boolean; leaked: LeakedSidecarTree[] }> {
-  const {
-    snapshot,
-    claims,
-    worktreePaths,
-    worktreeDirRealpath,
-    readCwd = readProcCwdRealpath,
-  } = input;
+  const { snapshot, claims, worktreePaths, worktreeDirRealpath, readCwd = readProcessCwd } = input;
   if (!snapshot.ok) {
     return { supported: false, leaked: [] };
   }

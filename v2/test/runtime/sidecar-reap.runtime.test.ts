@@ -74,7 +74,7 @@ describe.skipIf(!tmuxOk)("sidecar reap (runtime)", () => {
       const current = activeContexts.pop();
       if (!current) break;
       await stopDaemonByPid(current.daemonPid);
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });

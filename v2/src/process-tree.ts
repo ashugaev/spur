@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 
@@ -340,6 +340,18 @@ export async function readProcessEnvValue(pid: number, key: string): Promise<Pro
 // that as "cannot tell", never as "no processes found".
 export async function canReadProcessEnv(): Promise<boolean> {
   return (await readProcessEnvValue(process.pid, "PATH")).status === "ok";
+}
+
+// Realpath of /proc/<pid>/cwd, or null on any error (dead pid, permission,
+// no procfs). Canonical copy of the per-pid cwd primitive — sidecars/reap.ts
+// calls this directly (one path per feature); agent-processes.ts uses it to
+// attribute a record-less process' worktree for the doctor check.
+export async function readProcessCwd(pid: number): Promise<string | null> {
+  try {
+    return await realpath(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
 }
 
 export type ProcessIdentityReader = (pid: number) => Promise<string | null>;

@@ -80,7 +80,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
           // Already gone.
         }
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });
