@@ -32996,6 +32996,167 @@ describe("SessionService", () => {
       });
     });
 
+    describe("context resend verification on a fresh-launch relaunch", () => {
+      function fixtureSession(agent: StaleMatrixAgent) {
+        return {
+          id: "api-1",
+          project: "api",
+          agent,
+          agentSessionId: "session-uuid",
+          prompt: "the original task prompt",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          tmuxSession: "api-1",
+          launchCommand: agentLaunchCommand(agent),
+          status: "stopped" as const,
+          stopReason: "stale_timeout" as const,
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T09:00:00.000Z",
+        };
+      }
+
+      function setUpFreshLaunchRelaunch(agent: StaleMatrixAgent) {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        mockAgentWaitingState(agent);
+        const sessions = createSessionStore();
+        sessions.set("api-1", fixtureSession(agent));
+        listSessionsMock.mockReturnValue([]);
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+        // First createTmuxSession/waitForTmuxReady attempt is the native resume
+        // attempt; make it fail so relaunchSessionInPlace falls back to a fresh
+        // launch (same setup as the resend-ordering test above).
+        waitForTmuxReadyMock.mockImplementationOnce(async () => {
+          throw new Error("resume failed");
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => true);
+        return sessions;
+      }
+
+      it("claude: a confirmed context resend delivers the triggering event with no unconfirmed warning", async () => {
+        setUpFreshLaunchRelaunch("claude");
+        createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+          agent === "claude" ? { scan: vi.fn() } : null,
+        );
+        const service = await createDisposedSessionService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+          found: true,
+          lastScannedFile: "/tmp/spur-worktrees/api/api-1/session-uuid.jsonl",
+        });
+
+        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+
+        expect(result.status).toBe("running");
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.recover.context_unconfirmed" }),
+        );
+      });
+
+      it("claude: an unconfirmed context resend is surfaced but still delivers the triggering event", async () => {
+        setUpFreshLaunchRelaunch("claude");
+        createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+          agent === "claude" ? { scan: vi.fn() } : null,
+        );
+        const service = await createDisposedSessionService();
+        // Keyed on message text, not call order: the context resend's own
+        // Enter-resend loop calls waitForSubmitAck multiple times (up to
+        // maxResends+1) within a single sendAgentMessage call, so an ordered
+        // mockResolvedValueOnce would be consumed by that loop instead of
+        // separating the resend from the real trigger's own delivery.
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+          async (_binding, messageText: string) => ({
+            found: !messageText.includes("the original task prompt"),
+            lastScannedFile: "/tmp/spur-worktrees/api/api-1/session-uuid.jsonl",
+          }),
+        );
+
+        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+
+        // Alive but unproven: the resend is named, not swallowed, and the
+        // relaunch is not torn down or refused — the pane write itself landed
+        // (the send already spent its Enter resends), and failing the wake
+        // here would risk losing a one-shot scheduled wake, which only
+        // re-arms on SessionAdmissionDeniedError.
+        expect(result.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.recover.context_unconfirmed",
+            level: "warn",
+            sessionId: "api-1",
+            details: expect.objectContaining({ agent: "claude" }),
+          }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+      });
+
+      it("cursor: an ack timeout on a live pane is treated as delivered (no unconfirmed warning), and the triggering event follows", async () => {
+        setUpFreshLaunchRelaunch("cursor");
+        createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+          agent === "cursor" ? { scan: vi.fn() } : null,
+        );
+        const service = await createDisposedSessionService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+          found: false,
+          lastScannedFile:
+            "/tmp/.cursor/projects/test/agent-transcripts/chat-api-1/chat-api-1.jsonl",
+        });
+
+        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+
+        // cursor's writeAgentMessage treats an ack timeout with a live process
+        // as delivered (session.submit.recovered), never as submit_unconfirmed,
+        // so relaunchSessionInPlace's own unconfirmed-context warning never
+        // fires for it.
+        expect(result.status).toBe("running");
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.recover.context_unconfirmed" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+      });
+
+      it("codex: the context resend bypasses sendAgentMessage's ack wait entirely, and the triggering event still follows", async () => {
+        setUpFreshLaunchRelaunch("codex");
+        const service = await createDisposedSessionService();
+        const waitForSubmitAckSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+
+        expect(result.status).toBe("running");
+        // No ack machinery is ever armed for codex's context resend — it is a
+        // direct sendMessageToTmux call, same as restore()'s codex branch and
+        // for the same reason (codex's rollout-based ack lags a fresh launch
+        // enough to reproduce f79fb970f's fixed bug if it were awaited here).
+        // The ordinary (non-freshLaunch) delivery of the real trigger below
+        // does go through sendAgentMessage's ack wait, so it accounts for the
+        // one call each of these see — none of it from the context resend.
+        expect(createAgentSubmitAckBindingMock).toHaveBeenCalledTimes(1);
+        expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+          "codex",
+          expect.objectContaining({ freshLaunch: false }),
+        );
+        expect(waitForSubmitAckSpy).toHaveBeenCalledTimes(1);
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.recover.context_unconfirmed" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+      });
+    });
+
     describe("DEFECT 2: admission gate on the wake path", () => {
       it("caps concurrent stale-parked wakes at the global admission limit and defers (never drops) a refused scheduled wake", async () => {
         // A stale-parked session holds zero live slots (isLiveSessionRecord

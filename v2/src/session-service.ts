@@ -11233,11 +11233,47 @@ export class SessionService {
         ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       };
       if (session.agent === "codex") {
+        // codex has no launch-send pacing (agentHasLaunchSubmitAck is false for
+        // it) and its rollout-based ack lags a fresh launch/resume enough that
+        // waiting on it here would reproduce the exact bug f79fb970f fixed for
+        // restore(): a healthy pane torn down because the ack scan, not the
+        // send, timed out. Bypass sendAgentMessage the same way restore() does
+        // for codex. A dead pane still surfaces: send-keys against a gone tmux
+        // session throws.
         await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
           agent: session.agent,
         });
       } else {
-        await this.sendAgentMessage(recoveryPaneTarget, recoveryContextMessage);
+        // freshLaunch:true mirrors restore()'s equivalent call: it selects the
+        // agent's launch-tuned ack pacing and — for agents with launch-send
+        // pacing of their own (claude) — lets an ack that never confirms on a
+        // live pane resolve as "submit_unconfirmed" instead of throwing and
+        // tearing down an otherwise-healthy relaunch.
+        const contextSendOutcome = await this.sendAgentMessage(
+          recoveryPaneTarget,
+          recoveryContextMessage,
+          { freshLaunch: true },
+        );
+        if (contextSendOutcome === "submit_unconfirmed") {
+          // The pane write itself landed (send already spent its Enter
+          // resends) but the ack scan never confirmed the agent consumed it.
+          // Surface it rather than swallow it, same as restore()'s handling
+          // of the same outcome — an operator can tell this session's context
+          // resend is unproven. Not treated as a failed wake: the write did
+          // reach the pane, and failing the wake here would risk losing a
+          // one-shot scheduled wake, which only re-arms on
+          // SessionAdmissionDeniedError.
+          this.logEvent("session.recover.context_unconfirmed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `${session.id} relaunched but its resent task context was not confirmed`,
+            details: {
+              agent: session.agent,
+              agentSessionId: recoveredAgentSessionId ?? sessionWithAgentId.agentSessionId ?? null,
+            },
+          });
+        }
       }
     }
 
