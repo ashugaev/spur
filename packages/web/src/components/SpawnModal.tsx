@@ -20,12 +20,24 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { CarrySpawnModel, ResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
   onChange: (next: T) => void;
   onBlur?: () => void;
+}
+
+// A model FieldControl plus the two inputs ModelSelect needs to resolve a
+// concrete preselection instead of a "server decides" sentinel, plus the
+// settled/unsettled signal callers gate submit on (see ModelSelect's
+// onResolvedChange) instead of inferring it from a null value.
+export interface ModelFieldControl extends FieldControl<string | null> {
+  // Owned and fetched once by the caller (see ModelSelectProps.spawnDefaults).
+  spawnDefaults: ResolvedSpawnDefaults;
+  carry: CarrySpawnModel | null;
+  onResolvedChange: (resolved: boolean, error: string | null) => void;
 }
 
 export interface ToggleControl {
@@ -55,7 +67,7 @@ export type SpawnModalMode =
   | {
       kind: "spawn";
       project: ProjectControl;
-      model: FieldControl<string | null>;
+      model: ModelFieldControl;
       sessionMode?: {
         value: string;
         onChange: (next: string) => void;
@@ -72,7 +84,7 @@ export type SpawnModalMode =
     }
   | {
       kind: "respawn";
-      model: FieldControl<string | null>;
+      model: ModelFieldControl;
       noteSlot?: ReactNode;
       artifactSlot?: ReactNode;
     }
@@ -168,10 +180,10 @@ function ModeFields({
           <select
             aria-label="Spawn project"
             className={`flex-1 ${INPUT_CLASS}`}
+            disabled={mode.project.options.length === 0}
             onChange={(event) => mode.project.onChange(event.target.value)}
             value={mode.project.value}
           >
-            <option value="">Select project</option>
             {mode.project.options.map((project) => (
               <option key={project.id} value={project.id}>
                 {project.label}
@@ -183,7 +195,10 @@ function ModeFields({
             <ModelSelect
               agent={agent}
               ariaLabel="Spawn model"
+              carry={mode.model.carry}
               onChange={mode.model.onChange}
+              onResolvedChange={mode.model.onResolvedChange}
+              spawnDefaults={mode.model.spawnDefaults}
               value={mode.model.value}
             />
           </div>
@@ -202,6 +217,9 @@ function ModeFields({
             </select>
           ) : null}
         </div>
+        {mode.project.options.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-tertiary)]">No projects configured yet.</p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <input
             aria-label="branch name"
@@ -217,7 +235,6 @@ function ModeFields({
             onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
-            <option value="default">Default</option>
             <option value="worktree">Worktree</option>
             <option value="shared">Shared</option>
           </select>
@@ -262,7 +279,10 @@ function ModeFields({
           <ModelSelect
             agent={agent}
             ariaLabel="Respawn model"
+            carry={mode.model.carry}
             onChange={mode.model.onChange}
+            onResolvedChange={mode.model.onResolvedChange}
+            spawnDefaults={mode.model.spawnDefaults}
             value={mode.model.value}
           />
         </div>

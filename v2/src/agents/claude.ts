@@ -101,6 +101,22 @@ export async function findLatestSessionFile(worktreePath: string): Promise<strin
 }
 
 /**
+ * Path claude writes for a pinned native session id (from
+ * `claude --session-id <uuid>`) launched in `worktreePath`. The file appears
+ * only once claude persists the session, so this is the expected path, not a
+ * claim that it exists.
+ */
+export function sessionFilePathForId(worktreePath: string, sessionId: string): string {
+  return join(
+    homedir(),
+    ".claude",
+    "projects",
+    toClaudeProjectPath(worktreePath),
+    `${sessionId}.jsonl`,
+  );
+}
+
+/**
  * Resolve the transcript file for a pinned native session id (from
  * `claude --session-id <uuid>`). Returns the `<uuid>.jsonl` path under the
  * first matching project dir, or null when it does not exist yet. This is how
@@ -112,13 +128,7 @@ export async function sessionFileForId(
   sessionId: string,
 ): Promise<string | null> {
   for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
-    const filePath = join(
-      homedir(),
-      ".claude",
-      "projects",
-      toClaudeProjectPath(candidate),
-      `${sessionId}.jsonl`,
-    );
+    const filePath = sessionFilePathForId(candidate, sessionId);
     try {
       await stat(filePath);
       return filePath;

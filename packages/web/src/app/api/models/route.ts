@@ -10,8 +10,13 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: `Unsupported agent: ${agent}` }, { status: 400 });
   }
   try {
+    // cursor's catalog request shells out to `cursor models`, which has its
+    // own timeout but can still stall on a hung/misconfigured CLI; bound the
+    // whole daemon round trip so the picker settles into an error instead of
+    // staying unresolved (and submit disabled) indefinitely.
     const payload = await spurRequestJson<AgentModelsResponse>(
       `/models?agent=${encodeURIComponent(agent)}`,
+      { timeoutMs: 8_000 },
     );
     return NextResponse.json(payload);
   } catch (error) {

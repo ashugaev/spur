@@ -1,5 +1,5 @@
 const WAIT_TEXT =
-  /^(?:Loading(?:\s[^\n.…]+)?(?:\.{3}|…)?|Please wait(?:\.{3}|…)?|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing|Starting|Transcribing)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
+  /^(?:Loading(?:\s[^\n.…]+)?(?:\.{3}|…)?|Please wait(?:\.{3}|…)?|(?:Creating|Deleting|Saving|Spawning|Respawning|Queueing|Sending|Inserting|Switching|Adding|Answering|Copying|Handing off|Pausing|Restoring|Reopening|Completing|Killing|Clearing|Starting|Transcribing|Resolving)(?:\s[^\n]*)?(?:\.{3}|…))$/i;
 
 function literalText(node) {
   if (!node) return null;

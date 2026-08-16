@@ -5,6 +5,8 @@ import {
   makeNeedsInputSession,
   makeSpawningSession,
   makeStoppedSession,
+  mockAgentModels,
+  mockSpawnDefaults,
 } from "./fixtures.js";
 
 type ElementBox = {
@@ -1053,6 +1055,11 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await mockSessionDetail(page, handedOff);
     await mockSessionConversation(page, session.id, "working");
+    await mockAgentModels(page, {
+      claude: [{ id: "opus", label: "Opus" }],
+      cursor: [{ id: "composer-2.5", label: "Composer 2.5" }],
+    });
+    await mockSpawnDefaults(page);
     await page.route(`**/api/sessions/${session.id}/handoff`, async (route) => {
       handoffBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
       await route.fulfill({
@@ -1066,16 +1073,20 @@ test.describe("S2: Actions bar", () => {
     await page.getByRole("button", { name: /^handoff$/i }).click();
     const handoffAgent = page.getByRole("combobox", { name: "Handoff agent" });
     await expect(handoffAgent).toHaveValue("claude");
+    // Handing off to a different agent (default) never carries the source
+    // session's model: the control resolves that agent's own catalog.
+    await expect(page.getByRole("button", { name: "Handoff model" })).toHaveText(/Opus/);
     await handoffAgent.selectOption("cursor");
+    await expect(page.getByRole("button", { name: "Handoff model" })).toHaveText(/Composer 2.5/);
     await page.getByRole("textbox", { name: "Handoff notes" }).fill("Continue from codex");
-    await page
-      .getByRole("button", { name: /^handoff$/i })
-      .last()
-      .click();
+    const handoffSubmit = page.getByRole("button", { name: /^handoff$/i }).last();
+    await expect(handoffSubmit).toBeEnabled();
+    await handoffSubmit.click();
 
     await expect(page).toHaveURL(/\/sessions\/detail-s2-handoff-next/);
     expect(handoffBody).toMatchObject({
       agent: "cursor",
+      model: "composer-2.5",
       notes: "Continue from codex",
     });
   });

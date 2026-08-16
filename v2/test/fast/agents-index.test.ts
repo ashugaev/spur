@@ -60,6 +60,8 @@ vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
 }));
 
 import {
+  agentHasLaunchSubmitAck,
+  agentSubmitAckPacing,
   buildAgentLaunchPlan,
   createAgentSubmitAckBinding,
   setupAgentHooks,
@@ -456,13 +458,29 @@ describe("createAgentSubmitAckBinding", () => {
     const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
     const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
     await binding?.scan("hello");
-    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid");
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid", {
+      freshLaunch: false,
+    });
     expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/file.jsonl", size: 42 },
       "hello",
       ctx.worktreePath,
       "pinned-uuid",
     );
+  });
+
+  it("passes fresh-launch into the claude baseline capture", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 0 });
+
+    await createAgentSubmitAckBinding("claude", {
+      ...ctx,
+      agentSessionId: "pinned-uuid",
+      freshLaunch: true,
+    });
+
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid", {
+      freshLaunch: true,
+    });
   });
 
   it("returns a binding for codex that scans the rollout dir", async () => {
@@ -503,5 +521,34 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
     );
+  });
+});
+
+describe("agentSubmitAckPacing", () => {
+  it("shortens the claude window for a launch send only", () => {
+    expect(agentSubmitAckPacing("claude")).toEqual({ windowMs: 300_000, maxResends: 2 });
+    expect(agentSubmitAckPacing("claude", { freshLaunch: true })).toEqual({
+      windowMs: 5_000,
+      maxResends: 2,
+    });
+  });
+
+  it("reports launch-send pacing for claude only", () => {
+    // Callers scope launch-send handling by this flag, so it must track exactly
+    // the agents whose short window and Enter resends justify it.
+    expect(agentHasLaunchSubmitAck("claude")).toBe(true);
+    expect(agentHasLaunchSubmitAck("codex")).toBe(false);
+    expect(agentHasLaunchSubmitAck("cursor")).toBe(false);
+  });
+
+  it("keeps cursor and codex pacing on a launch send", () => {
+    expect(agentSubmitAckPacing("cursor", { freshLaunch: true })).toEqual({
+      windowMs: 5_000,
+      maxResends: 12,
+    });
+    expect(agentSubmitAckPacing("codex", { freshLaunch: true })).toEqual({
+      windowMs: 300_000,
+      maxResends: 2,
+    });
   });
 });

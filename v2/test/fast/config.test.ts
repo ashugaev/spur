@@ -2681,7 +2681,11 @@ projects:
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
       trigger.spawn.allowedTriggers,
-    ]).toEqual([true, undefined, []]);
+    ]).toEqual([
+      true,
+      undefined,
+      ["gh-changes-requested", "gh-ci-failed", "gh-comment", "gh-merge-conflict", "gh-merged"],
+    ]);
     expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
     expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -2694,6 +2698,20 @@ projects:
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
       "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    );
+  });
+
+  it("parses the root PR-merged send trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const trigger = config.projects["sp"]?.triggers["gh-merged"];
+    if (!trigger || !("send" in trigger)) {
+      throw new Error("expected gh-merged to be a send trigger");
+    }
+    expect(trigger.source).toBe("gh");
+    expect(trigger.event).toBe("github:merged");
+    expect(trigger.send.interrupt).toBe(false);
+    expect(trigger.send.prompt).toBe(
+      "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore.",
     );
   });
 

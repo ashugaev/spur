@@ -376,4 +376,40 @@ handoff_trace="$(grep -E '^--user (stop spur-web|restart spur-daemon|start spur-
 
 echo "npm-init.test.sh: port-handoff scenario OK"
 
+# --- Scenario 8: a slow daemon can become ready after the old 10s cutoff ---
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario slow-readiness)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+CURL_COUNT="$WORK_DIR/slow-readiness-curl-count"
+cat >"$FAKE_BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "is-active" ]; then exit 0; fi
+exit 0
+EOF
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+count=0
+if [ -f "$CURL_COUNT" ]; then count="$(cat "$CURL_COUNT")"; fi
+count=$((count + 1))
+echo "$count" >"$CURL_COUNT"
+if [ "$count" -le 20 ]; then exit 1; fi
+echo 200
+EOF
+cat >"$FAKE_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/sleep"
+OUT_FILE="$WORK_DIR/slow-readiness-output.log"
+CURL_COUNT="$CURL_COUNT" HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-tailscale >"$OUT_FILE" 2>&1
+[ "$(cat "$CURL_COUNT")" -gt 20 ] ||
+  fail "npm-init.sh did not wait beyond the old 10-second readiness cutoff"
+grep -q 'npm-init: spur-daemon active=1 spur-web active=1' "$OUT_FILE" ||
+  fail "npm-init.sh rejected services that became ready within the extended window"
+
+echo "npm-init.test.sh: slow-readiness scenario OK"
+
 echo "npm-init.test.sh: OK"
