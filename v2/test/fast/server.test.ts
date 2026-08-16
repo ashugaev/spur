@@ -3160,6 +3160,64 @@ describe("startServer", () => {
     }
   });
 
+  it("resolves spawn defaults so a client can preselect a concrete model and workspace mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    worktree: false",
+        "    defaultModels:",
+        "      claude: sonnet",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const claudeResponse = await fetch(
+        `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=claude`,
+      );
+      expect(claudeResponse.status).toBe(200);
+      await expect(claudeResponse.json()).resolves.toEqual({ model: "sonnet", worktree: false });
+
+      const codexResponse = await fetch(
+        `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=codex`,
+      );
+      expect(codexResponse.status).toBe(200);
+      await expect(codexResponse.json()).resolves.toEqual({ model: null, worktree: false });
+
+      const badAgentResponse = await fetch(
+        `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=nope`,
+      );
+      expect(badAgentResponse.status).toBe(400);
+
+      const missingProjectResponse = await fetch(
+        `http://127.0.0.1:${port}/projects/missing/spawn-defaults?agent=claude`,
+      );
+      expect(missingProjectResponse.status).toBe(404);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("disconnects a symlink alias and reconnects its fresh retarget", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

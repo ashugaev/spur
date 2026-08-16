@@ -16,6 +16,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -1621,6 +1622,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `respawnModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [respawnModelResolved, setRespawnModelResolved] = useState(false);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
@@ -1630,6 +1635,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `handoffModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [handoffModelResolved, setHandoffModelResolved] = useState(false);
+  // Fetched once here and passed down into each modal's ModelSelect, instead
+  // of letting ModelSelect fetch its own copy (see Dashboard's spawnDefaults
+  // for the same pattern). projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const respawnSpawnDefaults = useResolvedSpawnDefaults(
+    respawnOpen && session ? session.projectId : "",
+    respawnAgent ?? "claude",
+  );
+  const handoffSpawnDefaults = useResolvedSpawnDefaults(
+    handoffOpen && session ? session.projectId : "",
+    handoffAgent ?? "claude",
+  );
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -2023,6 +2044,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
       if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
@@ -2102,6 +2125,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setBusyAction("handoff");
     try {
       const payload: Record<string, unknown> = { agent: handoffAgent };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
       if (handoffModel !== null) payload.model = handoffModel;
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
@@ -2521,7 +2546,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
-    setRespawnModel(session.model ?? null);
+    // Not session.model directly: that would seed an unfiltered value ahead
+    // of ModelSelect's resolver, bypassing the isListed() check the `carry`
+    // rung otherwise applies (a model the session ran that has since left
+    // the agent's catalog would stay selected and submittable). Passing
+    // carry lets the resolver re-derive the same value, filtered.
+    setRespawnModel(null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -3741,7 +3771,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <ModelSelect
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
+                        carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
+                        onResolvedChange={setHandoffModelResolved}
+                        spawnDefaults={handoffSpawnDefaults}
                         value={handoffModel}
                       />
                     </div>
@@ -3786,7 +3819,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         aria-busy={busyAction === "handoff" || undefined}
                         aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                         className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={busyAction === "handoff"}
+                        disabled={busyAction === "handoff" || !handoffModelResolved}
                         onClick={() => void handleHandoff()}
                         type="button"
                       >
@@ -3816,7 +3849,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
               mode={{
                 kind: "respawn",
-                model: { value: respawnModel, onChange: setRespawnModel },
+                model: {
+                  value: respawnModel,
+                  onChange: setRespawnModel,
+                  spawnDefaults: respawnSpawnDefaults,
+                  carry: { agent: session.agent, model: session.model },
+                  onResolvedChange: setRespawnModelResolved,
+                },
                 artifactSlot:
                   startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
@@ -3884,6 +3923,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               submitBusyAriaLabel="Respawning session"
               submitDisabled={
                 busyAction === "respawn" ||
+                !respawnModelResolved ||
                 (!respawnPrompt.trim() &&
                   respawnStartupAttachmentIds.length === 0 &&
                   respawnAttachments.length === 0)

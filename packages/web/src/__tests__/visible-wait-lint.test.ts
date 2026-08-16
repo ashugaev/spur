@@ -20,6 +20,8 @@ describe("visible wait text lint rule", () => {
     "Please wait...",
     "Saving…",
     "Starting microphone...",
+    "Resolving…",
+    "Resolving model...",
   ])("rejects %s in production web source", async (text) => {
     const messages = await lint(
       `export function Probe() { return <p>${text}</p>; }`,
