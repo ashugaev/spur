@@ -2788,9 +2788,14 @@ export class SessionService {
             if (!(await this.memoryShedEligibleRecord(candidate.id))) continue;
             sessionAttempted = true;
             await this.withWorkspaceLifecycleLocks(candidate.id, () =>
-              this.applyManualStatusLocked(candidate.id, "stopped", {}, {
-                skipEnrichment: true,
-              }),
+              this.applyManualStatusLocked(
+                candidate.id,
+                "stopped",
+                {},
+                {
+                  skipEnrichment: true,
+                },
+              ),
             );
             stoppedSessions.push(candidate.id);
             afterPressure = this.readMemoryPressure(Date.now());
@@ -3241,164 +3246,164 @@ export class SessionService {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
-          // Claim the due occurrence BEFORE sending: clear scheduledWake and
-          // persist it first. A slow or failing send must not leave the wake
-          // due, or the `<= now` guard stays true and it re-fires every tick
-          // forever.
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-          const claimed =
-            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-            current.scheduledWake.message === scheduledWake.message;
-          if (claimed) {
-            const { scheduledWake: _scheduledWake, ...base } = current;
-            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-            writeSession(this.config.dataDir, cleared);
-            try {
-              await this.sendLocked(session.id, { message: scheduledWake.message });
-              this.logEvent("session.wake.sent", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent scheduled wake to ${session.id}`,
-                details: {
-                  dueAt: scheduledWake.dueAt,
-                },
-              });
-            } catch (error) {
-              if (error instanceof SessionAdmissionDeniedError) {
-                // Admission refused this stale-parked wake, not a delivery
-                // failure — the occurrence above was already claimed
-                // (scheduledWake cleared and persisted) before this send
-                // attempt, so losing it here would drop the wake forever.
-                // Re-arm the exact same occurrence (CAS: only if nothing
-                // else re-armed/cancelled it in the meantime) so the next
-                // poll tick retries once the fleet has headroom again.
-                const afterDenial = readSession(this.config.dataDir, session.id);
-                if (afterDenial && !afterDenial.scheduledWake) {
-                  writeSession(this.config.dataDir, {
-                    ...afterDenial,
-                    scheduledWake,
-                    updatedAt: nowIso(),
+            // Claim the due occurrence BEFORE sending: clear scheduledWake and
+            // persist it first. A slow or failing send must not leave the wake
+            // due, or the `<= now` guard stays true and it re-fires every tick
+            // forever.
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+            const claimed =
+              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+              current.scheduledWake.message === scheduledWake.message;
+            if (claimed) {
+              const { scheduledWake: _scheduledWake, ...base } = current;
+              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+              writeSession(this.config.dataDir, cleared);
+              try {
+                await this.sendLocked(session.id, { message: scheduledWake.message });
+                this.logEvent("session.wake.sent", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent scheduled wake to ${session.id}`,
+                  details: {
+                    dueAt: scheduledWake.dueAt,
+                  },
+                });
+              } catch (error) {
+                if (error instanceof SessionAdmissionDeniedError) {
+                  // Admission refused this stale-parked wake, not a delivery
+                  // failure — the occurrence above was already claimed
+                  // (scheduledWake cleared and persisted) before this send
+                  // attempt, so losing it here would drop the wake forever.
+                  // Re-arm the exact same occurrence (CAS: only if nothing
+                  // else re-armed/cancelled it in the meantime) so the next
+                  // poll tick retries once the fleet has headroom again.
+                  const afterDenial = readSession(this.config.dataDir, session.id);
+                  if (afterDenial && !afterDenial.scheduledWake) {
+                    writeSession(this.config.dataDir, {
+                      ...afterDenial,
+                      scheduledWake,
+                      updatedAt: nowIso(),
+                    });
+                  }
+                  this.logEvent("session.wake.deferred", {
+                    level: "warn",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
+                    details: {
+                      dueAt: scheduledWake.dueAt,
+                    },
+                  });
+                } else {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.wake.failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                    details: {
+                      dueAt: scheduledWake.dueAt,
+                    },
                   });
                 }
-                this.logEvent("session.wake.deferred", {
-                  level: "warn",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
-                  details: {
-                    dueAt: scheduledWake.dueAt,
-                  },
-                });
-              } else {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logEvent("session.wake.failed", {
-                  level: "error",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-                  details: {
-                    dueAt: scheduledWake.dueAt,
-                  },
-                });
               }
             }
-          }
           });
         }
 
         const intervalWake = session.intervalWake;
         if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
-          // Claim the due tick BEFORE sending: advance nextDueAt to the next
-          // future interval (catching up past any missed intervals) and persist
-          // it first. A slow or failing send must not leave the wake due, or the
-          // `<= now` guard stays true and it re-fires every tick forever.
-          let nextDueMs = Date.parse(intervalWake.nextDueAt);
-          do {
-            nextDueMs += intervalWake.intervalMs;
-          } while (nextDueMs <= now);
-          const nextDueAt = new Date(nextDueMs).toISOString();
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-          const claimed =
-            current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
-            current.intervalWake.intervalMs === intervalWake.intervalMs &&
-            current.intervalWake.message === intervalWake.message &&
-            current.intervalWake.stopCondition === intervalWake.stopCondition;
-          if (claimed) {
-            const updated: SessionRecord = {
-              ...current,
-              intervalWake: {
-                ...intervalWake,
-                nextDueAt,
-              },
-              updatedAt: nowIso(),
-            };
-            writeSession(this.config.dataDir, updated);
-            try {
-              await this.sendLocked(session.id, {
-                message: this.formatIntervalWakeMessage(
-                  session.id,
-                  intervalWake.message,
-                  intervalWake.stopCondition,
-                ),
-              });
-              this.logEvent("session.wake.interval_sent", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent interval wake to ${session.id}`,
-                details: {
+            // Claim the due tick BEFORE sending: advance nextDueAt to the next
+            // future interval (catching up past any missed intervals) and persist
+            // it first. A slow or failing send must not leave the wake due, or the
+            // `<= now` guard stays true and it re-fires every tick forever.
+            let nextDueMs = Date.parse(intervalWake.nextDueAt);
+            do {
+              nextDueMs += intervalWake.intervalMs;
+            } while (nextDueMs <= now);
+            const nextDueAt = new Date(nextDueMs).toISOString();
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+            const claimed =
+              current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+              current.intervalWake.intervalMs === intervalWake.intervalMs &&
+              current.intervalWake.message === intervalWake.message &&
+              current.intervalWake.stopCondition === intervalWake.stopCondition;
+            if (claimed) {
+              const updated: SessionRecord = {
+                ...current,
+                intervalWake: {
+                  ...intervalWake,
                   nextDueAt,
-                  intervalMs: intervalWake.intervalMs,
                 },
-              });
-            } catch (error) {
-              if (error instanceof SessionAdmissionDeniedError) {
-                // Same reasoning as the scheduled-wake branch above: this
-                // occurrence was already claimed (nextDueAt advanced and
-                // persisted) before the send attempt. Roll nextDueAt back to
-                // the occurrence that was just refused (CAS: only if nothing
-                // else re-armed it meanwhile) so the next poll tick retries
-                // it promptly instead of waiting a full interval.
-                const afterDenial = readSession(this.config.dataDir, session.id);
-                if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
-                  writeSession(this.config.dataDir, {
-                    ...afterDenial,
-                    intervalWake: {
-                      ...afterDenial.intervalWake,
-                      nextDueAt: intervalWake.nextDueAt,
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, updated);
+              try {
+                await this.sendLocked(session.id, {
+                  message: this.formatIntervalWakeMessage(
+                    session.id,
+                    intervalWake.message,
+                    intervalWake.stopCondition,
+                  ),
+                });
+                this.logEvent("session.wake.interval_sent", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent interval wake to ${session.id}`,
+                  details: {
+                    nextDueAt,
+                    intervalMs: intervalWake.intervalMs,
+                  },
+                });
+              } catch (error) {
+                if (error instanceof SessionAdmissionDeniedError) {
+                  // Same reasoning as the scheduled-wake branch above: this
+                  // occurrence was already claimed (nextDueAt advanced and
+                  // persisted) before the send attempt. Roll nextDueAt back to
+                  // the occurrence that was just refused (CAS: only if nothing
+                  // else re-armed it meanwhile) so the next poll tick retries
+                  // it promptly instead of waiting a full interval.
+                  const afterDenial = readSession(this.config.dataDir, session.id);
+                  if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+                    writeSession(this.config.dataDir, {
+                      ...afterDenial,
+                      intervalWake: {
+                        ...afterDenial.intervalWake,
+                        nextDueAt: intervalWake.nextDueAt,
+                      },
+                      updatedAt: nowIso(),
+                    });
+                  }
+                  this.logEvent("session.wake.interval_deferred", {
+                    level: "warn",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Deferred interval wake for ${session.id}: ${error.message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
                     },
-                    updatedAt: nowIso(),
+                  });
+                } else {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.wake.interval_failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send interval wake to ${session.id}: ${message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
+                    },
                   });
                 }
-                this.logEvent("session.wake.interval_deferred", {
-                  level: "warn",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Deferred interval wake for ${session.id}: ${error.message}`,
-                  details: {
-                    nextDueAt,
-                    intervalMs: intervalWake.intervalMs,
-                  },
-                });
-              } else {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logEvent("session.wake.interval_failed", {
-                  level: "error",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Failed to send interval wake to ${session.id}: ${message}`,
-                  details: {
-                    nextDueAt,
-                    intervalMs: intervalWake.intervalMs,
-                  },
-                });
               }
             }
-          }
           });
         }
 
@@ -3553,124 +3558,124 @@ export class SessionService {
           continue;
         }
         await this.withWorkspaceLifecycleLocks(session.id, async () => {
-        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
-        // next future scheduled time and persist it first. A slow or failing
-        // send must not leave the wake due, or the `<= now` guard stays true
-        // and it re-fires every tick forever.
-        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
-        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-        const dailyWakeClaimed =
-          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
-          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
-        if (dailyWakeClaimed) {
-          // Resolving the next occurrence can throw on a malformed dailyAt
-          // (e.g. a stray "99:99" that slipped into an existing record
-          // before validation covered it). Scope this to the session,
-          // mirroring the auto-rotate catch above: one bad record must not
-          // escape the loop and starve every later session's wake
-          // processing this tick. Unlike a delivery failure, a malformed
-          // dailyAt has no next occurrence to advance to, so skip 24h ahead
-          // instead of clearing the schedule -- an absent dailyWake is
-          // invisible in the web UI and in `spur list`, and disabling a
-          // schedule is meant to be an explicit user action (cancelWake).
-          // This bounds the storm to one failure event per day and keeps
-          // message/stopCondition intact for repair via re-arm.
-          let nextDueAt: Date;
-          try {
-            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            const skipped: SessionRecord = {
-              ...currentDailyWakeSession,
-              dailyWake: {
-                ...dailyWake,
-                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
-              },
-              updatedAt: nowIso(),
-            };
-            writeSession(this.config.dataDir, skipped);
-            this.logEvent("session.wake.daily_failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
-            return;
-          }
-          const updated: SessionRecord = {
-            ...currentDailyWakeSession,
-            dailyWake: {
-              ...dailyWake,
-              nextDueAt: nextDueAt.toISOString(),
-            },
-            updatedAt: nowIso(),
-          };
-          writeSession(this.config.dataDir, updated);
-          try {
-            await this.sendLocked(session.id, {
-              message: this.formatDailyWakeMessage(
-                session.id,
-                dailyWake.message,
-                dailyWake.stopCondition,
-              ),
-            });
-            this.logEvent("session.wake.daily_sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent daily wake to ${session.id}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
-          } catch (error) {
-            if (error instanceof SessionAdmissionDeniedError) {
-              // Same reasoning as the scheduled/interval branches above:
-              // this occurrence was already claimed (nextDueAt advanced and
-              // persisted) before the send attempt. Roll nextDueAt back to
-              // the occurrence that was just refused (CAS: only if nothing
-              // else re-armed it meanwhile) so the next poll tick retries it
-              // promptly instead of waiting until tomorrow.
-              const afterDenial = readSession(this.config.dataDir, session.id);
-              if (afterDenial && afterDenial.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
-                writeSession(this.config.dataDir, {
-                  ...afterDenial,
-                  dailyWake: { ...dailyWake },
-                  updatedAt: nowIso(),
-                });
-              }
-              this.logEvent("session.wake.daily_deferred", {
-                level: "warn",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Deferred daily wake for ${session.id}: ${error.message}`,
-                details: {
-                  nextDueAt: dailyWake.nextDueAt,
-                  dailyAt: dailyWake.dailyAt,
-                },
-              });
-            } else {
+          // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+          // next future scheduled time and persist it first. A slow or failing
+          // send must not leave the wake due, or the `<= now` guard stays true
+          // and it re-fires every tick forever.
+          const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const dailyWakeClaimed =
+            currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+            currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+            currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+            currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+          if (dailyWakeClaimed) {
+            // Resolving the next occurrence can throw on a malformed dailyAt
+            // (e.g. a stray "99:99" that slipped into an existing record
+            // before validation covered it). Scope this to the session,
+            // mirroring the auto-rotate catch above: one bad record must not
+            // escape the loop and starve every later session's wake
+            // processing this tick. Unlike a delivery failure, a malformed
+            // dailyAt has no next occurrence to advance to, so skip 24h ahead
+            // instead of clearing the schedule -- an absent dailyWake is
+            // invisible in the web UI and in `spur list`, and disabling a
+            // schedule is meant to be an explicit user action (cancelWake).
+            // This bounds the storm to one failure event per day and keeps
+            // message/stopCondition intact for repair via re-arm.
+            let nextDueAt: Date;
+            try {
+              nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+            } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
+              const skipped: SessionRecord = {
+                ...currentDailyWakeSession,
+                dailyWake: {
+                  ...dailyWake,
+                  nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+                },
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, skipped);
               this.logEvent("session.wake.daily_failed", {
                 level: "error",
                 sessionId: session.id,
                 projectId: session.project,
-                message: `Failed to send daily wake to ${session.id}: ${message}`,
+                message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
                 details: {
                   nextDueAt: dailyWake.nextDueAt,
                   dailyAt: dailyWake.dailyAt,
                 },
               });
+              return;
+            }
+            const updated: SessionRecord = {
+              ...currentDailyWakeSession,
+              dailyWake: {
+                ...dailyWake,
+                nextDueAt: nextDueAt.toISOString(),
+              },
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, updated);
+            try {
+              await this.sendLocked(session.id, {
+                message: this.formatDailyWakeMessage(
+                  session.id,
+                  dailyWake.message,
+                  dailyWake.stopCondition,
+                ),
+              });
+              this.logEvent("session.wake.daily_sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent daily wake to ${session.id}`,
+                details: {
+                  nextDueAt: dailyWake.nextDueAt,
+                  dailyAt: dailyWake.dailyAt,
+                },
+              });
+            } catch (error) {
+              if (error instanceof SessionAdmissionDeniedError) {
+                // Same reasoning as the scheduled/interval branches above:
+                // this occurrence was already claimed (nextDueAt advanced and
+                // persisted) before the send attempt. Roll nextDueAt back to
+                // the occurrence that was just refused (CAS: only if nothing
+                // else re-armed it meanwhile) so the next poll tick retries it
+                // promptly instead of waiting until tomorrow.
+                const afterDenial = readSession(this.config.dataDir, session.id);
+                if (afterDenial && afterDenial.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+                  writeSession(this.config.dataDir, {
+                    ...afterDenial,
+                    dailyWake: { ...dailyWake },
+                    updatedAt: nowIso(),
+                  });
+                }
+                this.logEvent("session.wake.daily_deferred", {
+                  level: "warn",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Deferred daily wake for ${session.id}: ${error.message}`,
+                  details: {
+                    nextDueAt: dailyWake.nextDueAt,
+                    dailyAt: dailyWake.dailyAt,
+                  },
+                });
+              } else {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.wake.daily_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send daily wake to ${session.id}: ${message}`,
+                  details: {
+                    nextDueAt: dailyWake.nextDueAt,
+                    dailyAt: dailyWake.dailyAt,
+                  },
+                });
+              }
             }
           }
-        }
         });
       }
     } finally {
@@ -4144,10 +4149,7 @@ export class SessionService {
     }
   }
 
-  private async withSessionLifecycleLock<T>(
-    sessionId: string,
-    task: () => Promise<T>,
-  ): Promise<T> {
+  private async withSessionLifecycleLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
     const previous = this.sessionLifecycleLocks.get(sessionId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -4181,10 +4183,7 @@ export class SessionService {
     );
   }
 
-  private withWorkspaceLifecycleLocks<T>(
-    sessionId: string,
-    task: () => Promise<T>,
-  ): Promise<T> {
+  private withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
     const session = readSession(this.config.dataDir, sessionId);
     return this.withSessionLifecycleLocks(
       session ? [session.id, workspaceIdOf(session)] : [sessionId],
@@ -7011,10 +7010,6 @@ export class SessionService {
       }
       try {
         await this.restore(id);
-        const record = readSession(this.config.dataDir, id);
-        if (record) {
-          await this.startAutoStartSidecars(record, projectConfig);
-        }
         if (memory !== null) {
           await sleep(RESTORE_SETTLE_MS);
         }
@@ -9202,15 +9197,10 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.sendLocked(sessionId, request),
-    );
+    return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
   }
 
-  private async sendLocked(
-    sessionId: string,
-    request: SendMessageRequest,
-  ): Promise<SessionView> {
+  private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9400,10 +9390,7 @@ export class SessionService {
     );
   }
 
-  private async flushQueuedMessageLocked(
-    sessionId: string,
-    message: string,
-  ): Promise<SessionView> {
+  private async flushQueuedMessageLocked(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
     // Both probes are synchronous, before any await. The pane-lock probe
     // catches a drain already past its own queueDeliveryInFlight registration
@@ -10285,10 +10272,7 @@ export class SessionService {
     return outcome;
   }
 
-  private clearWorkspaceStaleSidecarReplay(
-    session: SessionRecord,
-    sidecarName: string,
-  ): void {
+  private clearWorkspaceStaleSidecarReplay(session: SessionRecord, sidecarName: string): void {
     const workspaceId = workspaceIdOf(session);
     for (const candidate of listSessions(this.config.dataDir)) {
       if (workspaceIdOf(candidate) !== workspaceId) continue;
@@ -10311,10 +10295,7 @@ export class SessionService {
     );
   }
 
-  private async stopSidecarLocked(
-    sessionId: string,
-    sidecarName: string,
-  ): Promise<SessionView> {
+  private async stopSidecarLocked(sessionId: string, sidecarName: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10787,10 +10768,7 @@ export class SessionService {
     return this.withWorkspaceLifecycleLocks(sessionId, () => this.killLocked(sessionId, request));
   }
 
-  private async killLocked(
-    sessionId: string,
-    request: KillSessionRequest,
-  ): Promise<SessionView> {
+  private async killLocked(sessionId: string, request: KillSessionRequest): Promise<SessionView> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);

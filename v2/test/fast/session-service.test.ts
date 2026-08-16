@@ -9548,7 +9548,7 @@ describe("SessionService", () => {
     expect(restoreSpy).not.toHaveBeenCalledWith("web-1");
   });
 
-  it("restoreRebootedSessions restarts only autoStart sidecars", async () => {
+  it("does not restart an anchor sidecar after a queued stop wins at reboot restore completion", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -9560,8 +9560,7 @@ describe("SessionService", () => {
           restoreAfterReboot: true,
           symlinks: [],
           sidecars: {
-            dev: { command: "pnpm dev", autoStart: true },
-            manual: { command: "pnpm worker", autoStart: false },
+            proxy: { command: "pnpm proxy", autoStart: true },
           },
           sources: {},
           triggers: {},
@@ -9569,23 +9568,65 @@ describe("SessionService", () => {
       },
     });
     const sessions = createSessionStore();
-    sessions.set("api-1", runningSession({ status: "stopped" }));
+    sessions.set("api-1", runningSession({ sidecarNames: ["proxy"] }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        tmuxSession: "api-2",
+        workspaceId: "api-1",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        sidecarNames: ["proxy"],
+        status: "stopped",
+      }),
+    );
+    let sidecarAlive = true;
+    sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
+    killTmuxSessionMock.mockImplementation(async (name: string) => {
+      if (name === "api-1--proxy") sidecarAlive = false;
+    });
 
     const service = await createDisposedSessionService();
-    vi.spyOn(service, "restore").mockResolvedValue({} as never);
-    const startSidecarSpy = vi
-      .spyOn(
-        service as unknown as {
-          startSidecarInternal: (args: { session: SessionRecord }) => Promise<SessionRecord>;
-        },
-        "startSidecarInternal",
-      )
-      .mockImplementation(async ({ session }) => session);
+    const internals = service as unknown as {
+      withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+      startAutoStartSidecars(
+        session: SessionRecord,
+        project: AppConfig["projects"][string],
+      ): Promise<SessionRecord>;
+    };
+    let releaseRestore!: () => void;
+    const restoreBarrier = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    let restoreStarted!: () => void;
+    const restoreStartedBarrier = new Promise<void>((resolve) => {
+      restoreStarted = resolve;
+    });
+    vi.spyOn(service, "restore").mockImplementation(() =>
+      internals.withWorkspaceLifecycleLocks("api-2", async () => {
+        restoreStarted();
+        await restoreBarrier;
+        const member = sessions.get("api-2");
+        if (member) sessions.set("api-2", { ...member, status: "running" });
+        return {} as never;
+      }),
+    );
+    const duplicateAutoStart = vi.spyOn(internals, "startAutoStartSidecars");
 
-    await service.restoreRebootedSessions([{ id: "api-1", project: "api" }]);
+    const rebootRestore = service.restoreRebootedSessions([{ id: "api-2", project: "api" }]);
+    await restoreStartedBarrier;
+    const stop = service.stopSidecar("api-1", "proxy");
+    await Promise.resolve();
 
-    expect(startSidecarSpy).toHaveBeenCalledTimes(1);
-    expect(startSidecarSpy).toHaveBeenCalledWith(expect.objectContaining({ sidecarName: "dev" }));
+    expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
+
+    releaseRestore();
+    await stop;
+    await rebootRestore;
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+    expect(sidecarAlive).toBe(false);
+    expect(duplicateAutoStart).not.toHaveBeenCalled();
   });
 
   it("restoreRebootedSessions isolates per-session failures", async () => {
@@ -32230,10 +32271,7 @@ describe("SessionService", () => {
         async (operation) => {
           mockClaudeJsonlState("waiting");
           const sessions = createSessionStore();
-          sessions.set(
-            "api-1",
-            runningSession({ worktree: false, worktreePath: "/repo/api" }),
-          );
+          sessions.set("api-1", runningSession({ worktree: false, worktreePath: "/repo/api" }));
           listSessionsMock.mockReturnValue([]);
           let releaseKill!: () => void;
           const killBarrier = new Promise<void>((resolve) => {
@@ -32281,10 +32319,7 @@ describe("SessionService", () => {
         async (operation) => {
           mockClaudeJsonlState("waiting");
           const sessions = createSessionStore();
-          sessions.set(
-            "api-1",
-            runningSession({ worktree: false, worktreePath: "/repo/api" }),
-          );
+          sessions.set("api-1", runningSession({ worktree: false, worktreePath: "/repo/api" }));
           listSessionsMock.mockReturnValue([]);
           let releaseWrite!: () => void;
           const writeBarrier = new Promise<void>((resolve) => {
@@ -32723,7 +32758,9 @@ describe("SessionService", () => {
 
         expect(sessions.get("api-1")?.scheduledWake?.message).toBe("replacement wake");
         expect(
-          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.deferred"),
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.wake.deferred",
+          ),
         ).toHaveLength(1);
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         service.dispose();
