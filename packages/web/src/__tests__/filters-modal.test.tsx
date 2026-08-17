@@ -77,13 +77,13 @@ const tagCatalogResponse = {
   ],
 };
 
-function mockFetch() {
+function mockFetch(sessions: unknown = sessionsResponse) {
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/sessions") return new Response(JSON.stringify(sessions));
     if (url === "/api/tags") return new Response(JSON.stringify(tagCatalogResponse));
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -259,6 +259,126 @@ describe("Filters modal", () => {
     // The toggle is off, so `usePrReadyUrls` has never fetched: the count
     // must read as "not counted yet", not a literal 0.
     expect(screen.getByRole("button", { name: /^Ready to merge: –$/ })).toBeInTheDocument();
+  });
+
+  it("All tags chip is pressed with no tag filter, unpressed after selecting a tag, and clicking it clears the filter", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    const allTags = screen.getByRole("button", { name: /^All tags:/ });
+    expect(allTags).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
+    await waitFor(() => expect(screen.queryByText("web-1")).not.toBeInTheDocument());
+    expect(allTags).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(allTags);
+    await waitFor(() => expect(screen.getByText("web-1")).toBeInTheDocument());
+    expect(allTags).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("All agents chip is pressed with no agent filter, unpressed after selecting an agent, and clicking it clears the filter", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    const allAgents = screen.getByRole("button", { name: /^All agents:/ });
+    expect(allAgents).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: /^codex:/ }));
+    await waitFor(() => expect(screen.queryByText("api-1")).not.toBeInTheDocument());
+    expect(allAgents).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(allAgents);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+    expect(allAgents).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Reset tag filters clears only the tag dimension, leaving agent filters untouched", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^docs:/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^codex:/ }));
+
+    const trigger = screen.getByRole("button", { name: "Filters" });
+    await waitFor(() => expect(trigger).toHaveTextContent("3"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset tag filters" }));
+
+    await waitFor(() => expect(trigger).toHaveTextContent("1"));
+    expect(screen.getByRole("button", { name: /^codex:/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /^All tags:/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("Reset agent filters clears only the agent dimension, leaving the tag chip pressed", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^codex:/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset agent filters" }));
+
+    expect(screen.queryByRole("button", { name: "Reset agent filters" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^bug:/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /^All agents:/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("hides both reset buttons when neither section has an active selection", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    expect(screen.queryByRole("button", { name: "Reset tag filters" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset agent filters" })).not.toBeInTheDocument();
+  });
+
+  it("styles the reset button as text-only tertiary with no border or background", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    fireEvent.click(screen.getByRole("button", { name: /^bug:/ }));
+    const reset = screen.getByRole("button", { name: "Reset tag filters" });
+
+    expect(reset).toHaveClass("text-[var(--color-text-tertiary)]");
+    expect(reset.className).not.toMatch(/\b(border|bg-)/);
+  });
+
+  it("All tags count reflects desks matching other filters, not the sum of individual tag chip counts", async () => {
+    mockFetch({
+      projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
+      sessions: [
+        session("api-1", "api", "claude", "running", "working", ["bug", "docs"]),
+        session("api-2", "api", "codex", "stopped", "stopped", []),
+        session("api-3", "api", "codex", "stopped", "stopped", []),
+      ],
+      daemonAlive: true,
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+
+    openFilters();
+    // Sum of individual tag chip counts: bug=1 desk, docs=1 desk -> 2 (the
+    // bug+docs desk is counted once per tag it carries).
+    expect(screen.getByRole("button", { name: /^bug:/ })).toHaveTextContent("bug:1");
+    expect(screen.getByRole("button", { name: /^docs:/ })).toHaveTextContent("docs:1");
+    // All tags counts every desk matching other filters once, including the
+    // two untagged desks (api-2, api-3) -> 3 desks total, which does NOT
+    // equal the 2-chip sum above.
+    expect(screen.getByRole("button", { name: /^All tags:/ })).toHaveTextContent("All tags:3");
   });
 
   it("traps focus inside the dialog and puts initial focus there", async () => {
