@@ -96,6 +96,7 @@ import { startServer } from "./server.js";
 import {
   SESSION_STATES,
   isSessionState,
+  type AppConfig,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type RespawnSessionRequest,
@@ -444,12 +445,21 @@ function getConfigPath(program: Command): string | undefined {
   return options.config;
 }
 
-export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
+// Projects only ever live in the connected project configs the registry lists,
+// never in the instance config, so a projects lookup has to merge. `dataDir`
+// stays on the instance config: a project spur.yaml passed via `--config`
+// parses in "instance" mode with no `dataDir` key and would otherwise move the
+// write target (issue #715).
+function loadProjectScope(configPath: string): Pick<AppConfig, "dataDir" | "projects"> {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
   const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
-  const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
-  const project = config.projects[projectId];
+  const { projects } = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
+  return { dataDir: base.dataDir, projects };
+}
+
+export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
+  const project = loadProjectScope(configPath).projects[projectId];
   if (!project) {
     throw new Error(`Unknown project: ${projectId}`);
   }
@@ -3784,7 +3794,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<text...>", "Friction description")
     .action((parts: string[], _options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const { dataDir, projects } = loadConfig(configPath);
+      const { dataDir, projects } = loadProjectScope(configPath);
       const projectId = process.env["SPUR_PROJECT"]?.trim();
       if (!projectId) {
         writeStderr("agent-issue log: SPUR_PROJECT is not set; not in a Spur session.\n");
@@ -3853,7 +3863,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<id...>", "Raw numeric review-comment ids")
     .action((ids: string[], _options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const { dataDir, projects } = loadConfig(configPath);
+      const { dataDir, projects } = loadProjectScope(configPath);
       const projectId = process.env["SPUR_PROJECT"]?.trim();
       if (!projectId) {
         writeStderr("comment-seen record: SPUR_PROJECT is not set; not in a Spur session.\n");

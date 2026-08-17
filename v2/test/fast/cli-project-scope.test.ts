@@ -60,12 +60,10 @@ projects:
 
 async function runCli(instanceConfigPath: string, args: string[]): Promise<{ stderr: string }> {
   const chunks: string[] = [];
-  const spy = vi
-    .spyOn(process.stderr, "write")
-    .mockImplementation((chunk: string | Uint8Array) => {
-      chunks.push(String(chunk));
-      return true;
-    });
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  });
   try {
     await createProgram("/tmp/dist/cli.js").parseAsync([
       "node",
