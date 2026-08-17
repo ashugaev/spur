@@ -22,9 +22,12 @@ import type {
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
+import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
+const PROJECT_CALLBACK_PREFIX = "spur_project:";
+const PROJECTS_MENU_CALLBACK = "spur_projects";
 const PENDING_SPAWN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_SPAWNS = 100;
 
@@ -318,23 +321,68 @@ function eventData(message: TelegramTextMessage, sessionId: string): TelegramMes
   };
 }
 
-async function projectSessions(
+async function allSessions(
   deps: SourceStartDeps<TelegramSourceConfig>,
 ): Promise<SourceSessionListItem[]> {
-  const sessions = deps.listSessions ? await deps.listSessions() : [];
-  return sessions.filter((session) => session.project === deps.projectId);
+  return deps.listSessions ? deps.listSessions() : [];
 }
 
-async function findProjectSession(
+async function findSession(
   deps: SourceStartDeps<TelegramSourceConfig>,
   sessionId: string,
 ): Promise<SourceSessionListItem | null> {
-  return (await projectSessions(deps)).find((entry) => entry.id === sessionId) ?? null;
+  return (await allSessions(deps)).find((entry) => entry.id === sessionId) ?? null;
 }
 
 function sessionLabel(session: SourceSessionListItem): string {
-  const label = `${session.id} ${session.agent} ${session.state}`;
+  const emoji = telegramStatusEmoji(session.state);
+  const label = `${emoji} ${session.id} ${session.agent} ${session.state}`;
   return label.length <= 64 ? label : `${label.slice(0, 61)}...`;
+}
+
+function groupSessionsByProject(
+  sessions: SourceSessionListItem[],
+): Map<string, SourceSessionListItem[]> {
+  const grouped = new Map<string, SourceSessionListItem[]>();
+  for (const session of sessions) {
+    const list = grouped.get(session.project) ?? [];
+    list.push(session);
+    grouped.set(session.project, list);
+  }
+  return grouped;
+}
+
+function buildProjectMenuKeyboard(
+  grouped: Map<string, SourceSessionListItem[]>,
+): { text: string; callback_data: string }[][] {
+  return Array.from(grouped.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([projectId, projectSessions]) => [
+      {
+        text: `${projectId} (${projectSessions.length})`,
+        callback_data: `${PROJECT_CALLBACK_PREFIX}${projectId}`,
+      },
+    ]);
+}
+
+function buildSessionMenuKeyboard(
+  sessions: SourceSessionListItem[],
+): { text: string; callback_data: string }[][] {
+  const rows = sessions
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((session) => [
+      {
+        text: sessionLabel(session),
+        callback_data: `${WATCH_CALLBACK_PREFIX}${session.id}`,
+      },
+    ]);
+  rows.push([
+    {
+      text: "« Back to projects",
+      callback_data: PROJECTS_MENU_CALLBACK,
+    },
+  ]);
+  return rows;
 }
 
 function isTelegramAgentName(value: string): value is TelegramAgentName {
@@ -342,21 +390,15 @@ function isTelegramAgentName(value: string): value is TelegramAgentName {
 }
 
 async function sendWatchMenu(ctx: TelegramTextContext, runtime: TelegramRuntime): Promise<void> {
-  const sessions = await projectSessions(runtime.deps);
+  const sessions = await allSessions(runtime.deps);
   if (sessions.length === 0) {
-    await ctx.reply("No active Spur sessions for this project.");
+    await ctx.reply("No active Spur sessions.");
     return;
   }
-  await ctx.reply("Select a Spur session:", {
+  const grouped = groupSessionsByProject(sessions);
+  await ctx.reply("Select a project:", {
     reply_markup: {
-      inline_keyboard: sessions
-        .sort((left, right) => left.id.localeCompare(right.id))
-        .map((session) => [
-          {
-            text: sessionLabel(session),
-            callback_data: `${WATCH_CALLBACK_PREFIX}${session.id}`,
-          },
-        ]),
+      inline_keyboard: buildProjectMenuKeyboard(grouped),
     },
   });
 }
@@ -576,9 +618,62 @@ async function handleTelegramCallback(
     return;
   }
 
-  if (!data.startsWith(WATCH_CALLBACK_PREFIX)) return;
+  if (data === PROJECTS_MENU_CALLBACK) {
+    await ctx.answerCallbackQuery();
+    const sessions = await allSessions(deps);
+    if (sessions.length === 0) {
+      if (ctx.editMessageText) {
+        await ctx.editMessageText("No active Spur sessions.");
+      } else {
+        await ctx.reply?.("No active Spur sessions.");
+      }
+      return;
+    }
+    const grouped = groupSessionsByProject(sessions);
+    const text = "Select a project:";
+    const replyMarkup = { inline_keyboard: buildProjectMenuKeyboard(grouped) };
+    if (ctx.editMessageText) {
+      await ctx.editMessageText(text, { reply_markup: replyMarkup });
+    } else {
+      await ctx.reply?.(text, { reply_markup: replyMarkup });
+    }
+    return;
+  }
+
+  if (data.startsWith(PROJECT_CALLBACK_PREFIX)) {
+    const projectId = data.slice(PROJECT_CALLBACK_PREFIX.length);
+    const all = await allSessions(deps);
+    const sessions = all.filter((session) => session.project === projectId);
+    if (sessions.length === 0) {
+      await ctx.answerCallbackQuery("No active sessions in this project.");
+      const text = `No active Spur sessions in project ${projectId}.`;
+      const replyMarkup = {
+        inline_keyboard: [[{ text: "« Back to projects", callback_data: PROJECTS_MENU_CALLBACK }]],
+      };
+      if (ctx.editMessageText) {
+        await ctx.editMessageText(text, { reply_markup: replyMarkup });
+      } else {
+        await ctx.reply?.(text, { reply_markup: replyMarkup });
+      }
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const text = `Select a Spur session in ${projectId}:`;
+    const replyMarkup = { inline_keyboard: buildSessionMenuKeyboard(sessions) };
+    if (ctx.editMessageText) {
+      await ctx.editMessageText(text, { reply_markup: replyMarkup });
+    } else {
+      await ctx.reply?.(text, { reply_markup: replyMarkup });
+    }
+    return;
+  }
+
+  if (!data.startsWith(WATCH_CALLBACK_PREFIX)) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
   const sessionId = data.slice(WATCH_CALLBACK_PREFIX.length);
-  const session = await findProjectSession(deps, sessionId);
+  const session = await findSession(deps, sessionId);
   if (!session) {
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
@@ -629,9 +724,9 @@ async function handleTelegramText(
     return;
   }
   if (command?.kind === "watch") {
-    const session = await findProjectSession(deps, command.sessionId);
+    const session = await findSession(deps, command.sessionId);
     if (!session) {
-      await ctx.reply(`No active Spur session ${command.sessionId} for this project.`);
+      await ctx.reply(`No active Spur session ${command.sessionId}.`);
       return;
     }
     if (
@@ -736,7 +831,7 @@ async function handleTelegramText(
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
   }
-  const session = await findProjectSession(deps, binding.sessionId);
+  const session = await findSession(deps, binding.sessionId);
   if (!session) {
     await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
     await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);

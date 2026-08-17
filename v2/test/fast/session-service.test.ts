@@ -12898,6 +12898,7 @@ describe("SessionService", () => {
       expect.objectContaining({ topicName: expect.any(String) }),
     );
     const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toMatch(/^🔴 api-1 needs input/);
     expect(text).toContain("```\nPlease confirm before I proceed.\n```");
     expect(editTelegramTopicMock).toHaveBeenCalledWith(
       telegramSource,
@@ -12946,8 +12947,42 @@ describe("SessionService", () => {
       expect.objectContaining({ topicName: expect.any(String) }),
     );
     const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toMatch(/^⏳ api-1 rate limited/);
     expect(text).not.toContain("```");
     expect(editTelegramTopicMock).toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("pushes an error notice with the error emoji", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("Fatal: something went wrong.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    mockClaudeJsonlState("error");
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      expect.stringContaining("error"),
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toMatch(/^🔴 api-1 error/);
     service.dispose();
   });
 
@@ -13085,11 +13120,11 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      expect.stringContaining("is waiting."),
+      "🟡 api-1 is waiting.",
       expect.objectContaining({ topicName: expect.any(String) }),
     );
     const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
-    expect(text).toContain("```\nWaiting on your next instruction.\n```");
+    expect(text).not.toContain("```");
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
