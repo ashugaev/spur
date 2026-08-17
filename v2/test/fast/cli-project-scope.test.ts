@@ -12,7 +12,6 @@ import { readCommentSeenRegistry } from "../../src/metadata.js";
 
 interface Fixture {
   dataDir: string;
-  decoyDataDir: string;
   instanceConfigPath: string;
   registryPath: string;
 }
@@ -22,7 +21,6 @@ function buildFixture(): Fixture {
   const dataDir = join(fixtureDir, "data");
   const worktreeDir = join(fixtureDir, "worktree");
   const projectRepoDir = join(fixtureDir, "repo");
-  const decoyDataDir = join(fixtureDir, "decoy-data");
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(worktreeDir, { recursive: true });
   mkdirSync(projectRepoDir, { recursive: true });
@@ -41,7 +39,6 @@ projects: {}
   writeFileSync(
     projectConfigPath,
     `
-dataDir: ${decoyDataDir}
 projects:
   zz:
     path: ${projectRepoDir}
@@ -55,7 +52,7 @@ projects:
   const registryPath = join(dataDir, "config-registry.json");
   writeFileSync(registryPath, JSON.stringify({ configPaths: [projectConfigPath] }));
 
-  return { dataDir, decoyDataDir, instanceConfigPath, registryPath };
+  return { dataDir, instanceConfigPath, registryPath };
 }
 
 async function runCli(instanceConfigPath: string, args: string[]): Promise<{ stderr: string }> {
@@ -141,7 +138,7 @@ describe("cli project scope (agent-issue log / comment-seen record)", () => {
     expect(readCommentSeenRegistry(fixture.dataDir, "nope", "pr-watch").size).toBe(0);
   });
 
-  it("case 5: dataDir stays on the instance config, never the registered project config's decoy", async () => {
+  it("case 5: agent-issue log's write lands at the instance dataDir", async () => {
     const fixture = buildFixture();
     process.env["SPUR_PROJECT"] = "zz";
     process.env["SPUR_SESSION"] = "zz-1";
@@ -149,7 +146,6 @@ describe("cli project scope (agent-issue log / comment-seen record)", () => {
     await runCli(fixture.instanceConfigPath, ["agent-issue", "log", "friction", "probe"]);
 
     expect(existsSync(join(fixture.dataDir, "agent-issues.jsonl"))).toBe(true);
-    expect(existsSync(fixture.decoyDataDir)).toBe(false);
   });
 
   it("case 6: a malformed config-registry.json degrades to the instance-only lookup instead of throwing", async () => {

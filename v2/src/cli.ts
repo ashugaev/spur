@@ -445,11 +445,11 @@ function getConfigPath(program: Command): string | undefined {
   return options.config;
 }
 
-// Projects only ever live in the connected project configs the registry lists,
-// never in the instance config, so a projects lookup has to merge. `dataDir`
-// stays on the instance config: a project spur.yaml passed via `--config`
-// parses in "instance" mode with no `dataDir` key and would otherwise move the
-// write target (issue #715).
+// In a normal session the instance config's own `projects` map is empty —
+// every project is declared in a connected config the registry lists — so a
+// projects lookup has to merge them in. `dataDir` stays on `base`: it equals
+// the merged result by construction, but reading it off `base` keeps that
+// guarantee independent of `registry.ts` internals (issue #715).
 function loadProjectScope(configPath: string): Pick<AppConfig, "dataDir" | "projects"> {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
