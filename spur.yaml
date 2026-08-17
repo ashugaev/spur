@@ -61,6 +61,10 @@ projects:
     sources:
       gh:
         type: github
+      itest-schedule:
+        type: cron
+        schedule: "0 3 */3 * *"
+        runOnStart: false
       # PR-review fleet lives in the `sp-review` project (~/.spur/projects/sp-review).
       # tg:
       #   type: telegram
@@ -104,6 +108,11 @@ projects:
         event: github:ready_for_review
         send:
           prompt: "Run $manager and $github. Active PR is ready for review."
+      itest-run:
+        source: itest-schedule
+        event: cron:tick
+        spawn:
+          prompt: "/clean-install-test"
       # tg-message:
       #   source: tg
       #   event: telegram:message
