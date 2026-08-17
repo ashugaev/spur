@@ -153,7 +153,7 @@ Queued-message delivery events: `session.message.sent` (delivered), `session.mes
 
 Spur appends lifecycle events to `<dataDir>/events.jsonl` (recover checks, native-resume failures, fresh-launch fallbacks, step delivery, and a pre-spawn `host.disk.low` warning when free space on `dataDir` is under [`diskRetention.warnFreeGb`](configuration.md) — report-only, never blocks or fails the spawn). GitHub poll-cost events:
 
-- `gh.poll_cycle`: one completed poll cycle; includes `calls` and `graphqlCost`.
+- `gh.poll_cycle`: one completed poll cycle; includes `calls` and `graphqlCost`. Consecutive cycles that spent nothing (`calls: 0`) collapse into the first event of the run; the count they swallowed lands on the next emitted event as `suppressedZeroCycles`.
 - `gh.usage`: minute/hour `gh` invocation and GraphQL-cost windows.
 - `gh.poll_budget_paused`: polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known.
 
