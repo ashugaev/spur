@@ -43,6 +43,23 @@ projects:
 
 Use [spur.yaml.example](../v2/spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`, `triggers`, `sidecars`, or agent overrides only when the repo needs them.
 
+## Project bootstrap session
+
+Dashboard "+ New project" spawns an ordinary agent session against the new, still-unconfigured project. Its
+first message points the agent at [spur.yaml.reference](../v2/spur.yaml.reference) — a parse-valid catalog of
+every `spur.yaml` key — and has it write a `spur.yaml` for the repo, restricted to detected capabilities
+(`symlinks`, `branchNaming`, `defaultAgent`/`defaultModels`, `reasoningEffort`, `sidecars`, `workspaceAccess`,
+`modes`; never `sources` or `triggers` at this point, since connecting starts polling and could auto-spawn
+sessions before anyone has agreed to it) and connect it via `POST /projects/connect`. The connect call uses
+`curl --fail-with-body`, which needs curl 7.76+; on a host with an older curl the connect step itself fails, and
+the agent falls back to reporting the raw curl error instead of a parsed response body.
+
+Once connected, the session asks one batched message of up to 6 defaulted questions (worktree/branch naming,
+default agent/model, a dev-server sidecar, symlinks, GitHub PR automation, a default mode) and waits. Answering
+lets the agent add `sources`/`triggers` (only on an affirmative GitHub automation answer) and re-connect the
+edited file. Ignoring the questions is safe: the already-connected config from the first pass stands, and the
+agent never asks again.
+
 ## Full example
 
 ```yaml

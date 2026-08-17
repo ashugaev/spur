@@ -23,6 +23,7 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "../../src/event-log.js";
+import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -4454,5 +4455,20 @@ describe("loadInstanceConfigReadOnly", () => {
     if (result.status === "ok") {
       expect(result.config).toEqual(loadConfig(configPath));
     }
+  });
+});
+
+describe("spur.yaml.reference", () => {
+  it("parses via loadProjectConfig (the connect-time parse mode) and exposes every capability", () => {
+    const config = loadProjectConfig(resolveBootstrapConfigReferencePath());
+    const project = config.projects["reference-project"];
+    expect(project).toBeDefined();
+    expect(Object.keys(project?.sidecars ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.sources ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.triggers ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.modes ?? {}).length).toBeGreaterThan(0);
+    expect(project?.branchNaming).toBeDefined();
+    expect(project?.symlinks.length).toBeGreaterThan(0);
+    expect(Object.keys(project?.sidecars ?? {})).not.toContain("playwright");
   });
 });

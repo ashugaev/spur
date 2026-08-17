@@ -165,6 +165,7 @@ cp "$HERE/../required-package-files.txt" "$PKG_DIR/required-package-files.txt"
 : >"$PKG_DIR/deploy/spur-web.npm.service"
 : >"$PKG_DIR/dist/cli.js"
 : >"$PKG_DIR/web/dist-server/web-server.js"
+: >"$PKG_DIR/spur.yaml.reference"
 printf '{"version":"1.2.3"}' >"$PKG_DIR/package.json"
 cat >"$PREFIX_DIR/bin/spur" <<'EOF'
 #!/usr/bin/env bash
@@ -291,6 +292,7 @@ cp "$HERE/../required-package-files.txt" "$PKG_DIR9/required-package-files.txt"
 : >"$PKG_DIR9/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR9/deploy/spur-web.npm.service"
 : >"$PKG_DIR9/dist/cli.js"
+: >"$PKG_DIR9/spur.yaml.reference"
 printf '{"version":"1.2.3"}' >"$PKG_DIR9/package.json"
 cat >"$PREFIX_DIR9/bin/spur" <<'EOF'
 #!/usr/bin/env bash
@@ -344,6 +346,7 @@ cp "$HERE/../required-package-files.txt" "$PKG_DIR10/required-package-files.txt"
 : >"$PKG_DIR10/deploy/spur-web.npm.service"
 : >"$PKG_DIR10/dist/cli.js"
 : >"$PKG_DIR10/web/dist-server/web-server.js"
+: >"$PKG_DIR10/spur.yaml.reference"
 printf '{"version":"1.0.0"}' >"$PKG_DIR10/package.json"
 cat >"$PREFIX_DIR10/bin/spur" <<'EOF'
 #!/usr/bin/env bash
@@ -394,6 +397,7 @@ cp "$HERE/../required-package-files.txt" "$PKG_DIR11/required-package-files.txt"
 : >"$PKG_DIR11/deploy/spur-web.npm.service"
 : >"$PKG_DIR11/dist/cli.js"
 : >"$PKG_DIR11/web/dist-server/web-server.js"
+: >"$PKG_DIR11/spur.yaml.reference"
 printf '{"version":"1.5.0"}' >"$PKG_DIR11/package.json"
 cat >"$PREFIX_DIR11/bin/spur" <<'EOF'
 #!/usr/bin/env bash

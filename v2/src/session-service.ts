@@ -133,7 +133,7 @@ import {
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
 } from "./shepherd.js";
-import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import { renderBootstrapPrompt, resolveBootstrapConfigReferencePath } from "./bootstrap-prompt.js";
 import {
   extractBareUserTask,
   renderHandoffPrompt,
@@ -7027,6 +7027,7 @@ export class SessionService {
       prefix: entry.prefix,
       path: entry.path,
       port: this.config.server.port,
+      referencePath: resolveBootstrapConfigReferencePath(),
     });
     const normalized = normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt });
     return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);

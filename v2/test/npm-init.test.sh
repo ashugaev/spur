@@ -54,6 +54,7 @@ setup_scenario() {
   cp "$DEPLOY_WEB_UNIT" "$pkg_root/deploy/spur-web.npm.service"
   : >"$pkg_root/dist/cli.js"
   : >"$pkg_root/web/dist-server/web-server.js"
+  : >"$pkg_root/spur.yaml.reference"
 
   cat >"$fake_bin/node" <<'EOF'
 #!/usr/bin/env bash

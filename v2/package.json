@@ -29,6 +29,7 @@
     "required-package-files.txt",
     "NOTICE",
     "spur.yaml.example",
+    "spur.yaml.reference",
     "tmux.conf"
   ],
   "scripts": {

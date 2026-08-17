@@ -1,0 +1,114 @@
+projects:
+  reference-project:
+    name: "Reference Project"
+    path: .
+    defaultBranch: main
+    sessionPrefix: refproj
+    worktree: true
+    restoreAfterReboot: false
+    maxLiveSessions: 3
+    symlinks:
+      - .env
+      - node_modules
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    defaultAgent: claude
+    defaultModels:
+      claude: opus
+      codex: gpt-5-codex
+      cursor: auto
+    reasoningEffort:
+      claude: medium
+      codex: medium
+    codexArgs:
+      - -c
+      - 'service_tier="default"'
+    workspaceAccess:
+      items:
+        - label: Web IDE
+          kind: link
+          value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
+    preflight:
+      prompt: "Run the project's install and typecheck commands before starting work."
+    spawn:
+      steps:
+        - "Read AGENTS.md if present."
+        - "Run the project's test suite before finishing."
+    sidecars:
+      api:
+        command: ./scripts/dev-api.sh
+        autoStart: true
+        env:
+          PORT: "${SPUR_RESERVED_PORT_API}"
+        ports:
+          api:
+            env: SPUR_RESERVED_PORT_API
+            start: 4400
+            end: 4409
+        idleTtlMinutes: 30
+      web:
+        command: ./scripts/dev-web.sh
+        autoStart: true
+        dependsOn:
+          - api
+        ports:
+          web:
+            env: SPUR_RESERVED_PORT_WEB
+            start: 5700
+            end: 5709
+            url: "https://{port}.example.dev"
+    modes:
+      manager:
+        skill: manager
+        default: true
+      reviewer:
+        skill: reviewer
+    sources:
+      gh:
+        type: github
+        intervalMs: 60000
+        emitExisting: false
+      nightly:
+        type: cron
+        schedule: "0 3 * * *"
+        runOnStart: false
+      healthcheck:
+        type: service
+        service: reference-project.service
+        rules:
+          crashed:
+            match: "panic|fatal error"
+            cooldownMs: 60000
+      tg:
+        type: telegram
+        token: "example-telegram-bot-token-lowercase-only"
+        allowedUsers:
+          - 12345678
+        allowedChats:
+          - -1000000000000
+    triggers:
+      nightly-sweep:
+        source: nightly
+        event: cron:tick
+        spawn:
+          prompt: "Run the nightly maintenance sweep and report anything it changed."
+      gh-comment:
+        source: gh
+        event: github:comment
+        send:
+          prompt: "A reviewer left a comment on the active PR. Address it."
+      gh-ready-for-review:
+        source: gh
+        event: github:ready_for_review
+        send:
+          prompt: "The active PR left draft state and is ready for review."
+      gh-merged:
+        source: gh
+        event: github:merged
+        send:
+          prompt: "The active PR merged. If a self-destruct condition applies, self-destruct now; otherwise ignore."
+      service-crash:
+        source: healthcheck
+        event: service:crashed
+        spawn:
+          prompt: "The reference-project service crashed. Investigate the logs and fix the cause."
