@@ -76,13 +76,13 @@ const tagCatalogResponse = {
   ],
 };
 
-function mockFetch() {
+function mockFetch(sessions: unknown = sessionsResponse) {
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/sessions") return new Response(JSON.stringify(sessions));
     if (url === "/api/tags") return new Response(JSON.stringify(tagCatalogResponse));
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -355,10 +355,7 @@ describe("Filters modal", () => {
   });
 
   it("All tags count reflects desks matching other filters, not the sum of individual tag chip counts", async () => {
-    vi.restoreAllMocks();
-    window.localStorage.clear();
-    window.history.replaceState(null, "", "/");
-    const multiTagResponse = {
+    mockFetch({
       projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
       sessions: [
         session("api-1", "api", "claude", "running", "working", ["bug", "docs"]),
@@ -366,16 +363,6 @@ describe("Filters modal", () => {
         session("api-3", "api", "codex", "stopped", "stopped", []),
       ],
       daemonAlive: true,
-    };
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : (input as Request).url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, language: "" }));
-      if (url === "/api/sessions") return new Response(JSON.stringify(multiTagResponse));
-      if (url === "/api/tags") return new Response(JSON.stringify(tagCatalogResponse));
-      throw new Error(`Unexpected fetch: ${url}`);
     });
 
     render(<Dashboard />);

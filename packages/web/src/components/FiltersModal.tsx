@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { tagChipStyle } from "@/lib/tag-style";
 import type { AttentionLevel } from "@/lib/types";
@@ -48,6 +48,36 @@ function SectionHeader({
         </button>
       ) : null}
     </div>
+  );
+}
+
+// The "<label>: <count>" chip shared by the All chips and every Project,
+// Agent, and Tag option. Status and PR-ready chips carry an icon and dimming
+// of their own and stay hand-rolled on `optionClass`.
+function FacetChip({
+  count,
+  label,
+  onClick,
+  selected,
+  style,
+}: {
+  count: number;
+  label: string;
+  onClick: () => void;
+  selected: boolean;
+  style?: CSSProperties;
+}) {
+  return (
+    <button
+      aria-pressed={selected}
+      className={optionClass(selected)}
+      onClick={onClick}
+      style={style}
+      type="button"
+    >
+      <span>{label}:</span>
+      <span className="font-bold tabular-nums">{count}</span>
+    </button>
   );
 }
 
@@ -226,15 +256,12 @@ export function FiltersModal({
           <div className="flex flex-col gap-2">
             <SectionLabel>Status</SectionLabel>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
-              <button
-                aria-pressed={activeStatFilter === null}
-                className={optionClass(activeStatFilter === null)}
+              <FacetChip
+                count={allStatusesCount}
+                label="All statuses"
                 onClick={() => onSelectStatus(null)}
-                type="button"
-              >
-                <span>All statuses:</span>
-                <span className="font-bold tabular-nums">{allStatusesCount}</span>
-              </button>
+                selected={activeStatFilter === null}
+              />
               {statusOptions.map((option) => (
                 <button
                   aria-pressed={activeStatFilter === option.level}
@@ -305,26 +332,20 @@ export function FiltersModal({
           <div className="flex flex-col gap-2">
             <SectionLabel>Project</SectionLabel>
             <div className="flex flex-wrap gap-2">
-              <button
-                aria-pressed={projectId === ""}
-                className={optionClass(projectId === "")}
+              <FacetChip
+                count={allProjectsCount}
+                label="All"
                 onClick={() => onSelectProject("")}
-                type="button"
-              >
-                <span>All:</span>
-                <span className="font-bold tabular-nums">{allProjectsCount}</span>
-              </button>
+                selected={projectId === ""}
+              />
               {projectOptions.map((project) => (
-                <button
-                  aria-pressed={projectId === project.id}
-                  className={optionClass(projectId === project.id)}
+                <FacetChip
+                  count={project.count}
                   key={project.id}
+                  label={project.name}
                   onClick={() => onSelectProject(project.id)}
-                  type="button"
-                >
-                  <span>{project.name}:</span>
-                  <span className="font-bold tabular-nums">{project.count}</span>
-                </button>
+                  selected={projectId === project.id}
+                />
               ))}
             </div>
           </div>
@@ -337,26 +358,20 @@ export function FiltersModal({
               showReset={agentFilter.length > 0}
             />
             <div className="flex flex-wrap gap-2">
-              <button
-                aria-pressed={agentFilter.length === 0}
-                className={optionClass(agentFilter.length === 0)}
+              <FacetChip
+                count={allAgentsCount}
+                label="All agents"
                 onClick={onClearAgents}
-                type="button"
-              >
-                <span>All agents:</span>
-                <span className="font-bold tabular-nums">{allAgentsCount}</span>
-              </button>
+                selected={agentFilter.length === 0}
+              />
               {agentOptions.map((agent) => (
-                <button
-                  aria-pressed={agentFilter.includes(agent.id)}
-                  className={optionClass(agentFilter.includes(agent.id))}
+                <FacetChip
+                  count={agent.count}
                   key={agent.id}
+                  label={getAgentDisplayName(agent.id)}
                   onClick={() => onToggleAgent(agent.id)}
-                  type="button"
-                >
-                  <span>{getAgentDisplayName(agent.id)}:</span>
-                  <span className="font-bold tabular-nums">{agent.count}</span>
-                </button>
+                  selected={agentFilter.includes(agent.id)}
+                />
               ))}
             </div>
           </div>
@@ -370,29 +385,23 @@ export function FiltersModal({
                 showReset={activeTagFilters.length > 0}
               />
               <div className="flex flex-wrap gap-2">
-                <button
-                  aria-pressed={activeTagFilters.length === 0}
-                  className={optionClass(activeTagFilters.length === 0)}
+                <FacetChip
+                  count={allTagsCount}
+                  label="All tags"
                   onClick={onClearTags}
-                  type="button"
-                >
-                  <span>All tags:</span>
-                  <span className="font-bold tabular-nums">{allTagsCount}</span>
-                </button>
+                  selected={activeTagFilters.length === 0}
+                />
                 {tagOptions.map((tag) => {
                   const selected = activeTagFilters.includes(tag.name);
                   return (
-                    <button
-                      aria-pressed={selected}
-                      className={optionClass(selected)}
+                    <FacetChip
+                      count={tag.count}
                       key={tag.name}
+                      label={tag.name}
                       onClick={() => onToggleTag(tag.name)}
+                      selected={selected}
                       style={selected ? undefined : tagChipStyle(tag.color)}
-                      type="button"
-                    >
-                      <span>{tag.name}:</span>
-                      <span className="font-bold tabular-nums">{tag.count}</span>
-                    </button>
+                    />
                   );
                 })}
               </div>

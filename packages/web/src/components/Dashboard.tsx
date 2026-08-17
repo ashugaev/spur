@@ -213,6 +213,22 @@ function buildFacetCounts<T extends string>(
   return counts;
 }
 
+// Desks matching every active filter except `exclude` — the "All" chip count
+// for that dimension. Not the sum of that section's per-option counts: a desk
+// carrying two tags counts once here but once per tag in `buildFacetCounts`,
+// and untagged desks count here but appear in no per-tag bucket.
+function countFacetDesks(
+  sessions: readonly DashboardSession[],
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+): number {
+  const deskKeys = new Set<string>();
+  for (const session of sessions) {
+    if (sessionMatchesFacetFilters(session, exclude, filters)) deskKeys.add(session.deskKey);
+  }
+  return deskKeys.size;
+}
+
 function sameDeskActiveSessions(
   sessions: readonly DashboardSession[],
   session: DashboardSession,
@@ -1468,12 +1484,8 @@ export function Dashboard() {
     [allSessions, facetFilters],
   );
 
-  // Counts every desk matching the other active filters, regardless of tag
-  // (including untagged desks) — NOT the sum of the individual tag chip
-  // counts above, since a multi-tag desk is only counted once here but once
-  // per tag in `tagCounts`.
-  const allTagsCount = useMemo(
-    () => buildFacetCounts(allSessions, "tag", facetFilters, () => ["all"] as const).get("all") ?? 0,
+  const allAgentsCount = useMemo(
+    () => countFacetDesks(allSessions, "agent", facetFilters),
     [allSessions, facetFilters],
   );
 
@@ -1482,11 +1494,8 @@ export function Dashboard() {
     [allSessions, facetFilters],
   );
 
-  // Same "all desks matching the other filters" semantics as `allTagsCount`,
-  // mirrored for the Agent section's All chip — not a sum of `agentCounts`.
-  const allAgentsCount = useMemo(
-    () =>
-      buildFacetCounts(allSessions, "agent", facetFilters, () => ["all"] as const).get("all") ?? 0,
+  const allTagsCount = useMemo(
+    () => countFacetDesks(allSessions, "tag", facetFilters),
     [allSessions, facetFilters],
   );
 

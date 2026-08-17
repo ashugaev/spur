@@ -435,7 +435,7 @@ test.describe("R1b: mobile landscape project menu scroll", () => {
     await list.evaluate((el) => {
       el.scrollTop = el.scrollHeight;
     });
-    await expect(page.getByRole("menu")).toBeVisible();
+    await expect(menu).toBeVisible();
     const menuBoxAfter = await menu.boundingBox();
     expect(menuBoxAfter).not.toBeNull();
     if (!menuBoxAfter) throw new Error("Expected project menu bounds after scroll");
