@@ -111,7 +111,7 @@ Recreate (delete + provision fresh) after a wedge: a shared-core box that stoppe
 
 9 DELETE ON CONFIRMATION
 
-Never delete a box without the user's confirmation, even in autonomous mode — see AUTONOMOUS MODE for what substitutes for that confirmation between runs.
+Never delete the box created THIS run without the user's confirmation, even in autonomous mode.
 
   gcloud compute instances delete "spur-itest-$TS" --zone="$ZONE" --project=<gcp-project> --quiet
 
@@ -119,7 +119,7 @@ Update the recipe after deleting.
 
 AUTONOMOUS MODE
 
-With no user present: run the full cycle above unattended, write the friction log to `$SPUR_SESSION_ARTIFACTS_DIR`, open a PR for any doc fix — never push straight to main — and report in-session. Deletion still needs the user's confirmation, so never delete an unconfirmed box; the reap in step 1 is what keeps an unconfirmed box from a prior cycle from accumulating into a pile of paid VMs.
+With no user present: run the full cycle above unattended, write the friction log to `$SPUR_SESSION_ARTIFACTS_DIR`, open a PR for any doc fix — never push straight to main — and report in-session. THIS run's box still needs the user's confirmation before deletion, per step 9. The step 1 reap of prior-cycle boxes is unconditional and runs regardless of confirmation — it is what keeps an unconfirmed box from a prior cycle from accumulating into a pile of paid VMs.
 
 NOTES
 
