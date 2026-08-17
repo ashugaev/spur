@@ -1,6 +1,6 @@
 ---
 name: clean-install-test
-description: Clean-room test of the Spur server install by planting a coding agent on a throwaway cloud VM and having IT install Spur from the docs, single-shot, with no human in the loop. Cron-safe — runs end to end from the skill name alone, reaps stale VMs, opens a PR for any doc fix, reports in-session. Provision a disposable Ubuntu VM, plant a cursor-agent (fallback Claude Code) by copying the operator's credentials (itest-only shortcut), stage the repo docs, run the agent on the README Install block verbatim, capture the transcript, turn friction into doc fixes, verify services, reap old VMs, delete only on user confirmation.
+description: Clean-room test of the Spur server install by planting a coding agent on a throwaway cloud VM and having IT install Spur from the docs, single-shot, with no human in the loop. Cron-safe — runs end to end from the skill name alone, reaps stale VMs, opens a PR for any doc fix, reports in-session. Provision a disposable Ubuntu VM, plant a cursor-agent (fallback Claude Code) by copying the operator's credentials (itest-only shortcut), run the agent on the README Install block verbatim, capture the transcript, turn friction into doc fixes, verify services, reap old VMs, delete only on user confirmation.
 ---
 
 CLEAN INSTALL TEST
@@ -59,15 +59,9 @@ Claude fallback, only when cursor-agent is unavailable — needs node:
 
 Re-testing a box that already ran once: reset it first — see RESET VS RECREATE.
 
-4 STAGE THE DOCS THE AGENT READS
+4 RUN THE TEST — README INSTALL BLOCK, SINGLE-SHOT, NO HINTS
 
-Give the agent only the docs, mirroring repo layout so relative links resolve. Do NOT include `CLAUDE.md` — it would inject dev-orchestration context an end user never has.
-
-  tar czf - README.md docs/ v2/README.md | ssh ... 'rm -rf ~/spur-docs && mkdir -p ~/spur-docs && tar xzf - -C ~/spur-docs'
-
-5 RUN THE TEST — README INSTALL BLOCK, SINGLE-SHOT, NO HINTS
-
-The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/README.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR branch to test an unmerged doc fix.
+The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/docs/install-from-npm.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR branch to test an unmerged doc fix. No docs are staged on the VM — the agent fetches this one file over HTTPS; do not tar the repo docs onto the box, the prompt never reads them.
 
 Launch detached from `~` (no CLAUDE.md there), stream-json, poll a done-file. The launch ssh call can hang even after the remote process has detached — never wait on it, verify with a separate ssh call instead:
 
@@ -76,7 +70,7 @@ Launch detached from `~` (no CLAUDE.md there), stream-json, poll a done-file. Th
 
 Long shell commands the planted agent runs go background inside cursor-agent itself: it gets `awaitToolCall` polls carrying a taskId, and the command's own output lands in `~/.cursor/projects/<slug>/terminals/<taskId>.txt` — check there when the jsonl shows a pending tool_call and nothing else.
 
-6 ANALYZE THE TRANSCRIPT — FRICTION IS THE OUTPUT
+5 ANALYZE THE TRANSCRIPT — FRICTION IS THE OUTPUT
 
 cursor-agent stream-json event shapes, needed to parse a transcript at all:
 
@@ -86,7 +80,7 @@ cursor-agent stream-json event shapes, needed to parse a transcript at all:
 
 Walk each tool_call with its result, each error, and the final result message. Look for steps the agent got wrong, retried, or did not infer from the docs (doc gap); anything it hard-blocked on versus correctly deferring to the user TODO; whether it chose the safe path (private/Tailscale, never public expose). Identity gates — agent login and `sudo tailscale up` — land in the final TODO as a pass, not friction, when the agent reached them cleanly and stated what the user must do; real friction is anything it should have handled from the docs but didn't.
 
-7 VERIFY SERVICES (INFRA LEVEL, NOT UI)
+6 VERIFY SERVICES (INFRA LEVEL, NOT UI)
 
 Confirm the agent's install works. Expected topology after `spur init`: two user units only.
 
@@ -101,11 +95,11 @@ Confirm the agent's install works. Expected topology after `spur init`: two user
 
 Pass = both units active, daemon 200, web 200, `/ws` upgrade 101, `ss -ltn` shows only 22, 127.0.0.1:4310, 127.0.0.1:5555, plus systemd-resolved — nothing else, and nothing answers on the app ports from the VM's public IP.
 
-8 EVOLVE THE DOCS
+7 EVOLVE THE DOCS
 
 For each real friction, edit the install doc minimally, then re-run on a fresh or reset box (see RESET VS RECREATE) until a fresh agent completes single-shot to the identity gates with a clean TODO. Fix the doc, re-test, repeat — never fix by hinting the agent.
 
-9 REPORT
+8 REPORT
 
 Summarize: single-shot or not, each service check pass/fail, the friction list (each item a doc fix), the agent's final user TODO. Write the friction log to `$SPUR_SESSION_ARTIFACTS_DIR`.
 
@@ -115,7 +109,7 @@ Reset (keep the box) after a run that completed: remove the spur package under `
 
 Recreate (delete + provision fresh) after a wedge: a shared-core box that stopped answering ssh does not reliably come back within minutes — skip nursing it, go to step 1.
 
-10 DELETE ON CONFIRMATION
+9 DELETE ON CONFIRMATION
 
 Never delete a box without the user's confirmation, even in autonomous mode — see AUTONOMOUS MODE for what substitutes for that confirmation between runs.
 
