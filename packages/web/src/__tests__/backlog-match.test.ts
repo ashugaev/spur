@@ -85,6 +85,14 @@ describe("isBacklogItemActivelyWorked", () => {
     }
   });
 
+  it("still counts a stale-parked session as actively working the item (it wakes silently rather than being replaced)", () => {
+    const stale = session({
+      state: "stale",
+      links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+    });
+    expect(isBacklogItemActivelyWorked(item(), [stale])).toBe(true);
+  });
+
   it("matches by url even when the key is absent from the prompt", () => {
     const active = session({
       prompt: "please look at https://jira.example.com/browse/WEB-17 today",

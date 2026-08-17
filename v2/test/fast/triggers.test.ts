@@ -734,6 +734,44 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "stopped",
+      stopReason: "stale_timeout",
+      state: "stale",
+      lastActivityAt: recentActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining('GitHub updates on PR #42 "Tighten coverage":'),
+          { interrupt: false },
+        );
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("retains the first-arrival deadline when a second event merges into the same queue key", async () => {
     const secondEvent = {
       name: "github:comment",
@@ -3230,6 +3268,37 @@ describe("startConfiguredTriggers", () => {
           prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("never spawns a second session for a stale-parked work-item owner (still owns the work, wakes silently instead)", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "stopped",
+      stopReason: "stale_timeout",
+      state: "stale",
+      workspaceExists: true,
+    });
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledWith("api-9");
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

@@ -16,6 +16,7 @@ export const SESSION_STATES = [
   "waiting",
   "needs_input",
   "rate_limited",
+  "stale",
   "stopped",
   "error",
   "killed",
@@ -24,6 +25,10 @@ export type SessionState = (typeof SESSION_STATES)[number];
 
 export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
+}
+
+export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReason">): boolean {
+  return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 
 export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
@@ -568,6 +573,7 @@ export interface ProjectConfig {
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
+  staleAfterMinutes?: number;
 }
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
@@ -716,6 +722,7 @@ export interface AppConfig {
     maxAgeWarnMinutes: number;
   };
   admission: AdmissionConfig;
+  staleAfterMinutes: number;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -845,7 +852,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause";
+  stopReason?: "manual_pause" | "stale_timeout";
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
@@ -853,6 +860,9 @@ export interface SessionRecord {
   slots?: SessionSlots;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
+  // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
+  // on wake by finishStaleWake. Absent once the session has woken.
+  staleSidecars?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   /**
    * Pane identity of each sidecar's CURRENT instance, keyed by sidecar name.

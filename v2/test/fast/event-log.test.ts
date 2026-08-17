@@ -377,6 +377,40 @@ describe("readSessionEventLog across shards", () => {
     expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
     expect(readSessionEventLog(dataDir, "api-1")).toEqual(before);
   });
+
+  // GAP B coverage: the stale-mode terminal-log compaction sweep (see
+  // session-service.ts's compactTerminalSessionLogs/compactShardOnce) rotates
+  // a stale-parked session's shard exactly like this — same tryRotate call,
+  // just reached via REAPABLE_SESSION_STATUSES including "stopped" with no
+  // stopReason exclusion. This pins the invariant that matters for that
+  // path: a session that keeps writing AFTER its shard is compacted (a
+  // stale-parked session waking back up and resuming activity) must still
+  // read back its full, correctly ordered history — compaction never
+  // truncates history, it only moves it behind a .1.gz the shared reader
+  // already knows to unzip.
+  it("preserves full ordered history when a session keeps writing after its shard is compacted", () => {
+    const dataDir = makeTempDir();
+    for (let i = 0; i < 3; i += 1) {
+      appendEventLog(dataDir, { event: `before-${i}`, level: "info", sessionId: "api-1" });
+    }
+    const shardPath = sessionEventLogPath(dataDir, "api-1");
+    tryRotate(shardPath, 0, 5);
+    expect(existsSync(shardPath)).toBe(false);
+    expect(existsSync(`${shardPath}.1.gz`)).toBe(true);
+
+    for (let i = 0; i < 3; i += 1) {
+      appendEventLog(dataDir, { event: `after-${i}`, level: "info", sessionId: "api-1" });
+    }
+
+    expect(readSessionEventLog(dataDir, "api-1").map((entry) => entry.event)).toEqual([
+      "before-0",
+      "before-1",
+      "before-2",
+      "after-0",
+      "after-1",
+      "after-2",
+    ]);
+  });
 });
 
 describe("readEventLog across archives", () => {

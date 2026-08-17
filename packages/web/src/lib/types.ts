@@ -14,6 +14,7 @@ export type SpurSessionState =
   | "waiting"
   | "needs_input"
   | "rate_limited"
+  | "stale"
   | "stopped"
   | "error"
   | "killed";

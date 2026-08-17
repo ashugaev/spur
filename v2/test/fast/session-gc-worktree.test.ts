@@ -179,6 +179,62 @@ describe("session gc against a real git worktree", () => {
     expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
   });
 
+  it("blocks a stale-parked session's worktree — it is an idle in-progress task, not an abandoned one (FIX 5)", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      status: "stopped",
+      stopReason: "stale_timeout",
+    });
+
+    const report = await executeSessionGc(
+      planFor(fixture.config),
+      depsWithoutGh(fixture.config, NO_OPEN_PRS),
+      { dryRun: false, sizes: false },
+    );
+
+    expect(report.groups[0]?.blockReasons).toEqual(["live_session"]);
+    expect(existsSync(fixture.worktreePath)).toBe(true);
+    expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
+  });
+
+  it("blocks a stale-parked session's record from archival even when its worktree is already gone from disk (GC's second liveness check, GAP C)", async () => {
+    // Distinct from the "blocks a stale-parked session's worktree" case
+    // above: there the worktree still exists on disk, so the plan classifies
+    // action "reclaim" and the FIRST liveness check (guarding removeWorktree)
+    // is what fires. Here the worktree is already gone before planning even
+    // runs (e.g. a prior GC run removed it but crashed before archiving, or
+    // it was deleted out of band) — planSessionGc's own pathExists check
+    // then classifies this group "archive" outright, with no
+    // protectedSessionIds passed in by this test's planFor helper. The only
+    // thing standing between this parked-and-still-resumable record and
+    // archiveGroup is executeSessionGc's SECOND liveness check, right before
+    // archiving. A mutation dropping that second check would archive it: the
+    // session vanishes from the fleet and can never be woken again.
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      status: "stopped",
+      stopReason: "stale_timeout",
+    });
+    await rm(fixture.worktreePath, { recursive: true, force: true });
+
+    const plan = planFor(fixture.config);
+    expect(plan.groups[0]?.action).toBe("archive");
+
+    const report = await executeSessionGc(plan, depsWithoutGh(fixture.config, NO_OPEN_PRS), {
+      dryRun: false,
+      sizes: false,
+    });
+
+    expect(report.groups[0]?.blockReasons).toEqual(["live_session"]);
+    expect(report.groups[0]?.archived).toBe(false);
+    expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
+    expect(existsSync(join(fixture.config.dataDir, "sessions-archive", "api", "api-1.json"))).toBe(
+      false,
+    );
+  });
+
   it("blocks a worktree holding unpushed commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.worktreePath, "feature.txt"), "local only\n", "utf8");
